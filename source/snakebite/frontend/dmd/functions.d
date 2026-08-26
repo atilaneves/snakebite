@@ -259,3 +259,20 @@ private InlineAsmToken inlineAsmToken(
         token.toString.idup,
     );
 }
+
+// The module-level function called `name`, or null if there is none.
+public imported!"dmd.func".FuncDeclaration findFunction(
+    imported!"dmd.dmodule".Module module_,
+    in string name,
+) {
+    if (module_.members is null)
+        return null;
+
+    foreach (member; *module_.members) {
+        auto function_ = member.isFuncDeclaration;
+        if (function_ !is null && function_.ident.toString == name)
+            return function_;
+    }
+
+    return null;
+}

@@ -51,20 +51,20 @@ public ModuleParseResult parseModule(
     return compiler.parseModule(filePath, importPaths, flags);
 }
 
-// Whether this process compiles like the single-snippet world (bin/ut, repl)
-// or like `dub test` (a whole package as one root set). The snippet world needs
-// the lightning rod + allInst to funnel every tiny fixture's borrowed template
-// instances; a dub package is its own root set (`dmd -unittest <files>`) and so
+// Whether this process compiles many small snippets (bin/ut, the REPL) or one
+// whole program as a single root set (`dmd -unittest <files>`). The snippet
+// world needs the lightning rod + allInst to funnel every tiny fixture's
+// borrowed template instances; a whole program is its own root set and so
 // needs neither -- and must not parse the rod, or druntime modules home their
-// instances on the rod (which the dub link never emits) instead of on the
-// package root that instantiated them.
-public alias DubMode = imported!"std.typecons".Flag!"dubMode";
+// instances on the rod (which is never emitted) instead of on the program
+// root that instantiated them.
+public alias Snippets = imported!"std.typecons".Flag!"snippets";
 
 // Initialise DMD's process-global state for this process. Must be called once,
-// before any parse, by the entry point (it knows whether this is a dub run).
+// before any parse, by the entry point (it knows what kind of process this is).
 // Idempotent: a second call is a no-op.
-public void initialize(in DubMode dubMode) {
-    compiler.initialize(dubMode);
+public void initialize(in Snippets snippets) {
+    compiler.initialize(snippets);
 }
 
 // Parse a set of files as root modules, modelling `dmd -unittest <files>
@@ -170,32 +170,32 @@ final class Compiler {
         import core.sync.mutex: Mutex;
 
         // Construct only. DMD's process-global state (allInst, the lightning
-        // rod) depends on whether this is a dub run, which getopt has not seen
-        // yet at module-ctor time, so the entry point calls initialize() once
-        // it knows.
+        // rod) depends on whether this process compiles snippets or a whole
+        // program, which getopt has not seen yet at module-ctor time, so the
+        // entry point calls initialize() once it knows.
         mutex = new Mutex;
     }
 
-    void initialize(in DubMode dubMode) {
+    void initialize(in Snippets snippets) {
         mutex.lock;
         scope(exit) mutex.unlock;
 
         if (initialized)
             return;
 
-        initializeDmdState(dubMode);
+        initializeDmdState(snippets);
         initialized = true;
     }
 
     private void requireInitialized() const {
         assert(
             initialized,
-            "snakebite.frontend.compiler.initialize(dubMode) must be called "
+            "snakebite.frontend.compiler.initialize(snippets) must be called "
             ~ "before parsing",
         );
     }
 
-    private void initializeDmdState(in DubMode dubMode) {
+    private void initializeDmdState(in Snippets snippets) {
         import dmd.common.charactertables:
             IdentifierCharLookup,
             IdentifierTable;
@@ -271,20 +271,19 @@ final class Compiler {
         // version identifier (addDefaultVersionIdentifiers), so that
         // `version (unittest)` blocks compile in. initDMD's global._init()
         // runs that pairing while useUnitTests is still false, so register it
-        // here, after the assignment and after _init, for both bin/ut and
-        // --dub.
+        // here, after the assignment and after _init, for both worlds.
         import dmd.cond: VersionCondition;
         VersionCondition.addPredefinedGlobalIdent("unittest");
         resetErrors;
 
-        // A dub package compiles like `dmd -unittest <files>`: it is its own
-        // root set, so each reachable template instance homes on the package
+        // A whole program compiles like `dmd -unittest <files>`: it is its own
+        // root set, so each reachable template instance homes on the program
         // root that instantiated it and emits in that root's object. The
-        // lightning rod + allInst funnel is only for the single-snippet world,
-        // and parsing the rod would actively break the dub link (its init
-        // fixes druntime modules' importedFrom onto the rod, which the dub
-        // codegen path never emits), so skip both entirely in dub mode.
-        if (!dubMode) {
+        // lightning rod + allInst funnel is only for the snippet world, and
+        // parsing the rod would actively break a whole program (its init
+        // fixes druntime modules' importedFrom onto the rod, which is never
+        // emitted), so skip both entirely otherwise.
+        if (snippets) {
             global.params.allInst = true;
             parseLightningRod;
         }
