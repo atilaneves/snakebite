@@ -81,8 +81,8 @@ public int run(Backend backend, Program program) {
         int status;
         try
             backend.call(main_, isVoid ? null : &status, []);
-        catch (Exception exception) {
-            fprintf(stderr, "%s\n", exception.msg.toStringz);
+        catch (Throwable throwable) {
+            fprintf(stderr, "%s\n", throwable.msg.toStringz);
             return 1;
         }
         return status;

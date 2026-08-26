@@ -98,21 +98,63 @@ public mixin template SnippetTests() {
     }
 }
 
-// Parse `code` as a whole guest program and run it on the backend the way
-// compiled D would run it, returning the exit status.
+// UFCS assertion: `42.shouldBeStatusOf!(backend, code)` parses `code` as a
+// whole guest program, runs it on the backend the way compiled D would run
+// it, and checks the exit status against `expected`.
 //
 // `code` is registered under the caller's module (`__MODULE__`, resolved at
 // the call site as a template default, the same trick `__FILE__`/`__LINE__`
 // already rely on below) the same way `eval` snippets register through
-// `SnippetTests`. The first `run`/`shouldBeRetOf` call from a given test
-// module parses every program that module registered in one batch, so dmd's
-// per-batch setup cost is paid once per module, not once per test.
-public int run(BackendType, string code, string module_ = __MODULE__)() {
+// `SnippetTests`. The first `shouldBeStatusOf`/`shouldBeRetOf` call from a
+// given test module parses every program that module registered in one
+// batch, so dmd's per-batch setup cost is paid once per module, not once
+// per test.
+public void shouldBeStatusOf(
+    BackendType, string code, string module_ = __MODULE__,
+)(
+    in int expected,
+    in string file = __FILE__,
+    in size_t line = __LINE__,
+) {
     import snakebite.backends.backend: Program, run;
+
+    nativeMainStatus!code.shouldEqual(expected, file, line);
 
     enum program_ = RegisterProgram!(module_, code).program;
     auto program = Program([parsedProgram(program_)]);
-    return run(new BackendType, program);
+    run(new BackendType, program).shouldEqual(expected, file, line);
+}
+
+// `main`'s exit status, run natively, mirroring the backend-side semantics
+// documented on `snakebite.backends.backend.run`: `void main` is status 0,
+// an escaping `Throwable` is status 1, and no `main` at all is status 0.
+//
+// `code` is mixed into a struct, the same isolation `batchSource` gives the
+// guest side, so `hasMember` only ever finds a `main` `code` itself declared
+// - an unqualified lookup would instead walk out to this module's public
+// imports and could silently resolve to an unrelated `main`.
+private int nativeMainStatus(string code)() {
+    struct Guest {
+        static:
+        mixin(code);
+    }
+
+    static if (!__traits(hasMember, Guest, "main"))
+        return 0;
+    else {
+        static assert(__traits(compiles, Guest.main()),
+            "nativeMainStatus only supports a zero-argument main");
+
+        try {
+            static if (is(typeof(Guest.main()) == void)) {
+                Guest.main();
+                return 0;
+            } else
+                return Guest.main();
+        } catch (Throwable) {
+            return 1;
+        }
+    }
 }
 
 // UFCS assertion: `42.shouldBeRetOf!(backend, code, "answer")` invokes one
@@ -121,7 +163,8 @@ public int run(BackendType, string code, string module_ = __MODULE__)() {
 // guest's actual return type must match it in size, so a lying test fails
 // loudly instead of reading garbage bytes.
 //
-// `code` is registered and batch-parsed the same way `run`'s is; see there.
+// `code` is registered and batch-parsed the same way `shouldBeStatusOf`'s
+// is; see there.
 public void shouldBeRetOf(
     BackendType, string code, string functionName, T,
     string module_ = __MODULE__,
@@ -132,6 +175,12 @@ public void shouldBeRetOf(
 ) {
     import dmd.typesem: size;
     import snakebite.backends.backend: Program;
+
+    const native = () {
+        mixin(code);
+        return mixin(functionName ~ "()");
+    }();
+    native.shouldEqual(expected, file, line);
 
     enum program_ = RegisterProgram!(module_, code).program;
     auto program = Program([parsedProgram(program_)]);
