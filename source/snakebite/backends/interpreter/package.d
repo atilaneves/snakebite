@@ -197,8 +197,10 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.ffi: PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import dmd.astenums: LINK, STC, Tvoid;
-    import dmd.expression: CallExp, Expression, IntegerExp, RealExp, VarExp;
+    import dmd.expression:
+        CallExp, DeclarationExp, Expression, IntegerExp, RealExp, VarExp;
     import dmd.func: FuncDeclaration;
+    import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
     import dmd.statement:
         CompoundStatement, ExpStatement, ImportStatement, ReturnStatement,
@@ -310,6 +312,14 @@ extern(C++) private final class Evaluator: Visitor {
             if (alignment > layout.alignment)
                 layout.alignment = alignment;
         }
+
+        // Locals share the same frame as the parameters: each one gets a
+        // slot appended after whatever came before it, keyed by its own
+        // `VarDeclaration` since `visit(VarExp)` looks up both kinds of
+        // read the same way. A body-less declaration has no `fbody` to
+        // walk, so this is a no-op for it, the same as the `variables is
+        // null` case above.
+        collectLocals(function_.fbody, layout);
 
         _layouts[function_] = layout;
         return function_ in _layouts;
@@ -543,6 +553,63 @@ extern(C++) private final class Evaluator: Visitor {
         memcpy(_place, _frameBase + *offset, _type.size);
     }
 
+    // `long sum = 0;` inside a function body is a `VarDeclaration` wrapped
+    // in a `DeclarationExp`, which dmd's semantic pass hands back as the
+    // sole expression of an `ExpStatement` - the same shape any local
+    // declaration takes as a statement, so this is the only place a local
+    // gets initialized. `layoutOf` already gave `variable` a slot in the
+    // current frame; this only has to run its initializer expression into
+    // that slot. dmd types a `DeclarationExp` itself `void` (there is no
+    // value to hand a caller), so `visit(ExpStatement)` always reaches
+    // this with `_place is null`, never mind that below.
+    override void visit(DeclarationExp expression) {
+        import std.conv: text;
+
+        auto variable = expression.declaration.isVarDeclaration();
+        if (variable is null)
+            throw new Exception(
+                text("interpreter cannot run declaration `",
+                    expression.toString, "`: only a local variable is ",
+                    "supported"),
+            );
+
+        auto offset = variable in _layout.offsetOf;
+        if (offset is null)
+            throw new Exception(
+                text("interpreter cannot run declaration `",
+                    expression.toString, "`: no frame slot was laid out ",
+                    "for it"),
+            );
+
+        // No initializer at all (e.g. `long sum;`) leaves the slot as
+        // whatever bytes were already there, matching a compiled frame's
+        // uninitialized storage - nothing to run.
+        if (variable._init is null)
+            return;
+
+        auto expInitializer = variable._init.isExpInitializer();
+        if (expInitializer is null)
+            throw new Exception(
+                text("interpreter cannot run the initializer for `",
+                    expression.toString, "`: only a plain expression ",
+                    "initializer is supported"),
+            );
+
+        // dmd's semantic pass rewrites `long sum = 0;`'s initializer into
+        // a `ConstructExp` (`sum = 0`, `e1` the just-declared `sum`, `e2`
+        // the actual value) rather than handing back the bare value
+        // expression - the same rewrite it uses for a plain assignment,
+        // but tagged `construct` instead of `assign` since this is the
+        // variable's first write, not a later one. Only `e2` is a
+        // subexpression this interpreter has to evaluate: `e1` is `sum`
+        // itself, already the destination `offset` names.
+        auto value = expInitializer.exp;
+        if (auto construct = value.isConstructExp())
+            value = construct.e2;
+
+        evaluate(value, variable.type, _frameBase + *offset);
+    }
+
     // `expression.f` is already statically resolved (dmd resolves direct
     // calls during semantic analysis), so no name lookup or virtual
     // dispatch happens here. This caller reserves the callee's frame and
@@ -644,6 +711,53 @@ private void writeLiteral(
         text("interpreter cannot write a value of type `",
             type.toString, "`"),
     );
+}
+
+// Walks `statement` looking for a local variable declaration - dmd
+// represents `long sum = 0;` as an `ExpStatement` whose sole expression is
+// a `DeclarationExp` wrapping the `VarDeclaration` - and appends a frame
+// slot for every one it finds, the same way the parameter loop in
+// `layoutOf` appends one for every parameter. Only `CompoundStatement` is
+// walked into: it is the only statement kind that can nest others among
+// the ones this interpreter runs today, so a declaration inside any other
+// kind (a loop or conditional body, once those exist) will need this
+// walk extended to reach it.
+private void collectLocals(
+    imported!"dmd.statement".Statement statement,
+    ref FrameLayout layout,
+) {
+    import dmd.typesem: size;
+
+    if (statement is null)
+        return;
+
+    if (auto compound = statement.isCompoundStatement()) {
+        if (compound.statements is null)
+            return;
+
+        foreach (child; *compound.statements)
+            collectLocals(child, layout);
+        return;
+    }
+
+    auto expStatement = statement.isExpStatement();
+    if (expStatement is null || expStatement.exp is null)
+        return;
+
+    auto declarationExp = expStatement.exp.isDeclarationExp();
+    if (declarationExp is null)
+        return;
+
+    auto variable = declarationExp.declaration.isVarDeclaration();
+    if (variable is null)
+        return;
+
+    const alignment = variable.type.alignsize;
+    layout.size = alignUp(layout.size, alignment);
+    layout.offsetOf[variable] = layout.size;
+    layout.size += variable.type.size;
+    if (alignment > layout.alignment)
+        layout.alignment = alignment;
 }
 
 // dmd's default field-alignment rule (`aggregate.alignmember`, the same
