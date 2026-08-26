@@ -31,7 +31,7 @@ required anyway or 2) so fast it doesn't matter.
 If the sandbox blocks these commands, request escalation for the same
 command instead of trying alternate test runners.
 
-Run `ci.sh` before creating a PR. It must pass before the PR is
+Run `build/ci.sh` before creating a PR. It must pass before the PR is
 created or merged.
 
 Test behaviours, not implementations.
