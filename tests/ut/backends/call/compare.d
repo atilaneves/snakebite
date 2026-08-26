@@ -4,17 +4,14 @@ module ut.backends.call.compare;
 import ut.backends;
 
 
-// `a < b` is a `CmpExp`. Both operands sit behind a call because dmd folds
-// an expression whose operands are all literals during semantic analysis,
-// which would leave the backend with nothing to compare. The two cases
-// differ in which side is larger: one alone would also pass against a
-// comparison that always answered the same way.
+// `a < b` is a `CmpExp`. Both operands are calls because dmd folds a
+// literal-only expression during semantic analysis, leaving nothing for
+// the backend to compare. Both orderings are tested so a comparison that
+// always answers the same way still fails one of the two cases.
 //
-// `small` and `big` come first because the native oracle mixes these
-// declarations into a local delegate scope, and a nested D function does
-// not see a sibling declared later in the same scope. The guest side parses
-// the snippet as a whole module, where declaration order does not affect
-// name resolution.
+// `small` and `big` are declared before use because the native oracle
+// nests them in a local delegate scope, where a sibling declared later
+// is not visible.
 static foreach (backend; Matrix!()) {
     @("compare.lessThan.true." ~ backend.stringof)
     @Tags(backend.stringof)
