@@ -131,28 +131,36 @@ static foreach (backend; Matrix!()) {
     @("call.void." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        import snakebite.frontend.compiler: parseSnippet;
-        import snakebite.frontend.dmd.functions: findFunction;
-
-        auto guestModule = parseSnippet(q{
+        // A `void` function's own `return` can wrap a call to another
+        // `void` function: there is no destination to write the result
+        // into, only `inner`'s effects to run.
+        enum code = q{
             void inner() {
             }
 
-            // A `void` function's own `return` can wrap a call to
-            // another `void` function: there is no destination to
-            // write the result into, only `inner`'s effects to run.
             void outer() {
                 return inner();
             }
-        });
-        auto function_ = findFunction(guestModule, "outer");
-        assert(function_ !is null,
-            "No function `outer` in the guest program");
+        };
 
-        // Pins that the void guest-call path runs to completion without
-        // throwing. The guest subset it exercises has no observable
-        // effects yet, so nothing stronger can be asserted here until it
-        // does.
-        (new backend).call(function_, null, []);
+        // Pins that the void call path runs to completion without
+        // throwing. The subset it exercises has no observable effects
+        // yet, so nothing stronger can be asserted here until it does.
+        // `shouldBeRetOf` needs a return value to compare, so this drives
+        // the call directly on either arm.
+        static if (is(backend == Native)) {
+            mixin(code);
+            outer;
+        } else {
+            import snakebite.frontend.compiler: parseSnippet;
+            import snakebite.frontend.dmd.functions: findFunction;
+
+            auto guestModule = parseSnippet(code);
+            auto function_ = findFunction(guestModule, "outer");
+            assert(function_ !is null,
+                "No function `outer` in the guest program");
+
+            (new backend).call(function_, null, []);
+        }
     }
 }

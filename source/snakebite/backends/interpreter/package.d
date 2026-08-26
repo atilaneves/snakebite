@@ -368,10 +368,14 @@ extern(C++) private final class Evaluator: Visitor {
         // `Statement` does not override the virtual `toChars()` that
         // `RootObject.toString()` calls, so `statement.toString()` hits
         // `RootObject`'s base implementation, `assert(0)`. Rendering
-        // statements back to source text is instead a free function.
+        // statements back to source text is instead a free function - and
+        // it renders a statement as a line, trailing newline included, so
+        // the message strips it to stay on one line.
+        import std.string: strip;
+
         throw new Exception(
             text("interpreter cannot execute a `", statement.stmt,
-                "` statement: `", toChars(statement).fromStringz, "`"),
+                "` statement: `", toChars(statement).fromStringz.strip, "`"),
         );
     }
 

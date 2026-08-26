@@ -3,8 +3,6 @@ module ut.backends.eval.expressions.arithmetic;
 
 import ut.backends;
 
-mixin SnippetTests;
-
 
 static foreach (backend; Matrix!(
     Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),

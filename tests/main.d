@@ -5,8 +5,9 @@ int main(string[] args) {
     initialize(Snippets.yes);
 
     return args.runTests!(
-        "ut.backends.call.func",
-        "ut.backends.eval.expressions.arithmetic",
         "ut.backends.run.main",
+        "ut.backends.call.func",
+        "ut.backends.call.ffi",
+        "ut.backends.eval.expressions.arithmetic",
     );
 }

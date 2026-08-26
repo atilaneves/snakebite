@@ -12,8 +12,21 @@ import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction, findStruct;
 import std.conv: text;
 import std.meta: Filter, staticIndexOf;
-import std.traits: isInstanceOf, moduleName;
+import std.traits: isInstanceOf;
 
+
+// The native oracle, as a matrix entry. Not a snakebite backend: `code` is
+// mixed in and compiled by dmd when `bin/ut` itself is built, so this runs
+// regular compiled D and is the expectation every real backend must agree
+// with. It sits in the matrix so the oracle runs as its own named, tagged
+// test - a snippet that is wrong natively then fails as `Native`, instead
+// of being recomputed inside every backend's test and reported against
+// whichever backend happened to run first.
+public struct Native {}
+
+// Every implementation a guest program can run on in a test: the native
+// oracle plus every real backend.
+public alias TestBackends = AliasSeq!(Native, Backends);
 
 // Why a backend is missing from a test's `Matrix!(...)`. Every `Omit!(...)`
 // names one of these so the omission is documentation, not silence.
@@ -29,9 +42,16 @@ public enum Because {
 // `Backends`, otherwise it is a typo since it could never have been in the
 // matrix to begin with.
 public struct Omit(B, Because why, string note = "") {
-    static assert(staticIndexOf!(B, Backends) != -1,
+    static assert(staticIndexOf!(B, TestBackends) != -1,
         "Omit!(" ~ B.stringof ~ ", ...): `" ~ B.stringof ~
-        "` is not in `Backends` - typo?");
+        "` is not in `TestBackends` - typo?");
+    // The oracle states what the snippet means; a backend is only ever
+    // right or wrong relative to it. A test that omitted it would assert
+    // an expectation nothing independently checks, so every snippet a
+    // test writes must run natively.
+    static assert(!is(B == Native),
+        "Omit!(Native, ...): the native oracle is never omitted - every " ~
+        "test snippet must run as compiled D");
     static assert(note.length > 0 || why == Because.unconfirmed,
         "Omit!(" ~ B.stringof ~ ", Because." ~ text(why) ~
         ", ...): a non-empty `note` is required for this reason");
@@ -41,8 +61,8 @@ public struct Omit(B, Because why, string note = "") {
     public enum note_ = note;
 }
 
-// The backends a test runs on: `Backends` minus every `Omit!(...)`. Usable
-// directly as `static foreach (backend; Matrix!(...))`.
+// The backends a test runs on: `TestBackends` minus every `Omit!(...)`.
+// Usable directly as `static foreach (backend; Matrix!(...))`.
 public template Matrix(specs...) {
     static foreach (spec; specs)
         static assert(isInstanceOf!(Omit, spec),
@@ -57,45 +77,39 @@ public template Matrix(specs...) {
 
     private enum bool notOmitted(B) = staticIndexOf!(B, Omitted!specs) == -1;
 
-    public alias Matrix = Filter!(notOmitted, Backends);
+    public alias Matrix = Filter!(notOmitted, TestBackends);
 }
 
 
-// Opt-in for a test module: `mixin SnippetTests;` at the top gives it `eval`.
+// Renders one expression on one matrix entry and returns the result, for
+// the test to assert on: `eval!(backend, "2 + 3").should == "5"`.
 //
-// `code` is regular compiled D: dmd mixes it in when building `bin/ut`, and
-// the native rendering of the value is the expectation. The same snippet,
-// wrapped in a `string`-returning function that renders the value in the
-// guest, is handed to the backend, which must agree with the native result.
+// On `Native` the expression is regular compiled D, mixed in when `bin/ut`
+// itself is built. On a backend it is parsed as a guest snippet, wrapped in
+// a `string`-returning function that renders the value in the guest, and
+// handed to that backend. Neither arm knows about the other: each returns
+// what it computed, so a disagreement fails as whichever entry was wrong.
 //
-// All of a module's snippets are parsed and semantically analysed together,
-// as one guest module, the first time any of them is evaluated. dmd
-// serialises that work; the tests themselves then only run the backend.
-public mixin template SnippetTests() {
-    private struct SnippetTestsTag {}
-    private enum snippetModule = imported!"std.traits".moduleName!SnippetTestsTag;
+// The optional middle argument is `declarations` in scope for `code`.
+// Natively they nest in the delegate below; in the guest they are static
+// members of the snippet's struct. dmd constant-folds literal-only
+// expressions during semantic analysis, so a test that wants a backend to
+// do the arithmetic itself keeps an operand behind a function declared
+// there. One template rather than a two- and a three-argument overload:
+// with `module_` defaulted, `eval!(backend, a, b)` would match both.
+public string eval(
+    BackendType,
+    string first,
+    string second = null,
+    string module_ = __MODULE__,
+)(
+    in string file = __FILE__,
+    in size_t line = __LINE__,
+) {
+    enum declarations = second is null ? "" : first;
+    enum code = second is null ? first : second;
 
-    string eval(BackendType, string code)(
-        in string file = __FILE__,
-        in size_t line = __LINE__,
-    ) {
-        return eval!(BackendType, "", code)(file, line);
-    }
-
-    // As above, with `declarations` in scope for `code`. Natively they are
-    // nested in the function that mixes them in; in the guest they are
-    // static members of the snippet's struct. DMD constant-folds
-    // literal-only expressions during semantic analysis, so a test that
-    // wants a backend to do the arithmetic itself keeps an operand behind a
-    // function declared here.
-    string eval(BackendType, string declarations, string code)(
-        in string file = __FILE__,
-        in size_t line = __LINE__,
-    ) {
-        return imported!"ut.backends".evaluate!(
-            snippetModule, BackendType, declarations, code,
-        )(file, line);
-    }
+    return evaluate!(module_, BackendType, declarations, code)(file, line);
 }
 
 // UFCS assertion: `42.shouldBeStatusOf!(backend, code)` parses `code` as a
@@ -118,11 +132,14 @@ public void shouldBeStatusOf(
 ) {
     import snakebite.backends.backend: Program, run;
 
-    nativeMainStatus!code.shouldEqual(expected, file, line);
-
-    enum program_ = RegisterProgram!(module_, code).program;
-    auto program = Program([parsedProgram(program_)]);
-    run(new BackendType, program).shouldEqual(expected, file, line);
+    static if (is(BackendType == Native))
+        nativeMainStatus!code.shouldEqual(expected, file, line);
+    else {
+        enum program_ = RegisterProgram!(module_, code).program;
+        auto program = Program([parsedProgram(program_)]);
+        asTestFailure(run(new BackendType, program), file, line)
+            .shouldEqual(expected, file, line);
+    }
 }
 
 // `main`'s exit status, run natively, mirroring the backend-side semantics
@@ -176,29 +193,70 @@ public void shouldBeRetOf(
     import dmd.typesem: size;
     import snakebite.backends.backend: Program;
 
-    const native = () {
-        mixin(code);
-        return mixin(functionName ~ "()");
-    }();
-    native.shouldEqual(expected, file, line);
+    static if (is(BackendType == Native)) {
+        const native = () {
+            mixin(code);
+            return mixin(functionName ~ "()");
+        }();
+        native.shouldEqual(expected, file, line);
+    } else {
+        enum program_ = RegisterProgram!(module_, code).program;
+        auto program = Program([parsedProgram(program_)]);
+        auto function_ = findFunction(program.rootModules[0], functionName);
+        if (function_ is null)
+            throw new UnitTestException(
+                text("No function `", functionName, "` in the guest program"),
+                file, line,
+            );
 
-    enum program_ = RegisterProgram!(module_, code).program;
-    auto program = Program([parsedProgram(program_)]);
-    auto function_ = findFunction(program.rootModules[0], functionName);
-    assert(function_ !is null,
-        "No function `" ~ functionName ~ "` in the guest program");
+        // The expectation's own type states what the guest returns, and
+        // `call` writes that many bytes into `&result`, so a mismatch would
+        // scribble past it or read bytes the guest never wrote. Caught here,
+        // naming both types, rather than as a corrupt-looking value later.
+        auto returnType = function_.type.nextOf;
+        if (T.sizeof != returnType.size)
+            throw new UnitTestException(
+                text("`", functionName, "` returns `", returnType.toString,
+                     "` (", returnType.size, " bytes), but the expected value",
+                     " is `", T.stringof, "` (", T.sizeof, " bytes)"),
+                file, line,
+            );
 
-    auto returnType = function_.type.nextOf;
-    assert(T.sizeof == returnType.size,
-        text("`", T.stringof, "` (", T.sizeof, " bytes) does not match the ",
-             "guest return type (", returnType.size, " bytes)"));
-
-    T result;
-    (new BackendType).call(function_, &result, []);
-    result.shouldEqual(expected, file, line);
+        T result;
+        asTestFailure((new BackendType).call(function_, &result, []),
+            file, line);
+        result.shouldEqual(expected, file, line);
+    }
 }
 
-public string evaluate(
+// Reports a backend's own failure as the test failure it is, at the test's
+// own file and line.
+//
+// unit-threaded prints a full stack trace for any throwable that is not a
+// `UnitTestException`. For a backend refusing a guest construct, every
+// frame in that trace is the backend's own visitor recursion, which says
+// nothing the message does not already say and buries it. The refusal is a
+// result about the guest program, not a crash in the host.
+//
+// Only an `Exception` is converted. An `Error` means the host itself is
+// broken, and there the trace is the whole point, so it propagates
+// untouched.
+private T asTestFailure(T)(
+    lazy T expression,
+    in string file,
+    in size_t line,
+) {
+    import std.string: strip;
+
+    try
+        return expression;
+    catch (Exception exception)
+        // dmd renders a statement with its trailing newline, so a message
+        // quoting one would otherwise break the failure across lines.
+        throw new UnitTestException(exception.msg.strip, file, line);
+}
+
+private string evaluate(
     string module_,
     BackendType,
     string declarations,
@@ -211,15 +269,16 @@ public string evaluate(
     // is how the snippet gets registered without any extra syntax in tests.
     enum snippet = Register!(module_, declarations, code).snippet;
 
-    const native = () {
+    // Each matrix entry renders the snippet its own way and hands the result
+    // straight back for the test to assert on, so a wrong expectation fails
+    // as the entry that produced it. The native oracle is one such entry
+    // rather than an extra comparison every backend re-runs.
+    static if (is(BackendType == Native)) {
         mixin(declarations);
         return text(mixin(code));
-    }();
-
-    const guest = (new BackendType).eval(parsedFunction(snippet));
-    guest.shouldEqual(native, file, line);
-
-    return native;
+    } else
+        return asTestFailure(
+            (new BackendType).eval(parsedFunction(snippet)), file, line);
 }
 
 
