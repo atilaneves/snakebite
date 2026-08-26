@@ -203,8 +203,8 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
     import dmd.statement:
-        CompoundStatement, ExpStatement, ImportStatement, ReturnStatement,
-        ScopeStatement, Statement;
+        CompoundStatement, ExpStatement, ForStatement, ImportStatement,
+        ReturnStatement, ScopeStatement, Statement;
     import dmd.typesem: size;
 
     alias visit = Visitor.visit;
@@ -507,19 +507,28 @@ extern(C++) private final class Evaluator: Visitor {
         if (statement.exp is null)
             return;
 
-        // A statement-position expression's value, if any, has no
-        // destination - only its effects matter. dmd hands this
-        // interpreter exactly one shape of it so far: the call that a
-        // `void` function's `return f();` desugars to, where `f()` is
-        // itself `void`. A `void` expression has nowhere to write a
-        // result even if it had one, so this skips the reservation
-        // outright rather than pushing dmd's one placeholder byte for
-        // `Tvoid` (`Type.size` never returns zero) and evaluates straight
-        // into a `null` place, the same convention `execute` already uses
-        // for a discarded `void` return.
-        auto type = statement.exp.type;
+        runForEffect(statement.exp);
+    }
+
+    // Runs `expression` for its side effects, discarding whatever value it
+    // produces: what an `ExpStatement` needs for its one expression, and
+    // what a `ForStatement`'s `increment` needs too - dmd types `i++`/
+    // `i += 1` no differently there than it would as a statement on its
+    // own line, just with nowhere its result could go even if the
+    // interpreter kept it.
+    //
+    // dmd hands this interpreter exactly one shape of a `void`-typed
+    // expression so far: the call that a `void` function's `return f();`
+    // desugars to, where `f()` is itself `void`. A `void` expression has
+    // nowhere to write a result even if it had one, so this skips the
+    // reservation outright rather than pushing dmd's one placeholder byte
+    // for `Tvoid` (`Type.size` never returns zero) and evaluates straight
+    // into a `null` place, the same convention `execute` already uses for
+    // a discarded `void` return.
+    private void runForEffect(Expression expression) {
+        auto type = expression.type;
         if (type.ty == Tvoid) {
-            evaluate(statement.exp, type, null);
+            evaluate(expression, type, null);
             return;
         }
 
@@ -528,7 +537,71 @@ extern(C++) private final class Evaluator: Visitor {
         // frame stack, popped when it goes out of scope, not into a GC
         // allocation.
         auto frame = _frames.push(type.size, type.alignsize);
-        evaluate(statement.exp, type, frame.base);
+        evaluate(expression, type, frame.base);
+    }
+
+    // `for (init; condition; increment) body`, run in the order D defines:
+    // the initialiser once, then the condition before each iteration, the
+    // body, and the increment after it. A missing condition (`for (;;)`)
+    // means "always true", the same as a missing `while` condition.
+    //
+    // dmd's semantic pass hoists the header's declaration out into a
+    // `CompoundStatement`/`ScopeStatement` wrapping the loop, which is why
+    // a local declared there gets a frame slot like any other. The
+    // initialiser still runs here when one survives, rather than being
+    // assumed absent: skipping a statement that is present would run the
+    // loop with an uninitialised counter instead of refusing.
+    override void visit(ForStatement statement) {
+        if (statement._init !is null) {
+            statement._init.accept(this);
+            if (_returned)
+                return;
+        }
+
+        while (statement.condition is null || truthy(statement.condition)) {
+            if (statement._body !is null) {
+                statement._body.accept(this);
+                if (_returned)
+                    return;
+            }
+
+            if (statement.increment !is null)
+                runForEffect(statement.increment);
+        }
+    }
+
+    // Evaluates `condition` and reports whether it is nonzero: dmd's own
+    // `toBoolean` (`expressionsem.d`) accepts any expression whose type
+    // `Type.isBoolean` allows - `bool` itself, but also any other
+    // integral type, unconverted - as a loop condition, testing it
+    // against zero rather than requiring an actual `bool`. A floating
+    // point condition is equally valid D and is refused here rather than
+    // guessed at, since nothing runs one yet.
+    private bool truthy(Expression condition) {
+        import std.conv: text;
+
+        auto type = condition.type;
+        auto frame = _frames.push(type.size, type.alignsize);
+        evaluate(condition, type, frame.base);
+
+        if (type.isIntegral) {
+            switch (type.size) {
+                case 1: return *cast(ubyte*) frame.base != 0;
+                case 2: return *cast(ushort*) frame.base != 0;
+                case 4: return *cast(uint*) frame.base != 0;
+                case 8: return *cast(ulong*) frame.base != 0;
+                default:
+                    throw new Exception(
+                        text("interpreter cannot test truthiness of an ",
+                            "integral of ", type.size, " byte(s)"),
+                    );
+            }
+        }
+
+        throw new Exception(
+            text("interpreter cannot test truthiness of a value of type `",
+                type.toString, "`"),
+        );
     }
 
     override void visit(Expression expression) {
