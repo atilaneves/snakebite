@@ -155,8 +155,7 @@ private Project loadProject(in Options options) {
     );
     project.frontend = stopWatch.peek;
 
-    project.program =
-        Program(parsed.map!(result => result.module_).array);
+    project.program = Program(parsed);
 
     return project;
 }

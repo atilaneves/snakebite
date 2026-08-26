@@ -4,15 +4,11 @@ module snakebite.backends.backend;
 private:
 
 
-// What compiled D would have as the inputs to a link: the root modules
-// (parsed and semantically analysed by the frontend), the compiled images
-// the guest calls into via FFI, and the arguments `main` receives. A dub
-// project is not special: a dub-aware driver asks dub for import paths,
-// flags and libraries and builds one of these.
+// The root modules of the guest program, parsed and semantically analysed by
+// the frontend. A dub project is not special: a dub-aware driver asks dub for
+// import paths and flags and builds one of these.
 public struct Program {
     imported!"dmd.dmodule".Module[] rootModules;
-    string[] sharedLibraries;
-    string[] args;
 }
 
 

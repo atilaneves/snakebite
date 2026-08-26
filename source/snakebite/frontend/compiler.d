@@ -2,13 +2,6 @@ module snakebite.frontend.compiler;
 
 private:
 
-public alias ModuleParseResult = imported!"std.typecons".Tuple!(
-    imported!"dmd.dmodule".Module,
-    "module_",
-    imported!"dmd.frontend".Diagnostics,
-    "diagnostics",
-);
-
 public struct FrontendFlags {
     string[] compilerArguments;
 }
@@ -32,25 +25,6 @@ shared static ~this() {
     compiler.shutdown;
 }
 
-public ModuleParseResult parseModule(in string filePath) {
-    return compiler.parseModule(filePath, [], FrontendFlags.init);
-}
-
-public ModuleParseResult parseModule(
-    in string filePath,
-    in string[] importPaths,
-) {
-    return compiler.parseModule(filePath, importPaths, FrontendFlags.init);
-}
-
-public ModuleParseResult parseModule(
-    in string filePath,
-    in string[] importPaths,
-    in FrontendFlags flags,
-) {
-    return compiler.parseModule(filePath, importPaths, flags);
-}
-
 // Whether this process compiles many small snippets (bin/ut, the REPL) or one
 // whole program as a single root set (`dmd -unittest <files>`). The snippet
 // world needs the lightning rod + allInst to funnel every tiny fixture's
@@ -71,14 +45,7 @@ public void initialize(in Snippets snippets) {
 // -I<paths>`: every file is established as a root before any import traversal,
 // so a module imported by a sibling root keeps its unittest bodies instead of
 // becoming a bodyless non-root placeholder. Results follow input order.
-public ModuleParseResult[] parseRootModules(
-    in string[] filePaths,
-    in string[] importPaths,
-) {
-    return compiler.parseRootModules(filePaths, importPaths, FrontendFlags.init);
-}
-
-public ModuleParseResult[] parseRootModules(
+public imported!"dmd.dmodule".Module[] parseRootModules(
     in string[] filePaths,
     in string[] importPaths,
     in FrontendFlags flags,
@@ -86,84 +53,19 @@ public ModuleParseResult[] parseRootModules(
     return compiler.parseRootModules(filePaths, importPaths, flags);
 }
 
-public ModuleParseResult parseSnippet(in string source) {
-    return compiler.parseSnippet(source, []);
-}
-
-public ModuleParseResult parseSnippet(
-    in string source,
-    in string[] importPaths,
-) {
-    return compiler.parseSnippet(source, importPaths);
-}
-
-public ModuleParseResult parseSnippetUncached(
-    in string source,
-    in string[] importPaths,
-) {
-    return compiler.parseSnippetUncached(source, importPaths);
-}
-
-public ModuleParseResult parseSnippetWithCheckActionContext(in string source) {
-    return compiler.parseSnippetWithCheckActionContext(source, []);
-}
-
-public ModuleParseResult parseSnippetWithCheckActionContext(
-    in string source,
-    in string[] importPaths,
-) {
-    return compiler.parseSnippetWithCheckActionContext(
-        source, importPaths, FrontendFlags.init,
-    );
-}
-
-public ModuleParseResult parseSnippetWithCheckActionContext(
-    in string source,
-    in string[] importPaths,
-    in FrontendFlags flags,
-) {
-    return compiler.parseSnippetWithCheckActionContext(source, importPaths, flags);
-}
-
-public ModuleParseResult parseModuleWithCheckActionContext(
-    in string filePath,
-    in string[] importPaths,
-) {
-    return compiler.parseModuleWithCheckActionContext(filePath, importPaths);
+public imported!"dmd.dmodule".Module parseSnippet(in string source) {
+    return compiler.parseSnippet(source);
 }
 
 public void withCompilerLock(scope void delegate() action) {
     compiler.withLock(action);
 }
 
-public void withFrontendFlags(
-    in FrontendFlags flags,
-    scope void delegate() action,
-) {
-    const savedFlags = saveFrontendFlags;
-    scope(exit) restoreFrontendFlags(savedFlags);
-    applyFrontendFlags(flags);
-    action();
-}
-
-// The lightning rod module: the first root module parsed in this process,
-// where DMD's allInst+importedFrom funneling accumulates druntime/phobos
-// template instances and TypeInfos (see parseLightningRod).
-public imported!"dmd.dmodule".Module lightningRod() {
-    return compiler._rod;
-}
-
-public imported!"dmd.expression".Expression parseExpression(in string source) {
-    return compiler.parseExpression(source);
-}
-
 final class Compiler {
     private bool initialized;
     private imported!"core.sync.mutex".Mutex mutex;
-    private imported!"dmd.dmodule".Module _rod;
-    // Keyed by source content, import paths, and an optional caller-provided
-    // identity salt; prevents re-registering the same root module in DMD's
-    // process-global table.
+    // Keyed by source content; prevents re-registering the same root module
+    // in DMD's process-global table.
     private imported!"dmd.dmodule".Module[string] sourceCache;
 
     private this() {
@@ -314,14 +216,13 @@ final class Compiler {
 
         auto result = dmdParseModule("snakebite_rod.d", "module snakebite_rod;\n");
         assert(!result.diagnostics.hasErrors, "lightning rod failed to parse");
-        fullSemanticWithInlineAsmSnapshot(result.module_);
+        fullSemantic(result.module_);
         assert(global.errors == 0, "lightning rod failed semantic");
 
-        _rod = result.module_;
         // dmd.frontend never sets Module.rootModule (only dmd's own main.d
         // does). Setting it lets callers assert the rod really was first and
         // points dsymbolsem's sc-less importedFrom fallback at the rod.
-        Module.rootModule = _rod;
+        Module.rootModule = result.module_;
         resetErrors;
     }
 
@@ -351,35 +252,7 @@ final class Compiler {
         action();
     }
 
-    ModuleParseResult parseModule(
-        in string filePath,
-        in string[] importPaths,
-        in FrontendFlags flags,
-    ) {
-        import std.conv: text;
-        import std.file: readText;
-
-        mutex.lock;
-        scope(exit) mutex.unlock;
-        requireInitialized;
-
-        if (auto module_ = parsedModuleForFile(filePath, importPaths)) {
-            ModuleParseResult result;
-            result.module_ = module_;
-            return result;
-        }
-
-        return parseSourceLocked(
-            filePath.readText,
-            importPaths,
-            text("file\0", filePath),
-            true,
-            dmdFileName(filePath, importPaths),
-            flags,
-        );
-    }
-
-    ModuleParseResult[] parseRootModules(
+    imported!"dmd.dmodule".Module[] parseRootModules(
         in string[] filePaths,
         in string[] importPaths,
         in FrontendFlags flags,
@@ -391,7 +264,7 @@ final class Compiler {
         return parseRootModulesLocked(filePaths, importPaths, flags);
     }
 
-    private ModuleParseResult[] parseRootModulesLocked(
+    private imported!"dmd.dmodule".Module[] parseRootModulesLocked(
         in string[] filePaths,
         in string[] importPaths,
         in FrontendFlags flags,
@@ -453,195 +326,45 @@ final class Compiler {
         // drives `-unittest <files>`: each phase runs across all roots before
         // the next begins.
         foreach (m; modules) m.importAll(null);
-        import snakebite.frontend.dmd.functions:
-            snapshotInlineAsmInstructions;
         foreach (m; modules) m.dsymbolSemantic(null);
         runDeferredSemantic;
         foreach (m; modules) m.semantic2(null);
         runDeferredSemantic2;
         foreach (m; modules) m.semantic3(null);
         runDeferredSemantic3;
-        snapshotInlineAsmInstructions;
         if (global.errors != 0)
             throw new Exception(diagnosticMessageWithLocations);
 
         captured.replay;
 
-        ModuleParseResult[] results;
-        foreach (m; modules) {
-            ModuleParseResult result;
-            result.module_ = m;
-            results ~= result;
-        }
-        return results;
+        return modules;
     }
 
-    ModuleParseResult parseSnippet(in string source, in string[] importPaths) {
+    imported!"dmd.dmodule".Module parseSnippet(in string source) {
         mutex.lock;
         scope(exit) mutex.unlock;
         requireInitialized;
 
-        return parseSourceLocked(source, importPaths, null, true);
+        return parseSourceLocked(source);
     }
 
-    ModuleParseResult parseSnippetUncached(
-        in string source,
-        in string[] importPaths,
-    ) {
-        mutex.lock;
-        scope(exit) mutex.unlock;
-        requireInitialized;
-
-        return parseSourceLocked(source, importPaths, null, false);
-    }
-
-    ModuleParseResult parseSnippetWithCheckActionContext(
-        in string source,
-        in string[] importPaths,
-    ) {
-        return parseSnippetWithCheckActionContext(source, importPaths, FrontendFlags.init);
-    }
-
-    ModuleParseResult parseSnippetWithCheckActionContext(
-        in string source,
-        in string[] importPaths,
-        in FrontendFlags flags,
-    ) {
-        import dmd.astenums: CHECKACTION;
-        import dmd.globals: global;
-        import std.array: join;
-        import std.conv: text;
-
-        mutex.lock;
-        scope(exit) mutex.unlock;
-        requireInitialized;
-
-        const originalCheckAction = global.params.checkAction;
-        global.params.checkAction = CHECKACTION.context;
-        scope(exit) global.params.checkAction = originalCheckAction;
-
-        return parseSourceLocked(
-            source,
-            importPaths,
-            text("checkaction=context", "\0", flags.compilerArguments.join("\0")),
-            true,
-            null,
-            flags,
-        );
-    }
-
-    ModuleParseResult parseModuleWithCheckActionContext(
-        in string filePath,
-        in string[] importPaths,
-    ) {
-        import dmd.astenums: CHECKACTION;
-        import dmd.globals: global;
-        import std.file: readText;
-        import std.conv: text;
-
-        mutex.lock;
-        scope(exit) mutex.unlock;
-        requireInitialized;
-
-        const originalCheckAction = global.params.checkAction;
-        global.params.checkAction = CHECKACTION.context;
-        scope(exit) global.params.checkAction = originalCheckAction;
-
-        return parseSourceLocked(
-            filePath.readText,
-            importPaths,
-            text("checkaction=context\0", filePath),
-            true,
-            filePath,
-        );
-    }
-
-    private imported!"dmd.expression".Expression parseExpression(in string source) {
-        mutex.lock;
-        scope(exit) mutex.unlock;
-        requireInitialized;
-        return parseExpressionLocked(source);
-    }
-
-    private imported!"dmd.expression".Expression parseExpressionLocked(in string source) {
-        import dmd.astcodegen: ASTCodegen;
-        import dmd.errors: diagnostics;
-        import dmd.errorsink: ErrorSinkNull;
-        import dmd.expression: Expression;
-        import dmd.globals: global;
-        import dmd.parse: Parser;
-        import dmd.tokens: TOK;
-
-        resetErrors;
-        auto errorSink = new ErrorSinkNull;
-
-        scope parser = new Parser!ASTCodegen(
-            null,
-            source ~ '\0',
-            false,
-            errorSink,
-            &global.compileEnv,
-            global.params.useUnitTests,
-        );
-
-        parser.nextToken;
-        auto root = parser.parseAssignExp();
-
-        if (global.errors != 0)
-            throw new Exception(diagnosticMessage);
-
-        if (parser.token.value != TOK.endOfFile)
-            throw new Exception("trailing tokens after expression");
-
-        auto expression = cast(Expression) root;
-        if (expression is null)
-            throw new Exception("not an expression");
-
-        return expression;
-    }
-
-    private ModuleParseResult parseSourceLocked(
-        in string source,
-        in string[] importPaths,
-        in string cacheSalt,
-        in bool useCache,
-        in string filePath = null,
-        in FrontendFlags flags = FrontendFlags.init,
-    ) {
+    private imported!"dmd.dmodule".Module parseSourceLocked(in string source) {
         import core.atomic: atomicFetchAdd;
         import dmd.errors: diagnostics;
-        import dmd.frontend:
-            addImport,
-            dmdParseModule = parseModule;
+        import dmd.frontend: dmdParseModule = parseModule;
         import dmd.globals: global;
         import std.conv: text;
 
-        const key = cacheKey(source, importPaths, cacheSalt);
-        if (useCache)
-        if (auto cached = key in sourceCache) {
-            ModuleParseResult result;
-            result.module_ = *cached;
-            return result;
-        }
-
-        const originalPathLength = global.path.length;
-        scope(exit) global.path.setDim(originalPathLength);
-        foreach (importPath; importPaths)
-            addImport(importPath);
-
-        const savedFlags = saveFrontendFlags;
-        scope(exit) restoreFrontendFlags(savedFlags);
-        applyFrontendFlags(flags);
+        if (auto cached = source in sourceCache)
+            return *cached;
 
         resetErrors;
 
-        const fileName = filePath is null ?
-            text(
-                "snippet_",
-                atomicFetchAdd(_moduleCounter, 1u),
-                ".d",
-            ) :
-            filePath;
+        const fileName = text(
+            "snippet_",
+            atomicFetchAdd(_moduleCounter, 1u),
+            ".d",
+        );
 
         // DMD's `onFileReadError` writes `import path[N] = …` lines directly to
         // C stderr via `fprintf`, bypassing the diagnostic handler installed in
@@ -654,32 +377,27 @@ final class Compiler {
         auto captured = capturedStderr;
         scope(failure) captured.discard;
 
-        ModuleParseResult moduleResult = dmdParseModule(fileName, source);
+        auto moduleResult = dmdParseModule(fileName, source);
         if (moduleResult.diagnostics.hasErrors)
             throw new Exception(diagnosticMessage);
 
-        fullSemanticWithInlineAsmSnapshot(moduleResult.module_);
+        fullSemantic(moduleResult.module_);
         if (global.errors != 0)
             throw new Exception(diagnosticMessage);
 
         captured.replay;
 
-        if (useCache)
-            sourceCache[key] = moduleResult.module_;
+        sourceCache[source] = moduleResult.module_;
 
-        return moduleResult;
+        return moduleResult.module_;
     }
 
-    private void fullSemanticWithInlineAsmSnapshot(
-        imported!"dmd.dmodule".Module module_,
-    ) {
+    private void fullSemantic(imported!"dmd.dmodule".Module module_) {
         import dmd.dsymbolsem:
             dsymbolSemantic, importAll, runDeferredSemantic,
             runDeferredSemantic2, runDeferredSemantic3;
         import dmd.semantic2: semantic2;
         import dmd.semantic3: semantic3;
-        import snakebite.frontend.dmd.functions:
-            snapshotInlineAsmInstructions;
 
         module_.importedFrom = module_;
         module_.importAll(null);
@@ -689,18 +407,6 @@ final class Compiler {
         runDeferredSemantic2;
         module_.semantic3(null);
         runDeferredSemantic3;
-        snapshotInlineAsmInstructions;
-    }
-
-    private string cacheKey(
-        in string source,
-        in string[] importPaths,
-        in string cacheSalt,
-    ) const {
-        import std.array: join;
-        import std.conv: text;
-
-        return text(source, "\0", importPaths.join("\0"), "\0", cacheSalt);
     }
 
     private imported!"dmd.dmodule".Module parsedModuleForFile(
