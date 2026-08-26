@@ -12,6 +12,7 @@ int main(string[] args) {
         "ut.backends.call.loop",
         "ut.backends.call.compare",
         "ut.backends.call.assign",
+        "ut.backends.call.wrap",
         "ut.backends.call.ffi",
         "ut.backends.eval.expressions.arithmetic",
         "ut.ffi.plan",
