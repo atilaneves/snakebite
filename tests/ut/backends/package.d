@@ -102,11 +102,6 @@ public mixin template SnippetTests() {
 // whole guest program, runs it on the backend the way compiled D would run
 // it, and checks the exit status against `expected`.
 //
-// `code` is also mixed in natively and its `main` called directly, the same
-// oracle `evaluate` uses for snippets: a test whose `expected` disagrees
-// with what compiled D actually returns fails on the native check, before
-// the backend ever runs.
-//
 // `code` is registered under the caller's module (`__MODULE__`, resolved at
 // the call site as a template default, the same trick `__FILE__`/`__LINE__`
 // already rely on below) the same way `eval` snippets register through
@@ -168,11 +163,8 @@ private int nativeMainStatus(string code)() {
 // guest's actual return type must match it in size, so a lying test fails
 // loudly instead of reading garbage bytes.
 //
-// `code` is also mixed in natively and `functionName` called directly first,
-// the same oracle `evaluate` uses for snippets: a lying `expected` fails on
-// the native check, before the backend ever runs.
-//
-// `code` is registered and batch-parsed the same way `run`'s is; see there.
+// `code` is registered and batch-parsed the same way `shouldBeStatusOf`'s
+// is; see there.
 public void shouldBeRetOf(
     BackendType, string code, string functionName, T,
     string module_ = __MODULE__,
