@@ -1,0 +1,29 @@
+name "snakebite"
+description "Backends for the D programming language"
+copyright "Copyright © 2026, atila"
+license "BSL-1.0"
+
+dependency "dmd:frontend" version="~>2.112.0"
+dependency ":dmd-backend-vendor" version="*"
+
+// When bumping dmd:frontend, re-run scripts/vendor-dmd-backend.sh to
+// keep vendor/dmd-backend/ in sync with the new version.
+subPackage {
+    name "dmd-backend-vendor"
+    targetType "sourceLibrary"
+    sourcePaths "vendor/dmd-backend"
+    importPaths "vendor/dmd-backend"
+}
+
+
+configuration "unittest" {
+    targetType "executable"
+    targetName "ut"
+    targetPath "bin"
+
+    mainSourceFile "tests/main.d"
+    sourcePaths "tests"
+    importPaths "tests"
+
+    dependency "unit-threaded" version="*"
+}
