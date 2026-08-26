@@ -12,5 +12,12 @@ ninja bin/ut
 bin/ut
 
 # Smoke test: the bench must still build (with ldc, optimised) and run
-# against its default fixture. Not a timing check, so keep it fast.
-build/bench.sh examples/ct -w 0 -r 1 > /dev/null
+# against its default fixture with every backend passing. Not a timing
+# check, so keep it fast. Output stays visible: when this fails, the
+# table and the backends' stderr diagnostics are the explanation.
+build/bench.sh examples/ct -w 0 -r 1
+
+# The unit-threaded fixture only works with the real-workflow row: ctfe
+# runs raw `unittest{}` blocks, so `@ShouldFail` reads as a real failure
+# (an accepted gap). `-b dmd` selects that row for dub projects too.
+build/bench.sh examples/rt -w 0 -r 1 -b dmd

@@ -17,8 +17,11 @@ command -v "$compiler" > /dev/null 2>&1 || compiler=ldc
 builddir=.reggae-bench
 if [[ ! -f "$builddir/build.ninja" ]]; then
     mkdir -p "$builddir"
-    dub run reggae --compiler="$compiler" -- -b ninja -C "$builddir" \
-        --dub-config=bench --dub-build-type=release --dc="$compiler" .
+    # Absolute paths: reggae bakes these arguments into the generated
+    # regeneration rule, which ninja runs from inside $builddir, where
+    # relative paths would no longer resolve.
+    dub run reggae --compiler="$compiler" -- -b ninja -C "$PWD/$builddir" \
+        --dub-config=bench --dub-build-type=release --dc="$compiler" "$PWD"
 fi
 
 ninja -C "$builddir" bench

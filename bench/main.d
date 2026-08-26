@@ -57,11 +57,17 @@ int main(string[] args) {
         return 1;
     }
 
+    const reports = benchmarkAll(project, options);
+
     writeln(headerLine(project, options));
     writeln;
-    printTable(benchmarkAll(project, options));
+    printTable(reports);
 
-    return 0;
+    // A failing backend fails the process: build/ci.sh runs the bench as a
+    // smoke test, and an exit status of 0 next to a FAIL row once let a
+    // real regression through unreported.
+    import std.algorithm.searching: all;
+    return reports.all!(report => report.passed) ? 0 : 1;
 }
 
 private Options parseOptions(string[] args) {
@@ -247,12 +253,9 @@ private BackendReport benchmark(
 
     const residentBefore = residentSetBytes;
 
-    // A failing test prints its diagnostic the way druntime prints an
-    // escaped `Throwable`; repeated over warmup + measured runs that is
-    // noise, and the pass column already reports failures, so drop it.
-    auto silenced = silencedStderr;
-    scope(exit) silenced.restore;
-
+    // A failing backend's diagnostics go to stderr, repeated over warmup +
+    // measured runs. Noisy, but silencing them left failures with no
+    // explanation at all; the noise is the lesser evil.
     Duration[] times;
     foreach (round; 0 .. warmup + runs) {
         auto stopWatch = StopWatch(AutoStart.yes);
@@ -333,43 +336,4 @@ private long residentSetBytes() {
 
     const fields = readText("/proc/self/statm").split;
     return fields[1].to!long * sysconf(_SC_PAGESIZE);
-}
-
-// Holds the saved stderr file descriptor while fd 2 points at /dev/null.
-private struct SilencedStderr {
-    private int _saved = -1;
-
-    void restore() @trusted nothrow @nogc {
-        import core.stdc.stdio: fflush, stderr;
-        import core.sys.posix.unistd: close, dup2;
-
-        if (_saved < 0)
-            return;
-
-        fflush(stderr);
-        dup2(_saved, 2);
-        close(_saved);
-        _saved = -1;
-    }
-}
-
-// @trusted: dup/dup2/open/close operate only on file descriptors this
-// function owns; a failed setup leaves stderr untouched with _saved == -1 so
-// restore is a no-op.
-private SilencedStderr silencedStderr() @trusted nothrow @nogc {
-    import core.stdc.stdio: fflush, stderr;
-    import core.sys.posix.fcntl: O_WRONLY, open;
-    import core.sys.posix.unistd: close, dup, dup2;
-
-    const sink = open("/dev/null", O_WRONLY);
-    if (sink < 0)
-        return SilencedStderr.init;
-
-    SilencedStderr silenced;
-    fflush(stderr);
-    silenced._saved = dup(2);
-    dup2(sink, 2);
-    close(sink);
-
-    return silenced;
 }
