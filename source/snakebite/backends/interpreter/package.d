@@ -28,7 +28,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 
             throw new Exception(
                 "interpreter cannot call a function with no body: `" ~
-                    function_.toChars.text ~ "`",
+                    function_.toString.text ~ "`",
             );
         }
 
@@ -68,7 +68,7 @@ extern(C++) private final class StatementWalker: Visitor {
 
         throw new Exception(
             text("interpreter cannot execute a `", statement.stmt,
-                "` statement: `", statement.toChars, "`"),
+                "` statement: `", statement.toString, "`"),
         );
     }
 
@@ -131,14 +131,14 @@ private void writeReturnValue(
             default:
                 throw new Exception(
                     text("interpreter cannot return an integral of size ",
-                        returnType.size, ": `", returnType.toChars, "`"),
+                        returnType.size, ": `", returnType.toString, "`"),
                 );
         }
     }
 
     throw new Exception(
         text("interpreter cannot return a value of type `",
-            returnType.toChars, "`"),
+            returnType.toString, "`"),
     );
 }
 
@@ -161,7 +161,7 @@ extern(C++) private final class ExpressionEvaluator: Visitor {
 
         throw new Exception(
             text("interpreter cannot evaluate a `", expression.op,
-                "` expression: `", expression.toChars, "`"),
+                "` expression: `", expression.toString, "`"),
         );
     }
 
