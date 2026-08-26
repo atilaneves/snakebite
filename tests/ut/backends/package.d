@@ -99,7 +99,12 @@ public mixin template SnippetTests() {
 }
 
 // Parse `code` as a whole guest program and run it on the backend the way
-// compiled D would run it, returning the exit status.
+// compiled D would run it, checking the exit status against `expected`.
+//
+// `code` is also mixed in natively and its `main` called directly, the same
+// oracle `evaluate` uses for snippets: a test whose `expected` disagrees
+// with what compiled D actually returns fails on the native check, before
+// the backend ever runs.
 //
 // `code` is registered under the caller's module (`__MODULE__`, resolved at
 // the call site as a template default, the same trick `__FILE__`/`__LINE__`
@@ -107,12 +112,44 @@ public mixin template SnippetTests() {
 // `SnippetTests`. The first `run`/`shouldBeRetOf` call from a given test
 // module parses every program that module registered in one batch, so dmd's
 // per-batch setup cost is paid once per module, not once per test.
-public int run(BackendType, string code, string module_ = __MODULE__)() {
+public void run(BackendType, string code, string module_ = __MODULE__)(
+    in int expected,
+    in string file = __FILE__,
+    in size_t line = __LINE__,
+) {
     import snakebite.backends.backend: Program, run;
+
+    nativeMainStatus!code.shouldEqual(expected, file, line);
 
     enum program_ = RegisterProgram!(module_, code).program;
     auto program = Program([parsedProgram(program_)]);
-    return run(new BackendType, program);
+    run(new BackendType, program).shouldEqual(expected, file, line);
+}
+
+// `main`'s exit status, run natively, mirroring the backend-side semantics
+// documented on `snakebite.backends.backend.run`: `void main` is status 0,
+// an escaping `Throwable` is status 1, and no `main` at all is status 0.
+private int nativeMainStatus(string code)() {
+    return () {
+        mixin(code);
+
+        static if (!__traits(compiles, main)) {
+            return 0;
+        } else static if (is(typeof(main()) == void)) {
+            try {
+                main();
+                return 0;
+            } catch (Throwable) {
+                return 1;
+            }
+        } else {
+            try {
+                return main();
+            } catch (Throwable) {
+                return 1;
+            }
+        }
+    }();
 }
 
 // UFCS assertion: `42.shouldBeRetOf!(backend, code, "answer")` invokes one
@@ -120,6 +157,10 @@ public int run(BackendType, string code, string module_ = __MODULE__)() {
 // `expected`, whose type states the guest function's return type. The
 // guest's actual return type must match it in size, so a lying test fails
 // loudly instead of reading garbage bytes.
+//
+// `code` is also mixed in natively and `functionName` called directly first,
+// the same oracle `evaluate` uses for snippets: a lying `expected` fails on
+// the native check, before the backend ever runs.
 //
 // `code` is registered and batch-parsed the same way `run`'s is; see there.
 public void shouldBeRetOf(
@@ -132,6 +173,12 @@ public void shouldBeRetOf(
 ) {
     import dmd.typesem: size;
     import snakebite.backends.backend: Program;
+
+    const native = () {
+        mixin(code);
+        return mixin(functionName ~ "()");
+    }();
+    native.shouldEqual(expected, file, line);
 
     enum program_ = RegisterProgram!(module_, code).program;
     auto program = Program([parsedProgram(program_)]);

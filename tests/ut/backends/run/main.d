@@ -15,7 +15,7 @@ static foreach (backend; Matrix!()) {
                      return 42;
                  }
              }
-        ).should == 42;
+        )(42);
     }
 }
 
@@ -30,6 +30,6 @@ static foreach (backend; Matrix!()) {
                      return 77;
                  }
              }
-        ).should == 77;
+        )(77);
     }
 }
