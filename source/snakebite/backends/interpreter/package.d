@@ -204,7 +204,7 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.mtype: Type;
     import dmd.statement:
         CompoundStatement, ExpStatement, ImportStatement, ReturnStatement,
-        Statement;
+        ScopeStatement, Statement;
     import dmd.typesem: size;
 
     alias visit = Visitor.visit;
@@ -463,6 +463,21 @@ extern(C++) private final class Evaluator: Visitor {
         }
     }
 
+    // `{ ... }` is a `ScopeStatement` wrapping the `CompoundStatement` (or
+    // any other single statement) it braces - dmd gives every such block
+    // its own scope this way, even one with no `if`/`while`/loop
+    // introducing it. There is no separate scope to enter here: `layoutOf`
+    // already gave every local inside it a slot in the function's one
+    // frame (see `collectLocals` below), so running it is just running
+    // whatever it wraps, honouring `_returned` the same way
+    // `visit(CompoundStatement)` does for its own children.
+    override void visit(ScopeStatement statement) {
+        if (statement.statement is null)
+            return;
+
+        statement.statement.accept(this);
+    }
+
     override void visit(ReturnStatement statement) {
         _returned = true;
 
@@ -717,11 +732,14 @@ private void writeLiteral(
 // represents `long sum = 0;` as an `ExpStatement` whose sole expression is
 // a `DeclarationExp` wrapping the `VarDeclaration` - and appends a frame
 // slot for every one it finds, the same way the parameter loop in
-// `layoutOf` appends one for every parameter. Only `CompoundStatement` is
-// walked into: it is the only statement kind that can nest others among
-// the ones this interpreter runs today, so a declaration inside any other
-// kind (a loop or conditional body, once those exist) will need this
-// walk extended to reach it.
+// `layoutOf` appends one for every parameter. `CompoundStatement` and
+// `ScopeStatement` are the only statement kinds walked into: a
+// `CompoundStatement` is a statement list, and a `ScopeStatement` is the
+// node dmd wraps every `{ ... }` block in (even one with no `if`/`while`
+// introducing it), so a local declared inside a bare nested block still
+// needs a slot in the same frame `visit(ScopeStatement)` runs it against.
+// A declaration inside any other kind (a loop or conditional body, once
+// those exist) will need this walk extended further to reach it.
 private void collectLocals(
     imported!"dmd.statement".Statement statement,
     ref FrameLayout layout,
@@ -737,6 +755,11 @@ private void collectLocals(
 
         foreach (child; *compound.statements)
             collectLocals(child, layout);
+        return;
+    }
+
+    if (auto scope_ = statement.isScopeStatement()) {
+        collectLocals(scope_.statement, layout);
         return;
     }
 
