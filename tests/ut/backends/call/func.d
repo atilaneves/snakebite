@@ -35,3 +35,23 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("call." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        33.3.shouldBeRetOf!(
+            backend,
+            q{
+                double func() {
+                    return thrice(11.1);
+                }
+
+                double thrice(double d) {
+                    return 33.3;
+                }
+            },
+            "func",
+        );
+    }
+}
