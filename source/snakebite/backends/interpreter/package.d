@@ -194,7 +194,7 @@ import dmd.visitor: Visitor;
 // walks a call's frames, so there is nothing left for a separate
 // `Interpreter`-side cache to hold.
 extern(C++) private final class Evaluator: Visitor {
-    import snakebite.ffi: callCompiled;
+    import snakebite.ffi: PlanCache, maxArguments;
     import dmd.astenums: LINK, STC, Tvoid;
     import dmd.expression: CallExp, Expression, IntegerExp, RealExp, VarExp;
     import dmd.func: FuncDeclaration;
@@ -214,6 +214,10 @@ extern(C++) private final class Evaluator: Visitor {
     // function's first call (the cold path) and reused by every call
     // after it.
     private FrameLayout[FuncDeclaration] _layouts;
+    // How to reach each already-compiled function this guest calls,
+    // worked out on that function's first call and reused by every call
+    // after it - the same cold-path-once shape as `_layouts`.
+    private PlanCache _plans;
 
     // The destination: while walking statements, the enclosing function's
     // return type and return place; `evaluate` narrows it to each
@@ -357,8 +361,9 @@ extern(C++) private final class Evaluator: Visitor {
         if (body_ is null) {
             const linkage = function_.resolvedLinkage;
             if (linkage != LINK.d && linkage != LINK.default_) {
-                callCompiled(
-                    function_, returnPlace, argumentSlots(frameBase, layout));
+                const(void)*[maxArguments] slots;
+                _plans.of(function_).call(
+                    returnPlace, argumentSlots(slots, frameBase, layout));
                 return;
             }
 
@@ -389,18 +394,23 @@ extern(C++) private final class Evaluator: Visitor {
         body_.accept(this);
     }
 
-    // Where each parameter's bytes sit in the frame the caller just filled,
-    // in declaration order: what the FFI needs to hand them over, built
-    // from the layout this interpreter already computed.
+    // Where each parameter's bytes sit in the frame the caller just
+    // filled, in declaration order: what the FFI needs to hand them over,
+    // built from the layout this interpreter already computed.
+    //
+    // Filled into the caller's own storage rather than a fresh array: this
+    // runs on every call through the FFI, and the slots are read and done
+    // with before the call returns, so there is nothing for an allocation
+    // to outlive.
     extern(D) private const(void*)[] argumentSlots(
+        return scope ref const(void)*[maxArguments] slots,
         ubyte* frameBase,
         const(FrameLayout)* layout,
     ) {
-        auto slots = new const(void)*[layout.offsets.length];
         foreach (i, offset; layout.offsets)
             slots[i] = frameBase + offset;
 
-        return slots;
+        return slots[0 .. layout.offsets.length];
     }
 
     override void visit(Statement statement) {
