@@ -55,3 +55,28 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+// `AddAssignExp` is itself an expression, not just a statement: `sum += n`
+// evaluates to the sum, the same as `sum = sum + n` would. Every other test
+// here uses `+=` as a statement, so the value it writes to its own place is
+// never read; `return (sum += five());` is what pins that it is.
+static foreach (backend; Matrix!()) {
+    @("assign.addAssign.isAnExpression." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        5.shouldBeRetOf!(
+            backend,
+            q{
+                int five() {
+                    return 5;
+                }
+
+                int total() {
+                    int sum = 0;
+                    return (sum += five());
+                }
+            },
+            "total",
+        );
+    }
+}
