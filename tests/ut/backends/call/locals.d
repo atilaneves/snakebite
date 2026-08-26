@@ -8,12 +8,9 @@ static foreach (backend; Matrix!()) {
     @("locals.literalInit." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        // `long sum = 0;` is a `VarDeclaration` with an `ExpInitializer`
-        // wrapping the literal `0`. dmd represents the declaration itself
-        // as a `DeclarationExp` inside an `ExpStatement` - the same shape
-        // any local declaration takes as a statement. The initialiser is
-        // part of that statement, so `sum` reads as `0` only if the
-        // statement ran; D leaves the storage indeterminate otherwise.
+        // A local variable's initialiser must run before the variable is
+        // read. `sum` only holds `0` because its declaration statement
+        // ran; nothing initialises the storage otherwise.
         0L.shouldBeRetOf!(
             backend,
             q{
@@ -31,13 +28,10 @@ static foreach (backend; Matrix!()) {
     @("locals.callInit." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        // `auto x = f();` still parses as a `DeclarationExp` wrapping a
-        // `VarDeclaration`, but its `ExpInitializer` wraps a `CallExp`
-        // instead of a literal: D allows any expression to initialise a
-        // local, and the call must run before the local is readable. The
-        // local is returned unchanged rather than combined with anything,
-        // so what this pins is the declaration and its initialiser, not
-        // whatever else the expression could have been.
+        // A local can be initialised from a function call as well as a
+        // literal. The call must run before `a` is readable, and `a` is
+        // returned unchanged so the test pins the declaration and its
+        // initialiser rather than anything else.
         6.shouldBeRetOf!(
             backend,
             q{
