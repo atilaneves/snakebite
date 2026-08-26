@@ -1,2 +1,3 @@
 name "ct"
 targetType "executable"
+dflags "-checkaction=context"
