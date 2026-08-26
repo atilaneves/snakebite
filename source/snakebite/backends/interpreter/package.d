@@ -65,10 +65,16 @@ extern(C++) private final class StatementWalker: Visitor {
 
     override void visit(Statement statement) {
         import std.conv: text;
+        import std.string: fromStringz;
+        import dmd.hdrgen: toChars;
 
+        // `Statement` does not override the virtual `toChars()` that
+        // `RootObject.toString()` calls, so `statement.toString()` hits
+        // `RootObject`'s base implementation, `assert(0)`. Rendering
+        // statements back to source text is instead a free function.
         throw new Exception(
             text("interpreter cannot execute a `", statement.stmt,
-                "` statement: `", statement.toString, "`"),
+                "` statement: `", toChars(statement).fromStringz, "`"),
         );
     }
 
