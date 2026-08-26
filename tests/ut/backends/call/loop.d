@@ -13,12 +13,7 @@ static foreach (backend; Matrix!()) {
         // `DoStatement` because it carries an optional init statement
         // (here, `long i = 0;`) and an optional increment expression
         // alongside the condition, none of which any other statement
-        // node bundles together. A backend that only walked
-        // `CompoundStatement`/`ScopeStatement` children (the only
-        // statement kinds this interpreter descended into before this
-        // test) would refuse this node outright and never run the loop's
-        // init statement or body, so this would fail before even
-        // reaching the `return` inside it.
+        // node bundles together.
         //
         // The condition here is the literal `1`: dmd's flow analysis
         // recognises `for (...; 1; ...)` as unconditionally entering the
@@ -34,6 +29,39 @@ static foreach (backend; Matrix!()) {
                 }
             },
             "seven",
+        );
+    }
+}
+
+// A loop that runs its body more than once, and stops. The count comes back
+// as the answer, so a condition tested only once (never terminating, or
+// running the body a single time) and an increment that never ran both
+// disagree with it: without the increment `i` stays `0` and the loop cannot
+// end, and without re-testing the condition it cannot end either.
+//
+// `one` is behind a call because dmd folds an all-literal expression during
+// semantic analysis, and comes first because the native oracle mixes these
+// declarations into a local delegate scope, where a nested function does not
+// see a sibling declared later.
+static foreach (backend; Matrix!()) {
+    @("loop.forRepeatsAndTerminates." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.shouldBeRetOf!(
+            backend,
+            q{
+                int one() {
+                    return 1;
+                }
+
+                int count() {
+                    int n = 0;
+                    for (int i = 0; i < 3; ++i)
+                        n += one();
+                    return n;
+                }
+            },
+            "count",
         );
     }
 }

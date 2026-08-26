@@ -11,9 +11,9 @@ static foreach (backend; Matrix!()) {
         // `long sum = 0;` is a `VarDeclaration` with an `ExpInitializer`
         // wrapping the literal `0`. dmd represents the declaration itself
         // as a `DeclarationExp` inside an `ExpStatement` - the same shape
-        // any local declaration takes as a statement - so a backend that
-        // skipped running that statement would leave `sum`'s storage
-        // uninitialized and return garbage instead of `0`.
+        // any local declaration takes as a statement. The initialiser is
+        // part of that statement, so `sum` reads as `0` only if the
+        // statement ran; D leaves the storage indeterminate otherwise.
         0L.shouldBeRetOf!(
             backend,
             q{
@@ -33,13 +33,11 @@ static foreach (backend; Matrix!()) {
     unittest {
         // `auto x = f();` still parses as a `DeclarationExp` wrapping a
         // `VarDeclaration`, but its `ExpInitializer` wraps a `CallExp`
-        // instead of a literal, so a backend that special-cased only
-        // literal initializers would fail this while still passing the
-        // one above. Returning the local rather than combining it with
-        // another expression keeps this test isolated to declarations:
-        // the interpreter does not yet evaluate arithmetic expressions,
-        // and that is a different feature from running a local's
-        // initializer.
+        // instead of a literal: D allows any expression to initialise a
+        // local, and the call must run before the local is readable. The
+        // local is returned unchanged rather than combined with anything,
+        // so what this pins is the declaration and its initialiser, not
+        // whatever else the expression could have been.
         6.shouldBeRetOf!(
             backend,
             q{

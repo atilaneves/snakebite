@@ -52,6 +52,21 @@ private struct FrameLayout {
     // a parameter read from a `VarDeclaration` it found by name lookup,
     // not by position, so it still needs a hash lookup.
     size_t[VarDeclaration] offsetOf;
+
+    // Reserves one slot for a value of `type` and returns its offset. A
+    // parameter and a local differ in what they key the offset by, not in
+    // how the frame grows to fit them, so both come here.
+    size_t appendSlot(imported!"dmd.mtype".Type type) {
+        import dmd.typesem: size;
+
+        const alignment = type.alignsize;
+        const offset = alignUp(size_t(this.size), alignment);
+        this.size = offset + type.size;
+        if (alignment > this.alignment)
+            this.alignment = alignment;
+
+        return offset;
+    }
 }
 
 // The frame stack every guest call reserves its parameter frame from,
@@ -305,14 +320,9 @@ extern(C++) private final class Evaluator: Visitor {
                         "` by value"),
                 );
 
-            const alignment = parameter.type.alignsize;
-            layout.size = alignUp(layout.size, alignment);
-            layout.offsets[i] = layout.size;
+            layout.offsets[i] = layout.appendSlot(parameter.type);
             if (variables !is null)
-                layout.offsetOf[(*variables)[i]] = layout.size;
-            layout.size += parameter.type.size;
-            if (alignment > layout.alignment)
-                layout.alignment = alignment;
+                layout.offsetOf[(*variables)[i]] = layout.offsets[i];
         }
 
         // Locals share the same frame as the parameters: each one gets a
@@ -580,30 +590,29 @@ extern(C++) private final class Evaluator: Visitor {
     // point condition is equally valid D and is refused here rather than
     // guessed at, since nothing runs one yet.
     private bool truthy(Expression condition) {
+        return integralValueOf(condition) != 0;
+    }
+
+    // Evaluates `expression` and hands back its value. The frame stack
+    // supplies the bytes it is evaluated into, freed when this returns,
+    // because an expression is only ever evaluated into an address and
+    // never handed back as a value - so anything that needs the value
+    // itself, rather than a destination to leave it at, comes here.
+    private long integralValueOf(Expression expression) {
+        import snakebite.native: loadIntegral;
         import std.conv: text;
 
-        auto type = condition.type;
+        auto type = expression.type;
+        if (!type.isIntegral)
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "` as an integral: its type is `", type.toString, "`"),
+            );
+
         auto frame = _frames.push(type.size, type.alignsize);
-        evaluate(condition, type, frame.base);
+        evaluate(expression, type, frame.base);
 
-        if (type.isIntegral) {
-            switch (type.size) {
-                case 1: return *cast(ubyte*) frame.base != 0;
-                case 2: return *cast(ushort*) frame.base != 0;
-                case 4: return *cast(uint*) frame.base != 0;
-                case 8: return *cast(ulong*) frame.base != 0;
-                default:
-                    throw new Exception(
-                        text("interpreter cannot test truthiness of an ",
-                            "integral of ", type.size, " byte(s)"),
-                    );
-            }
-        }
-
-        throw new Exception(
-            text("interpreter cannot test truthiness of a value of type `",
-                type.toString, "`"),
-        );
+        return loadIntegral(frame.base, type.size, !type.isUnsigned);
     }
 
     override void visit(Expression expression) {
@@ -636,12 +645,10 @@ extern(C++) private final class Evaluator: Visitor {
     // Where a parameter or local read or written by `expression` lives in
     // the current frame. A read and a compound assignment differ in what
     // they do with the slot, not in how they find it, so both come here.
-    private ubyte* slotOf(Expression expression) {
+    private ubyte* slotOf(VarExp expression) {
         import std.conv: text;
 
-        auto variable = expression.isVarExp is null
-            ? null
-            : expression.isVarExp.var.isVarDeclaration;
+        auto variable = expression.var.isVarDeclaration;
         auto offset =
             variable is null ? null : variable in _layout.offsetOf;
         if (offset is null)
@@ -665,7 +672,7 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(DeclarationExp expression) {
         import std.conv: text;
 
-        auto variable = expression.declaration.isVarDeclaration();
+        auto variable = expression.declaration.isVarDeclaration;
         if (variable is null)
             throw new Exception(
                 text("interpreter cannot run declaration `",
@@ -687,7 +694,7 @@ extern(C++) private final class Evaluator: Visitor {
         if (variable._init is null)
             return;
 
-        auto expInitializer = variable._init.isExpInitializer();
+        auto expInitializer = variable._init.isExpInitializer;
         if (expInitializer is null)
             throw new Exception(
                 text("interpreter cannot run the initializer for `",
@@ -704,7 +711,7 @@ extern(C++) private final class Evaluator: Visitor {
         // subexpression this interpreter has to evaluate: `e1` is `sum`
         // itself, already the destination `offset` names.
         auto value = expInitializer.exp;
-        if (auto construct = value.isConstructExp())
+        if (auto construct = value.isConstructExp)
             value = construct.e2;
 
         evaluate(value, variable.type, _frameBase + *offset);
@@ -719,36 +726,29 @@ extern(C++) private final class Evaluator: Visitor {
     // width, which is where D's wraparound happens - the same place a
     // compiled `+=` puts it.
     //
-    // Assignment is an expression, so its value goes to `_place` as well
-    // when a destination was given. In statement position, which is the
-    // only place this runs today, that destination is a scratch
-    // reservation nothing reads.
+    // Assignment is an expression, so its value goes to `_place` too. In
+    // statement position, the only place this runs today, that is a
+    // scratch reservation nothing reads.
     override void visit(AddAssignExp expression) {
         import snakebite.native: loadIntegral, storeIntegral;
         import std.conv: text;
 
+        auto variable = expression.e1.isVarExp;
         auto targetType = expression.e1.type;
-        auto addendType = expression.e2.type;
-        if (!targetType.isIntegral || !addendType.isIntegral)
+        if (variable is null || !targetType.isIntegral)
             throw new Exception(
-                text("interpreter cannot add non-integral operands: `",
-                    expression.toString, "`"),
+                text("interpreter cannot add to `", expression.e1.toString,
+                    "`: `", expression.toString, "`"),
             );
 
-        auto target = slotOf(expression.e1);
-
-        auto addend = _frames.push(addendType.size, addendType.alignsize);
-        evaluate(expression.e2, addendType, addend.base);
-
-        const current = loadIntegral(
-            target, targetType.size, !targetType.isUnsigned);
-        const added = loadIntegral(
-            addend.base, addendType.size, !addendType.isUnsigned);
+        auto target = slotOf(variable);
+        const added = integralValueOf(expression.e2);
+        const current =
+            loadIntegral(target, targetType.size, !targetType.isUnsigned);
         const sum = cast(ulong) (current + added);
 
         storeIntegral(target, sum, targetType.size);
-        if (_place !is null)
-            storeIntegral(_place, sum, expression.type.size);
+        storeIntegral(_place, sum, expression.type.size);
     }
 
     // `a < b`. dmd's semantic pass has already brought both operands to
@@ -767,7 +767,7 @@ extern(C++) private final class Evaluator: Visitor {
     // wrong answer rather than a refusal, so they throw until something
     // needs them.
     override void visit(CmpExp expression) {
-        import snakebite.native: loadIntegral, storeIntegral;
+        import snakebite.native: storeIntegral;
         import std.conv: text;
 
         if (expression.op != EXP.lessThan)
@@ -776,23 +776,9 @@ extern(C++) private final class Evaluator: Visitor {
                     "` expression: `", expression.toString, "`"),
             );
 
-        auto leftType = expression.e1.type;
-        auto rightType = expression.e2.type;
-        if (!leftType.isIntegral || !rightType.isIntegral)
-            throw new Exception(
-                text("interpreter cannot compare non-integral operands: `",
-                    expression.toString, "`"),
-            );
-
-        auto left = _frames.push(leftType.size, leftType.alignsize);
-        auto right = _frames.push(rightType.size, rightType.alignsize);
-        evaluate(expression.e1, leftType, left.base);
-        evaluate(expression.e2, rightType, right.base);
-
-        const unsigned = leftType.isUnsigned;
-        const a = loadIntegral(left.base, leftType.size, !unsigned);
-        const b = loadIntegral(right.base, rightType.size, !unsigned);
-        const less = unsigned
+        const a = integralValueOf(expression.e1);
+        const b = integralValueOf(expression.e2);
+        const less = expression.e1.type.isUnsigned
             ? cast(ulong) a < cast(ulong) b
             : a < b;
 
@@ -923,7 +909,7 @@ private void collectLocals(
     if (statement is null)
         return;
 
-    if (auto compound = statement.isCompoundStatement()) {
+    if (auto compound = statement.isCompoundStatement) {
         if (compound.statements is null)
             return;
 
@@ -932,29 +918,24 @@ private void collectLocals(
         return;
     }
 
-    if (auto scope_ = statement.isScopeStatement()) {
+    if (auto scope_ = statement.isScopeStatement) {
         collectLocals(scope_.statement, layout);
         return;
     }
 
-    auto expStatement = statement.isExpStatement();
+    auto expStatement = statement.isExpStatement;
     if (expStatement is null || expStatement.exp is null)
         return;
 
-    auto declarationExp = expStatement.exp.isDeclarationExp();
+    auto declarationExp = expStatement.exp.isDeclarationExp;
     if (declarationExp is null)
         return;
 
-    auto variable = declarationExp.declaration.isVarDeclaration();
+    auto variable = declarationExp.declaration.isVarDeclaration;
     if (variable is null)
         return;
 
-    const alignment = variable.type.alignsize;
-    layout.size = alignUp(layout.size, alignment);
-    layout.offsetOf[variable] = layout.size;
-    layout.size += variable.type.size;
-    if (alignment > layout.alignment)
-        layout.alignment = alignment;
+    layout.offsetOf[variable] = layout.appendSlot(variable.type);
 }
 
 // dmd's default field-alignment rule (`aggregate.alignmember`, the same

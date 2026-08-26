@@ -25,8 +25,9 @@ build/bench.sh examples/ct -w 0 -r 1 -b ctfe -b dmd
 # (an accepted gap). `-b dmd` selects that row for dub projects too.
 build/bench.sh examples/rt -w 0 -r 1 -b dmd
 
-# `bottom-up` loops over a call to `abs`, so the interpreter row here is a
-# reading of what one FFI crossing costs it. CTFE is left out: it cannot
-# call a function whose source it does not have, which is exactly what the
-# loop is built to call.
+# `bottom-up` loops over a call to `abs`, so the interpreter row here is
+# dominated by what an FFI crossing costs it - the loop's own condition,
+# increment and accumulation are in the number too, so it bounds that cost
+# rather than isolating it. CTFE is left out: it cannot call a function
+# whose source it does not have, which is exactly what the loop calls.
 build/bench.sh examples/bottom-up -w 0 -r 1 -b dmd -b interpreter
