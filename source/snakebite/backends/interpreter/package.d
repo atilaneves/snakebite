@@ -122,10 +122,11 @@ extern(C++) private final class StatementWalker: Visitor {
                     "`return` expression: `", statement.exp.toChars, "`"),
             );
 
-        // Evaluation always happens, for any side effects it may have.
-        // When the caller does not want the value (`returnPlace is
-        // null`), evaluation still happens, into scratch space that is
-        // then discarded, rather than being skipped.
+        // A call inside `statement.exp` can have side effects even if its
+        // result is discarded, so evaluation always happens. When the
+        // caller does not want the value (`returnPlace is null`), it
+        // still happens, into throwaway scratch space, rather than being
+        // skipped.
         ubyte[] scratch;
         auto target = returnPlace;
         if (target is null) {
@@ -245,19 +246,17 @@ extern(C++) private final class ExpressionEvaluator: Visitor {
     }
 
     override void visit(CallExp expression) {
-        evaluateCall(expression, place, frame);
+        invoke(expression, place, frame);
     }
 }
 
-// Calls a guest function reached from within an expression, as opposed to
-// `Interpreter.call`, the host-facing entry point: the callee is already
-// statically resolved onto the `CallExp` by semantic analysis (`call.f`),
-// so no name lookup or virtual dispatch happens here. Arguments are
-// evaluated into the callee's own parameter frame, then the callee body is
-// walked the same way a top-level call is, writing its `return` value
-// straight into `place` - the same destination this call expression itself
-// was asked to evaluate into.
-private void evaluateCall(
+// `call`'s callee is already statically resolved onto it (`call.f`; dmd
+// resolves direct calls during semantic analysis), so this does no name
+// lookup or virtual dispatch. Its arguments are evaluated into a fresh
+// parameter frame, then its body is walked for its `return` value, which
+// lands straight in `place` - the same destination this call itself was
+// asked to evaluate into.
+private void invoke(
     imported!"dmd.expression".CallExp call,
     void* place,
     in Frame callerFrame,
@@ -284,14 +283,17 @@ private void evaluateCall(
     body_.accept(walker);
 }
 
-// Builds the callee's parameter frame: one slot per parameter at the byte
-// offset it would have in a compiled call's frame, and evaluates each
-// argument expression straight into its slot, not into some intermediate
-// value that then gets copied in. Argument expressions are evaluated
-// against the *caller's* own frame (`callerFrame`), since they run before
-// the callee's frame exists. Evaluation happens for every argument, even
-// ones the callee body never reads, since evaluating an argument can have
-// effects of its own.
+// Builds the callee's own parameter frame: this interpreter's storage for
+// its parameters, one slot per parameter at an offset laid out with dmd's
+// own default field-alignment rule (`alignUp`). This is the interpreter's
+// storage, not a real ABI call frame - compiled code may pass some
+// parameters in registers, but this interpreter always gives every
+// parameter a memory slot here. Each argument expression is evaluated
+// straight into its slot, not into some intermediate value that then gets
+// copied in, against the *caller's* own frame (`callerFrame`), since
+// arguments run before the callee's frame exists. Evaluation happens for
+// every argument, even ones the callee body never reads, since evaluating
+// an argument can have effects of its own.
 private Frame buildFrame(
     imported!"dmd.func".FuncDeclaration function_,
     imported!"dmd.expression".Expressions* arguments,
@@ -351,8 +353,16 @@ private Frame buildFrame(
     return frame;
 }
 
-// Rounds `offset` up to the next multiple of `alignment`, so each
-// parameter's slot starts at an address as aligned as the type itself.
-private size_t alignUp(in size_t offset, in size_t alignment) {
-    return (offset + alignment - 1) / alignment * alignment;
+// Rounds `offset` up so a value of `alignment`'s natural alignment can
+// start there. Delegates to dmd's own default field-alignment rule
+// (`aggregate.alignmember`, the same one dmd uses to lay out a struct's
+// fields) rather than reimplementing it.
+private size_t alignUp(in size_t offset, in uint alignment) {
+    import dmd.aggregate: alignmember;
+    import dmd.astenums: structalign_t;
+
+    structalign_t defaultAlignment;
+    defaultAlignment.setDefault;
+
+    return alignmember(defaultAlignment, alignment, cast(uint) offset);
 }
