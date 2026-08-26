@@ -3,6 +3,8 @@ module ut.backends.expressions.arithmetic;
 
 import ut.backends;
 
+mixin SnippetTests;
+
 
 static foreach (backend; Matrix!()) {
     @("int.operators." ~ backend.stringof)

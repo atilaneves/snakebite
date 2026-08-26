@@ -24,13 +24,13 @@ public final class Ctfe: imported!"snakebite.backends.backend".Backend {
 }
 
 // Call `function_` with no arguments under CTFE and return the result.
+// `ctfeInterpret` takes an expression, so the call is synthesised and typed
+// by hand: a zero-argument call's type is the function's return type.
 private imported!"dmd.expression".Expression interpret(
     imported!"dmd.func".FuncDeclaration function_,
 ) {
     import dmd.dinterpret: ctfeInterpret;
-    import dmd.dscope: Scope;
     import dmd.expression: CallExp, Expression, VarExp;
-    import dmd.expressionsem: expressionSemantic;
     import dmd.globals: global;
     import dmd.location: Loc;
     import snakebite.frontend.compiler:
@@ -40,17 +40,16 @@ private imported!"dmd.expression".Expression interpret(
 
     Expression result;
 
+    // CTFE keeps its state (call stack, depth) in dmd's globals.
     withCompilerLock({
         resetErrors;
 
-        auto scope_ = Scope.createGlobal(function_.getModule, global.errorSink);
-        scope(exit) scope_.pop;
+        auto callee = new VarExp(Loc.initial, function_);
+        callee.type = function_.type;
+        auto call = CallExp.create(Loc.initial, callee);
+        call.type = function_.type.nextOf;
 
-        Expression call = CallExp.create(
-            Loc.initial,
-            new VarExp(Loc.initial, function_),
-        );
-        result = call.expressionSemantic(scope_).ctfeInterpret;
+        result = call.ctfeInterpret;
 
         if (result.isErrorExp !is null || global.errors != 0)
             throw new Exception(diagnosticMessage);

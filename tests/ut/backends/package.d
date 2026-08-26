@@ -4,11 +4,13 @@ public import ut;
 public import snakebite.backends.ctfe: Ctfe;
 public import std.meta: AliasSeq;
 
+import core.sync.mutex: Mutex;
+import dmd.func: FuncDeclaration;
 import snakebite.frontend.compiler: parseSnippet;
-import snakebite.frontend.dmd.functions: findFunction;
+import snakebite.frontend.dmd.functions: findFunction, findStruct;
 import std.conv: text;
 import std.meta: Filter, staticIndexOf;
-import std.traits: isInstanceOf;
+import std.traits: isInstanceOf, moduleName;
 
 
 // Why a backend is missing from a test's `Matrix!(...)`. Every `Omit!(...)`
@@ -56,43 +58,135 @@ public template Matrix(specs...) {
 }
 
 
+// Opt-in for a test module: `mixin SnippetTests;` at the top gives it `eval`.
+//
 // `code` is regular compiled D: dmd mixes it in when building `bin/ut`, and
 // the native rendering of the value is the expectation. The same snippet,
 // wrapped in a `string`-returning function that renders the value in the
-// guest, is parsed and semantically analysed and then handed to the backend,
-// which must agree with the native result.
-string eval(BackendType, string code)(
-    in string file = __FILE__,
-    in size_t line = __LINE__,
-) {
-    return eval!(BackendType, "", code)(file, line);
+// guest, is handed to the backend, which must agree with the native result.
+//
+// All of a module's snippets are parsed and semantically analysed together,
+// as one guest module, the first time any of them is evaluated. dmd
+// serialises that work; the tests themselves then only run the backend.
+public mixin template SnippetTests() {
+    private struct SnippetTestsTag {}
+    private enum snippetModule = imported!"std.traits".moduleName!SnippetTestsTag;
+
+    string eval(BackendType, string code)(
+        in string file = __FILE__,
+        in size_t line = __LINE__,
+    ) {
+        return eval!(BackendType, "", code)(file, line);
+    }
+
+    // As above, with `declarations` in scope for `code`. Natively they are
+    // nested in the function that mixes them in; in the guest they are
+    // static members of the snippet's struct. DMD constant-folds
+    // literal-only expressions during semantic analysis, so a test that
+    // wants a backend to do the arithmetic itself keeps an operand behind a
+    // function declared here.
+    string eval(BackendType, string declarations, string code)(
+        in string file = __FILE__,
+        in size_t line = __LINE__,
+    ) {
+        return imported!"ut.backends".evaluate!(
+            snippetModule, BackendType, declarations, code,
+        )(file, line);
+    }
 }
 
-// As above, with `declarations` in scope for `code`. Natively they are nested
-// in the function that mixes them in; in the guest they are module-level.
-// DMD constant-folds literal-only expressions during semantic analysis, so a
-// test that wants a backend to do the arithmetic itself keeps an operand
-// behind a function declared here.
-string eval(BackendType, string declarations, string code)(
-    in string file = __FILE__,
-    in size_t line = __LINE__,
+public string evaluate(
+    string module_,
+    BackendType,
+    string declarations,
+    string code,
+)(
+    in string file,
+    in size_t line,
 ) {
+    // Instantiating the struct runs its static constructor at startup, which
+    // is how the snippet gets registered without any extra syntax in tests.
+    enum snippet = Register!(module_, declarations, code).snippet;
+
     const native = () {
         mixin(declarations);
         return text(mixin(code));
     }();
 
-    auto module_ = parseSnippet(evalSource(declarations, code)).module_;
-    auto function_ = findFunction(module_, "__eval");
-
-    const guest = (new BackendType).eval(function_);
+    const guest = (new BackendType).eval(parsedFunction(snippet));
     guest.shouldEqual(native, file, line);
 
     return native;
 }
 
-private string evalSource(in string declarations, in string code) {
-    return declarations ~
-        "\nstring __eval() { import std.conv: text; return text(" ~
-        code ~ "); }";
+
+private struct Snippet {
+    string module_;
+    string declarations;
+    string code;
+}
+
+private struct Register(string module_, string declarations, string code) {
+    enum snippet = Snippet(module_, declarations, code);
+
+    shared static this() {
+        _registered[module_] ~= snippet;
+    }
+}
+
+// Every snippet each test module will evaluate, filled in before `main`.
+private __gshared Snippet[][string] _registered;
+// Filled in one module at a time by `parsedFunction`.
+private __gshared FuncDeclaration[Snippet] _parsed;
+private __gshared bool[string] _parsedModules;
+private __gshared Mutex _mutex;
+
+shared static this() {
+    _mutex = new Mutex;
+}
+
+private FuncDeclaration parsedFunction(in Snippet snippet) {
+    _mutex.lock;
+    scope(exit) _mutex.unlock;
+
+    if (snippet.module_ !in _parsedModules)
+        parseModuleSnippets(snippet.module_);
+
+    // The map keys by value, and `in` makes the lookup key const.
+    auto found = cast(Snippet) snippet in _parsed;
+    assert(found !is null, text("Snippet was not registered: ", snippet));
+    return *found;
+}
+
+private void parseModuleSnippets(in string module_) {
+    const snippets = _registered[module_];
+    auto guestModule = parseSnippet(batchSource(snippets)).module_;
+    foreach (index, snippet; snippets)
+        _parsed[cast(Snippet) snippet] = findFunction(
+            findStruct(guestModule, snippetStructName(index)),
+            "__eval",
+        );
+    _parsedModules[module_] = true;
+}
+
+// Each snippet is a struct with static members so that declarations from
+// different snippets cannot collide.
+private string batchSource(in Snippet[] snippets) {
+    string source;
+    foreach (index, snippet; snippets)
+        source ~= text(
+            "struct ", snippetStructName(index), " {\n",
+            "    static:\n",
+            snippet.declarations, "\n",
+            "    string __eval() {\n",
+            "        import std.conv: text;\n",
+            "        return text(", snippet.code, ");\n",
+            "    }\n",
+            "}\n",
+        );
+    return source;
+}
+
+private string snippetStructName(in size_t index) {
+    return text("__snippet_", index);
 }
