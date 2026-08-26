@@ -10,6 +10,7 @@ int main(string[] args) {
         "ut.backends.call.locals",
         "ut.backends.call.scope_",
         "ut.backends.call.loop",
+        "ut.backends.call.compare",
         "ut.backends.call.ffi",
         "ut.backends.eval.expressions.arithmetic",
         "ut.ffi.plan",

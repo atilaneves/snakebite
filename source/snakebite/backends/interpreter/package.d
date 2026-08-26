@@ -198,13 +198,15 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import dmd.astenums: LINK, STC, Tvoid;
     import dmd.expression:
-        CallExp, DeclarationExp, Expression, IntegerExp, RealExp, VarExp;
+        CallExp, CmpExp, DeclarationExp, Expression, IntegerExp, RealExp,
+        VarExp;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
     import dmd.statement:
         CompoundStatement, ExpStatement, ForStatement, ImportStatement,
         ReturnStatement, ScopeStatement, Statement;
+    import dmd.tokens: EXP;
     import dmd.typesem: size;
 
     alias visit = Visitor.visit;
@@ -696,6 +698,54 @@ extern(C++) private final class Evaluator: Visitor {
             value = construct.e2;
 
         evaluate(value, variable.type, _frameBase + *offset);
+    }
+
+    // `a < b`. dmd's semantic pass has already brought both operands to
+    // one common integral type through D's usual arithmetic conversions,
+    // so each is read at the type dmd gave it rather than at one this
+    // rederives - and one shared signedness means either operand's type
+    // names how both are read.
+    //
+    // Each operand is evaluated into its own reservation on the frame
+    // stack, freed when this returns, because a comparison needs both
+    // values at once and an expression is only ever evaluated into an
+    // address, never returned as a value.
+    //
+    // Only `<` runs: the other three `CmpExp` operators are the same
+    // node, and answering one of them with `<`'s comparison would be a
+    // wrong answer rather than a refusal, so they throw until something
+    // needs them.
+    override void visit(CmpExp expression) {
+        import snakebite.native: loadIntegral, storeIntegral;
+        import std.conv: text;
+
+        if (expression.op != EXP.lessThan)
+            throw new Exception(
+                text("interpreter cannot evaluate a `", expression.op,
+                    "` expression: `", expression.toString, "`"),
+            );
+
+        auto leftType = expression.e1.type;
+        auto rightType = expression.e2.type;
+        if (!leftType.isIntegral || !rightType.isIntegral)
+            throw new Exception(
+                text("interpreter cannot compare non-integral operands: `",
+                    expression.toString, "`"),
+            );
+
+        auto left = _frames.push(leftType.size, leftType.alignsize);
+        auto right = _frames.push(rightType.size, rightType.alignsize);
+        evaluate(expression.e1, leftType, left.base);
+        evaluate(expression.e2, rightType, right.base);
+
+        const unsigned = leftType.isUnsigned;
+        const a = loadIntegral(left.base, leftType.size, !unsigned);
+        const b = loadIntegral(right.base, rightType.size, !unsigned);
+        const less = unsigned
+            ? cast(ulong) a < cast(ulong) b
+            : a < b;
+
+        storeIntegral(_place, less ? 1 : 0, expression.type.size);
     }
 
     // `expression.f` is already statically resolved (dmd resolves direct
