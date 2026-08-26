@@ -33,12 +33,6 @@ public final class Ctfe: imported!"snakebite.backends.backend".Backend {
             throw new Exception(result.error);
         return stringValue(result.value);
     }
-
-    // No druntime is interpreted or emulated: there is no ModuleInfo
-    // runner.
-    public override bool hasDruntime() {
-        return false;
-    }
 }
 
 // Writes a CTFE result into the caller's native return place. `null` (the

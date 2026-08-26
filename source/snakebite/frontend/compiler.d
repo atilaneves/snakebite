@@ -68,64 +68,6 @@ public imported!"dmd.dmodule".Module[] parseSnippets(in string[] sources) {
     return compiler.parseSnippets(sources);
 }
 
-// A guest module that runs every unittest reachable from `rootModules`
-// directly, in the style of dub_test_root.d's `D_BetterC` branch: `static
-// import` each root, then call every `__traits(getUnitTests, ...)` function
-// it collects. For a druntime-less backend (CTFE), the project's real
-// `main` is unusable: for a bare directory there may be none, and for a dub
-// project it is dub's own generated `dub_test_root`, whose `main` drives
-// the unittests through druntime's ModuleInfo runner rather than calling
-// them itself. `dub_test_root` is therefore excluded from the roots that
-// get `static import`ed here; the synthesized root is returned first, so a
-// caller picking "the first `main`" (`snakebite.backends.backend.run`)
-// picks this one rather than a real root's own `main`, if any.
-//
-// The synthesized source only needs the already-parsed roots to be
-// resolvable by qualified name, which dmd's module cache gives for free -
-// no import path needs to be re-added.
-public imported!"dmd.dmodule".Module[] parseUnittestRunner(
-    imported!"dmd.dmodule".Module[] rootModules,
-) {
-    import std.algorithm.iteration: filter, map;
-    import std.array: array;
-
-    auto realRoots = rootModules
-        .filter!(m => m.ident.toString != "dub_test_root")
-        .array;
-    const names = realRoots.map!(m => m.ident.toString.idup).array;
-
-    auto runner = parseSnippet(unittestRunnerSource(names));
-
-    return runner ~ realRoots;
-}
-
-// dub_test_root's own name, `snakebite_test_root`, avoids colliding with it
-// in case a bare-directory fixture ever imports both.
-private string unittestRunnerSource(in string[] moduleNames) {
-    import std.algorithm.iteration: map;
-    import std.array: join;
-    import std.conv: text;
-
-    const imports = moduleNames
-        .map!(name => text("static import ", name, ";"))
-        .join("\n");
-    const calls = moduleNames
-        .map!(name => text(
-            "    foreach (unitTest; __traits(getUnitTests, ", name, "))\n"
-            ~ "        unitTest();\n",
-        ))
-        .join;
-
-    return text(
-        "module snakebite_test_root;\n",
-        imports, "\n",
-        "int main() {\n",
-        calls,
-        "    return 0;\n",
-        "}\n",
-    );
-}
-
 public void withCompilerLock(scope void delegate() action) {
     compiler.withLock(action);
 }
