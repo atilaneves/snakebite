@@ -56,52 +56,50 @@ private struct FrameLayout {
 
 // The frame stack every guest call reserves its parameter frame from,
 // bump-allocated and popped LIFO. Built on `std.experimental.allocator`'s
-// `Region` building block, which supplies the fixed backing buffer,
-// alignment-respecting bump allocation, bounds checking (overflow throws;
-// no growth strategy yet), and freeing of the one block it most recently
-// handed out.
+// `Region` building block, which supplies the fixed backing buffer, a
+// bump pointer with a bounds check (overflow throws; no growth strategy
+// yet), and a `deallocate` that frees exactly the block most recently
+// handed out. Alignment above one byte is handled entirely by hand in
+// `push`, below - `Region` is built with `minAlign = 1`, so it never
+// rounds a request up on its own.
 //
-// `Region.deallocate` only ever frees that single last block, and neither
-// it nor any other public member exposes or restores the bump position
-// directly - `alignedAllocate` plus `deallocate` loses the alignment
-// padding forever, since `deallocate` rewinds only to the aligned start
-// it returned, not to the unaligned position before the padding. Reusing
-// that lost padding on every future call would exhaust the fixed buffer
-// over a long-running interpretation even though the frame stack is
-// logically empty between calls. So this computes the padding itself
-// (`available` is the only position `Region` exposes) and allocates
-// padding and frame together as one block, which `popTo` hands whole
-// back to `deallocate` - and remembers each pushed block on a small LIFO
-// stack of its own, since popping back through several reservations to
-// one mark needs to walk them off in that same order, one `Region`
-// deallocation per reservation. `Region` was checked for this; no
-// composition of it exposes an arbitrary-position restore, so this stays
-// the thinnest wrapper that reclaims the padding and supports popping to
-// an earlier mark.
+// `Mark` is the number of bytes used so far, not a count of live
+// reservations: `popTo` hands `Region.deallocate` one synthetic block
+// spanning from the mark's byte position to the current one. `deallocate`
+// only requires that a block's end match the region's current bump
+// position, which this always does - every mark taken after another is
+// popped before it, the same order calls nest in - so one `deallocate`
+// call frees everything back to the mark, however many reservations that
+// covers, with no per-reservation bookkeeping and no GC allocation.
 private struct FrameStack {
     import std.experimental.allocator.building_blocks.region: Region;
     import std.experimental.allocator.mallocator: Mallocator;
 
-    // How many reservations were live when the mark was taken; `popTo`
-    // walks the reservation stack back down to this depth.
+    // A byte position: how many bytes of the backing buffer were in use
+    // when the mark was taken.
     public alias Mark = size_t;
 
-    // `minAlign = 1`: every alignment is handled by hand above, so the
-    // region must never round a request up on its own - that would make
-    // the remembered block shorter than what `popTo` hands to
-    // `deallocate`, and `deallocate` would then refuse it as not the
-    // last-allocated block.
     private Region!(Mallocator, 1) _region;
     private size_t _capacity;
-    private void[][] _pushed;
+    // The backing buffer's own base address, learned once at construction
+    // (`allocateAll` hands back the whole buffer; `deallocate` immediately
+    // frees it again, leaving the region as empty as a fresh one) since no
+    // `Region` member exposes it directly. `popTo` needs it to build the
+    // synthetic block it hands back to `Region.deallocate`.
+    private ubyte* _base;
 
     public this(size_t capacity) {
         _capacity = capacity;
         _region = typeof(_region)(capacity);
+
+        auto whole = _region.allocateAll;
+        _base = cast(ubyte*) whole.ptr;
+        const freed = _region.deallocate(whole);
+        assert(freed, "could not reclaim the frame stack's own buffer");
     }
 
     public Mark mark() const {
-        return _pushed.length;
+        return _capacity - _region.available;
     }
 
     // Bump-allocates `size` bytes aligned to `alignment` and returns its
@@ -113,12 +111,23 @@ private struct FrameStack {
         // a failed request, not a valid empty one - so a parameterless
         // function's zero-size frame would look like an overflow. There
         // is nothing to write into such a frame anyway, so this reserves
-        // and tracks nothing for it and returns a base no caller will
-        // dereference.
+        // nothing for it and returns a base no caller will dereference.
         if (size == 0)
             return null;
 
-        const used = _capacity - _region.available;
+        // The padding math below only lands a slot on its requested
+        // alignment because the buffer's own base is aligned to at least
+        // that much. `Mallocator` guarantees `platformAlignment`; a
+        // request beyond that would be silently misaligned, so this
+        // throws instead.
+        if (alignment > Mallocator.alignment)
+            throw new Exception(
+                text("interpreter frame stack cannot honor a ", alignment,
+                    "-byte alignment: the backing buffer is only aligned ",
+                    "to ", Mallocator.alignment, " byte(s)"),
+            );
+
+        const used = mark;
         const alignedUsed = alignUp(used, alignment);
         const padding = alignedUsed - used;
 
@@ -129,18 +138,24 @@ private struct FrameStack {
                     " byte(s) at offset ", alignedUsed, " of ", _capacity),
             );
 
-        _pushed ~= block;
-        return cast(ubyte*) block.ptr + padding;
+        return _base + alignedUsed;
     }
 
-    // Pops every reservation pushed since `mark`, most recent first - the
-    // only order `Region.deallocate` accepts.
+    // Frees every byte reserved since `mark`, in one `Region.deallocate`
+    // call regardless of how many `push`es that covers.
     public void popTo(in Mark mark) {
-        while (_pushed.length > mark) {
-            const popped = _region.deallocate(_pushed[$ - 1]);
-            assert(popped, "frame stack reservations popped out of order");
-            _pushed = _pushed[0 .. $ - 1];
-        }
+        const used = this.mark;
+        // Nothing was reserved since `mark` - every intervening `push`
+        // was a zero-size one, which reserves nothing. `Region.deallocate`
+        // only accepts an empty block when its pointer is `null`, and
+        // `_base + mark` is not that, so this returns instead of handing
+        // it a block it would reject.
+        if (used == mark)
+            return;
+
+        auto block = _base[mark .. used];
+        const popped = _region.deallocate(block);
+        assert(popped, "frame stack marks popped out of order");
     }
 }
 
@@ -158,7 +173,7 @@ import dmd.visitor: Visitor;
 // walks a call's frames, so there is nothing left for a separate
 // `Interpreter`-side cache to hold.
 extern(C++) private final class Evaluator: Visitor {
-    import dmd.astenums: STC;
+    import dmd.astenums: STC, Tvoid;
     import dmd.expression: CallExp, Expression, IntegerExp, RealExp, VarExp;
     import dmd.func: FuncDeclaration;
     import dmd.mtype: Type;
@@ -267,7 +282,10 @@ extern(C++) private final class Evaluator: Visitor {
 
     // Runs `function_`'s body with its frame already reserved at
     // `frameBase` - and its parameter slots already filled by the caller
-    // - evaluating its `return` expression into `returnPlace`.
+    // - evaluating its `return` expression into `returnPlace`. Every call
+    // this backend ever makes, whether the host called in directly or a
+    // guest `CallExp` reached it, passes through here exactly once, so
+    // this is where a call unsafe to run gets rejected.
     private void execute(
         FuncDeclaration function_,
         void* returnPlace,
@@ -275,6 +293,25 @@ extern(C++) private final class Evaluator: Visitor {
         const(FrameLayout)* layout,
     ) {
         import std.conv: text;
+
+        // `function_` being resolved only means a declaration was found;
+        // it does not mean this call is safe to run directly. For
+        // `obj.method(...)`, dmd sets the resolved declaration to the
+        // statically known method even though the call needs `this` -
+        // running it here would silently devirtualize it and drop the
+        // context, and a nested function's static chain is dropped the
+        // same way. A zero-parameter method or nested function has no
+        // parameter to give it away either, so this check cannot be
+        // folded into the parameter-count check below. Both are
+        // unsupported constructs this interpreter has no representation
+        // for, so this throws loudly instead of running with a missing
+        // context and returning a plausible-looking wrong answer.
+        if (function_.isThis() !is null || function_.isNested())
+            throw new Exception(
+                text("interpreter cannot call `", function_.toString,
+                    "`: it needs a `this` or a static chain, which the ",
+                    "interpreter does not provide"),
+            );
 
         auto body_ = function_.fbody;
         if (body_ is null)
@@ -360,11 +397,21 @@ extern(C++) private final class Evaluator: Visitor {
         // destination - only its effects matter. dmd hands this
         // interpreter exactly one shape of it so far: the call that a
         // `void` function's `return f();` desugars to, where `f()` is
-        // itself `void` and there is nothing to reserve. The same
-        // discard-into-a-scratch-reservation handling as a discarded
-        // `return` covers a non-`void` expression the same way, since
-        // `push` already treats a zero-size request as a no-op.
+        // itself `void`. A `void` expression has nowhere to write a
+        // result even if it had one, so this skips the reservation
+        // outright rather than pushing dmd's one placeholder byte for
+        // `Tvoid` (`Type.size` never returns zero) and evaluates straight
+        // into a `null` place, the same convention `execute` already uses
+        // for a discarded `void` return.
         auto type = statement.exp.type;
+        if (type.ty == Tvoid) {
+            evaluate(statement.exp, type, null);
+            return;
+        }
+
+        // The caller discarded the result, but evaluating the expression
+        // can have effects, so it still runs - into a reservation on the
+        // frame stack, popped straight after, not into a GC allocation.
         const mark = _frames.mark;
         scope(exit) _frames.popTo(mark);
         auto scratch = _frames.push(type.size, type.alignsize);
@@ -426,22 +473,10 @@ extern(C++) private final class Evaluator: Visitor {
                     expression.toString, "`"),
             );
 
-        // `expression.f` being resolved only means dmd found one
-        // candidate declaration; it does not mean this call is safe to
-        // run directly. For `obj.method(...)`, dmd still sets `f` to the
-        // statically known method - running it here would silently
-        // devirtualize a virtual call and drop `this`, and a nested
-        // function's static chain is dropped the same way. Both are
-        // unsupported constructs this interpreter has no representation
-        // for, so this throws loudly instead of running with a missing
-        // context and returning a plausible-looking wrong answer.
-        if (function_.isThis() !is null || function_.isNested())
-            throw new Exception(
-                text("interpreter cannot call `", function_.toString,
-                    "`: it needs a `this` or a static chain, which the ",
-                    "interpreter does not provide"),
-            );
-
+        // Whether this call needs a `this` or a static chain it cannot
+        // provide is `execute`'s check, not this one - it runs there for
+        // every call this backend makes, not only ones that arrive as a
+        // guest `CallExp`.
         auto layout = layoutOf(function_);
 
         auto arguments = expression.arguments;

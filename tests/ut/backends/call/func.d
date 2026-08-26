@@ -131,20 +131,28 @@ static foreach (backend; Matrix!()) {
     @("call.void." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        shouldRunOf!(
-            backend,
-            q{
-                void inner() {
-                }
+        import snakebite.frontend.compiler: parseSnippet;
+        import snakebite.frontend.dmd.functions: findFunction;
 
-                // A `void` function's own `return` can wrap a call to
-                // another `void` function: there is no destination to
-                // write the result into, only `inner`'s effects to run.
-                void outer() {
-                    return inner();
-                }
-            },
-            "outer",
-        )();
+        auto guestModule = parseSnippet(q{
+            void inner() {
+            }
+
+            // A `void` function's own `return` can wrap a call to
+            // another `void` function: there is no destination to
+            // write the result into, only `inner`'s effects to run.
+            void outer() {
+                return inner();
+            }
+        });
+        auto function_ = findFunction(guestModule, "outer");
+        assert(function_ !is null,
+            "No function `outer` in the guest program");
+
+        // Pins that the void guest-call path runs to completion without
+        // throwing. The guest subset it exercises has no observable
+        // effects yet, so nothing stronger can be asserted here until it
+        // does.
+        (new backend).call(function_, null, []);
     }
 }
