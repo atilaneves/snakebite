@@ -6,9 +6,13 @@ import ut.backends;
 mixin SnippetTests;
 
 
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+// `eval` is not implemented for the interpreter yet, so every test in this
+// file omits it the same way.
+private alias NoInterpreterEval =
+    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet");
+
+
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("int.operators." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -21,9 +25,7 @@ static foreach (backend; Matrix!(
 }
 
 // The sign of `%` follows the dividend, not the divisor.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("int.moduloSignFollowsDividend." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -34,9 +36,7 @@ static foreach (backend; Matrix!(
 }
 
 // `>>` sign-extends, `>>>` zero-fills.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("int.shifts." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -47,9 +47,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("int.bitwise." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -62,9 +60,7 @@ static foreach (backend; Matrix!(
 }
 
 // Complement of an unsigned operand keeps the unsigned type.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("int.unsignedComplementStaysUnsigned." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -73,9 +69,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("int.relational." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -91,9 +85,7 @@ static foreach (backend; Matrix!(
 
 // An `int` operand converts to `uint` before the operation, so the result
 // is unsigned division, not division of the bit pattern as a negative int.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("int.unsignedDivisionAndModulo." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -104,9 +96,7 @@ static foreach (backend; Matrix!(
 }
 
 // Signed division truncates toward zero, whichever operand is negative.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("long.divisionTruncatesTowardZero." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -119,9 +109,7 @@ static foreach (backend; Matrix!(
 
 // Narrowing truncates; widening a negative signed value sign-extends and
 // widening an unsigned value zero-extends.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("int.casts." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -133,9 +121,7 @@ static foreach (backend; Matrix!(
 }
 
 // Character and boolean operands promote to integers.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("int.integerLikeOperands." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -144,9 +130,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("float.operators." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -161,7 +145,7 @@ static foreach (backend; Matrix!(
 // a function call.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges, "CTFE keeps `cast(float)` at real precision"),
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
+    NoInterpreterEval,
 )) {
     @("float.intToFloatUsesFloatPrecision." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -196,9 +180,7 @@ unittest {
 
 // With a literal on each side DMD folds the expression before any backend
 // sees it; an operand behind a function call makes the backend do the work.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("int.runtimeShapedOperators." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -216,9 +198,7 @@ static foreach (backend; Matrix!(
 }
 
 // The signed operand converts to `uint`, so -1 compares as `uint.max`.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("int.signedUnsignedComparisonIsUnsigned." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -230,9 +210,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("int.wraparound." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -245,9 +223,7 @@ static foreach (backend; Matrix!(
 
 // The wrapped `uint` sum widens to `ulong` by zero-extension, not
 // sign-extension.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("int.unsignedWrapThenWidenZeroExtends." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -259,9 +235,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
-)) {
+static foreach (backend; Matrix!(NoInterpreterEval)) {
     @("int.assignmentAndIncrement." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
