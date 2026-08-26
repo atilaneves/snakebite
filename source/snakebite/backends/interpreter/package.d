@@ -699,18 +699,8 @@ extern(C++) private final class Evaluator: Visitor {
         evaluate(value, variable.type, _frameBase + *offset);
     }
 
-    // `sum += n`. dmd keeps compound assignment as its own node instead
-    // of rewriting it to `sum = sum + n` because the target must only be
-    // evaluated once, and this honours that: the target's slot is found
-    // once, read, and written back.
-    //
-    // The sum is computed in 64 bits and stored back at the target's own
-    // width, which is where D's wraparound happens - the same place a
-    // compiled `+=` puts it.
-    //
-    // Assignment is an expression, so its value goes to `_place` too. In
-    // statement position, the only place this runs today, that is a
-    // scratch reservation nothing reads.
+    // The target is looked up once, not once to read and again to write:
+    // D evaluates the left side of a compound assignment a single time.
     override void visit(AddAssignExp expression) {
         import snakebite.nativelayout: loadIntegral, storeIntegral;
         import std.conv: text;
@@ -733,21 +723,9 @@ extern(C++) private final class Evaluator: Visitor {
         storeIntegral(_place, sum, expression.type.size);
     }
 
-    // `a < b`. dmd's semantic pass has already brought both operands to
-    // one common integral type through D's usual arithmetic conversions,
-    // so each is read at the type dmd gave it rather than at one this
-    // rederives - and one shared signedness means either operand's type
-    // names how both are read.
-    //
-    // Each operand is evaluated into its own reservation on the frame
-    // stack, freed when this returns, because a comparison needs both
-    // values at once and an expression is only ever evaluated into an
-    // address, never returned as a value.
-    //
-    // Only `<` runs: the other three `CmpExp` operators are the same
-    // node, and answering one of them with `<`'s comparison would be a
-    // wrong answer rather than a refusal, so they throw until something
-    // needs them.
+    // `<=`, `>` and `>=` arrive as this same node and are refused: nothing
+    // needs them yet, and answering them with `<` would be a wrong answer
+    // rather than a refusal.
     override void visit(CmpExp expression) {
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
@@ -870,18 +848,10 @@ private void writeLiteral(
     );
 }
 
-// Walks `statement` looking for a local variable declaration - dmd
-// represents `long sum = 0;` as an `ExpStatement` whose sole expression is
-// a `DeclarationExp` wrapping the `VarDeclaration` - and appends a frame
-// slot for every one it finds, the same way the parameter loop in
-// `layoutOf` appends one for every parameter. `CompoundStatement` and
-// `ScopeStatement` are the only statement kinds walked into: a
-// `CompoundStatement` is a statement list, and a `ScopeStatement` is the
-// node dmd wraps every `{ ... }` block in (even one with no `if`/`while`
-// introducing it), so a local declared inside a bare nested block still
-// needs a slot in the same frame `visit(ScopeStatement)` runs it against.
-// A declaration inside any other kind (a loop or conditional body, once
-// those exist) will need this walk extended further to reach it.
+// Appends a frame slot for every local `statement` declares. Only
+// statement lists and nested blocks are walked into, so a local declared
+// anywhere else - a loop or conditional body - gets no slot, and running
+// its declaration throws rather than writing to one that does not exist.
 private void collectLocals(
     imported!"dmd.statement".Statement statement,
     ref FrameLayout layout,
