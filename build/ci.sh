@@ -11,20 +11,8 @@ fi
 ninja bin/ut
 bin/ut
 
-# Smoke test: the bench must still build (with ldc, optimised) and run
-# against its default fixture with every backend passing. Not a timing
-# check, so keep it fast. Output stays visible: when this fails, the
-# table and the backends' stderr diagnostics are the explanation.
-# Backends are selected explicitly because the interpreter cannot run
-# the examples/ct corpus yet: it has no frame stack or locals, so it
-# only handles a function body down to its `return`.
 build/bench.sh examples/ct -w 0 -r 1 -b ctfe -b dmd
 
-# The unit-threaded fixture only works with the real-workflow row: ctfe
-# runs raw `unittest{}` blocks, so `@ShouldFail` reads as a real failure
-# (an accepted gap). `-b dmd` selects that row for dub projects too.
 build/bench.sh examples/rt -w 0 -r 1 -b dmd
 
-# Every backend, no selection: `bottom-up` is the fixture that stays inside
-# what the least complete backend can do, so the interpreter runs it too.
-build/bench.sh examples/bottom-up -w 0 -r 1
+build/bench.sh examples/bottom-up -w 0 -r 1 -b dmd -b interpreter

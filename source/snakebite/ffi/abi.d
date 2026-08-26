@@ -65,7 +65,7 @@ public struct Register {
             return Register(Kind.pointer, 8);
 
         if (type.isIntegral) {
-            import snakebite.native: isIntegralSize;
+            import snakebite.nativelayout: isIntegralSize;
 
             const bytes = type.size;
             if (bytes.isIntegralSize)
@@ -123,7 +123,7 @@ public void writeWord(
     if (register.kind == Register.Kind.none)
         return;
 
-    import snakebite.native: storeIntegral;
+    import snakebite.nativelayout: storeIntegral;
 
     // The callee left the value in the low bits of the return register;
     // anything above the type's own width is not part of it, which is

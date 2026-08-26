@@ -41,6 +41,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 // once per function and cached, never per call.
 private struct FrameLayout {
     import dmd.declaration: VarDeclaration;
+    import dmd.mtype: Type;
 
     size_t size;
     uint alignment = 1;
@@ -52,6 +53,21 @@ private struct FrameLayout {
     // a parameter read from a `VarDeclaration` it found by name lookup,
     // not by position, so it still needs a hash lookup.
     size_t[VarDeclaration] offsetOf;
+
+    // Reserves one slot for a value of `type` and returns its offset. A
+    // parameter and a local differ in what they key the offset by, not in
+    // how the frame grows to fit them, so both come here.
+    private size_t reserveSlot(Type type) {
+        import dmd.typesem: size;
+
+        const alignment = type.alignsize;
+        const offset = alignUp(this.size, alignment);
+        this.size = offset + type.size;
+        if (alignment > this.alignment)
+            this.alignment = alignment;
+
+        return offset;
+    }
 }
 
 // The frame stack every guest call reserves its parameter frame from,
@@ -197,12 +213,16 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.ffi: PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import dmd.astenums: LINK, STC, Tvoid;
-    import dmd.expression: CallExp, Expression, IntegerExp, RealExp, VarExp;
+    import dmd.expression:
+        AddAssignExp, CallExp, CmpExp, DeclarationExp, Expression,
+        IntegerExp, RealExp, VarExp;
     import dmd.func: FuncDeclaration;
+    import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
     import dmd.statement:
-        CompoundStatement, ExpStatement, ImportStatement, ReturnStatement,
-        Statement;
+        CompoundStatement, ExpStatement, ForStatement, ImportStatement,
+        ReturnStatement, ScopeStatement, Statement;
+    import dmd.tokens: EXP;
     import dmd.typesem: size;
 
     alias visit = Visitor.visit;
@@ -301,15 +321,18 @@ extern(C++) private final class Evaluator: Visitor {
                         "` by value"),
                 );
 
-            const alignment = parameter.type.alignsize;
-            layout.size = alignUp(layout.size, alignment);
-            layout.offsets[i] = layout.size;
+            layout.offsets[i] = layout.reserveSlot(parameter.type);
             if (variables !is null)
-                layout.offsetOf[(*variables)[i]] = layout.size;
-            layout.size += parameter.type.size;
-            if (alignment > layout.alignment)
-                layout.alignment = alignment;
+                layout.offsetOf[(*variables)[i]] = layout.offsets[i];
         }
+
+        // Locals share the same frame as the parameters: each one gets a
+        // slot appended after whatever came before it, keyed by its own
+        // `VarDeclaration` since `visit(VarExp)` looks up both kinds of
+        // read the same way. A body-less declaration has no `fbody` to
+        // walk, so this is a no-op for it, the same as the `variables is
+        // null` case above.
+        collectLocals(function_.fbody, layout);
 
         _layouts[function_] = layout;
         return function_ in _layouts;
@@ -453,6 +476,21 @@ extern(C++) private final class Evaluator: Visitor {
         }
     }
 
+    // `{ ... }` is a `ScopeStatement` wrapping the `CompoundStatement` (or
+    // any other single statement) it braces - dmd gives every such block
+    // its own scope this way, even one with no `if`/`while`/loop
+    // introducing it. There is no separate scope to enter here: `layoutOf`
+    // already gave every local inside it a slot in the function's one
+    // frame (see `collectLocals` below), so running it is just running
+    // whatever it wraps, honouring `_returned` the same way
+    // `visit(CompoundStatement)` does for its own children.
+    override void visit(ScopeStatement statement) {
+        if (statement.statement is null)
+            return;
+
+        statement.statement.accept(this);
+    }
+
     override void visit(ReturnStatement statement) {
         _returned = true;
 
@@ -482,19 +520,28 @@ extern(C++) private final class Evaluator: Visitor {
         if (statement.exp is null)
             return;
 
-        // A statement-position expression's value, if any, has no
-        // destination - only its effects matter. dmd hands this
-        // interpreter exactly one shape of it so far: the call that a
-        // `void` function's `return f();` desugars to, where `f()` is
-        // itself `void`. A `void` expression has nowhere to write a
-        // result even if it had one, so this skips the reservation
-        // outright rather than pushing dmd's one placeholder byte for
-        // `Tvoid` (`Type.size` never returns zero) and evaluates straight
-        // into a `null` place, the same convention `execute` already uses
-        // for a discarded `void` return.
-        auto type = statement.exp.type;
+        runForEffect(statement.exp);
+    }
+
+    // Runs `expression` for its side effects, discarding whatever value it
+    // produces: what an `ExpStatement` needs for its one expression, and
+    // what a `ForStatement`'s `increment` needs too - dmd types `i++`/
+    // `i += 1` no differently there than it would as a statement on its
+    // own line, just with nowhere its result could go even if the
+    // interpreter kept it.
+    //
+    // dmd hands this interpreter exactly one shape of a `void`-typed
+    // expression so far: the call that a `void` function's `return f();`
+    // desugars to, where `f()` is itself `void`. A `void` expression has
+    // nowhere to write a result even if it had one, so this skips the
+    // reservation outright rather than pushing dmd's one placeholder byte
+    // for `Tvoid` (`Type.size` never returns zero) and evaluates straight
+    // into a `null` place, the same convention `execute` already uses for
+    // a discarded `void` return.
+    private void runForEffect(Expression expression) {
+        auto type = expression.type;
         if (type.ty == Tvoid) {
-            evaluate(statement.exp, type, null);
+            evaluate(expression, type, null);
             return;
         }
 
@@ -503,7 +550,43 @@ extern(C++) private final class Evaluator: Visitor {
         // frame stack, popped when it goes out of scope, not into a GC
         // allocation.
         auto frame = _frames.push(type.size, type.alignsize);
-        evaluate(statement.exp, type, frame.base);
+        evaluate(expression, type, frame.base);
+    }
+
+    override void visit(ForStatement statement) {
+        while (statement.condition is null
+                || integralValueOf(statement.condition) != 0) {
+            if (statement._body !is null) {
+                statement._body.accept(this);
+                if (_returned)
+                    return;
+            }
+
+            if (statement.increment !is null)
+                runForEffect(statement.increment);
+        }
+    }
+
+    // Evaluates `expression` and hands back its value. The frame stack
+    // supplies the bytes it is evaluated into, freed when this returns,
+    // because an expression is only ever evaluated into an address and
+    // never handed back as a value - so anything that needs the value
+    // itself, rather than a destination to leave it at, comes here.
+    private long integralValueOf(Expression expression) {
+        import snakebite.nativelayout: loadIntegral;
+        import std.conv: text;
+
+        auto type = expression.type;
+        if (!type.isIntegral)
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "` as an integral: its type is `", type.toString, "`"),
+            );
+
+        auto frame = _frames.push(type.size, type.alignsize);
+        evaluate(expression, type, frame.base);
+
+        return loadIntegral(frame.base, type.size, !type.isUnsigned);
     }
 
     override void visit(Expression expression) {
@@ -525,6 +608,18 @@ extern(C++) private final class Evaluator: Visitor {
 
     override void visit(VarExp expression) {
         import core.stdc.string: memcpy;
+
+        // The slot already holds native bytes of the destination's exact
+        // type (the variable's declared type), so this is a plain copy,
+        // not a conversion - unlike a literal, which `writeLiteral` has
+        // to convert from its dmd node first.
+        memcpy(_place, slotOf(expression), _type.size);
+    }
+
+    // Where a parameter or local read or written by `expression` lives in
+    // the current frame. A read and a compound assignment differ in what
+    // they do with the slot, not in how they find it, so both come here.
+    private ubyte* slotOf(VarExp expression) {
         import std.conv: text;
 
         auto variable = expression.var.isVarDeclaration;
@@ -532,15 +627,95 @@ extern(C++) private final class Evaluator: Visitor {
             variable is null ? null : variable in _layout.offsetOf;
         if (offset is null)
             throw new Exception(
-                text("interpreter cannot read `", expression.toString,
-                    "`: not a parameter in the current frame"),
+                text("interpreter cannot reach `", expression.toString,
+                    "`: not a parameter or local in the current frame"),
             );
 
-        // The slot already holds native bytes of the destination's exact
-        // type (the parameter's declared type), so this is a plain copy,
-        // not a conversion - unlike a literal, which `writeLiteral` has
-        // to convert from its dmd node first.
-        memcpy(_place, _frameBase + *offset, _type.size);
+        return _frameBase + *offset;
+    }
+
+    // Runs a local's initializer into the frame slot `layoutOf` already
+    // gave it. `long sum = 0;` is a `DeclarationExp` here.
+    override void visit(DeclarationExp expression) {
+        import std.conv: text;
+
+        auto variable = expression.declaration.isVarDeclaration;
+        if (variable is null)
+            throw new Exception(
+                text("interpreter cannot run declaration `",
+                    expression.toString, "`: only a local variable is ",
+                    "supported"),
+            );
+
+        auto offset = variable in _layout.offsetOf;
+        if (offset is null)
+            throw new Exception(
+                text("interpreter cannot run declaration `",
+                    expression.toString, "`: no frame slot was laid out ",
+                    "for it"),
+            );
+
+        auto expInitializer = variable._init.isExpInitializer;
+        if (expInitializer is null)
+            throw new Exception(
+                text("interpreter cannot run the initializer for `",
+                    expression.toString, "`: only a plain expression ",
+                    "initializer is supported"),
+            );
+
+        // dmd rewrites `long sum = 0;`'s initializer into a `ConstructExp`
+        // (`sum = 0`); only `e2`, the actual value, needs evaluating.
+        auto value = expInitializer.exp;
+        if (auto construct = value.isConstructExp)
+            value = construct.e2;
+
+        evaluate(value, variable.type, _frameBase + *offset);
+    }
+
+    // The target is looked up once, not once to read and again to write:
+    // D evaluates the left side of a compound assignment a single time.
+    override void visit(AddAssignExp expression) {
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+        import std.conv: text;
+
+        auto variable = expression.e1.isVarExp;
+        auto targetType = expression.e1.type;
+        if (variable is null || !targetType.isIntegral)
+            throw new Exception(
+                text("interpreter cannot add to `", expression.e1.toString,
+                    "`: `", expression.toString, "`"),
+            );
+
+        auto target = slotOf(variable);
+        const added = integralValueOf(expression.e2);
+        const current =
+            loadIntegral(target, targetType.size, !targetType.isUnsigned);
+        const sum = cast(ulong) (current + added);
+
+        storeIntegral(target, sum, targetType.size);
+        storeIntegral(_place, sum, expression.type.size);
+    }
+
+    // `<=`, `>` and `>=` arrive as this same node and are refused: nothing
+    // needs them yet, and answering them with `<` would be a wrong answer
+    // rather than a refusal.
+    override void visit(CmpExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+        import std.conv: text;
+
+        if (expression.op != EXP.lessThan)
+            throw new Exception(
+                text("interpreter cannot evaluate a `", expression.op,
+                    "` expression: `", expression.toString, "`"),
+            );
+
+        const a = integralValueOf(expression.e1);
+        const b = integralValueOf(expression.e2);
+        const less = expression.e1.type.isUnsigned
+            ? cast(ulong) a < cast(ulong) b
+            : a < b;
+
+        storeIntegral(_place, less ? 1 : 0, expression.type.size);
     }
 
     // `expression.f` is already statically resolved (dmd resolves direct
@@ -634,7 +809,7 @@ private void writeLiteral(
     }
 
     if (type.isIntegral) {
-        import snakebite.native: storeIntegral;
+        import snakebite.nativelayout: storeIntegral;
 
         storeIntegral(place, value.toInteger, type.size);
         return;
@@ -644,6 +819,46 @@ private void writeLiteral(
         text("interpreter cannot write a value of type `",
             type.toString, "`"),
     );
+}
+
+// Appends a frame slot for every local `statement` declares. Only
+// statement lists and nested blocks are walked into, so a local declared
+// anywhere else - a loop or conditional body - gets no slot, and running
+// its declaration throws rather than writing to one that does not exist.
+private void collectLocals(
+    imported!"dmd.statement".Statement statement,
+    ref FrameLayout layout,
+) {
+    if (statement is null)
+        return;
+
+    if (auto compound = statement.isCompoundStatement) {
+        if (compound.statements is null)
+            return;
+
+        foreach (child; *compound.statements)
+            collectLocals(child, layout);
+        return;
+    }
+
+    if (auto scope_ = statement.isScopeStatement) {
+        collectLocals(scope_.statement, layout);
+        return;
+    }
+
+    auto expStatement = statement.isExpStatement;
+    if (expStatement is null || expStatement.exp is null)
+        return;
+
+    auto declarationExp = expStatement.exp.isDeclarationExp;
+    if (declarationExp is null)
+        return;
+
+    auto variable = declarationExp.declaration.isVarDeclaration;
+    if (variable is null)
+        return;
+
+    layout.offsetOf[variable] = layout.reserveSlot(variable.type);
 }
 
 // dmd's default field-alignment rule (`aggregate.alignmember`, the same
