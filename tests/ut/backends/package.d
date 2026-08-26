@@ -2,6 +2,7 @@ module ut.backends;
 
 public import ut;
 public import snakebite.backends.ctfe: Ctfe;
+public import snakebite.backends.interpreter: Interpreter;
 public import std.meta: AliasSeq;
 
 import core.sync.mutex: Mutex;

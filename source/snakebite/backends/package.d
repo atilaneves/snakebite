@@ -11,4 +11,5 @@ private:
 // never import each other.
 public alias Backends = imported!"std.meta".AliasSeq!(
     imported!"snakebite.backends.ctfe".Ctfe,
+    imported!"snakebite.backends.interpreter".Interpreter,
 );
