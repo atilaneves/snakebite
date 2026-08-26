@@ -35,167 +35,6 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     }
 }
 
-// One guest function's frame layout: each parameter's byte offset, and
-// the total size and alignment one activation of the function needs on
-// the frame stack. A pure function of the declaration, so it is computed
-// once per function and cached, never per call.
-private struct FrameLayout {
-    import dmd.declaration: VarDeclaration;
-    import dmd.mtype: Type;
-
-    size_t size;
-    uint alignment = 1;
-    // Parallel to the function's parameter list, indexed positionally.
-    // The argument-evaluation loop already has the positional index in
-    // hand, so it never pays an AA hash lookup for the hottest path.
-    size_t[] offsets;
-    // Keyed by declaration instead of position: `visit(VarExp)` resolves
-    // a parameter read from a `VarDeclaration` it found by name lookup,
-    // not by position, so it still needs a hash lookup.
-    size_t[VarDeclaration] offsetOf;
-
-    // Reserves one slot for a value of `type` and returns its offset. A
-    // parameter and a local differ in what they key the offset by, not in
-    // how the frame grows to fit them, so both come here.
-    private size_t reserveSlot(Type type) {
-        import dmd.typesem: size;
-
-        const alignment = type.alignsize;
-        const offset = alignUp(this.size, alignment);
-        this.size = offset + type.size;
-        if (alignment > this.alignment)
-            this.alignment = alignment;
-
-        return offset;
-    }
-}
-
-// The frame stack every guest call reserves its parameter frame from,
-// bump-allocated and popped LIFO. `push` is the only way to get bytes from
-// it, and the `Frame` it returns is the only way to give them back: a
-// call site never marks a position and pops back to it by hand, so it can
-// never forget to, on a throw or any other path out of scope.
-//
-// Built on `std.experimental.allocator`'s `Region` building block, which
-// supplies the fixed backing buffer, a bump pointer with a bounds check
-// (overflow throws; no growth strategy yet), and a `deallocate` that frees
-// exactly the block most recently handed out. That is all `Region`
-// contributes: alignment above one byte is computed entirely by hand in
-// `push`, below - `Region` is built with `minAlign = 1`, so it never
-// rounds a request up on its own.
-private struct FrameStack {
-    import std.experimental.allocator.building_blocks.region: Region;
-    import std.experimental.allocator.mallocator: Mallocator;
-
-    // A byte position: how many bytes of the backing buffer were in use
-    // at some earlier point. Never exposed outside this struct - `Frame`
-    // is what a call site holds instead.
-    private alias Mark = size_t;
-
-    private Region!(Mallocator, 1) _region;
-    private size_t _capacity;
-    // The backing buffer's own base address, learned once at construction
-    // (`allocateAll` hands back the whole buffer; `deallocate` immediately
-    // frees it again, leaving the region as empty as a fresh one) since no
-    // `Region` member exposes it directly. `popTo` needs it to build the
-    // synthetic block it hands back to `Region.deallocate`.
-    private ubyte* _base;
-
-    public this(size_t capacity) {
-        _capacity = capacity;
-        _region = typeof(_region)(capacity);
-
-        auto whole = _region.allocateAll;
-        _base = cast(ubyte*) whole.ptr;
-        const freed = _region.deallocate(whole);
-        assert(freed, "could not reclaim the frame stack's own buffer");
-    }
-
-    private Mark mark() const {
-        return _capacity - _region.available;
-    }
-
-    // One `push` reservation: `base` is where its bytes start, `null` for
-    // a zero-size reservation nothing will dereference. Pops itself, back
-    // to the mark it was pushed at, the moment it goes out of scope -
-    // copying it would let two handles pop the same bytes, so it can only
-    // be moved.
-    public struct Frame {
-        private FrameStack* _stack;
-        private Mark _mark;
-        public ubyte* base;
-
-        @disable this(this);
-
-        ~this() {
-            if (_stack !is null)
-                _stack.popTo(_mark);
-        }
-    }
-
-    // Bump-allocates `size` bytes aligned to `alignment` and hands back a
-    // handle that frees them again when it goes out of scope.
-    public Frame push(in size_t size, in uint alignment) {
-        import std.conv: text;
-
-        const mark = this.mark;
-
-        // `Region.allocate(0)` always returns `null` - it treats that as
-        // a failed request, not a valid empty one - so a parameterless
-        // function's zero-size frame would look like an overflow. There
-        // is nothing to write into such a frame anyway, so this reserves
-        // nothing for it and hands back a handle whose `base` no caller
-        // will dereference.
-        if (size == 0)
-            return Frame(&this, mark, null);
-
-        // The padding math below only lands a slot on its requested
-        // alignment because the buffer's own base is aligned to at least
-        // that much. `Mallocator` guarantees `platformAlignment`; a
-        // request beyond that would be silently misaligned, so this
-        // throws instead.
-        if (alignment > Mallocator.alignment)
-            throw new Exception(
-                text("interpreter frame stack cannot honor a ", alignment,
-                    "-byte alignment: the backing buffer is only aligned ",
-                    "to ", Mallocator.alignment, " byte(s)"),
-            );
-
-        const alignedUsed = alignUp(mark, alignment);
-        const padding = alignedUsed - mark;
-
-        auto block = _region.allocate(padding + size);
-        if (block is null)
-            throw new Exception(
-                text("interpreter frame stack overflow: need ", size,
-                    " byte(s) at offset ", alignedUsed, " of ", _capacity),
-            );
-
-        return Frame(&this, mark, _base + alignedUsed);
-    }
-
-    // Frees every byte reserved since `mark`, in one `Region.deallocate`
-    // call regardless of how many `push`es that covers - `Frame`'s
-    // destructor is the only caller, and only ever with the mark it was
-    // itself pushed at, so this always covers exactly the reservations
-    // nested inside that one `Frame`, in the order they nested.
-    private void popTo(in Mark mark) {
-        const used = this.mark;
-        // Nothing was reserved since `mark` - either this was a zero-size
-        // reservation, or the reservations nested inside it already
-        // popped themselves. `Region.deallocate` only accepts an empty
-        // block when its pointer is `null`, and `_base + mark` is not
-        // that, so this returns instead of handing it a block it would
-        // reject.
-        if (used == mark)
-            return;
-
-        auto block = _base[mark .. used];
-        const popped = _region.deallocate(block);
-        assert(popped, "frame stack popped out of LIFO order");
-    }
-}
-
 import dmd.visitor: Visitor;
 
 // The evaluation context: executes statements and evaluates expressions,
@@ -210,9 +49,11 @@ import dmd.visitor: Visitor;
 // walks a call's frames, so there is nothing left for a separate
 // `Interpreter`-side cache to hold.
 extern(C++) private final class Evaluator: Visitor {
+    import snakebite.backends.interpreter.framelayout: FrameLayout;
+    import snakebite.backends.interpreter.framestack: FrameStack;
     import snakebite.ffi: PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
-    import dmd.astenums: LINK, STC, Tvoid;
+    import dmd.astenums: LINK, Tvoid;
     import dmd.expression:
         AddAssignExp, CallExp, CmpExp, DeclarationExp, Expression,
         IntegerExp, RealExp, VarExp;
@@ -292,49 +133,7 @@ extern(C++) private final class Evaluator: Visitor {
         if (auto cached = function_ in _layouts)
             return cached;
 
-        import std.conv: text;
-
-        FrameLayout layout;
-
-        // The parameter *types* are part of the function's own type, and
-        // are there whether or not it has a body. `parameters` - the
-        // declarations a body reads its arguments through - only exist
-        // when there is a body to read them, so a body-less `extern(C)`
-        // declaration still gets a frame laid out here, and simply has no
-        // declaration to key `offsetOf` by.
-        auto parameterList = typeFunctionOf(function_).parameterList;
-        auto variables = function_.parameters;
-        layout.offsets.length = parameterList.length;
-
-        foreach (i; 0 .. parameterList.length) {
-            auto parameter = parameterList[i];
-
-            // A `ref`/`out` parameter occupies a pointer slot in a
-            // compiled frame, and `lazy` a delegate; `parameter.type`
-            // is still the pointed-to/lazily-evaluated type either
-            // way, so a value slot of that type's size would be the
-            // wrong layout. Not supported, so this throws.
-            if (parameter.storageClass & (STC.ref_ | STC.out_ | STC.lazy_))
-                throw new Exception(
-                    text("interpreter cannot pass `ref`/`out`/`lazy` ",
-                        "parameter ", i, " of `", function_.toString,
-                        "` by value"),
-                );
-
-            layout.offsets[i] = layout.reserveSlot(parameter.type);
-            if (variables !is null)
-                layout.offsetOf[(*variables)[i]] = layout.offsets[i];
-        }
-
-        // Locals share the same frame as the parameters: each one gets a
-        // slot appended after whatever came before it, keyed by its own
-        // `VarDeclaration` since `visit(VarExp)` looks up both kinds of
-        // read the same way. A body-less declaration has no `fbody` to
-        // walk, so this is a no-op for it, the same as the `variables is
-        // null` case above.
-        collectLocals(function_.fbody, layout);
-
-        _layouts[function_] = layout;
+        _layouts[function_] = FrameLayout.of(function_);
         return function_ in _layouts;
     }
 
@@ -481,8 +280,8 @@ extern(C++) private final class Evaluator: Visitor {
     // its own scope this way, even one with no `if`/`while`/loop
     // introducing it. There is no separate scope to enter here: `layoutOf`
     // already gave every local inside it a slot in the function's one
-    // frame (see `collectLocals` below), so running it is just running
-    // whatever it wraps, honouring `_returned` the same way
+    // frame (see `collectLocals` in `framelayout`), so running it is
+    // just running whatever it wraps, honouring `_returned` the same way
     // `visit(CompoundStatement)` does for its own children.
     override void visit(ScopeStatement statement) {
         if (statement.statement is null)
@@ -819,69 +618,4 @@ private void writeLiteral(
         text("interpreter cannot write a value of type `",
             type.toString, "`"),
     );
-}
-
-// Appends a frame slot for every local `statement` declares. Only
-// statement lists and nested blocks are walked into, so a local declared
-// anywhere else - a loop or conditional body - gets no slot, and running
-// its declaration throws rather than writing to one that does not exist.
-private void collectLocals(
-    imported!"dmd.statement".Statement statement,
-    ref FrameLayout layout,
-) {
-    if (statement is null)
-        return;
-
-    if (auto compound = statement.isCompoundStatement) {
-        if (compound.statements is null)
-            return;
-
-        foreach (child; *compound.statements)
-            collectLocals(child, layout);
-        return;
-    }
-
-    if (auto scope_ = statement.isScopeStatement) {
-        collectLocals(scope_.statement, layout);
-        return;
-    }
-
-    auto expStatement = statement.isExpStatement;
-    if (expStatement is null || expStatement.exp is null)
-        return;
-
-    auto declarationExp = expStatement.exp.isDeclarationExp;
-    if (declarationExp is null)
-        return;
-
-    auto variable = declarationExp.declaration.isVarDeclaration;
-    if (variable is null)
-        return;
-
-    layout.offsetOf[variable] = layout.reserveSlot(variable.type);
-}
-
-// dmd's default field-alignment rule (`aggregate.alignmember`, the same
-// one it uses to lay out a struct's fields), rather than reimplementing
-// it: no generic round-up-to-alignment helper exists anywhere else in the
-// dmd frontend sources. Parameter frame offsets are ordinarily assigned
-// far downstream of this, in dmd's machine-code backend, which this
-// project does not use - laying out frames here is unavoidable, not a
-// case of redoing work dmd already did for us at this stage.
-//
-// `alignmember` takes a `structalign_t` for cases with an explicit
-// `align(N)`; there is none here, so `defaultAlignment` is always the
-// type's own natural alignment - and it is built once at module load,
-// not on every call, since this runs on every parameter offset and every
-// frame stack push.
-private imported!"dmd.astenums".structalign_t defaultAlignment;
-
-shared static this() {
-    defaultAlignment.setDefault;
-}
-
-private size_t alignUp(in size_t offset, in uint alignment) {
-    import dmd.aggregate: alignmember;
-
-    return alignmember(defaultAlignment, alignment, cast(uint) offset);
 }
