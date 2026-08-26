@@ -8,13 +8,6 @@ static foreach (backend; Matrix!()) {
     @("loop.forRunsBody." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        // `for (long i = 0; 1; ) return 7;` is a `ForStatement` - dmd
-        // gives it its own node distinct from `WhileStatement`/
-        // `DoStatement` because it carries an optional init statement
-        // (here, `long i = 0;`) and an optional increment expression
-        // alongside the condition, none of which any other statement
-        // node bundles together.
-        //
         // The condition here is the literal `1`: dmd's flow analysis
         // recognises `for (...; 1; ...)` as unconditionally entering the
         // loop, the same as `while (true)`, so `seven` type-checks with
