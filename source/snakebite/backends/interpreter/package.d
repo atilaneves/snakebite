@@ -599,7 +599,7 @@ extern(C++) private final class Evaluator: Visitor {
     // never handed back as a value - so anything that needs the value
     // itself, rather than a destination to leave it at, comes here.
     private long integralValueOf(Expression expression) {
-        import snakebite.native: loadIntegral;
+        import snakebite.nativelayout: loadIntegral;
         import std.conv: text;
 
         auto type = expression.type;
@@ -730,7 +730,7 @@ extern(C++) private final class Evaluator: Visitor {
     // statement position, the only place this runs today, that is a
     // scratch reservation nothing reads.
     override void visit(AddAssignExp expression) {
-        import snakebite.native: loadIntegral, storeIntegral;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
         import std.conv: text;
 
         auto variable = expression.e1.isVarExp;
@@ -767,7 +767,7 @@ extern(C++) private final class Evaluator: Visitor {
     // wrong answer rather than a refusal, so they throw until something
     // needs them.
     override void visit(CmpExp expression) {
-        import snakebite.native: storeIntegral;
+        import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
         if (expression.op != EXP.lessThan)
@@ -876,7 +876,7 @@ private void writeLiteral(
     }
 
     if (type.isIntegral) {
-        import snakebite.native: storeIntegral;
+        import snakebite.nativelayout: storeIntegral;
 
         storeIntegral(place, value.toInteger, type.size);
         return;
