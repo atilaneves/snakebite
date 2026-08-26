@@ -7,27 +7,23 @@ private:
 // Runs guest code with dmd's own compile-time function evaluator.
 public final class Ctfe: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
-    import snakebite.backends.backend: Program;
 
-    // With no `entryPoint`, does what druntime's default test mode does:
-    // every unittest in the program's root modules, exit status 0 only if
-    // all of them pass. CTFE has no druntime and no I/O, so `main` is not
-    // run. A guest failure (a failed assert, an uncaught exception)
-    // surfaces as a CTFE diagnostic, which is reported the way druntime
-    // reports an escaped `Throwable`: printed, exit status 1.
-    public override int run(
-        Program program,
-        FuncDeclaration entryPoint = null,
+    public override void call(
+        FuncDeclaration function_,
+        void* returnPlace,
+        void*[] args,
     ) {
-        if (entryPoint !is null)
-            return interpretAsEntryPoint(entryPoint);
+        if (args.length != 0)
+            throw new Exception(
+                "arguments not yet supported by the CTFE backend",
+            );
 
-        int status;
-        foreach (module_; program.rootModules)
-            foreach (test; unitTests(module_))
-                if (interpretAsEntryPoint(test) != 0)
-                    status = 1;
-        return status;
+        // `const` would qualify the dmd AST reference inside the result.
+        auto result = interpret(function_);
+        if (result.error !is null)
+            throw new Exception(result.error);
+
+        writeResult(function_, result.value, returnPlace);
     }
 
     public override string eval(FuncDeclaration function_) {
@@ -39,59 +35,53 @@ public final class Ctfe: imported!"snakebite.backends.backend".Backend {
     }
 }
 
-// One function as the whole program: interpret it, report a guest failure
-// the way druntime reports an escaped `Throwable` (printed, exit status 1).
-private int interpretAsEntryPoint(
+// Writes a CTFE result into the caller's native return place. `null` (the
+// caller does not want the value) and `void` (there is no value) both write
+// nothing. Integrals and floating point are laid out exactly as compiled D
+// would; anything else is not supported yet.
+private void writeResult(
     imported!"dmd.func".FuncDeclaration function_,
+    imported!"dmd.expression".Expression value,
+    void* returnPlace,
 ) {
-    import core.stdc.stdio: fprintf, stderr;
-    import std.string: toStringz;
+    import dmd.astenums: Tfloat32, Tfloat64, Tvoid;
+    import dmd.typesem: size;
+    import std.conv: text;
 
-    // `const` would qualify the dmd AST reference inside the result.
-    auto result = interpret(function_);
-    if (result.error is null)
-        return 0;
+    auto type = function_.type.nextOf;
 
-    fprintf(stderr, "%s\n", result.error.toStringz);
-    return 1;
-}
+    if (returnPlace is null || type.ty == Tvoid)
+        return;
 
-// Every unittest in the module, however deeply nested: at module scope,
-// behind attribute declarations (`@("name")`, `static:`, ...), or inside
-// aggregates - the same set druntime's default runner executes.
-private imported!"dmd.func".FuncDeclaration[] unitTests(
-    imported!"dmd.dmodule".Module module_,
-) {
-    import dmd.arraytypes: Dsymbols;
-    import dmd.func: FuncDeclaration;
+    if (type.ty == Tfloat32) {
+        *cast(float*) returnPlace = cast(float) value.toReal;
+        return;
+    }
 
-    FuncDeclaration[] tests;
+    if (type.ty == Tfloat64) {
+        *cast(double*) returnPlace = cast(double) value.toReal;
+        return;
+    }
 
-    void collect(Dsymbols* symbols) {
-        if (symbols is null)
-            return;
-
-        foreach (symbol; *symbols) {
-            if (symbol is null)
-                continue;
-
-            if (auto test = symbol.isUnitTestDeclaration) {
-                tests ~= test;
-                continue;
-            }
-
-            if (auto attributes = symbol.isAttribDeclaration) {
-                collect(attributes.decl);
-                continue;
-            }
-
-            if (auto aggregate = symbol.isAggregateDeclaration)
-                collect(aggregate.members);
+    if (type.isIntegral) {
+        const integer = value.toInteger;
+        switch (type.size) {
+            case 1: *cast(ubyte*) returnPlace = cast(ubyte) integer; return;
+            case 2: *cast(ushort*) returnPlace = cast(ushort) integer; return;
+            case 4: *cast(uint*) returnPlace = cast(uint) integer; return;
+            case 8: *cast(ulong*) returnPlace = cast(ulong) integer; return;
+            default:
+                throw new Exception(
+                    text("CTFE backend cannot return an integral of size ",
+                        type.size, ": `", type.toChars, "`"),
+                );
         }
     }
 
-    collect(module_.members);
-    return tests;
+    throw new Exception(
+        text("CTFE backend cannot return a value of type `",
+            type.toChars, "`"),
+    );
 }
 
 // One CTFE call's outcome: the value on success, the diagnostic text on

@@ -95,6 +95,43 @@ public mixin template SnippetTests() {
     }
 }
 
+// Parse `code` as a whole guest program and run it on the backend the way
+// compiled D would run it, returning the exit status.
+public int run(BackendType, string code)() {
+    import snakebite.backends.backend: Program, run;
+
+    auto program = Program([parseSnippet(code)]);
+    return run(new BackendType, program);
+}
+
+// UFCS assertion: `42.shouldBeRetOf!(backend, code, "answer")` invokes one
+// guest function through the backend's `call` and checks its result against
+// `expected`, whose type states the guest function's return type. The
+// guest's actual return type must match it in size, so a lying test fails
+// loudly instead of reading garbage bytes.
+public void shouldBeRetOf(BackendType, string code, string functionName, T)(
+    in T expected,
+    in string file = __FILE__,
+    in size_t line = __LINE__,
+) {
+    import dmd.typesem: size;
+    import snakebite.backends.backend: Program;
+
+    auto program = Program([parseSnippet(code)]);
+    auto function_ = findFunction(program.rootModules[0], functionName);
+    assert(function_ !is null,
+        "No function `" ~ functionName ~ "` in the guest program");
+
+    auto returnType = function_.type.nextOf;
+    assert(T.sizeof == returnType.size,
+        text("`", T.stringof, "` (", T.sizeof, " bytes) does not match the ",
+             "guest return type (", returnType.size, " bytes)"));
+
+    T result;
+    (new BackendType).call(function_, &result, []);
+    result.shouldEqual(expected, file, line);
+}
+
 public string evaluate(
     string module_,
     BackendType,

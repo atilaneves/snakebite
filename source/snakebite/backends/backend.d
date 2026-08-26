@@ -16,16 +16,20 @@ public interface Backend {
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
 
-    // "Run on this project": do what compiled D does for the program (module
-    // constructors, unittests according to `--DRT-testmode`, `main`) and
-    // return the exit status. A `Throwable` that escapes is handled as
-    // druntime would handle it: printed, exit status 1.
+    // Invoke one guest function. `args` and the value written to
+    // `returnPlace` are in native layout, exactly as compiled D would lay
+    // them out; `returnPlace` must be exactly the return type's size, and
+    // `null` means the result is discarded (e.g. a `void` function, or a
+    // caller that does not need the value). Type information travels only
+    // through `function_`'s dmd type, not through the untyped `void*[]`.
     //
-    // A non-null `entryPoint` runs that one function instead of `main`, e.g.
-    // a single unittest. The function is then called directly, so attributes
-    // that a custom test runner (unit-threaded's `@ShouldFail` and friends)
-    // would interpret are not honoured.
-    public int run(Program program, FuncDeclaration entryPoint = null);
+    // A guest failure (a failed assert, an uncaught guest exception) throws
+    // a host exception, the same as `eval`.
+    //
+    // Guest state persists across calls on one instance: a REPL keeps one
+    // backend for the whole session, so declarations from earlier cells are
+    // visible to later ones.
+    public void call(FuncDeclaration function_, void* returnPlace, void*[] args);
 
     // Execute one synthesised `string`-returning function and return its
     // result. The guest renders the value itself (`std.conv.text`), so the
@@ -36,5 +40,39 @@ public interface Backend {
     // Guest state persists across calls on one instance: a REPL keeps one
     // backend for the whole session, so declarations from earlier cells are
     // visible to later ones.
+    //
+    // Collapses into `call` once `call` can return a native `string`.
     public string eval(FuncDeclaration function_);
+}
+
+// "Run on this project": run `main` the way compiled D does, implemented
+// once on top of `call`, and return the exit status. A test build is not
+// special: as with `dub test` or `dmd -unittest`, whatever runs the
+// unittests (druntime's runner, unit-threaded's) is itself the program's
+// `main`. `void main` maps to exit status 0. A `Throwable` that escapes is
+// handled as druntime would handle it: printed, exit status 1. No `main`
+// found is not an error: the status is 0.
+public int run(Backend backend, Program program) {
+    import core.stdc.stdio: fprintf, stderr;
+    import dmd.astenums: Tvoid;
+    import snakebite.frontend.dmd.functions: findFunction;
+    import std.string: toStringz;
+
+    foreach (module_; program.rootModules) {
+        auto main_ = findFunction(module_, "main");
+        if (main_ is null)
+            continue;
+
+        const isVoid = main_.type.nextOf.ty == Tvoid;
+        int status;
+        try
+            backend.call(main_, isVoid ? null : &status, []);
+        catch (Exception exception) {
+            fprintf(stderr, "%s\n", exception.msg.toStringz);
+            return 1;
+        }
+        return status;
+    }
+
+    return 0;
 }
