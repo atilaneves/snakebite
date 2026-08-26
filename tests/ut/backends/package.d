@@ -2,6 +2,7 @@ module ut.backends;
 
 public import ut;
 public import snakebite.backends.ctfe: Ctfe;
+public import snakebite.backends.interpreter: Interpreter;
 public import std.meta: AliasSeq;
 
 import core.sync.mutex: Mutex;
@@ -20,7 +21,8 @@ public enum Because {
     inexpressible, // the backend can never run the construct (note required)
     diverges,      // pinned in a sibling test that asserts the actual
                    // behaviour (note required)
-    unconfirmed,   // never tried (note optional)
+    unconfirmed,   // never tried, or deliberately not implemented yet
+                   // (note optional)
 }
 
 // Removes `B` from a test's `Matrix!(...)`, with a reason. `B` must be one of
