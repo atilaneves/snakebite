@@ -9,3 +9,4 @@ compile_commands.json
 .claude/worktrees
 examples/ct/ct
 examples/ct/ct-test-application
+.worktrees
