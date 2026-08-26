@@ -1,0 +1,30 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  test:
+    name: Dub Test
+    strategy:
+      matrix:
+        os:
+          - ubuntu-24.04
+        dc:
+          - dmd-2.112.0
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install D compiler
+        uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ${{ matrix.dc }}
+
+      - name: Set up uv
+        if: matrix.os == 'ubuntu-24.04'
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.32"
+
+      - name: Run CI
+        run: ./ci.sh
