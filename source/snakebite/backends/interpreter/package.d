@@ -649,15 +649,8 @@ extern(C++) private final class Evaluator: Visitor {
         return _frameBase + *offset;
     }
 
-    // `long sum = 0;` inside a function body is a `VarDeclaration` wrapped
-    // in a `DeclarationExp`, which dmd's semantic pass hands back as the
-    // sole expression of an `ExpStatement` - the same shape any local
-    // declaration takes as a statement, so this is the only place a local
-    // gets initialized. `layoutOf` already gave `variable` a slot in the
-    // current frame; this only has to run its initializer expression into
-    // that slot. dmd types a `DeclarationExp` itself `void` (there is no
-    // value to hand a caller), so `visit(ExpStatement)` always reaches
-    // this with `_place is null`, never mind that below.
+    // Runs a local's initializer into the frame slot `layoutOf` already
+    // gave it. `long sum = 0;` is a `DeclarationExp` here.
     override void visit(DeclarationExp expression) {
         import std.conv: text;
 
