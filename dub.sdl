@@ -36,4 +36,6 @@ configuration "bench" {
     targetPath "bin"
 
     mainSourceFile "bench/main.d"
+    sourcePaths "bench"
+    importPaths "."
 }

@@ -74,8 +74,12 @@ public string[] dubDescribe(
     const dataArgs = ["--data=" ~ dataKind, "--data-list"];
 
     if (config == DubConfig.test) {
+        // `--build=unittest` too: without it, describe reports the default
+        // build type's flags, not the unittest build type's - missing
+        // `-unittest` itself among others, since dub adds those per build
+        // type, not per config.
         auto withUnittest = describeCapturingStdout(  // auto: need status and output
-            describe ~ ["--config=unittest"] ~ dataArgs, pkgDir,
+            describe ~ ["--config=unittest", "--build=unittest"] ~ dataArgs, pkgDir,
         );
         if (withUnittest.status == 0)
             return parseDescribeList(withUnittest.output);
