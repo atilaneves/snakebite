@@ -27,3 +27,13 @@ configuration "unittest" {
 
     dependency "unit-threaded" version="*"
 }
+
+// Built by build/bench.sh with LDC in release mode: the backends must
+// be optimised for the benchmark numbers to mean anything.
+configuration "bench" {
+    targetType "executable"
+    targetName "bench"
+    targetPath "bin"
+
+    mainSourceFile "bench/main.d"
+}

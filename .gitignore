@@ -6,3 +6,5 @@ compile_commands.json
 *.ninja
 .reggae
 .claude/worktrees
+examples/ct/ct
+examples/ct/ct-test-application

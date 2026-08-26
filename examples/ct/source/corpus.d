@@ -1,3 +1,12 @@
+// The example corpus: build/bench.sh's default fixture. Adding or
+// changing unittests here needs no approval and no build/ci.sh run; the
+// only check is `build/bench.sh examples/ct` succeeding.
+//
+// Kept out of app.d: dub's synthetic "unittest" configuration excludes
+// the executable's main source file (it would clash with the generated
+// test runner's own main), so app.d's unittests would never run under
+// `dub test`.
+
 void encode(T)(T val, ref ubyte[] output) {
     static if (is(T == float))
         encode(*cast(uint*) &val, output);
@@ -1564,8 +1573,4 @@ struct KernelPoint { int x; int y; }
     foreach (i; 0 .. 1_500) bytes ~= cast(ubyte) i;
     assert(bytes.length == 1_500);
     assert(bytes[1_499] == cast(ubyte) 1_499);
-}
-
-unittest {
-    assert(1 == 2);
 }
