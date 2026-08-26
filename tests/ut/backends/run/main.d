@@ -34,6 +34,32 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `version (D_BetterC)` is not predefined by the frontend, so a real build
+// picks the `else` branch's `main`, same as `dmd -unittest` would for dub's
+// generated `dub_test_root.d` (its D_BetterC branch is dead code here). This
+// pins that `findFunction` resolves the condition instead of always
+// descending into a version declaration's syntactic first branch.
+static foreach (backend; Matrix!()) {
+    @("ret.int.betterCBranchNotTaken." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeStatusOf!(
+             backend,
+             q{
+                 version (D_BetterC) {
+                     int main() {
+                         return 1;
+                     }
+                 } else {
+                     int main() {
+                         return 42;
+                     }
+                 }
+             }
+        );
+    }
+}
+
 // No `main` at all is not an error: the status is 0.
 static foreach (backend; Matrix!()) {
     @("noMain." ~ backend.stringof)
