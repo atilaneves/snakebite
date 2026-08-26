@@ -24,3 +24,5 @@ build/bench.sh examples/ct -w 0 -r 1 -b ctfe -b dmd
 # runs raw `unittest{}` blocks, so `@ShouldFail` reads as a real failure
 # (an accepted gap). `-b dmd` selects that row for dub projects too.
 build/bench.sh examples/rt -w 0 -r 1 -b dmd
+
+build/bench.sh examples/bottom-up -w 0 -r 1 -b dmd
