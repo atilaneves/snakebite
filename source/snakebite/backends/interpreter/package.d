@@ -552,17 +552,6 @@ extern(C++) private final class Evaluator: Visitor {
         evaluate(expression, type, frame.base);
     }
 
-    // `for (init; condition; increment) body`, run in the order D defines:
-    // the initialiser once, then the condition before each iteration, the
-    // body, and the increment after it. A missing condition (`for (;;)`)
-    // means "always true", the same as a missing `while` condition.
-    //
-    // dmd's semantic pass hoists the header's declaration out into a
-    // `CompoundStatement`/`ScopeStatement` wrapping the loop, which is why
-    // a local declared there gets a frame slot like any other. The
-    // initialiser still runs here when one survives, rather than being
-    // assumed absent: skipping a statement that is present would run the
-    // loop with an uninitialised counter instead of refusing.
     override void visit(ForStatement statement) {
         if (statement._init !is null) {
             statement._init.accept(this);
