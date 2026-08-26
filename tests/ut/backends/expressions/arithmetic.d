@@ -166,7 +166,7 @@ unittest {
             import std.conv: text;
             return text(cast(int) cast(float) big);
         }
-    }).module_;
+    });
 
     (new Ctfe).eval(findFunction(module_, "__eval")).should == "16777217";
 }

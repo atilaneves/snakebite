@@ -160,7 +160,7 @@ private FuncDeclaration parsedFunction(in Snippet snippet) {
 
 private void parseModuleSnippets(in string module_) {
     const snippets = _registered[module_];
-    auto guestModule = parseSnippet(batchSource(snippets)).module_;
+    auto guestModule = parseSnippet(batchSource(snippets));
     foreach (index, snippet; snippets)
         _parsed[cast(Snippet) snippet] = findFunction(
             findStruct(guestModule, snippetStructName(index)),
