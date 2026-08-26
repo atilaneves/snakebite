@@ -31,7 +31,7 @@ unittest {
     // Preparing is what mangles the symbol, asks the dynamic linker for
     // its address and classifies the signature, so this is what the
     // barrier exists to do once.
-    cache.preparations.shouldEqual(1);
+    cache.preparations.should == 1;
 }
 
 
@@ -52,5 +52,5 @@ unittest {
     // Two functions are two plans - a cache that shared one between them
     // would call one function through the other's address - and still only
     // one preparation each.
-    cache.preparations.shouldEqual(2);
+    cache.preparations.should == 2;
 }
