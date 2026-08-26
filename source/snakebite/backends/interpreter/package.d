@@ -113,30 +113,22 @@ private void writeReturnValue(
         return;
 
     if (returnType.ty == Tfloat32) {
-        *cast(float*) returnPlace = cast(float) evaluator.realValue;
+        *cast(float*) returnPlace = cast(float) evaluator.value.toReal;
         return;
     }
 
     if (returnType.ty == Tfloat64) {
-        *cast(double*) returnPlace = cast(double) evaluator.realValue;
+        *cast(double*) returnPlace = cast(double) evaluator.value.toReal;
         return;
     }
 
     if (returnType.isIntegral) {
+        const integer = evaluator.value.toInteger;
         switch (returnType.size) {
-            case 1:
-                *cast(ubyte*) returnPlace = cast(ubyte) evaluator.integerValue;
-                return;
-            case 2:
-                *cast(ushort*) returnPlace =
-                    cast(ushort) evaluator.integerValue;
-                return;
-            case 4:
-                *cast(uint*) returnPlace = cast(uint) evaluator.integerValue;
-                return;
-            case 8:
-                *cast(ulong*) returnPlace = evaluator.integerValue;
-                return;
+            case 1: *cast(ubyte*) returnPlace = cast(ubyte) integer; return;
+            case 2: *cast(ushort*) returnPlace = cast(ushort) integer; return;
+            case 4: *cast(uint*) returnPlace = cast(uint) integer; return;
+            case 8: *cast(ulong*) returnPlace = integer; return;
             default:
                 throw new Exception(
                     text("interpreter cannot return an integral of size ",
@@ -151,16 +143,19 @@ private void writeReturnValue(
     );
 }
 
-// Evaluates one expression node directly (dmd's `IntegerExp`/`RealExp`
-// already carry their literal value), throwing on anything it does not know
-// how to evaluate instead of returning silent garbage.
+// Evaluates one expression node directly, keeping the literal `Expression`
+// itself rather than pulling its value out into separate integer/real
+// fields: `Expression.toInteger`/`toReal` already convert it correctly for
+// whichever kind it is, so a caller that knows the wanted kind (from the
+// return type) does not need this class to track it too. Throws on
+// anything it does not know how to evaluate instead of returning silent
+// garbage.
 extern(C++) private final class ExpressionEvaluator: Visitor {
     import dmd.expression: Expression, IntegerExp, RealExp;
 
     alias visit = Visitor.visit;
 
-    public ulong integerValue;
-    public real realValue;
+    public Expression value;
 
     override void visit(Expression expression) {
         import std.conv: text;
@@ -172,10 +167,10 @@ extern(C++) private final class ExpressionEvaluator: Visitor {
     }
 
     override void visit(IntegerExp expression) {
-        integerValue = expression.toInteger;
+        value = expression;
     }
 
     override void visit(RealExp expression) {
-        realValue = expression.toReal;
+        value = expression;
     }
 }
