@@ -49,9 +49,18 @@ private imported!"dmd.func".FuncDeclaration findFunction(
         if (function_ !is null && function_.ident.toString == name)
             return function_;
 
-        if (auto attributes = member.isAttribDeclaration)
-            if (auto found = findFunction(attributes.decl, name))
+        // `AttribDeclaration.decl` is always the syntactic "then" branch,
+        // even for a `version`/`debug`/`static if` declaration whose
+        // condition resolved to the "else" branch - the resolved branch
+        // lives behind `dsymbolsem.include`, dmd's own accessor for this.
+        // Descending into `.decl` unconditionally here would walk dead code
+        // a real build never compiles in.
+        if (auto attributes = member.isAttribDeclaration) {
+            import dmd.dsymbolsem: include;
+
+            if (auto found = findFunction(include(attributes, null), name))
                 return found;
+        }
     }
 
     return null;
