@@ -9,5 +9,7 @@ int main(string[] args) {
         "ut.backends.call.func",
         "ut.backends.call.ffi",
         "ut.backends.eval.expressions.arithmetic",
+        "ut.ffi.plan",
+        "ut.ffi.cost",
     );
 }
