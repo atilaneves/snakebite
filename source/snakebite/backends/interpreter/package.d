@@ -54,8 +54,7 @@ extern(C++) private final class StatementWalker: Visitor {
 
     alias visit = Visitor.visit;
 
-    // The enclosing function's return type, not this walker's own; a
-    // statement walker has no return type of its own.
+    // The return type of the function whose body this walker is walking.
     private Type functionReturnType;
     private void* returnPlace;
 
