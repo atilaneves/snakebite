@@ -5,6 +5,7 @@ bin
 compile_commands.json
 *.ninja
 .reggae
+.reggae-bench
 .claude/worktrees
 examples/ct/ct
 examples/ct/ct-test-application
