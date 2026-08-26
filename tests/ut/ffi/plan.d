@@ -75,3 +75,23 @@ unittest {
     cache.of(function_).shouldThrowWithMessage(
         "ffi cannot call `refReturner`: it returns by `ref`");
 }
+
+
+@("refused.tooManyArguments")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(C) int seven(int a, int b, int c, int d, int e, int f, int g);
+    });
+    auto function_ = findFunction(guestModule, "seven");
+    assert(function_ !is null, "No function `seven` in the guest program");
+
+    PlanCache cache;
+
+    // Refused when the plan is prepared. The interpreter sizes its slot
+    // buffer by `maxArguments`, so a call that got past this would fill
+    // one slot past the end of that buffer - which is why preparing the
+    // plan has to happen before the buffer is filled, not alongside it.
+    cache.of(function_).shouldThrowWithMessage(
+        "ffi cannot call `seven`: it takes 7 arguments, and at most 6"
+        ~ " are passed in registers");
+}

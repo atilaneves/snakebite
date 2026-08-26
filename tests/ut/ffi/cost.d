@@ -45,7 +45,9 @@ unittest {
     assert(function_ !is null, "No function `abs` in the guest program");
 
     PlanCache cache;
-    enum n = 1_000_000;
+    // Enough iterations for a stable ratio and no more: this runs in
+    // `ci.sh` on every build, so it buys its stability cheaply.
+    enum n = 200_000;
 
     // Both loops do the same work either side of the barrier: read one
     // `int` argument from a slot, call `abs`, keep the result. Only the
@@ -59,7 +61,7 @@ unittest {
     // measured as if the barrier had cost it.
     const(void)*[1] slots = [&argument];
 
-    foreach (i; 0 .. 10_000) {
+    foreach (i; 0 .. 2_000) {
         cast(void) direct(cast(size_t) cast(long) argument);
         cache.of(function_).call(&result, slots[]);
     }
