@@ -5,3 +5,4 @@ bin
 compile_commands.json
 *.ninja
 .reggae
+.claude/worktrees

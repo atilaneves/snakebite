@@ -1,0 +1,15 @@
+name "rt"
+targetType "library"
+targetPath "bin"
+
+configuration "unittest" {
+    targetType "executable"
+    targetName "ut"
+    targetPath "bin"
+
+    mainSourceFile "tests/main.d"
+    sourcePaths "tests"
+    importPaths "tests"
+
+    dependency "unit-threaded" version="*"
+}
