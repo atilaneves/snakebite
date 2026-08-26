@@ -126,6 +126,19 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
                     "`: it is not a function"),
             );
 
+        // A `ref` return hands back the *address* of the result in the
+        // return register, not the result. `type.nextOf` is the
+        // referred-to type either way, so classifying it would describe a
+        // value that never travels, and writing the return register
+        // through that description would store the low bytes of an
+        // address as if they were the value - a wrong answer that looks
+        // like a right one.
+        if (type.isRef)
+            throw new Exception(
+                text("ffi cannot call `", function_.toString,
+                    "`: it returns by `ref`"),
+            );
+
         // A variadic callee is handed its arguments differently - on the
         // System V AMD64 ABI the caller must also report how many SSE
         // registers it used - so the fixed-arity call this plans would be

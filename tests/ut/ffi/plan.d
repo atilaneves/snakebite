@@ -54,3 +54,24 @@ unittest {
     // one preparation each.
     cache.preparations.should == 2;
 }
+
+
+@("refused.refReturn")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(C) ref int refReturner();
+    });
+    auto function_ = findFunction(guestModule, "refReturner");
+    assert(function_ !is null, "No function `refReturner` in the program");
+
+    PlanCache cache;
+
+    // A `ref` return hands back the address of the result, not the
+    // result. `nextOf` is the referred-to type either way, so classifying
+    // it describes a value that never travels, and writing the return
+    // register through that description stores the low bytes of an
+    // address as if they were the value - a wrong answer that looks
+    // right. Refused when the plan is prepared, before anything runs.
+    cache.of(function_).shouldThrowWithMessage(
+        "ffi cannot call `refReturner`: it returns by `ref`");
+}
