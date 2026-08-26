@@ -98,8 +98,9 @@ public mixin template SnippetTests() {
     }
 }
 
-// Parse `code` as a whole guest program and run it on the backend the way
-// compiled D would run it, checking the exit status against `expected`.
+// UFCS assertion: `42.run!(backend, code)` parses `code` as a whole guest
+// program and runs it on the backend the way compiled D would run it,
+// checking the exit status against `expected`.
 //
 // `code` is also mixed in natively and its `main` called directly, the same
 // oracle `evaluate` uses for snippets: a test whose `expected` disagrees
