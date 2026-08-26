@@ -40,15 +40,22 @@ static foreach (backend; Matrix!()) {
     @("call." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        33.3.shouldBeRetOf!(
+        11.1.shouldBeRetOf!(
             backend,
             q{
-                double func() {
-                    return thrice(11.1);
+                // `thrice` first: the native oracle mixes this snippet's
+                // functions into a local delegate scope, and nested D
+                // functions (unlike module-scope ones) do not see a sibling
+                // declared later in the same scope. The guest side parses
+                // this as a whole module, where declaration order does not
+                // affect name resolution, so this ordering does not change
+                // what is being tested.
+                double thrice(double d) {
+                    return d;
                 }
 
-                double thrice(double d) {
-                    return 33.3;
+                double func() {
+                    return thrice(11.1);
                 }
             },
             "func",
