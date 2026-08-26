@@ -33,3 +33,19 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+// No `main` at all is not an error: the status is 0.
+static foreach (backend; Matrix!()) {
+    @("noMain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.run!(
+             backend,
+             q{
+                 int notMain() {
+                     return 42;
+                 }
+             }
+        );
+    }
+}

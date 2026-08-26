@@ -130,27 +130,33 @@ public void run(BackendType, string code, string module_ = __MODULE__)(
 // `main`'s exit status, run natively, mirroring the backend-side semantics
 // documented on `snakebite.backends.backend.run`: `void main` is status 0,
 // an escaping `Throwable` is status 1, and no `main` at all is status 0.
+//
+// `code` is mixed into a struct, the same isolation `batchSource` gives the
+// guest side, so `hasMember` only ever finds a `main` `code` itself declared
+// - an unqualified lookup would instead walk out to this module's public
+// imports and could silently resolve to an unrelated `main`.
 private int nativeMainStatus(string code)() {
-    return () {
+    struct Guest {
+        static:
         mixin(code);
+    }
 
-        static if (!__traits(compiles, main)) {
-            return 0;
-        } else static if (is(typeof(main()) == void)) {
-            try {
-                main();
+    static if (!__traits(hasMember, Guest, "main"))
+        return 0;
+    else {
+        static assert(__traits(compiles, Guest.main()),
+            "nativeMainStatus only supports a zero-argument main");
+
+        try {
+            static if (is(typeof(Guest.main()) == void)) {
+                Guest.main();
                 return 0;
-            } catch (Throwable) {
-                return 1;
-            }
-        } else {
-            try {
-                return main();
-            } catch (Throwable) {
-                return 1;
-            }
+            } else
+                return Guest.main();
+        } catch (Throwable) {
+            return 1;
         }
-    }();
+    }
 }
 
 // UFCS assertion: `42.shouldBeRetOf!(backend, code, "answer")` invokes one
