@@ -12,7 +12,7 @@ public struct Program {
 }
 
 
-public interface Backend {
+public abstract class Backend {
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
 
@@ -29,7 +29,9 @@ public interface Backend {
     // Guest state persists across calls on one instance: a REPL keeps one
     // backend for the whole session, so declarations from earlier cells are
     // visible to later ones.
-    public void call(FuncDeclaration function_, void* returnPlace, void*[] args);
+    public abstract void call(
+        FuncDeclaration function_, void* returnPlace, void*[] args,
+    );
 
     // Execute one synthesised `string`-returning function and return its
     // result. The guest renders the value itself (`std.conv.text`), so the
@@ -42,7 +44,19 @@ public interface Backend {
     // visible to later ones.
     //
     // Collapses into `call` once `call` can return a native `string`.
-    public string eval(FuncDeclaration function_);
+    public abstract string eval(FuncDeclaration function_);
+
+    // Whether guest programs run here can rely on druntime being present
+    // (module info, its unittest runner, I/O). Presumed true unless a
+    // backend overrides this. A backend that answers false cannot run a
+    // program whose `main` delegates work to druntime, such as dub's
+    // generated test root, which drives unittests through druntime's
+    // ModuleInfo runner rather than calling them itself; a driver that needs
+    // those unittests to actually run must substitute a program that does
+    // not depend on druntime instead.
+    public bool hasDruntime() {
+        return true;
+    }
 }
 
 // "Run on this project": run `main` the way compiled D does, implemented
