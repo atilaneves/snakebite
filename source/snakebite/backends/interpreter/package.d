@@ -198,8 +198,8 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import dmd.astenums: LINK, STC, Tvoid;
     import dmd.expression:
-        CallExp, CmpExp, DeclarationExp, Expression, IntegerExp, RealExp,
-        VarExp;
+        AddAssignExp, CallExp, CmpExp, DeclarationExp, Expression,
+        IntegerExp, RealExp, VarExp;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
@@ -625,22 +625,32 @@ extern(C++) private final class Evaluator: Visitor {
 
     override void visit(VarExp expression) {
         import core.stdc.string: memcpy;
+
+        // The slot already holds native bytes of the destination's exact
+        // type (the variable's declared type), so this is a plain copy,
+        // not a conversion - unlike a literal, which `writeLiteral` has
+        // to convert from its dmd node first.
+        memcpy(_place, slotOf(expression), _type.size);
+    }
+
+    // Where a parameter or local read or written by `expression` lives in
+    // the current frame. A read and a compound assignment differ in what
+    // they do with the slot, not in how they find it, so both come here.
+    private ubyte* slotOf(Expression expression) {
         import std.conv: text;
 
-        auto variable = expression.var.isVarDeclaration;
+        auto variable = expression.isVarExp is null
+            ? null
+            : expression.isVarExp.var.isVarDeclaration;
         auto offset =
             variable is null ? null : variable in _layout.offsetOf;
         if (offset is null)
             throw new Exception(
-                text("interpreter cannot read `", expression.toString,
-                    "`: not a parameter in the current frame"),
+                text("interpreter cannot reach `", expression.toString,
+                    "`: not a parameter or local in the current frame"),
             );
 
-        // The slot already holds native bytes of the destination's exact
-        // type (the parameter's declared type), so this is a plain copy,
-        // not a conversion - unlike a literal, which `writeLiteral` has
-        // to convert from its dmd node first.
-        memcpy(_place, _frameBase + *offset, _type.size);
+        return _frameBase + *offset;
     }
 
     // `long sum = 0;` inside a function body is a `VarDeclaration` wrapped
@@ -698,6 +708,47 @@ extern(C++) private final class Evaluator: Visitor {
             value = construct.e2;
 
         evaluate(value, variable.type, _frameBase + *offset);
+    }
+
+    // `sum += n`. dmd keeps compound assignment as its own node instead
+    // of rewriting it to `sum = sum + n` because the target must only be
+    // evaluated once, and this honours that: the target's slot is found
+    // once, read, and written back.
+    //
+    // The sum is computed in 64 bits and stored back at the target's own
+    // width, which is where D's wraparound happens - the same place a
+    // compiled `+=` puts it.
+    //
+    // Assignment is an expression, so its value goes to `_place` as well
+    // when a destination was given. In statement position, which is the
+    // only place this runs today, that destination is a scratch
+    // reservation nothing reads.
+    override void visit(AddAssignExp expression) {
+        import snakebite.native: loadIntegral, storeIntegral;
+        import std.conv: text;
+
+        auto targetType = expression.e1.type;
+        auto addendType = expression.e2.type;
+        if (!targetType.isIntegral || !addendType.isIntegral)
+            throw new Exception(
+                text("interpreter cannot add non-integral operands: `",
+                    expression.toString, "`"),
+            );
+
+        auto target = slotOf(expression.e1);
+
+        auto addend = _frames.push(addendType.size, addendType.alignsize);
+        evaluate(expression.e2, addendType, addend.base);
+
+        const current = loadIntegral(
+            target, targetType.size, !targetType.isUnsigned);
+        const added = loadIntegral(
+            addend.base, addendType.size, !addendType.isUnsigned);
+        const sum = cast(ulong) (current + added);
+
+        storeIntegral(target, sum, targetType.size);
+        if (_place !is null)
+            storeIntegral(_place, sum, expression.type.size);
     }
 
     // `a < b`. dmd's semantic pass has already brought both operands to
