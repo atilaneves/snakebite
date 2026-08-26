@@ -56,7 +56,7 @@ private struct FrameLayout {
     // Reserves one slot for a value of `type` and returns its offset. A
     // parameter and a local differ in what they key the offset by, not in
     // how the frame grows to fit them, so both come here.
-    public size_t reserveSlot(imported!"dmd.mtype".Type type) {
+    private size_t reserveSlot(imported!"dmd.mtype".Type type) {
         import dmd.typesem: size;
 
         const alignment = type.alignsize;

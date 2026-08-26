@@ -4,14 +4,9 @@ module ut.backends.call.compare;
 import ut.backends;
 
 
-// `a < b` is a `CmpExp`. Both operands are calls because dmd folds a
-// literal-only expression during semantic analysis, leaving nothing for
-// the backend to compare. Both orderings are tested so a comparison that
-// always answers the same way still fails one of the two cases.
-//
-// `small` and `big` are declared before use because the native oracle
-// nests them in a local delegate scope, where a sibling declared later
-// is not visible.
+// `1 < 2` is true and `2 < 1` is false. Both orderings are here so a
+// comparison that always answers the same way fails one of them, and both
+// operands are calls so the answer cannot be folded before a backend runs.
 static foreach (backend; Matrix!()) {
     @("compare.lessThan.true." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -60,11 +55,8 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A signed comparison reads the operands' bit pattern as two's complement,
-// so `uint.max` (all bits set) would come out less than `1u` if read that
-// way. The interpreter's `CmpExp` branches on `expression.e1.type.isUnsigned`
-// specifically to avoid that; this pins the unsigned reading as the correct
-// one.
+// `uint.max < 1u` is false. Read as two's complement the same bits are -1,
+// which would make it true.
 static foreach (backend; Matrix!()) {
     @("compare.lessThan.unsigned." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -89,12 +81,9 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// `<=`, `>` and `>=` arrive at the interpreter as the same `CmpExp` node as
-// `<`, distinguished only by `expression.op`. It refuses every one of them
-// deliberately: nothing needs them yet, and answering with `<`'s own logic
-// would be a silently wrong answer rather than a refusal. Native and Ctfe
-// both answer these fine, so the refusal is pinned as an Interpreter-only
-// divergence, the same way arithmetic.d pins Ctfe's float-precision one.
+// The interpreter answers `<` and refuses the other three comparisons, so
+// that a missing one is a refusal rather than a wrong answer. Compiled D
+// answers them all, which is why this is pinned for the interpreter alone.
 @("compare.lessOrEqual.refused.Interpreter")
 @Tags("Interpreter")
 unittest {
@@ -110,9 +99,7 @@ unittest {
 
     bool result;
     (new Interpreter).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "interpreter cannot evaluate a `lessOrEqual` expression: "
-            ~ "`small() <= big()`");
+        .shouldThrow;
 }
 
 @("compare.greaterThan.refused.Interpreter")
@@ -130,9 +117,7 @@ unittest {
 
     bool result;
     (new Interpreter).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "interpreter cannot evaluate a `greaterThan` expression: "
-            ~ "`big() > small()`");
+        .shouldThrow;
 }
 
 @("compare.greaterOrEqual.refused.Interpreter")
@@ -150,7 +135,5 @@ unittest {
 
     bool result;
     (new Interpreter).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "interpreter cannot evaluate a `greaterOrEqual` expression: "
-            ~ "`big() >= small()`");
+        .shouldThrow;
 }

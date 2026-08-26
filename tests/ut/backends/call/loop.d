@@ -8,11 +8,8 @@ static foreach (backend; Matrix!()) {
     @("loop.forRunsBody." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        // The condition here is the literal `1`: dmd's flow analysis
-        // recognises `for (...; 1; ...)` as unconditionally entering the
-        // loop, the same as `while (true)`, so `seven` type-checks with
-        // no `return` needed after the loop even though every real path
-        // out of it is the `return 7;` inside the body.
+        // A `1` condition means the loop always runs, like `while (true)`,
+        // so nothing after it is needed for `seven` to return a value.
         7L.shouldBeRetOf!(
             backend,
             q{
@@ -26,16 +23,9 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A loop that runs its body more than once, and stops. The count comes back
-// as the answer, so a condition tested only once (never terminating, or
-// running the body a single time) and an increment that never ran both
-// disagree with it: without the increment `i` stays `0` and the loop cannot
-// end, and without re-testing the condition it cannot end either.
-//
-// `one` is behind a call because dmd folds an all-literal expression during
-// semantic analysis, and comes first because the native oracle mixes these
-// declarations into a local delegate scope, where a nested function does not
-// see a sibling declared later.
+// Three iterations add up to 3. A body run once, or an `i` that never
+// increments, gives a different answer or no answer at all. `one` is behind
+// a call so the total cannot be folded before a backend runs.
 static foreach (backend; Matrix!()) {
     @("loop.forRepeatsAndTerminates." ~ backend.stringof)
     @Tags(backend.stringof)

@@ -4,10 +4,8 @@ module ut.backends.call.assign;
 import ut.backends;
 
 
-// `sum += n` is an `AddAssignExp`: dmd keeps compound assignment as its own
-// node rather than rewriting it into `sum = sum + n`, because the left side
-// must only be evaluated once. The addend is behind a call so that dmd's
-// semantic pass cannot fold the whole expression to a literal.
+// `2 += 5` leaves 7. The addend is behind a call so the answer cannot be
+// folded before a backend runs.
 static foreach (backend; Matrix!()) {
     @("assign.addAssign.local." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -56,10 +54,8 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// `AddAssignExp` is itself an expression, not just a statement: `sum += n`
-// evaluates to the sum, the same as `sum = sum + n` would. Every other test
-// here uses `+=` as a statement, so the value it writes to its own place is
-// never read; `return (sum += five());` is what pins that it is.
+// `sum += n` evaluates to the new sum. Every other test here uses `+=` as a
+// statement, where that value is discarded.
 static foreach (backend; Matrix!()) {
     @("assign.addAssign.isAnExpression." ~ backend.stringof)
     @Tags(backend.stringof)
