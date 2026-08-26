@@ -55,29 +55,26 @@ private struct FrameLayout {
 }
 
 // The frame stack every guest call reserves its parameter frame from,
-// bump-allocated and popped LIFO. Built on `std.experimental.allocator`'s
-// `Region` building block, which supplies the fixed backing buffer, a
-// bump pointer with a bounds check (overflow throws; no growth strategy
-// yet), and a `deallocate` that frees exactly the block most recently
-// handed out. Alignment above one byte is handled entirely by hand in
+// bump-allocated and popped LIFO. `push` is the only way to get bytes from
+// it, and the `Frame` it returns is the only way to give them back: a
+// call site never marks a position and pops back to it by hand, so it can
+// never forget to, on a throw or any other path out of scope.
+//
+// Built on `std.experimental.allocator`'s `Region` building block, which
+// supplies the fixed backing buffer, a bump pointer with a bounds check
+// (overflow throws; no growth strategy yet), and a `deallocate` that frees
+// exactly the block most recently handed out. That is all `Region`
+// contributes: alignment above one byte is computed entirely by hand in
 // `push`, below - `Region` is built with `minAlign = 1`, so it never
 // rounds a request up on its own.
-//
-// `Mark` is the number of bytes used so far, not a count of live
-// reservations: `popTo` hands `Region.deallocate` one synthetic block
-// spanning from the mark's byte position to the current one. `deallocate`
-// only requires that a block's end match the region's current bump
-// position, which this always does - every mark taken after another is
-// popped before it, the same order calls nest in - so one `deallocate`
-// call frees everything back to the mark, however many reservations that
-// covers, with no per-reservation bookkeeping and no GC allocation.
 private struct FrameStack {
     import std.experimental.allocator.building_blocks.region: Region;
     import std.experimental.allocator.mallocator: Mallocator;
 
     // A byte position: how many bytes of the backing buffer were in use
-    // when the mark was taken.
-    public alias Mark = size_t;
+    // at some earlier point. Never exposed outside this struct - `Frame`
+    // is what a call site holds instead.
+    private alias Mark = size_t;
 
     private Region!(Mallocator, 1) _region;
     private size_t _capacity;
@@ -98,22 +95,43 @@ private struct FrameStack {
         assert(freed, "could not reclaim the frame stack's own buffer");
     }
 
-    public Mark mark() const {
+    private Mark mark() const {
         return _capacity - _region.available;
     }
 
-    // Bump-allocates `size` bytes aligned to `alignment` and returns its
-    // base.
-    public ubyte* push(in size_t size, in uint alignment) {
+    // One `push` reservation: `base` is where its bytes start, `null` for
+    // a zero-size reservation nothing will dereference. Pops itself, back
+    // to the mark it was pushed at, the moment it goes out of scope -
+    // copying it would let two handles pop the same bytes, so it can only
+    // be moved.
+    public struct Frame {
+        private FrameStack* _stack;
+        private Mark _mark;
+        public ubyte* base;
+
+        @disable this(this);
+
+        ~this() {
+            if (_stack !is null)
+                _stack.popTo(_mark);
+        }
+    }
+
+    // Bump-allocates `size` bytes aligned to `alignment` and hands back a
+    // handle that frees them again when it goes out of scope.
+    public Frame push(in size_t size, in uint alignment) {
         import std.conv: text;
+
+        const mark = this.mark;
 
         // `Region.allocate(0)` always returns `null` - it treats that as
         // a failed request, not a valid empty one - so a parameterless
         // function's zero-size frame would look like an overflow. There
         // is nothing to write into such a frame anyway, so this reserves
-        // nothing for it and returns a base no caller will dereference.
+        // nothing for it and hands back a handle whose `base` no caller
+        // will dereference.
         if (size == 0)
-            return null;
+            return Frame(&this, mark, null);
 
         // The padding math below only lands a slot on its requested
         // alignment because the buffer's own base is aligned to at least
@@ -127,9 +145,8 @@ private struct FrameStack {
                     "to ", Mallocator.alignment, " byte(s)"),
             );
 
-        const used = mark;
-        const alignedUsed = alignUp(used, alignment);
-        const padding = alignedUsed - used;
+        const alignedUsed = alignUp(mark, alignment);
+        const padding = alignedUsed - mark;
 
         auto block = _region.allocate(padding + size);
         if (block is null)
@@ -138,24 +155,28 @@ private struct FrameStack {
                     " byte(s) at offset ", alignedUsed, " of ", _capacity),
             );
 
-        return _base + alignedUsed;
+        return Frame(&this, mark, _base + alignedUsed);
     }
 
     // Frees every byte reserved since `mark`, in one `Region.deallocate`
-    // call regardless of how many `push`es that covers.
-    public void popTo(in Mark mark) {
+    // call regardless of how many `push`es that covers - `Frame`'s
+    // destructor is the only caller, and only ever with the mark it was
+    // itself pushed at, so this always covers exactly the reservations
+    // nested inside that one `Frame`, in the order they nested.
+    private void popTo(in Mark mark) {
         const used = this.mark;
-        // Nothing was reserved since `mark` - every intervening `push`
-        // was a zero-size one, which reserves nothing. `Region.deallocate`
-        // only accepts an empty block when its pointer is `null`, and
-        // `_base + mark` is not that, so this returns instead of handing
-        // it a block it would reject.
+        // Nothing was reserved since `mark` - either this was a zero-size
+        // reservation, or the reservations nested inside it already
+        // popped themselves. `Region.deallocate` only accepts an empty
+        // block when its pointer is `null`, and `_base + mark` is not
+        // that, so this returns instead of handing it a block it would
+        // reject.
         if (used == mark)
             return;
 
         auto block = _base[mark .. used];
         const popped = _region.deallocate(block);
-        assert(popped, "frame stack marks popped out of order");
+        assert(popped, "frame stack popped out of LIFO order");
     }
 }
 
@@ -232,11 +253,9 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         auto layout = layoutOf(function_);
-        const mark = _frames.mark;
-        scope(exit) _frames.popTo(mark);
-        auto frameBase = _frames.push(layout.size, layout.alignment);
+        auto frame = _frames.push(layout.size, layout.alignment);
 
-        execute(function_, returnPlace, frameBase, layout);
+        execute(function_, returnPlace, frame.base, layout);
     }
 
     // `function_`'s frame layout, from the cache; computed on its first
@@ -382,11 +401,10 @@ extern(C++) private final class Evaluator: Visitor {
 
         // The caller discarded the result, but evaluating the expression
         // can have effects, so it still runs - into a reservation on the
-        // frame stack, popped straight after, not into a GC allocation.
-        const mark = _frames.mark;
-        scope(exit) _frames.popTo(mark);
-        auto scratch = _frames.push(_type.size, _type.alignsize);
-        evaluate(statement.exp, _type, scratch);
+        // frame stack, popped when it goes out of scope, not into a GC
+        // allocation.
+        auto frame = _frames.push(_type.size, _type.alignsize);
+        evaluate(statement.exp, _type, frame.base);
     }
 
     override void visit(ExpStatement statement) {
@@ -411,11 +429,10 @@ extern(C++) private final class Evaluator: Visitor {
 
         // The caller discarded the result, but evaluating the expression
         // can have effects, so it still runs - into a reservation on the
-        // frame stack, popped straight after, not into a GC allocation.
-        const mark = _frames.mark;
-        scope(exit) _frames.popTo(mark);
-        auto scratch = _frames.push(type.size, type.alignsize);
-        evaluate(statement.exp, type, scratch);
+        // frame stack, popped when it goes out of scope, not into a GC
+        // allocation.
+        auto frame = _frames.push(type.size, type.alignsize);
+        evaluate(statement.exp, type, frame.base);
     }
 
     override void visit(Expression expression) {
@@ -489,9 +506,7 @@ extern(C++) private final class Evaluator: Visitor {
                     paramCount, " argument(s), got ", argCount),
             );
 
-        const mark = _frames.mark;
-        scope(exit) _frames.popTo(mark);
-        auto calleeBase = _frames.push(layout.size, layout.alignment);
+        auto frame = _frames.push(layout.size, layout.alignment);
 
         if (parameters !is null) {
             // Every argument is evaluated, even one the callee never
@@ -503,11 +518,11 @@ extern(C++) private final class Evaluator: Visitor {
                 evaluate(
                     (*arguments)[i],
                     parameter.type,
-                    calleeBase + layout.offsets[i],
+                    frame.base + layout.offsets[i],
                 );
         }
 
-        execute(function_, _place, calleeBase, layout);
+        execute(function_, _place, frame.base, layout);
     }
 
     // Evaluates `expression` into `type.size` bytes at `place`, then
