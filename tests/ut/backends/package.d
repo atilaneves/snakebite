@@ -198,6 +198,36 @@ public void shouldBeRetOf(
     result.shouldEqual(expected, file, line);
 }
 
+// `shouldRunOf!(backend, code, "run")()` invokes one `void` guest
+// function through the backend's `call` and requires only that it
+// completes without throwing - a `void` function has no return value to
+// compare against, unlike `shouldBeRetOf`.
+//
+// `code` is registered and batch-parsed the same way `shouldBeStatusOf`'s
+// is; see there.
+public void shouldRunOf(
+    BackendType, string code, string functionName,
+    string module_ = __MODULE__,
+)(
+    in string file = __FILE__,
+    in size_t line = __LINE__,
+) {
+    import snakebite.backends.backend: Program;
+
+    () {
+        mixin(code);
+        mixin(functionName ~ "();");
+    }();
+
+    enum program_ = RegisterProgram!(module_, code).program;
+    auto program = Program([parsedProgram(program_)]);
+    auto function_ = findFunction(program.rootModules[0], functionName);
+    assert(function_ !is null,
+        "No function `" ~ functionName ~ "` in the guest program");
+
+    (new BackendType).call(function_, null, []);
+}
+
 public string evaluate(
     string module_,
     BackendType,

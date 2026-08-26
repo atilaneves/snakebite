@@ -10,21 +10,200 @@ private:
 public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
 
+    // The one evaluator this backend ever creates: it owns the frame
+    // stack and the per-function layout cache, both of which must
+    // outlive any single call to stay warm across calls. `call` is a
+    // thin adapter onto it.
+    private Evaluator _evaluator;
+
+    public this() {
+        _evaluator = new Evaluator;
+    }
+
+    public override void call(
+        FuncDeclaration function_,
+        void* returnPlace,
+        void*[] args,
+    ) {
+        _evaluator.call(function_, returnPlace, args);
+    }
+
+    public override string eval(FuncDeclaration function_) {
+        throw new Exception(
+            "eval not implemented for the interpreter yet",
+        );
+    }
+}
+
+// One guest function's frame layout: each parameter's byte offset, and
+// the total size and alignment one activation of the function needs on
+// the frame stack. A pure function of the declaration, so it is computed
+// once per function and cached, never per call.
+private struct FrameLayout {
+    import dmd.declaration: VarDeclaration;
+
+    size_t size;
+    uint alignment = 1;
+    // Parallel to the function's parameter list, indexed positionally.
+    // The argument-evaluation loop already has the positional index in
+    // hand, so it never pays an AA hash lookup for the hottest path.
+    size_t[] offsets;
+    // Keyed by declaration instead of position: `visit(VarExp)` resolves
+    // a parameter read from a `VarDeclaration` it found by name lookup,
+    // not by position, so it still needs a hash lookup.
+    size_t[VarDeclaration] offsetOf;
+}
+
+// The frame stack every guest call reserves its parameter frame from,
+// bump-allocated and popped LIFO. Built on `std.experimental.allocator`'s
+// `Region` building block, which supplies the fixed backing buffer,
+// alignment-respecting bump allocation, bounds checking (overflow throws;
+// no growth strategy yet), and freeing of the one block it most recently
+// handed out.
+//
+// `Region.deallocate` only ever frees that single last block, and neither
+// it nor any other public member exposes or restores the bump position
+// directly - `alignedAllocate` plus `deallocate` loses the alignment
+// padding forever, since `deallocate` rewinds only to the aligned start
+// it returned, not to the unaligned position before the padding. Reusing
+// that lost padding on every future call would exhaust the fixed buffer
+// over a long-running interpretation even though the frame stack is
+// logically empty between calls. So this computes the padding itself
+// (`available` is the only position `Region` exposes) and allocates
+// padding and frame together as one block, which `popTo` hands whole
+// back to `deallocate` - and remembers each pushed block on a small LIFO
+// stack of its own, since popping back through several reservations to
+// one mark needs to walk them off in that same order, one `Region`
+// deallocation per reservation. `Region` was checked for this; no
+// composition of it exposes an arbitrary-position restore, so this stays
+// the thinnest wrapper that reclaims the padding and supports popping to
+// an earlier mark.
+private struct FrameStack {
+    import std.experimental.allocator.building_blocks.region: Region;
+    import std.experimental.allocator.mallocator: Mallocator;
+
+    // How many reservations were live when the mark was taken; `popTo`
+    // walks the reservation stack back down to this depth.
+    public alias Mark = size_t;
+
+    // `minAlign = 1`: every alignment is handled by hand above, so the
+    // region must never round a request up on its own - that would make
+    // the remembered block shorter than what `popTo` hands to
+    // `deallocate`, and `deallocate` would then refuse it as not the
+    // last-allocated block.
+    private Region!(Mallocator, 1) _region;
+    private size_t _capacity;
+    private void[][] _pushed;
+
+    public this(size_t capacity) {
+        _capacity = capacity;
+        _region = typeof(_region)(capacity);
+    }
+
+    public Mark mark() const {
+        return _pushed.length;
+    }
+
+    // Bump-allocates `size` bytes aligned to `alignment` and returns its
+    // base.
+    public ubyte* push(in size_t size, in uint alignment) {
+        import std.conv: text;
+
+        // `Region.allocate(0)` always returns `null` - it treats that as
+        // a failed request, not a valid empty one - so a parameterless
+        // function's zero-size frame would look like an overflow. There
+        // is nothing to write into such a frame anyway, so this reserves
+        // and tracks nothing for it and returns a base no caller will
+        // dereference.
+        if (size == 0)
+            return null;
+
+        const used = _capacity - _region.available;
+        const alignedUsed = alignUp(used, alignment);
+        const padding = alignedUsed - used;
+
+        auto block = _region.allocate(padding + size);
+        if (block is null)
+            throw new Exception(
+                text("interpreter frame stack overflow: need ", size,
+                    " byte(s) at offset ", alignedUsed, " of ", _capacity),
+            );
+
+        _pushed ~= block;
+        return cast(ubyte*) block.ptr + padding;
+    }
+
+    // Pops every reservation pushed since `mark`, most recent first - the
+    // only order `Region.deallocate` accepts.
+    public void popTo(in Mark mark) {
+        while (_pushed.length > mark) {
+            const popped = _region.deallocate(_pushed[$ - 1]);
+            assert(popped, "frame stack reservations popped out of order");
+            _pushed = _pushed[0 .. $ - 1];
+        }
+    }
+}
+
+import dmd.visitor: Visitor;
+
+// The evaluation context: executes statements and evaluates expressions,
+// always into the current destination (`_type` bytes at `_place`),
+// resolving parameter reads against the currently executing function's
+// frame. One class covers statement and expression nodes both, so the
+// (type, place, frame) context lives in one spot instead of being copied
+// between visitor types. Any node kind it does not know throws, naming
+// the node, instead of silently doing nothing. It also owns the frame
+// stack and the per-function layout cache: both need to outlive any one
+// call to stay warm across calls, and this is the only place that ever
+// walks a call's frames, so there is nothing left for a separate
+// `Interpreter`-side cache to hold.
+extern(C++) private final class Evaluator: Visitor {
+    import dmd.astenums: STC;
+    import dmd.expression: CallExp, Expression, IntegerExp, RealExp, VarExp;
+    import dmd.func: FuncDeclaration;
+    import dmd.mtype: Type;
+    import dmd.statement:
+        CompoundStatement, ExpStatement, ReturnStatement, Statement;
+    import dmd.typesem: size;
+
+    alias visit = Visitor.visit;
+
+    // Every guest frame lives in this one frame stack, bump-allocated on
+    // call and popped on return. Frames never move; overflow throws
+    // loudly.
+    private FrameStack _frames;
     // Each guest function's frame layout, computed once on that
     // function's first call (the cold path) and reused by every call
     // after it.
     private FrameLayout[FuncDeclaration] _layouts;
-    // Every guest frame lives in this one buffer, bump-allocated by
-    // `reserve` and popped on return. The buffer is fixed-capacity and
-    // never reallocates, so a live frame's addresses never move.
-    private ubyte[] _frameStack;
-    private size_t _frameTop;
+
+    // The destination: while walking statements, the enclosing function's
+    // return type and return place; `evaluate` narrows it to each
+    // subexpression's own destination.
+    private Type _type;
+    private void* _place;
+    // The currently executing function's frame.
+    private ubyte* _frameBase;
+    private const(FrameLayout)* _layout;
+    // Set by `visit(ReturnStatement)`; checked by `visit(CompoundStatement)`
+    // to stop walking sibling statements once one has run. dmd accepts
+    // unreachable statements after a `return` (it only warns with `-w`),
+    // so without this flag a statement after `return` would still
+    // execute and silently overwrite an already-computed result.
+    private bool _returned;
 
     public this() {
-        _frameStack = new ubyte[1024 * 1024];
+        _frames = FrameStack(1024 * 1024);
     }
 
-    public override void call(
+    // Runs `function_` against a fresh top-level frame, mirroring the
+    // `Backend.call` contract: `returnPlace` is where the result goes
+    // (`null` if the caller does not want it), `args` are host-to-guest
+    // arguments (not yet supported). `extern(D)`: a dynamic array
+    // parameter is not valid on an `extern(C++)` method, and this one is
+    // never called from C++ - only `Visitor`'s `visit` overloads need
+    // that linkage.
+    extern(D) final void call(
         FuncDeclaration function_,
         void* returnPlace,
         void*[] args,
@@ -38,18 +217,11 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
             );
 
         auto layout = layoutOf(function_);
-        const mark = _frameTop;
-        scope(exit) _frameTop = mark;
-        auto frameBase = reserve(layout.size, layout.alignment);
+        const mark = _frames.mark;
+        scope(exit) _frames.popTo(mark);
+        auto frameBase = _frames.push(layout.size, layout.alignment);
 
-        scope evaluator = new Evaluator(this);
-        evaluator.execute(function_, returnPlace, frameBase, layout);
-    }
-
-    public override string eval(FuncDeclaration function_) {
-        throw new Exception(
-            "eval not implemented for the interpreter yet",
-        );
+        execute(function_, returnPlace, frameBase, layout);
     }
 
     // `function_`'s frame layout, from the cache; computed on its first
@@ -59,14 +231,13 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         if (auto cached = function_ in _layouts)
             return cached;
 
-        import dmd.astenums: STC;
-        import dmd.typesem: size;
         import std.conv: text;
 
         FrameLayout layout;
         auto parameters = function_.parameters;
         if (parameters !is null) {
-            foreach (parameter; *parameters) {
+            layout.offsets.length = parameters.length;
+            foreach (i, parameter; *parameters) {
                 // A `ref`/`out` parameter occupies a pointer slot in a
                 // compiled frame, and `lazy` a delegate; `parameter.type`
                 // is still the pointed-to/lazily-evaluated type either
@@ -82,6 +253,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 
                 const alignment = parameter.type.alignsize;
                 layout.size = alignUp(layout.size, alignment);
+                layout.offsets[i] = layout.size;
                 layout.offsetOf[parameter] = layout.size;
                 layout.size += parameter.type.size;
                 if (alignment > layout.alignment)
@@ -93,75 +265,10 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         return function_ in _layouts;
     }
 
-    // Bump-allocates one frame (or scratch block) on the frame stack and
-    // returns its base. The caller pops by restoring `_frameTop` to the
-    // value it saved beforehand. No growth strategy yet: overflow throws.
-    private ubyte* reserve(in size_t size, in uint alignment) {
-        import std.conv: text;
-
-        _frameTop = alignUp(_frameTop, alignment);
-        if (_frameTop + size > _frameStack.length)
-            throw new Exception(
-                text("interpreter frame stack overflow: need ", size,
-                    " byte(s) at offset ", _frameTop, " of ",
-                    _frameStack.length),
-            );
-
-        auto base = _frameStack.ptr + _frameTop;
-        _frameTop += size;
-        return base;
-    }
-}
-
-// One guest function's frame layout: each parameter's byte offset, and
-// the total size and alignment one activation of the function needs on
-// the frame stack. A pure function of the declaration, so it is computed
-// once per function and cached, never per call.
-private struct FrameLayout {
-    import dmd.declaration: VarDeclaration;
-
-    size_t size;
-    uint alignment = 1;
-    size_t[VarDeclaration] offsetOf;
-}
-
-import dmd.visitor: Visitor;
-
-// The evaluation context: executes statements and evaluates expressions,
-// always into the current destination (`_type` bytes at `_place`),
-// resolving parameter reads against the currently executing function's
-// frame. One class covers statement and expression nodes both, so the
-// (type, place, frame) context lives in one spot instead of being copied
-// between visitor types. Any node kind it does not know throws, naming
-// the node, instead of silently doing nothing.
-extern(C++) private final class Evaluator: Visitor {
-    import dmd.astenums: Tvoid;
-    import dmd.expression: CallExp, Expression, IntegerExp, RealExp, VarExp;
-    import dmd.func: FuncDeclaration;
-    import dmd.mtype: Type;
-    import dmd.statement: CompoundStatement, ReturnStatement, Statement;
-    import dmd.typesem: size;
-
-    alias visit = Visitor.visit;
-
-    private Interpreter _interpreter;
-    // The destination: while walking statements, the enclosing function's
-    // return type and return place; `evaluate` narrows it to each
-    // subexpression's own destination.
-    private Type _type;
-    private void* _place;
-    // The currently executing function's frame.
-    private ubyte* _frameBase;
-    private const(FrameLayout)* _layout;
-
-    this(Interpreter interpreter) {
-        _interpreter = interpreter;
-    }
-
     // Runs `function_`'s body with its frame already reserved at
     // `frameBase` - and its parameter slots already filled by the caller
     // - evaluating its `return` expression into `returnPlace`.
-    final void execute(
+    private void execute(
         FuncDeclaration function_,
         void* returnPlace,
         ubyte* frameBase,
@@ -180,17 +287,20 @@ extern(C++) private final class Evaluator: Visitor {
         auto savedPlace = _place;
         auto savedFrameBase = _frameBase;
         auto savedLayout = _layout;
+        auto savedReturned = _returned;
         scope(exit) {
             _type = savedType;
             _place = savedPlace;
             _frameBase = savedFrameBase;
             _layout = savedLayout;
+            _returned = savedReturned;
         }
 
         _type = function_.type.nextOf;
         _place = returnPlace;
         _frameBase = frameBase;
         _layout = layout;
+        _returned = false;
         body_.accept(this);
     }
 
@@ -208,24 +318,25 @@ extern(C++) private final class Evaluator: Visitor {
             return;
 
         foreach (child; *statement.statements) {
-            if (child !is null)
+            if (child !is null) {
                 child.accept(this);
+                if (_returned)
+                    return;
+            }
         }
     }
 
     override void visit(ReturnStatement statement) {
-        import std.conv: text;
+        _returned = true;
 
+        // `return f();` in a `void` function never reaches here with
+        // `statement.exp` set to `f()`: dmd's own semantic pass desugars
+        // it into `f(); return;` (an `ExpStatement` ahead of this now
+        // exp-less `ReturnStatement`) before the interpreter ever sees
+        // the body, precisely because a `void` return has no destination
+        // to write into. `visit(ExpStatement)` is where that call runs.
         if (statement.exp is null)
             return;
-
-        // A `void` function has no native destination for a `return`
-        // expression to evaluate into; unimplemented, so it throws.
-        if (_type.ty == Tvoid)
-            throw new Exception(
-                text("interpreter cannot evaluate a `void`-typed ",
-                    "`return` expression: `", statement.exp.toString, "`"),
-            );
 
         if (_place !is null) {
             evaluate(statement.exp, _type, _place);
@@ -235,10 +346,29 @@ extern(C++) private final class Evaluator: Visitor {
         // The caller discarded the result, but evaluating the expression
         // can have effects, so it still runs - into a reservation on the
         // frame stack, popped straight after, not into a GC allocation.
-        const mark = _interpreter._frameTop;
-        scope(exit) _interpreter._frameTop = mark;
-        auto scratch = _interpreter.reserve(_type.size, _type.alignsize);
+        const mark = _frames.mark;
+        scope(exit) _frames.popTo(mark);
+        auto scratch = _frames.push(_type.size, _type.alignsize);
         evaluate(statement.exp, _type, scratch);
+    }
+
+    override void visit(ExpStatement statement) {
+        if (statement.exp is null)
+            return;
+
+        // A statement-position expression's value, if any, has no
+        // destination - only its effects matter. dmd hands this
+        // interpreter exactly one shape of it so far: the call that a
+        // `void` function's `return f();` desugars to, where `f()` is
+        // itself `void` and there is nothing to reserve. The same
+        // discard-into-a-scratch-reservation handling as a discarded
+        // `return` covers a non-`void` expression the same way, since
+        // `push` already treats a zero-size request as a no-op.
+        auto type = statement.exp.type;
+        const mark = _frames.mark;
+        scope(exit) _frames.popTo(mark);
+        auto scratch = _frames.push(type.size, type.alignsize);
+        evaluate(statement.exp, type, scratch);
     }
 
     override void visit(Expression expression) {
@@ -296,7 +426,23 @@ extern(C++) private final class Evaluator: Visitor {
                     expression.toString, "`"),
             );
 
-        auto layout = _interpreter.layoutOf(function_);
+        // `expression.f` being resolved only means dmd found one
+        // candidate declaration; it does not mean this call is safe to
+        // run directly. For `obj.method(...)`, dmd still sets `f` to the
+        // statically known method - running it here would silently
+        // devirtualize a virtual call and drop `this`, and a nested
+        // function's static chain is dropped the same way. Both are
+        // unsupported constructs this interpreter has no representation
+        // for, so this throws loudly instead of running with a missing
+        // context and returning a plausible-looking wrong answer.
+        if (function_.isThis() !is null || function_.isNested())
+            throw new Exception(
+                text("interpreter cannot call `", function_.toString,
+                    "`: it needs a `this` or a static chain, which the ",
+                    "interpreter does not provide"),
+            );
+
+        auto layout = layoutOf(function_);
 
         auto arguments = expression.arguments;
         const argCount = arguments is null ? 0 : arguments.length;
@@ -308,19 +454,21 @@ extern(C++) private final class Evaluator: Visitor {
                     paramCount, " argument(s), got ", argCount),
             );
 
-        const mark = _interpreter._frameTop;
-        scope(exit) _interpreter._frameTop = mark;
-        auto calleeBase =
-            _interpreter.reserve(layout.size, layout.alignment);
+        const mark = _frames.mark;
+        scope(exit) _frames.popTo(mark);
+        auto calleeBase = _frames.push(layout.size, layout.alignment);
 
         if (parameters !is null) {
             // Every argument is evaluated, even one the callee never
-            // reads, since evaluating an argument can have effects.
+            // reads, since evaluating an argument can have effects. The
+            // loop already has the positional index `i`, so it indexes
+            // `offsets` directly instead of hashing `parameter` through
+            // `offsetOf`.
             foreach (i, parameter; *parameters)
                 evaluate(
                     (*arguments)[i],
                     parameter.type,
-                    calleeBase + layout.offsetOf[parameter],
+                    calleeBase + layout.offsets[i],
                 );
         }
 
@@ -386,16 +534,27 @@ private void writeLiteral(
     );
 }
 
-// Rounds `offset` up so a value of `alignment`'s natural alignment can
-// start there. Delegates to dmd's own default field-alignment rule
-// (`aggregate.alignmember`, the same one dmd uses to lay out a struct's
-// fields) rather than reimplementing it.
+// dmd's default field-alignment rule (`aggregate.alignmember`, the same
+// one it uses to lay out a struct's fields), rather than reimplementing
+// it: no generic round-up-to-alignment helper exists anywhere else in the
+// dmd frontend sources. Parameter frame offsets are ordinarily assigned
+// far downstream of this, in dmd's machine-code backend, which this
+// project does not use - laying out frames here is unavoidable, not a
+// case of redoing work dmd already did for us at this stage.
+//
+// `alignmember` takes a `structalign_t` for cases with an explicit
+// `align(N)`; there is none here, so `defaultAlignment` is always the
+// type's own natural alignment - and it is built once at module load,
+// not on every call, since this runs on every parameter offset and every
+// frame stack push.
+private imported!"dmd.astenums".structalign_t defaultAlignment;
+
+shared static this() {
+    defaultAlignment.setDefault;
+}
+
 private size_t alignUp(in size_t offset, in uint alignment) {
     import dmd.aggregate: alignmember;
-    import dmd.astenums: structalign_t;
-
-    structalign_t defaultAlignment;
-    defaultAlignment.setDefault;
 
     return alignmember(defaultAlignment, alignment, cast(uint) offset);
 }
