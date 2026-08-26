@@ -41,6 +41,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 // once per function and cached, never per call.
 private struct FrameLayout {
     import dmd.declaration: VarDeclaration;
+    import dmd.mtype: Type;
 
     size_t size;
     uint alignment = 1;
@@ -56,7 +57,7 @@ private struct FrameLayout {
     // Reserves one slot for a value of `type` and returns its offset. A
     // parameter and a local differ in what they key the offset by, not in
     // how the frame grows to fit them, so both come here.
-    private size_t reserveSlot(imported!"dmd.mtype".Type type) {
+    private size_t reserveSlot(Type type) {
         import dmd.typesem: size;
 
         const alignment = type.alignsize;
@@ -653,12 +654,6 @@ extern(C++) private final class Evaluator: Visitor {
                     expression.toString, "`: no frame slot was laid out ",
                     "for it"),
             );
-
-        // No initializer at all (e.g. `long sum;`) leaves the slot as
-        // whatever bytes were already there, matching a compiled frame's
-        // uninitialized storage - nothing to run.
-        if (variable._init is null)
-            return;
 
         auto expInitializer = variable._init.isExpInitializer;
         if (expInitializer is null)

@@ -137,3 +137,29 @@ unittest {
     (new Interpreter).call(function_, &result, [])
         .shouldThrow;
 }
+
+// `-1 < 0` is true. Read as an unsigned bit pattern the same bits are
+// `uint.max`, which would make it false.
+static foreach (backend; Matrix!()) {
+    @("compare.lessThan.signed." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int negative() {
+                    return -1;
+                }
+
+                int zero() {
+                    return 0;
+                }
+
+                bool less() {
+                    return negative() < zero();
+                }
+            },
+            "less",
+        );
+    }
+}
