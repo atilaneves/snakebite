@@ -68,3 +68,33 @@ public long loadIntegral(in void* place, in size_t size, in bool signed) {
 public bool isIntegralSize(in size_t size) {
     return size == 1 || size == 2 || size == 4 || size == 8;
 }
+
+// What a caller on a hot execution path repeatedly asks a dmd `Type`
+// for - its size, its alignment, whether it is integral, and if so
+// whether it is signed - decided once and kept, instead of re-entering
+// dmd's semantic-analysis machinery (`Type.size`, `TypeBasic.alignsize`,
+// `isIntegral`, `isUnsigned`) on every visit of the same node. Shared
+// between backends (not owned by the interpreter package) because any
+// tree-walking or bytecode backend asks a dmd `Type` the same four
+// questions to lay a value out in native memory.
+public struct TypeFacts {
+    import dmd.mtype: Type;
+
+    public size_t size;
+    public uint alignment;
+    public bool isIntegral;
+    public bool isUnsigned;
+
+    // The facts for `type`, read from dmd exactly once by the caller
+    // that builds this.
+    public static TypeFacts of(Type type) {
+        import dmd.typesem: size;
+
+        return TypeFacts(
+            type.size,
+            type.alignsize,
+            type.isIntegral,
+            type.isUnsigned,
+        );
+    }
+}
