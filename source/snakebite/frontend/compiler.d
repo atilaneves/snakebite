@@ -57,6 +57,17 @@ public imported!"dmd.dmodule".Module parseSnippet(in string source) {
     return compiler.parseSnippet(source);
 }
 
+// Parse several whole guest programs, driving the shared semantic phases
+// over the ones not already cached in one batched pass. Unlike `eval`'s
+// snippets (wrapped as structs inside one shared module by the caller),
+// two guest programs can each declare `main` at module scope, so they
+// cannot be concatenated into a single module; each source becomes its own
+// module here, but dmd's semantic setup cost is still paid once for the
+// whole batch rather than once per source. Results follow input order.
+public imported!"dmd.dmodule".Module[] parseSnippets(in string[] sources) {
+    return compiler.parseSnippets(sources);
+}
+
 public void withCompilerLock(scope void delegate() action) {
     compiler.withLock(action);
 }
@@ -270,16 +281,8 @@ final class Compiler {
         in FrontendFlags flags,
     ) {
         import dmd.dmodule: Module;
-        import dmd.dsymbolsem:
-            dsymbolSemantic,
-            importAll,
-            runDeferredSemantic,
-            runDeferredSemantic2,
-            runDeferredSemantic3;
         import dmd.frontend: addImport, dmdParseModule = parseModule;
         import dmd.globals: global;
-        import dmd.semantic2: semantic2;
-        import dmd.semantic3: semantic3;
         import std.file: readText;
 
         const originalPathLength = global.path.length;
@@ -325,13 +328,7 @@ final class Compiler {
         // Drive the shared semantic phases over the whole root set the way dmd
         // drives `-unittest <files>`: each phase runs across all roots before
         // the next begins.
-        foreach (m; modules) m.importAll(null);
-        foreach (m; modules) m.dsymbolSemantic(null);
-        runDeferredSemantic;
-        foreach (m; modules) m.semantic2(null);
-        runDeferredSemantic2;
-        foreach (m; modules) m.semantic3(null);
-        runDeferredSemantic3;
+        driveSharedSemantic(modules);
         if (global.errors != 0)
             throw new Exception(diagnosticMessageWithLocations);
 
@@ -346,6 +343,14 @@ final class Compiler {
         requireInitialized;
 
         return parseSourceLocked(source);
+    }
+
+    imported!"dmd.dmodule".Module[] parseSnippets(in string[] sources) {
+        mutex.lock;
+        scope(exit) mutex.unlock;
+        requireInitialized;
+
+        return parseSnippetsLocked(sources);
     }
 
     private imported!"dmd.dmodule".Module parseSourceLocked(in string source) {
@@ -393,20 +398,63 @@ final class Compiler {
     }
 
     private void fullSemantic(imported!"dmd.dmodule".Module module_) {
-        import dmd.dsymbolsem:
-            dsymbolSemantic, importAll, runDeferredSemantic,
-            runDeferredSemantic2, runDeferredSemantic3;
-        import dmd.semantic2: semantic2;
-        import dmd.semantic3: semantic3;
-
         module_.importedFrom = module_;
-        module_.importAll(null);
-        module_.dsymbolSemantic(null);
-        runDeferredSemantic;
-        module_.semantic2(null);
-        runDeferredSemantic2;
-        module_.semantic3(null);
-        runDeferredSemantic3;
+        driveSharedSemantic([module_]);
+    }
+
+    // Parse each of `sources` not already in `sourceCache` as its own module,
+    // then drive the shared semantic phases across those newly parsed modules
+    // together, so dmd's per-batch setup cost (deferred semantic queues, etc.)
+    // is paid once for the whole batch instead of once per source. Already
+    // cached modules are returned as-is, in the same position as their source.
+    private imported!"dmd.dmodule".Module[] parseSnippetsLocked(
+        in string[] sources,
+    ) {
+        import dmd.dmodule: Module;
+        import core.atomic: atomicFetchAdd;
+        import dmd.frontend: dmdParseModule = parseModule;
+        import dmd.globals: global;
+        import std.conv: text;
+
+        resetErrors;
+
+        auto captured = capturedStderr;
+        scope(failure) captured.discard;
+
+        auto modules = new Module[sources.length];
+        string[] freshSources;
+        Module[] freshModules;
+
+        foreach (i, source; sources) {
+            if (auto cached = source in sourceCache) {
+                modules[i] = *cached;
+                continue;
+            }
+
+            const fileName = text(
+                "snippet_",
+                atomicFetchAdd(_moduleCounter, 1u),
+                ".d",
+            );
+            auto result = dmdParseModule(fileName, source);
+            if (result.diagnostics.hasErrors)
+                throw new Exception(diagnosticMessage);
+
+            modules[i] = result.module_;
+            freshSources ~= source;
+            freshModules ~= result.module_;
+        }
+
+        driveSharedSemantic(freshModules);
+        if (global.errors != 0)
+            throw new Exception(diagnosticMessage);
+
+        captured.replay;
+
+        foreach (i, source; freshSources)
+            sourceCache[source] = freshModules[i];
+
+        return modules;
     }
 
     private imported!"dmd.dmodule".Module parsedModuleForFile(
@@ -460,6 +508,33 @@ final class Compiler {
 
         return filePath;
     }
+}
+
+// Drive dmd's shared semantic phases (the ones that must see every root
+// before the next phase starts, e.g. deferred semantic) across `modules`,
+// the way `dmd -unittest <files>` drives them across its whole root set.
+// Shared by the file-backed root set (`parseRootModulesLocked`) and the
+// in-memory snippet batches (`fullSemantic`, `parseSnippetsLocked`) so the
+// phase order is defined once. Leaves `global.errors` for the caller to
+// check: what counts as fatal differs (root-set parsing reports locations,
+// snippet parsing does not).
+private void driveSharedSemantic(imported!"dmd.dmodule".Module[] modules) {
+    import dmd.dsymbolsem:
+        dsymbolSemantic,
+        importAll,
+        runDeferredSemantic,
+        runDeferredSemantic2,
+        runDeferredSemantic3;
+    import dmd.semantic2: semantic2;
+    import dmd.semantic3: semantic3;
+
+    foreach (m; modules) m.importAll(null);
+    foreach (m; modules) m.dsymbolSemantic(null);
+    runDeferredSemantic;
+    foreach (m; modules) m.semantic2(null);
+    runDeferredSemantic2;
+    foreach (m; modules) m.semantic3(null);
+    runDeferredSemantic3;
 }
 
 private struct SavedFrontendFlags {

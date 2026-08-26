@@ -5,8 +5,9 @@ public import snakebite.backends.ctfe: Ctfe;
 public import std.meta: AliasSeq;
 
 import core.sync.mutex: Mutex;
+import dmd.dmodule: Module;
 import dmd.func: FuncDeclaration;
-import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction, findStruct;
 import std.conv: text;
 import std.meta: Filter, staticIndexOf;
@@ -97,10 +98,18 @@ public mixin template SnippetTests() {
 
 // Parse `code` as a whole guest program and run it on the backend the way
 // compiled D would run it, returning the exit status.
-public int run(BackendType, string code)() {
+//
+// `code` is registered under the caller's module (`__MODULE__`, resolved at
+// the call site as a template default, the same trick `__FILE__`/`__LINE__`
+// already rely on below) the same way `eval` snippets register through
+// `SnippetTests`. The first `run`/`shouldBeRetOf` call from a given test
+// module parses every program that module registered in one batch, so dmd's
+// per-batch setup cost is paid once per module, not once per test.
+public int run(BackendType, string code, string module_ = __MODULE__)() {
     import snakebite.backends.backend: Program, run;
 
-    auto program = Program([parseSnippet(code)]);
+    enum program_ = RegisterProgram!(module_, code).program;
+    auto program = Program([parsedProgram(program_)]);
     return run(new BackendType, program);
 }
 
@@ -109,7 +118,12 @@ public int run(BackendType, string code)() {
 // `expected`, whose type states the guest function's return type. The
 // guest's actual return type must match it in size, so a lying test fails
 // loudly instead of reading garbage bytes.
-public void shouldBeRetOf(BackendType, string code, string functionName, T)(
+//
+// `code` is registered and batch-parsed the same way `run`'s is; see there.
+public void shouldBeRetOf(
+    BackendType, string code, string functionName, T,
+    string module_ = __MODULE__,
+)(
     in T expected,
     in string file = __FILE__,
     in size_t line = __LINE__,
@@ -117,7 +131,8 @@ public void shouldBeRetOf(BackendType, string code, string functionName, T)(
     import dmd.typesem: size;
     import snakebite.backends.backend: Program;
 
-    auto program = Program([parseSnippet(code)]);
+    enum program_ = RegisterProgram!(module_, code).program;
+    auto program = Program([parsedProgram(program_)]);
     auto function_ = findFunction(program.rootModules[0], functionName);
     assert(function_ !is null,
         "No function `" ~ functionName ~ "` in the guest program");
@@ -226,4 +241,52 @@ private string batchSource(in Snippet[] snippets) {
 
 private string snippetStructName(in size_t index) {
     return text("__snippet_", index);
+}
+
+
+// A whole guest program registered by `run`/`shouldBeRetOf`, keyed by the
+// test module that declared it (unlike `Snippet`, there is no
+// `declarations`/`code` split: the program is already a complete module).
+private struct GuestProgram {
+    string module_;
+    string code;
+}
+
+private struct RegisterProgram(string module_, string code) {
+    enum program = GuestProgram(module_, code);
+
+    shared static this() {
+        _registeredPrograms[module_] ~= program;
+    }
+}
+
+// Every program each test module will run or call, filled in before `main`.
+private __gshared GuestProgram[][string] _registeredPrograms;
+// Filled in one module at a time by `parsedProgram`.
+private __gshared Module[GuestProgram] _parsedPrograms;
+private __gshared bool[string] _parsedProgramModules;
+
+private Module parsedProgram(in GuestProgram program) {
+    _mutex.lock;
+    scope(exit) _mutex.unlock;
+
+    if (program.module_ !in _parsedProgramModules)
+        parseModulePrograms(program.module_);
+
+    // The map keys by value, and `in` makes the lookup key const.
+    auto found = cast(GuestProgram) program in _parsedPrograms;
+    assert(found !is null, text("Program was not registered: ", program));
+    return *found;
+}
+
+private void parseModulePrograms(in string module_) {
+    import std.algorithm.iteration: map;
+    import std.array: array;
+
+    const programs = _registeredPrograms[module_];
+    const sources = programs.map!(program => program.code).array;
+    auto guestModules = parseSnippets(sources);
+    foreach (index, program; programs)
+        _parsedPrograms[cast(GuestProgram) program] = guestModules[index];
+    _parsedProgramModules[module_] = true;
 }
