@@ -68,3 +68,40 @@ public long loadIntegral(in void* place, in size_t size, in bool signed) {
 public bool isIntegralSize(in size_t size) {
     return size == 1 || size == 2 || size == 4 || size == 8;
 }
+
+// Writes a dmd constant-folded `value` into `place` as `type`'s native
+// layout: a `float` or `double` cast for the floating point widths, an
+// integral by way of `storeIntegral`.
+//
+// The interpreter, writing a literal into a frame slot, and the CTFE
+// backend, writing a call's result into its caller's return place, both
+// convert a dmd value to native bytes this same way, differing only in
+// where `type` and `value` come from.
+public void storeValue(
+    imported!"dmd.mtype".Type type,
+    imported!"dmd.expression".Expression value,
+    void* place,
+) {
+    import dmd.astenums: Tfloat32, Tfloat64;
+    import dmd.typesem: size;
+    import std.conv: text;
+
+    if (type.ty == Tfloat32) {
+        *cast(float*) place = cast(float) value.toReal;
+        return;
+    }
+
+    if (type.ty == Tfloat64) {
+        *cast(double*) place = cast(double) value.toReal;
+        return;
+    }
+
+    if (type.isIntegral) {
+        storeIntegral(place, value.toInteger, type.size);
+        return;
+    }
+
+    throw new Exception(
+        text("no native layout for a value of type `", type.toString, "`"),
+    );
+}

@@ -53,6 +53,7 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.backends.interpreter.framestack: FrameStack;
     import snakebite.ffi: PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
+    import snakebite.nativelayout: storeValue;
     import dmd.astenums: LINK, Tvoid;
     import dmd.expression:
         AddAssignExp, CallExp, CmpExp, DeclarationExp, Expression,
@@ -398,11 +399,11 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(IntegerExp expression) {
-        writeLiteral(_type, expression, _place);
+        storeValue(_type, expression, _place);
     }
 
     override void visit(RealExp expression) {
-        writeLiteral(_type, expression, _place);
+        storeValue(_type, expression, _place);
     }
 
     override void visit(VarExp expression) {
@@ -410,7 +411,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         // The slot already holds native bytes of the destination's exact
         // type (the variable's declared type), so this is a plain copy,
-        // not a conversion - unlike a literal, which `writeLiteral` has
+        // not a conversion - unlike a literal, which `storeValue` has
         // to convert from its dmd node first.
         memcpy(_place, slotOf(expression), _type.size);
     }
@@ -583,39 +584,4 @@ extern(C++) private final class Evaluator: Visitor {
         _place = place;
         expression.accept(this);
     }
-}
-
-// Converts one dmd literal node (`IntegerExp`/`RealExp`) to native
-// bytes: writes its value into `place` in native layout, exactly
-// `type`'s size.
-private void writeLiteral(
-    imported!"dmd.mtype".Type type,
-    imported!"dmd.expression".Expression value,
-    void* place,
-) {
-    import dmd.astenums: Tfloat32, Tfloat64;
-    import dmd.typesem: size;
-    import std.conv: text;
-
-    if (type.ty == Tfloat32) {
-        *cast(float*) place = cast(float) value.toReal;
-        return;
-    }
-
-    if (type.ty == Tfloat64) {
-        *cast(double*) place = cast(double) value.toReal;
-        return;
-    }
-
-    if (type.isIntegral) {
-        import snakebite.nativelayout: storeIntegral;
-
-        storeIntegral(place, value.toInteger, type.size);
-        return;
-    }
-
-    throw new Exception(
-        text("interpreter cannot write a value of type `",
-            type.toString, "`"),
-    );
 }

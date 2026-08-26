@@ -44,44 +44,15 @@ private void writeResult(
     imported!"dmd.expression".Expression value,
     void* returnPlace,
 ) {
-    import dmd.astenums: Tfloat32, Tfloat64, Tvoid;
-    import dmd.typesem: size;
-    import std.conv: text;
+    import dmd.astenums: Tvoid;
+    import snakebite.nativelayout: storeValue;
 
     auto type = function_.type.nextOf;
 
     if (returnPlace is null || type.ty == Tvoid)
         return;
 
-    if (type.ty == Tfloat32) {
-        *cast(float*) returnPlace = cast(float) value.toReal;
-        return;
-    }
-
-    if (type.ty == Tfloat64) {
-        *cast(double*) returnPlace = cast(double) value.toReal;
-        return;
-    }
-
-    if (type.isIntegral) {
-        const integer = value.toInteger;
-        switch (type.size) {
-            case 1: *cast(ubyte*) returnPlace = cast(ubyte) integer; return;
-            case 2: *cast(ushort*) returnPlace = cast(ushort) integer; return;
-            case 4: *cast(uint*) returnPlace = cast(uint) integer; return;
-            case 8: *cast(ulong*) returnPlace = cast(ulong) integer; return;
-            default:
-                throw new Exception(
-                    text("CTFE backend cannot return an integral of size ",
-                        type.size, ": `", type.toChars, "`"),
-                );
-        }
-    }
-
-    throw new Exception(
-        text("CTFE backend cannot return a value of type `",
-            type.toChars, "`"),
-    );
+    storeValue(type, value, returnPlace);
 }
 
 // One CTFE call's outcome: the value on success, the diagnostic text on
