@@ -98,9 +98,9 @@ public mixin template SnippetTests() {
     }
 }
 
-// UFCS assertion: `42.run!(backend, code)` parses `code` as a whole guest
-// program and runs it on the backend the way compiled D would run it,
-// checking the exit status against `expected`.
+// UFCS assertion: `42.shouldBeStatusOf!(backend, code)` parses `code` as a
+// whole guest program, runs it on the backend the way compiled D would run
+// it, and checks the exit status against `expected`.
 //
 // `code` is also mixed in natively and its `main` called directly, the same
 // oracle `evaluate` uses for snippets: a test whose `expected` disagrees
@@ -110,10 +110,13 @@ public mixin template SnippetTests() {
 // `code` is registered under the caller's module (`__MODULE__`, resolved at
 // the call site as a template default, the same trick `__FILE__`/`__LINE__`
 // already rely on below) the same way `eval` snippets register through
-// `SnippetTests`. The first `run`/`shouldBeRetOf` call from a given test
-// module parses every program that module registered in one batch, so dmd's
-// per-batch setup cost is paid once per module, not once per test.
-public void run(BackendType, string code, string module_ = __MODULE__)(
+// `SnippetTests`. The first `shouldBeStatusOf`/`shouldBeRetOf` call from a
+// given test module parses every program that module registered in one
+// batch, so dmd's per-batch setup cost is paid once per module, not once
+// per test.
+public void shouldBeStatusOf(
+    BackendType, string code, string module_ = __MODULE__,
+)(
     in int expected,
     in string file = __FILE__,
     in size_t line = __LINE__,

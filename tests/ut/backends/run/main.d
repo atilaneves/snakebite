@@ -8,7 +8,7 @@ static foreach (backend; Matrix!()) {
     @("ret.int.42." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        42.run!(
+        42.shouldBeStatusOf!(
              backend,
              q{
                  int main() {
@@ -23,7 +23,7 @@ static foreach (backend; Matrix!()) {
     @("ret.int.77." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        77.run!(
+        77.shouldBeStatusOf!(
              backend,
              q{
                  int main() {
@@ -39,7 +39,7 @@ static foreach (backend; Matrix!()) {
     @("noMain." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.run!(
+        0.shouldBeStatusOf!(
              backend,
              q{
                  int notMain() {
