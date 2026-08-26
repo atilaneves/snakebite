@@ -35,6 +35,27 @@ public imported!"dmd.dstruct".StructDeclaration findStruct(
     return null;
 }
 
+// `function_`'s type as the function type it must be. A `FuncDeclaration`
+// whose type is not a `TypeFunction` would be a malformed AST, not a guest
+// construct a backend has chosen not to support, so this halts on it as
+// the internal error it is rather than reporting a refusal. `assert(false)`
+// rather than `assert(cond)`: the latter is elided by `-release`, leaving a
+// null for the caller to dereference, and a silent null here is worse than
+// a stop.
+public imported!"dmd.mtype".TypeFunction typeFunctionOf(
+    imported!"dmd.func".FuncDeclaration function_,
+) {
+    import std.conv: text;
+
+    auto type = function_.type.isTypeFunction;
+    if (type is null)
+        assert(false,
+            text("`", function_.toString, "` has non-function type `",
+                function_.type.toString, "`"));
+
+    return type;
+}
+
 // Every unittest in `module_`, in declaration order, as druntime's
 // `__modtest` runs them: the ones nested in a struct or a class count too,
 // so the search descends into aggregates as well as attributes.

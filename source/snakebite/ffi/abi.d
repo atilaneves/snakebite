@@ -65,8 +65,10 @@ public struct Register {
             return Register(Kind.pointer, 8);
 
         if (type.isIntegral) {
+            import snakebite.native: isIntegralSize;
+
             const bytes = type.size;
-            if (bytes == 1 || bytes == 2 || bytes == 4 || bytes == 8)
+            if (bytes.isIntegralSize)
                 return Register(
                     type.isUnsigned ? Kind.unsigned : Kind.signed,
                     cast(ubyte) bytes,
@@ -121,15 +123,12 @@ public void writeWord(
     if (register.kind == Register.Kind.none)
         return;
 
+    import snakebite.native: storeIntegral;
+
     // The callee left the value in the low bits of the return register;
-    // anything above the type's own width is not part of it.
-    switch (register.size) {
-        case 1: *cast(ubyte*) place = cast(ubyte) result; return;
-        case 2: *cast(ushort*) place = cast(ushort) result; return;
-        case 4: *cast(uint*) place = cast(uint) result; return;
-        case 8: *cast(size_t*) place = result; return;
-        default: assert(false, "unsupported return size");
-    }
+    // anything above the type's own width is not part of it, which is
+    // exactly what storing at the type's own width keeps.
+    storeIntegral(place, result, register.size);
 }
 
 // Calls `address` with `words` in argument registers and hands back the

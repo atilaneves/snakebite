@@ -195,6 +195,7 @@ import dmd.visitor: Visitor;
 // `Interpreter`-side cache to hold.
 extern(C++) private final class Evaluator: Visitor {
     import snakebite.ffi: PlanCache, maxArguments;
+    import snakebite.frontend.dmd.functions: typeFunctionOf;
     import dmd.astenums: LINK, STC, Tvoid;
     import dmd.expression: CallExp, Expression, IntegerExp, RealExp, VarExp;
     import dmd.func: FuncDeclaration;
@@ -610,23 +611,6 @@ extern(C++) private final class Evaluator: Visitor {
     }
 }
 
-// `function_`'s type as the function type it must be. A `FuncDeclaration`
-// whose type is not a `TypeFunction` would be a malformed AST, not a guest
-// construct this interpreter has chosen not to support, so this reports it
-// as the internal error it is rather than as a refusal.
-private imported!"dmd.mtype".TypeFunction typeFunctionOf(
-    imported!"dmd.func".FuncDeclaration function_,
-) {
-    import std.conv: text;
-
-    auto type = function_.type.isTypeFunction;
-    assert(type !is null,
-        text("`", function_.toString, "` has non-function type `",
-            function_.type.toString, "`"));
-
-    return type;
-}
-
 // Converts one dmd literal node (`IntegerExp`/`RealExp`) to native
 // bytes: writes its value into `place` in native layout, exactly
 // `type`'s size.
@@ -650,18 +634,10 @@ private void writeLiteral(
     }
 
     if (type.isIntegral) {
-        const integer = value.toInteger;
-        switch (type.size) {
-            case 1: *cast(ubyte*) place = cast(ubyte) integer; return;
-            case 2: *cast(ushort*) place = cast(ushort) integer; return;
-            case 4: *cast(uint*) place = cast(uint) integer; return;
-            case 8: *cast(ulong*) place = integer; return;
-            default:
-                throw new Exception(
-                    text("interpreter cannot write an integral of size ",
-                        type.size, ": `", type.toString, "`"),
-                );
-        }
+        import snakebite.native: storeIntegral;
+
+        storeIntegral(place, value.toInteger, type.size);
+        return;
     }
 
     throw new Exception(
