@@ -25,4 +25,6 @@ build/bench.sh examples/ct -w 0 -r 1 -b ctfe -b dmd
 # (an accepted gap). `-b dmd` selects that row for dub projects too.
 build/bench.sh examples/rt -w 0 -r 1 -b dmd
 
-build/bench.sh examples/bottom-up -w 0 -r 1 -b dmd
+# Every backend, no selection: `bottom-up` is the fixture that stays inside
+# what the least complete backend can do, so the interpreter runs it too.
+build/bench.sh examples/bottom-up -w 0 -r 1

@@ -189,27 +189,10 @@ private BackendReport[] benchmarkAll(Project project, in Options options) {
                 compile = compileWatch.peek;
             }
 
-            // A backend without druntime (CTFE) cannot run the project's
-            // real `main` - for a dub project that's dub's own generated
-            // test root, which drives unittests through druntime's
-            // ModuleInfo runner rather than calling them itself. Swap in a
-            // synthesized runner that calls every unittest directly; see
-            // `parseUnittestRunner`. Every other backend runs the real
-            // program.
-            auto backendProject = project;
-            if (!backend.hasDruntime) {
-                import snakebite.backends: Program;
-                import snakebite.frontend.compiler: parseUnittestRunner;
-
-                backendProject.program = Program(
-                    parseUnittestRunner(project.program.rootModules),
-                );
-            }
-
             reports ~= benchmark(
                 backend,
                 backendName!BackendType,
-                backendProject,
+                project,
                 options.warmup,
                 options.runs,
                 hasCompile,
