@@ -56,11 +56,11 @@ private struct FrameLayout {
     // Reserves one slot for a value of `type` and returns its offset. A
     // parameter and a local differ in what they key the offset by, not in
     // how the frame grows to fit them, so both come here.
-    size_t appendSlot(imported!"dmd.mtype".Type type) {
+    public size_t reserveSlot(imported!"dmd.mtype".Type type) {
         import dmd.typesem: size;
 
         const alignment = type.alignsize;
-        const offset = alignUp(size_t(this.size), alignment);
+        const offset = alignUp(this.size, alignment);
         this.size = offset + type.size;
         if (alignment > this.alignment)
             this.alignment = alignment;
@@ -320,7 +320,7 @@ extern(C++) private final class Evaluator: Visitor {
                         "` by value"),
                 );
 
-            layout.offsets[i] = layout.appendSlot(parameter.type);
+            layout.offsets[i] = layout.reserveSlot(parameter.type);
             if (variables !is null)
                 layout.offsetOf[(*variables)[i]] = layout.offsets[i];
         }
@@ -553,13 +553,8 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(ForStatement statement) {
-        if (statement._init !is null) {
-            statement._init.accept(this);
-            if (_returned)
-                return;
-        }
-
-        while (statement.condition is null || truthy(statement.condition)) {
+        while (statement.condition is null
+                || integralValueOf(statement.condition) != 0) {
             if (statement._body !is null) {
                 statement._body.accept(this);
                 if (_returned)
@@ -569,17 +564,6 @@ extern(C++) private final class Evaluator: Visitor {
             if (statement.increment !is null)
                 runForEffect(statement.increment);
         }
-    }
-
-    // Evaluates `condition` and reports whether it is nonzero: dmd's own
-    // `toBoolean` (`expressionsem.d`) accepts any expression whose type
-    // `Type.isBoolean` allows - `bool` itself, but also any other
-    // integral type, unconverted - as a loop condition, testing it
-    // against zero rather than requiring an actual `bool`. A floating
-    // point condition is equally valid D and is refused here rather than
-    // guessed at, since nothing runs one yet.
-    private bool truthy(Expression condition) {
-        return integralValueOf(condition) != 0;
     }
 
     // Evaluates `expression` and hands back its value. The frame stack
@@ -684,14 +668,8 @@ extern(C++) private final class Evaluator: Visitor {
                     "initializer is supported"),
             );
 
-        // dmd's semantic pass rewrites `long sum = 0;`'s initializer into
-        // a `ConstructExp` (`sum = 0`, `e1` the just-declared `sum`, `e2`
-        // the actual value) rather than handing back the bare value
-        // expression - the same rewrite it uses for a plain assignment,
-        // but tagged `construct` instead of `assign` since this is the
-        // variable's first write, not a later one. Only `e2` is a
-        // subexpression this interpreter has to evaluate: `e1` is `sum`
-        // itself, already the destination `offset` names.
+        // dmd rewrites `long sum = 0;`'s initializer into a `ConstructExp`
+        // (`sum = 0`); only `e2`, the actual value, needs evaluating.
         auto value = expInitializer.exp;
         if (auto construct = value.isConstructExp)
             value = construct.e2;
@@ -856,8 +834,6 @@ private void collectLocals(
     imported!"dmd.statement".Statement statement,
     ref FrameLayout layout,
 ) {
-    import dmd.typesem: size;
-
     if (statement is null)
         return;
 
@@ -887,7 +863,7 @@ private void collectLocals(
     if (variable is null)
         return;
 
-    layout.offsetOf[variable] = layout.appendSlot(variable.type);
+    layout.offsetOf[variable] = layout.reserveSlot(variable.type);
 }
 
 // dmd's default field-alignment rule (`aggregate.alignmember`, the same
