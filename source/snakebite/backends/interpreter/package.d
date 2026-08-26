@@ -194,12 +194,14 @@ import dmd.visitor: Visitor;
 // walks a call's frames, so there is nothing left for a separate
 // `Interpreter`-side cache to hold.
 extern(C++) private final class Evaluator: Visitor {
-    import dmd.astenums: STC, Tvoid;
+    import snakebite.ffi: callCompiled;
+    import dmd.astenums: LINK, STC, Tvoid;
     import dmd.expression: CallExp, Expression, IntegerExp, RealExp, VarExp;
     import dmd.func: FuncDeclaration;
     import dmd.mtype: Type;
     import dmd.statement:
-        CompoundStatement, ExpStatement, ReturnStatement, Statement;
+        CompoundStatement, ExpStatement, ImportStatement, ReturnStatement,
+        Statement;
     import dmd.typesem: size;
 
     alias visit = Visitor.visit;
@@ -268,31 +270,40 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         FrameLayout layout;
-        auto parameters = function_.parameters;
-        if (parameters !is null) {
-            layout.offsets.length = parameters.length;
-            foreach (i, parameter; *parameters) {
-                // A `ref`/`out` parameter occupies a pointer slot in a
-                // compiled frame, and `lazy` a delegate; `parameter.type`
-                // is still the pointed-to/lazily-evaluated type either
-                // way, so a value slot of that type's size would be the
-                // wrong layout. Not supported, so this throws.
-                if (parameter.storage_class &
-                        (STC.ref_ | STC.out_ | STC.lazy_))
-                    throw new Exception(
-                        text("interpreter cannot pass `ref`/`out`/`lazy` ",
-                            "parameter `", parameter.toString,
-                            "` by value"),
-                    );
 
-                const alignment = parameter.type.alignsize;
-                layout.size = alignUp(layout.size, alignment);
-                layout.offsets[i] = layout.size;
-                layout.offsetOf[parameter] = layout.size;
-                layout.size += parameter.type.size;
-                if (alignment > layout.alignment)
-                    layout.alignment = alignment;
-            }
+        // The parameter *types* are part of the function's own type, and
+        // are there whether or not it has a body. `parameters` - the
+        // declarations a body reads its arguments through - only exist
+        // when there is a body to read them, so a body-less `extern(C)`
+        // declaration still gets a frame laid out here, and simply has no
+        // declaration to key `offsetOf` by.
+        auto parameterList = typeFunctionOf(function_).parameterList;
+        auto variables = function_.parameters;
+        layout.offsets.length = parameterList.length;
+
+        foreach (i; 0 .. parameterList.length) {
+            auto parameter = parameterList[i];
+
+            // A `ref`/`out` parameter occupies a pointer slot in a
+            // compiled frame, and `lazy` a delegate; `parameter.type`
+            // is still the pointed-to/lazily-evaluated type either
+            // way, so a value slot of that type's size would be the
+            // wrong layout. Not supported, so this throws.
+            if (parameter.storageClass & (STC.ref_ | STC.out_ | STC.lazy_))
+                throw new Exception(
+                    text("interpreter cannot pass `ref`/`out`/`lazy` ",
+                        "parameter ", i, " of `", function_.toString,
+                        "` by value"),
+                );
+
+            const alignment = parameter.type.alignsize;
+            layout.size = alignUp(layout.size, alignment);
+            layout.offsets[i] = layout.size;
+            if (variables !is null)
+                layout.offsetOf[(*variables)[i]] = layout.size;
+            layout.size += parameter.type.size;
+            if (alignment > layout.alignment)
+                layout.alignment = alignment;
         }
 
         _layouts[function_] = layout;
@@ -332,12 +343,30 @@ extern(C++) private final class Evaluator: Visitor {
                     "interpreter does not provide"),
             );
 
+        // A declaration with no body is not a program this interpreter can
+        // walk: the body is machine code in a library the host process
+        // already links. druntime is not reimplemented here, so calling
+        // that code is how such a declaration runs.
+        //
+        // Only a non-D linkage, though. `extern(D)` has its own calling
+        // convention, which the FFI does not implement, and a body-less
+        // `extern(D)` declaration is more likely a function whose body
+        // this interpreter simply never saw than one it should go looking
+        // for in the process image.
         auto body_ = function_.fbody;
-        if (body_ is null)
+        if (body_ is null) {
+            const linkage = function_.resolvedLinkage;
+            if (linkage != LINK.d && linkage != LINK.default_) {
+                callCompiled(
+                    function_, returnPlace, argumentSlots(frameBase, layout));
+                return;
+            }
+
             throw new Exception(
                 text("interpreter cannot call a function with no body: `",
                     function_.toString, "`"),
             );
+        }
 
         auto savedType = _type;
         auto savedPlace = _place;
@@ -360,6 +389,20 @@ extern(C++) private final class Evaluator: Visitor {
         body_.accept(this);
     }
 
+    // Where each parameter's bytes sit in the frame the caller just filled,
+    // in declaration order: what the FFI needs to hand them over, built
+    // from the layout this interpreter already computed.
+    extern(D) private const(void*)[] argumentSlots(
+        ubyte* frameBase,
+        const(FrameLayout)* layout,
+    ) {
+        auto slots = new const(void)*[layout.offsets.length];
+        foreach (i, offset; layout.offsets)
+            slots[i] = frameBase + offset;
+
+        return slots;
+    }
+
     override void visit(Statement statement) {
         import std.conv: text;
         import std.string: fromStringz;
@@ -377,6 +420,13 @@ extern(C++) private final class Evaluator: Visitor {
             text("interpreter cannot execute a `", statement.stmt,
                 "` statement: `", toChars(statement).fromStringz.strip, "`"),
         );
+    }
+
+    // An `import` inside a function body binds names, and dmd's semantic
+    // pass has already bound them: every `CallExp` this interpreter sees
+    // arrives with its callee resolved. Nothing is left to execute, so
+    // this runs no code rather than refusing the statement.
+    override void visit(ImportStatement statement) {
     }
 
     override void visit(CompoundStatement statement) {
@@ -506,31 +556,30 @@ extern(C++) private final class Evaluator: Visitor {
         // guest `CallExp`.
         auto layout = layoutOf(function_);
 
+        // The callee's parameter types, which a body-less declaration has
+        // just as much as one with a body - unlike `parameters`, which
+        // only a body has.
+        auto parameterList = typeFunctionOf(function_).parameterList;
         auto arguments = expression.arguments;
         const argCount = arguments is null ? 0 : arguments.length;
-        auto parameters = function_.parameters;
-        const paramCount = parameters is null ? 0 : parameters.length;
-        if (argCount != paramCount)
+        if (argCount != parameterList.length)
             throw new Exception(
                 text("interpreter: `", function_.toString, "` expects ",
-                    paramCount, " argument(s), got ", argCount),
+                    parameterList.length, " argument(s), got ", argCount),
             );
 
         auto frame = _frames.push(layout.size, layout.alignment);
 
-        if (parameters !is null) {
-            // Every argument is evaluated, even one the callee never
-            // reads, since evaluating an argument can have effects. The
-            // loop already has the positional index `i`, so it indexes
-            // `offsets` directly instead of hashing `parameter` through
-            // `offsetOf`.
-            foreach (i, parameter; *parameters)
-                evaluate(
-                    (*arguments)[i],
-                    parameter.type,
-                    frame.base + layout.offsets[i],
-                );
-        }
+        // Every argument is evaluated, even one the callee never reads,
+        // since evaluating an argument can have effects. The loop already
+        // has the positional index `i`, so it indexes `offsets` directly
+        // instead of hashing a declaration through `offsetOf`.
+        foreach (i; 0 .. parameterList.length)
+            evaluate(
+                (*arguments)[i],
+                parameterList[i].type,
+                frame.base + layout.offsets[i],
+            );
 
         execute(function_, _place, frame.base, layout);
     }
@@ -549,6 +598,23 @@ extern(C++) private final class Evaluator: Visitor {
         _place = place;
         expression.accept(this);
     }
+}
+
+// `function_`'s type as the function type it must be. A `FuncDeclaration`
+// whose type is not a `TypeFunction` would be a malformed AST, not a guest
+// construct this interpreter has chosen not to support, so this reports it
+// as the internal error it is rather than as a refusal.
+private imported!"dmd.mtype".TypeFunction typeFunctionOf(
+    imported!"dmd.func".FuncDeclaration function_,
+) {
+    import std.conv: text;
+
+    auto type = function_.type.isTypeFunction;
+    assert(type !is null,
+        text("`", function_.toString, "` has non-function type `",
+            function_.type.toString, "`"));
+
+    return type;
 }
 
 // Converts one dmd literal node (`IntegerExp`/`RealExp`) to native
