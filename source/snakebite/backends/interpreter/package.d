@@ -709,15 +709,15 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(AddExp expression) {
-        storeArithmetic!"+"(expression);
+        storeBinaryExp!"+"(expression);
     }
 
     override void visit(MinExp expression) {
-        storeArithmetic!"-"(expression);
+        storeBinaryExp!"-"(expression);
     }
 
     override void visit(MulExp expression) {
-        storeArithmetic!"*"(expression);
+        storeBinaryExp!"*"(expression);
     }
 
     // Each operand widens to 64 bits with its own signedness, and the
@@ -728,7 +728,7 @@ extern(C++) private final class Evaluator: Visitor {
     // are read as signed or unsigned.
     //
     // `extern(D)`: a string template parameter has no C++ mangling.
-    private extern(D) void storeArithmetic(string op)(BinExp expression) {
+    private extern(D) void storeBinaryExp(string op)(BinExp expression) {
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
