@@ -58,7 +58,7 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.declaration: VarDeclaration;
     import dmd.expression:
         AddAssignExp, AssignExp, CallExp, CmpExp, DeclarationExp,
-        Expression, IntegerExp, NotExp, RealExp, VarExp;
+        EqualExp, Expression, IntegerExp, NotExp, RealExp, VarExp;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
@@ -685,6 +685,26 @@ extern(C++) private final class Evaluator: Visitor {
             : a < b;
 
         storeIntegral(_place, less ? 1 : 0, _facts.size);
+    }
+
+    // Signedness does not change the answer here the way it does for `<`:
+    // dmd's usual arithmetic conversions give both operands the same type,
+    // so equal values have equal bit patterns either way.
+    override void visit(EqualExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+        import std.conv: text;
+
+        if (expression.op != EXP.equal && expression.op != EXP.notEqual)
+            throw new Exception(
+                text("interpreter cannot evaluate a `", expression.op,
+                    "` expression: `", expression.toString, "`"),
+            );
+
+        const a = integralValueOf(expression.e1);
+        const b = integralValueOf(expression.e2);
+        const answer = expression.op == EXP.equal ? a == b : a != b;
+
+        storeIntegral(_place, answer ? 1 : 0, _facts.size);
     }
 
     // `expression.f` is already statically resolved (dmd resolves direct

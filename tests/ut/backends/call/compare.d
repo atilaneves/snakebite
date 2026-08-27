@@ -163,3 +163,99 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("compare.equal.true." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int one() {
+                    return 1;
+                }
+
+                int uno() {
+                    return 1;
+                }
+
+                bool eq() {
+                    return one() == uno();
+                }
+            },
+            "eq",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("compare.equal.false." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        false.shouldBeRetOf!(
+            backend,
+            q{
+                int one() {
+                    return 1;
+                }
+
+                int two() {
+                    return 2;
+                }
+
+                bool eq() {
+                    return one() == two();
+                }
+            },
+            "eq",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("compare.notEqual.true." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int one() {
+                    return 1;
+                }
+
+                int two() {
+                    return 2;
+                }
+
+                bool neq() {
+                    return one() != two();
+                }
+            },
+            "neq",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("compare.notEqual.false." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        false.shouldBeRetOf!(
+            backend,
+            q{
+                int one() {
+                    return 1;
+                }
+
+                int uno() {
+                    return 1;
+                }
+
+                bool neq() {
+                    return one() != uno();
+                }
+            },
+            "neq",
+        );
+    }
+}
