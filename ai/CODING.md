@@ -65,9 +65,12 @@ This means there is no need to marshall or unmarshall when doing FFI.
   to tests.
 - Do not "intercept" D code by name to shortcut implementation.
 - Never delete test code to make tests pass.
+- Do not comment code explaining *what* it does. If it's not clear what
+  the code does, rewrite it, don't comment.
 
 # Do
 
 - Explain why a unittest block is testing an AST shape by referring to
   language semantics. If necessary, you are allowed to refer to dmd
   internal implementation details.
+- Code comments are for *why*.
