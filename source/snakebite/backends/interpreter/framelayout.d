@@ -9,7 +9,7 @@ private:
 // the frame stack. A pure function of the declaration, so it is computed
 // once per function and cached, never per call.
 package struct FrameLayout {
-    import snakebite.nativelayout: alignUp;
+    import snakebite.nativelayout: alignUp, TypeFacts;
     import dmd.declaration: VarDeclaration;
     import dmd.func: FuncDeclaration;
     import dmd.mtype: Type;
@@ -20,6 +20,12 @@ package struct FrameLayout {
     // The argument-evaluation loop already has the positional index in
     // hand, so it never pays an AA hash lookup for the hottest path.
     package size_t[] offsets;
+    // A parameter's facts, alongside its offset in `offsets` above and
+    // decided at the same time, from the same `TypeFacts.of` call: the
+    // argument-evaluation loop needs both to place a value, and a
+    // parameter's type never changes between calls, so this is decided
+    // once per function instead of once per call.
+    package TypeFacts[] offsetFacts;
     // Keyed by declaration instead of position: `visit(VarExp)` resolves
     // a parameter read from a `VarDeclaration` it found by name lookup,
     // not by position, so it still needs a hash lookup. Reached only
@@ -43,6 +49,7 @@ package struct FrameLayout {
         auto parameterList = typeFunctionOf(function_).parameterList;
         auto variables = function_.parameters;
         layout.offsets.length = parameterList.length;
+        layout.offsetFacts.length = parameterList.length;
 
         foreach (i; 0 .. parameterList.length) {
             auto parameter = parameterList[i];
@@ -59,9 +66,11 @@ package struct FrameLayout {
                         "` by value"),
                 );
 
-            layout.offsets[i] = layout.reserveSlot(parameter.type);
+            auto slot = layout.reserveSlot(parameter.type);
+            layout.offsets[i] = slot.offset;
+            layout.offsetFacts[i] = slot.facts;
             if (variables !is null)
-                layout._offsetOf[(*variables)[i]] = layout.offsets[i];
+                layout._offsetOf[(*variables)[i]] = slot.offset;
         }
 
         // Locals share the same frame as the parameters: each one gets a
@@ -78,19 +87,26 @@ package struct FrameLayout {
         return layout;
     }
 
-    // Reserves one slot for a value of `type` and returns its offset. A
-    // parameter and a local differ in what they key the offset by, not in
-    // how the frame grows to fit them, so both come here.
-    private size_t reserveSlot(Type type) {
-        import dmd.typesem: size;
+    // One slot `reserveSlot` just reserved: its offset into the frame,
+    // and the facts `TypeFacts.of` already had to compute to know how
+    // big the slot was and how it had to be aligned - so a caller that
+    // wants both, like a parameter's slot, gets them from the one call.
+    package struct Slot {
+        package size_t offset;
+        package TypeFacts facts;
+    }
 
-        const alignment = type.alignsize;
-        const offset = alignUp(this.size, alignment);
-        this.size = offset + type.size;
-        if (alignment > this.alignment)
-            this.alignment = alignment;
+    // Reserves one slot for a value of `type` and returns its offset and
+    // facts. A parameter and a local differ in what they key the offset
+    // by, not in how the frame grows to fit them, so both come here.
+    private Slot reserveSlot(Type type) {
+        const facts = TypeFacts.of(type);
+        const offset = alignUp(this.size, facts.alignment);
+        this.size = offset + facts.size;
+        if (facts.alignment > this.alignment)
+            this.alignment = facts.alignment;
 
-        return offset;
+        return Slot(offset, facts);
     }
 
     // Where `variable` lives in a frame built from this layout, as a byte
@@ -195,6 +211,6 @@ extern(C++) private final class LocalsCollector: Visitor {
         if (variable is null)
             return;
 
-        _layout._offsetOf[variable] = _layout.reserveSlot(variable.type);
+        _layout._offsetOf[variable] = _layout.reserveSlot(variable.type).offset;
     }
 }

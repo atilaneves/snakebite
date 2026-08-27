@@ -69,6 +69,36 @@ public bool isIntegralSize(in size_t size) {
     return size == 1 || size == 2 || size == 4 || size == 8;
 }
 
+// What a caller on a hot execution path repeatedly asks a dmd `Type`
+// for - its size, its alignment, whether it is integral, and if so
+// whether it is signed - decided once and kept, instead of re-entering
+// dmd's semantic-analysis machinery (`Type.size`, `TypeBasic.alignsize`,
+// `isIntegral`, `isUnsigned`) on every visit of the same node. Shared
+// between backends (not owned by the interpreter package) because any
+// tree-walking or bytecode backend asks a dmd `Type` the same four
+// questions to lay a value out in native memory.
+public struct TypeFacts {
+    import dmd.mtype: Type;
+
+    public size_t size;
+    public uint alignment;
+    public bool isIntegral;
+    public bool isUnsigned;
+
+    // The facts for `type`, read from dmd exactly once by the caller
+    // that builds this.
+    public static TypeFacts of(Type type) {
+        import dmd.typesem: size;
+
+        return TypeFacts(
+            type.size,
+            type.alignsize,
+            type.isIntegral,
+            type.isUnsigned,
+        );
+    }
+}
+
 // Rounds `offset` up to the next multiple of `alignment`, by way of dmd's
 // default field-alignment rule (`aggregate.alignmember`, the same one it
 // uses to lay out a struct's fields), rather than reimplementing it: no
@@ -101,14 +131,26 @@ shared static this() {
 // The interpreter, writing a literal into a frame slot, and the CTFE
 // backend, writing a call's result into its caller's return place, both
 // convert a dmd value to native bytes this same way, differing only in
-// where `type` and `value` come from.
+// where `type` and `value` come from. Neither caller has `type`'s facts
+// in hand at this call site, so this derives them itself, once.
 public void storeValue(
     imported!"dmd.mtype".Type type,
     imported!"dmd.expression".Expression value,
     void* place,
 ) {
+    storeValue(type, TypeFacts.of(type), value, place);
+}
+
+// As above, but for a caller - the interpreter's hot literal-evaluation
+// path - that already holds `type`'s facts, so this does not re-derive
+// `isIntegral`/`size` from `type` a second time.
+public void storeValue(
+    imported!"dmd.mtype".Type type,
+    in TypeFacts facts,
+    imported!"dmd.expression".Expression value,
+    void* place,
+) {
     import dmd.astenums: Tfloat32, Tfloat64;
-    import dmd.typesem: size;
     import std.conv: text;
 
     if (type.ty == Tfloat32) {
@@ -121,8 +163,8 @@ public void storeValue(
         return;
     }
 
-    if (type.isIntegral) {
-        storeIntegral(place, value.toInteger, type.size);
+    if (facts.isIntegral) {
+        storeIntegral(place, value.toInteger, facts.size);
         return;
     }
 
