@@ -11,8 +11,7 @@ fi
 ninja bin/ut
 bin/ut
 
-build/bench.sh examples/ct -w 0 -r 1 -b ctfe -b dmd
-
-build/bench.sh examples/rt -w 0 -r 1 -b dmd
-
+build/bench.sh examples/ct-easy -w 0 -r 1 -b ctfe -b dmd
+build/bench.sh examples/ct-full -w 0 -r 1 -b ctfe -b dmd
 build/bench.sh examples/bottom-up -w 0 -r 1 -b dmd -b interpreter
+build/bench.sh examples/rt -w 0 -r 1 -b dmd
