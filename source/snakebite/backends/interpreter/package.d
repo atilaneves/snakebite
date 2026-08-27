@@ -709,26 +709,26 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(AddExp expression) {
-        storeArithmetic(expression, (a, b) => a + b);
+        storeArithmetic!"+"(expression);
     }
 
     override void visit(MinExp expression) {
-        storeArithmetic(expression, (a, b) => a - b);
+        storeArithmetic!"-"(expression);
     }
 
     override void visit(MulExp expression) {
-        storeArithmetic(expression, (a, b) => a * b);
+        storeArithmetic!"*"(expression);
     }
 
-    // dmd's usual arithmetic conversions have already given both operands
-    // the result's own type, and `+`, `-` and `*` yield the same bits
-    // whether that type is signed or unsigned, so the arithmetic runs once
-    // at register width and the store keeps only the bits the destination
-    // holds - which is also what D promises on overflow.
-    private void storeArithmetic(
-        BinExp expression,
-        scope long function(long, long) @safe pure nothrow @nogc combine,
-    ) {
+    // Each operand widens to 64 bits with its own signedness, and the
+    // store keeps only the bits the destination holds - which is what D
+    // promises on overflow. That holds because any width change arrives
+    // as a `CastExp`, which the interpreter refuses by name, and because
+    // `+`, `-` and `*` leave the same low bits whether their operands
+    // are read as signed or unsigned.
+    //
+    // `extern(D)`: a string template parameter has no C++ mangling.
+    private extern(D) void storeArithmetic(string op)(BinExp expression) {
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
@@ -741,7 +741,7 @@ extern(C++) private final class Evaluator: Visitor {
         const a = integralValueOf(expression.e1);
         const b = integralValueOf(expression.e2);
 
-        storeIntegral(_place, cast(ulong) combine(a, b), _facts.size);
+        storeIntegral(_place, cast(ulong) mixin("a " ~ op ~ " b"), _facts.size);
     }
 
     // Only the branch the condition selects is evaluated, the same way
