@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Choose the smallest set of snippets that reaches every AST node class.
+"""Choose a small set of snippets that reaches every AST node class.
 
 `extract-snippets.py` gets the snippets and `astcover.d` says which AST node
 classes each one reaches. A corpus of a thousand snippets reaches no more
@@ -109,17 +109,23 @@ def native_status(ported):
     """What compiled D does with this program.
 
     The set exists to state native behaviour, so the expected status is
-    measured rather than derived: the snippet is compiled and run.
+    measured rather than derived. Compiling and running are separate steps
+    because `dmd -run` exits 1 for a program that does not compile as well
+    as for one that dies, and those must not become the same answer.
     """
-    with tempfile.NamedTemporaryFile("w", suffix=".d") as source:
-        source.write(ported)
-        source.flush()
-        result = subprocess.run(["dmd", "-run", source.name],
-                                capture_output=True)
-        if result.returncode not in (0, 1):
-            raise SystemExit(f"dmd could not run a snippet:\n"
-                             f"{result.stderr.decode()}")
-        return result.returncode
+    with tempfile.TemporaryDirectory() as directory:
+        source = f"{directory}/guest.d"
+        binary = f"{directory}/guest"
+        with open(source, "w") as out:
+            out.write(ported)
+
+        built = subprocess.run(["dmd", "-of=" + binary, source],
+                               capture_output=True, cwd=directory)
+        if built.returncode != 0:
+            raise SystemExit(f"a chosen snippet does not compile:\n"
+                             f"{built.stderr.decode()}")
+
+        return subprocess.run([binary], capture_output=True).returncode
 
 
 def main():

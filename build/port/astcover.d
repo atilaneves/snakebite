@@ -2,8 +2,8 @@
 //
 // Drop into `tests/ut/`, add `"ut.astcover"` to `tests/main.d`, and build.
 // It reads the JSON that `build/port/extract-snippets.py` writes and reports
-// the distinct dmd AST node classes each corpus reaches, plus the smallest
-// subset of snippets that reaches all of them.
+// the distinct dmd AST node classes each corpus reaches. `cover-set.py`
+// chooses a covering subset from what `writeNodeSets` records.
 //
 // AST node coverage states which constructs a backend must handle. It does
 // not state whether the backend handles them correctly - two snippets can
@@ -104,39 +104,4 @@ public void writeNodeSets(in bool[string][] perSnippet, in string path) {
 
     json ~= "]";
     write(path, json[]);
-}
-
-
-// The smallest subset reaching every node the whole corpus reaches, by
-// repeatedly taking whichever snippet adds the most that is still missing.
-// Set cover is NP-hard; this is the standard greedy approximation.
-public size_t[] minimalCover(in bool[string][] perSnippet) {
-    bool[string] have;
-    size_t[] chosen;
-    auto taken = new bool[perSnippet.length];
-
-    while (true) {
-        size_t best, bestGain;
-
-        foreach (i, nodes; perSnippet) {
-            if (taken[i])
-                continue;
-            size_t gain;
-            foreach (name; nodes.byKey)
-                if (name !in have)
-                    ++gain;
-            if (gain > bestGain) {
-                bestGain = gain;
-                best = i;
-            }
-        }
-
-        if (bestGain == 0)
-            return chosen;
-
-        taken[best] = true;
-        foreach (name; perSnippet[best].byKey)
-            have[name] = true;
-        chosen ~= best;
-    }
 }

@@ -7,10 +7,11 @@ the transform is: rename each `unittest` block to a `main`, and assert the
 status. Several blocks become one `main` calling each in turn, matching the
 order druntime runs them in, stopping at the first failure.
 
-The expected status comes from the call-site tail the extractor kept: a
-snippet paired with `.shouldThrowWithMessage(...)` asserts something
-deliberately false to reveal a computed value, so it exits 1, not 0. The
-message itself is lost - `run` reports a guest failure as a status.
+The expected status is guessed from the call-site tail the extractor kept: a
+snippet paired with `.shouldThrowWithMessage(...)` usually asserts something
+deliberately false, so it exits 1. This guess is wrong for a message that
+states what a backend refused rather than what D does, so the statuses this
+script writes are unverified. `cover-set.py` measures them instead.
 
     ./extract-snippets.py --quickbite DIR | ./port-snippet.py -m ut.ported
 

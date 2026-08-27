@@ -1,24 +1,21 @@
 module ut.backends.run.associative;
 
 
-// Every test here reaches an AST node class that no test
-// chosen before it reached, and is named for that class.
-// Together they reach every class the frontend produced
-// for a corpus of guest programs.
-//
-// The expected exit status is what `dmd -run` gives the
-// program, so each test states what compiled D does. A
-// backend joins a test's `Matrix` when it agrees.
+// The expected exit status of each guest is what `dmd -run` gives it,
+// so each test states what compiled D does. A backend joins a test's
+// `Matrix` when it agrees.
 
 
 import ut.backends;
 
 
+// An associative array literal takes its keys at run time, so the keys
+// cannot be folded into the literal.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
-    @("assocArrayLiteralExp." ~ backend.stringof)
+    @("assocArrayLiteralWithRuntimeKeys." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -34,6 +31,54 @@ static foreach (backend; Matrix!(
                 assert(values.length == 2);
                 assert(values[first] == 40);
                 assert(values[second] == 41);
+            }
+        });
+    }
+}
+
+// A struct key hashes and compares by its contents, so two separately
+// built strings with the same characters are the same key.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Interpreter, Because.unconfirmed),
+)) {
+    @("structKeyedLookupComparesContents." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Name {
+                string text;
+            }
+
+            string a() {
+                return "Al" ~ "ice";
+            }
+
+            string b() {
+                char[] buf;
+                buf ~= "Alice";
+                return buf.idup;
+            }
+
+            void main() {
+                int[Name] ages;
+                ages[Name(a())] = 30;
+
+                Name key = Name(b());
+                ages[key] = 31;
+                assert(ages.length == 1);
+                assert(ages[Name("Alice")] == 31);
+                assert((Name("Bob") in ages) is null);
+
+                int sum;
+                foreach (k, v; ages) {
+                    sum += v;
+                    assert(k.text == "Alice");
+                }
+                assert(sum == 31);
+
+                assert(ages.remove(Name("Alice")));
+                assert(ages.length == 0);
             }
         });
     }

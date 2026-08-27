@@ -1,24 +1,21 @@
 module ut.backends.run.classes;
 
 
-// Every test here reaches an AST node class that no test
-// chosen before it reached, and is named for that class.
-// Together they reach every class the frontend produced
-// for a corpus of guest programs.
-//
-// The expected exit status is what `dmd -run` gives the
-// program, so each test states what compiled D does. A
-// backend joins a test's `Matrix` when it agrees.
+// The expected exit status of each guest is what `dmd -run` gives it,
+// so each test states what compiled D does. A backend joins a test's
+// `Matrix` when it agrees.
 
 
 import ut.backends;
 
 
+// `shared` is a qualifier, not a distinct class: the shared type's
+// `TypeInfo` names the unshared one as its base.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
-    @("typeInfoSharedDeclaration." ~ backend.stringof)
+    @("sharedClassSharesItsUnsharedTypeInfo." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -27,20 +24,21 @@ static foreach (backend; Matrix!(
             }
 
             void main() {
-                auto base = cast(TypeInfo_Class) typeid(shared Scalars).base;
+                auto base = typeid(shared Scalars).base;
 
                 assert(base is typeid(Scalars));
-                assert((base.m_flags & TypeInfo_Class.ClassFlags.noPointers) != 0);
             }
         });
     }
 }
 
+// `super` in a derived constructor runs the base constructor, so state the
+// base sets is in place before the derived body runs.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
-    @("superExp." ~ backend.stringof)
+    @("superConstructorRunsBaseInitialiser." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -73,45 +71,16 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A call through an interface reference finds the class's override, which
+// needs the interface's own offset rather than the class vtable.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
-    @("typeInfoInvariantDeclaration." ~ backend.stringof)
+    @("interfaceDispatchFindsOverride." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            struct Holder {
-                immutable int[] values;
-
-                ref int[] mutableValues() return {
-                    auto pointer = &values;
-                    return *(cast(int[]*) pointer);
-                }
-            }
-
-            void main() {
-                Holder holder = Holder([1, 2, 3]);
-                const int index = 1;
-
-                holder.mutableValues[index] = 42;
-
-                assert(holder.values == [1, 42, 3]);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
-    @("interfaceDeclaration." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            import core.lifetime: emplace;
-
             interface Allocator {
                 void deallocate();
             }
@@ -125,17 +94,10 @@ static foreach (backend; Matrix!(
             }
 
             void main() {
-                enum words =
-                    (__traits(classInstanceSize, Implementation)
-                        + ulong.sizeof - 1)
-                    / ulong.sizeof;
-                ulong[words] storage;
-                auto implementation =
-                    emplace!Implementation(cast(void[]) storage[]);
-                implementation.calls = 0;
+                auto implementation = new Implementation;
                 Allocator allocator = implementation;
 
-                () @trusted { allocator.deallocate; }();
+                allocator.deallocate;
 
                 assert(implementation.calls == 1);
             }

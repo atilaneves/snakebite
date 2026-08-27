@@ -1,70 +1,21 @@
 module ut.backends.run.arrays;
 
 
-// Every test here reaches an AST node class that no test
-// chosen before it reached, and is named for that class.
-// Together they reach every class the frontend produced
-// for a corpus of guest programs.
-//
-// The expected exit status is what `dmd -run` gives the
-// program, so each test states what compiled D does. A
-// backend joins a test's `Matrix` when it agrees.
+// The expected exit status of each guest is what `dmd -run` gives it,
+// so each test states what compiled D does. A backend joins a test's
+// `Matrix` when it agrees.
 
 
 import ut.backends;
 
 
+// A module-level array is initialised before anything runs, so a callee
+// that touches it first still sees its contents.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
-    @("catAssignExp." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            struct Name {
-                string text;
-            }
-
-            string a() {
-                return "Al" ~ "ice";
-            }
-
-            string b() {
-                char[] buf;
-                buf ~= "Alice";
-                return buf.idup;
-            }
-
-            void main() {
-                int[Name] ages;
-                ages[Name(a())] = 30;
-
-                Name key = Name(b());
-                ages[key] = 31;
-                assert(ages.length == 1);
-                assert(ages[Name("Alice")] == 31);
-                assert((Name("Bob") in ages) is null);
-
-                int sum;
-                foreach (k, v; ages) {
-                    sum += v;
-                    assert(k.text == "Alice");
-                }
-                assert(sum == 31);
-
-                assert(ages.remove(Name("Alice")));
-                assert(ages.length == 0);
-            }
-        });
-    }
-}
-
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
-    @("arrayInitializer." ~ backend.stringof)
+    @("moduleArrayInitialisedBeforeFirstUse." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -94,11 +45,13 @@ static foreach (backend; Matrix!(
     }
 }
 
+// `~` allocates and copies. Neither operand's storage is reused, so a
+// backend that returns a slice of either one is wrong.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
-    @("catExp." ~ backend.stringof)
+    @("concatenationCopiesBothSides." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -118,11 +71,14 @@ static foreach (backend; Matrix!(
     }
 }
 
+// `.dup` and `.idup` give storage of their own. Writing through the copy
+// leaves the original alone, which a backend returning the same
+// (ptr, length) pair would not.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
-    @("realExp." ~ backend.stringof)
+    @("dupAndIdupCopyStorage." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -163,11 +119,13 @@ static foreach (backend; Matrix!(
     }
 }
 
+// Appending a `dchar` to a `char[]` encodes it as UTF-8, so one append
+// adds as many elements as the code point needs, not one.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
-    @("catDcharAssignExp." ~ backend.stringof)
+    @("appendingDcharEncodesUtf8." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -178,9 +136,105 @@ static foreach (backend; Matrix!(
             void main() {
                 char[] s;
                 s ~= pick('A');
+                s ~= pick('\u00e9');
+                s ~= pick('\U0001F600');
 
-                assert(s.length == 1);
-                assert(s[0] == 'A');
+                assert(s.length == 1 + 2 + 4);
+                assert(s == "A\u00e9\U0001F600");
+            }
+        });
+    }
+}
+
+// Growing storage through the allocator keeps what was already there,
+// across both the element-at-a-time and slice-at-a-time appends.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Interpreter, Because.unconfirmed),
+)) {
+    @("manualReallocationKeepsContents." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.experimental.allocator: expandArray;
+            import std.experimental.allocator.mallocator: Mallocator;
+
+            struct Vector {
+                private char[] _elements;
+                private long _length;
+
+                this(char[] values...) {
+                    _elements = cast(char[]) Mallocator.instance.allocate(
+                        values.length,
+                    );
+                    _elements[] = values[];
+                    _length = values.length;
+                }
+
+                ~this() {
+                    Mallocator.instance.deallocate(cast(void[]) _elements);
+                }
+
+                void put(char value) {
+                    expand(_length + 1);
+                    _elements[_length - 1] = value;
+                }
+
+                void put(const(char)[] values) {
+                    const oldLength = _length;
+                    expand(_length + values.length);
+                    _elements[oldLength .. _length] = values[];
+                }
+
+                private void expand(long newLength) {
+                    if (newLength > _elements.length) {
+                        const newCapacity = (newLength * 3) / 2;
+                        Mallocator.instance.expandArray(
+                            mutableElements,
+                            newCapacity - _elements.length,
+                        );
+                    }
+                    _length = newLength;
+                }
+
+                private ref char[] mutableElements() return {
+                    auto pointer = &_elements;
+                    return *pointer;
+                }
+            }
+
+            void main() {
+                auto vector = Vector('f', 'o', 'o');
+                vector.put('b');
+                vector.put(['a', 'r']);
+                vector.put("quux");
+
+                assert(vector._length == 10);
+                assert(vector._elements[0 .. vector._length] == "foobarquux");
+            }
+        });
+    }
+}
+
+// A pointer into an element of a nested array aliases the array's own
+// storage, so writing through it is visible through the array.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Interpreter, Because.unconfirmed),
+)) {
+    @("pointerIntoNestedArrayAliasesStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                static struct S { int[][] a; }
+                S s;
+                s.a ~= [1, 2, 3];
+                auto p = &s.a[0][1];
+                *p = 9;
+                assert(s.a[0][1] == 9);
+                assert(s.a[0][0] == 1);
+                assert(s.a[0].length == 3);
             }
         });
     }

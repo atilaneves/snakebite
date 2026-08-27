@@ -6,12 +6,23 @@ port renames the blocks. `build/port/` holds the scripts that do it.
 
 ## The decision
 
-`tests/ut/backends/run/` holds 45 ported tests, on the native backend only.
+`tests/ut/backends/run/` holds 34 ported tests, on the native backend only.
 They state what compiled D does with each construct. Other backends join a
 test when they agree.
 
-45 is not a compromise between coverage and cost. 45 snippets reach every
-AST node class that all 1344 reach, so the other 1265 add no construct.
+The selection started at 45: the fewest snippets that reach every AST node
+class the other 1344 reach, so the rest reach no class the 45 do not.
+
+Review then cut 45 to 34. AST node coverage chooses candidates; it does not
+say a test is worth keeping. Five of the 45 stated facts that
+`tests/ut/backends/eval/expressions/arithmetic.d` already stated, down to
+the same literals, because a guest that reaches `XorExp` for the first time
+still says nothing new about `^`. Others were pairs that differed by one
+operator, or asserted nothing at all.
+
+So the directory alone no longer reaches all 151 classes. The suite does,
+which is what matters: a construct is covered when some test pins it, not
+when this directory pins it.
 
 ## How the set is chosen
 
@@ -27,13 +38,20 @@ overload of dmd's `SemanticTimeTransitiveVisitor` and records
 classes that nothing taken so far reaches. Set cover is NP-hard, so this is
 the greedy approximation, and the result is small rather than smallest.
 
+What it writes is a starting point, not the committed tests. Those are
+maintained by hand: renamed for the semantic they pin, filed by it, and
+dropped when something else already pins it. Running the script again does
+not reproduce them.
+
 Each test is named for the class it was taken for, and filed by that class
 as well. Filing a test by what its guest happens to contain is what put a
 `real` literal test under arrays: a guest needs an array to have something
 to concatenate, so what it contains says less than why it was chosen.
 
-The expected exit status is measured, not derived: `cover-set.py` runs each
-guest through `dmd -run`. An earlier version read the status from the
+The expected exit status is measured, not derived: `cover-set.py` compiles
+each guest and runs it. Compiling and running are separate steps because
+`dmd -run` exits 1 for a program that does not compile as well as for one
+that dies. An earlier version read the status from the
 quickbite assertion the extractor kept, which was wrong twice. One guest
 asserts `dg.ptr is null` for a delegate to a nested function, which is
 false in compiled D. Another was paired with the message "`dg.funcptr`
@@ -48,6 +66,10 @@ Measured against quickbite's 1344 snippets and snakebite's own 63:
   visitor knows.
 - 45 snippets reach all 151. 4 reach half of them.
 - 45 snippets are 985 lines. All 1344 are 23084.
+
+"Reach" is the whole claim. Two guests can reach identical node sets and
+assert different values, so reaching no further class is not the same as
+adding nothing.
 
 Greedy cover, by how many snippets it takes:
 
@@ -85,7 +107,7 @@ ported.
 
 ## Cost
 
-The whole suite runs in 663 ms, of which the 45 tests are 309 us. The
+The whole suite runs in 663 ms, of which these tests are about 300 us. The
 native backend is compiled into `bin/ut`, so it pays for its link once for
 the binary rather than once a test.
 
@@ -117,12 +139,15 @@ of failing.
 
 ## Porting the whole corpus
 
-`port-snippet.py` ports everything rather than a cover set. 1320 of 1344
-snippets emit, and 17 more fail to build, link or run for the reasons
-above. The remaining 1303 run in 235 ms on the native backend and take
-3.5 s to rebuild. `--nodes` files them by construct and `--max-per-module`
-splits a large topic, since quickbite put 497 of its 1344 into one 16629
-line `expressions.d`.
+`port-snippet.py` ports everything rather than a cover set. It guesses each
+expected status from the quickbite assertion instead of measuring it, by
+the method described above as wrong twice, so its statuses are unverified.
 
-This is measured, not recommended. 1303 tests reach no more constructs
-than 45, and every one of them is a file to read past.
+1320 of 1344 snippets emit, and 17 more fail to build, link or run for the
+reasons above. The remaining 1303 run in 235 ms on the native backend and
+take 3.5 s to rebuild. `--nodes` files them by construct and
+`--max-per-module` splits a large topic, since quickbite put 497 of its
+1344 into one 16629 line `expressions.d`.
+
+This is measured, not recommended. 1303 tests reach no AST node class
+that 45 do not, and every one of them is a file to read past.

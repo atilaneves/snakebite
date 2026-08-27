@@ -1,24 +1,21 @@
 module ut.backends.run.exceptions;
 
 
-// Every test here reaches an AST node class that no test
-// chosen before it reached, and is named for that class.
-// Together they reach every class the frontend produced
-// for a corpus of guest programs.
-//
-// The expected exit status is what `dmd -run` gives the
-// program, so each test states what compiled D does. A
-// backend joins a test's `Matrix` when it agrees.
+// The expected exit status of each guest is what `dmd -run` gives it,
+// so each test states what compiled D does. A backend joins a test's
+// `Matrix` when it agrees.
 
 
 import ut.backends;
 
 
+// `throw` is an expression, so it can be a branch of a ternary whose other
+// branch has a value.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
-    @("throwExp." ~ backend.stringof)
+    @("throwAsExpressionInTernary." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
