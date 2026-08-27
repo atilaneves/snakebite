@@ -54,12 +54,13 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.ffi: PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout: storeValue, TypeFacts;
-    import dmd.astenums: LINK, Tnoreturn, Tvoid;
+    import dmd.astenums: LINK, Tarray, Tnoreturn, Tvoid;
     import dmd.declaration: VarDeclaration;
     import dmd.expression:
-        AddAssignExp, AssertExp, AssignExp, CallExp, CmpExp,
-        DeclarationExp, EqualExp, Expression, IntegerExp, NotExp, RealExp,
-        VarExp;
+        AddAssignExp, AddExp, AndExp, ArrayLengthExp, AssertExp, AssignExp,
+        BinExp, CallExp, CmpExp, CommaExp, DeclarationExp, EqualExp,
+        Expression, IndexExp, IntegerExp, MinExp, MulExp, NotExp, NullExp,
+        OrExp, RealExp, StringExp, VarExp, XorExp;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
@@ -84,6 +85,12 @@ extern(C++) private final class Evaluator: Visitor {
     // hold it. This outlives every call on this evaluator, which is the
     // guest state `Backend.call` promises persists across calls.
     private ubyte[][VarDeclaration] _statics;
+    // What `$` stands for inside each index expression currently being
+    // evaluated. dmd gives every `arr[... $ ...]` its own `lengthVar`
+    // declaration, which no statement declares and `LocalsCollector`
+    // therefore never gives a frame slot, so its storage lives here, bound
+    // for exactly as long as that one index expression is being evaluated.
+    private ulong[VarDeclaration] _lengthVars;
     // How to reach each already-compiled function this guest calls,
     // worked out on that function's first call and reused by every call
     // after it - the same cold-path-once shape as `_layouts`.
@@ -421,7 +428,7 @@ extern(C++) private final class Evaluator: Visitor {
     // Only the branch that runs is walked: the other one never executes,
     // so nothing in it is ever evaluated, not even to be discarded.
     override void visit(IfStatement statement) {
-        auto taken = integralValueOf(statement.condition) != 0
+        auto taken = truthOf(statement.condition)
             ? statement.ifbody
             : statement.elsebody;
 
@@ -430,8 +437,7 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(ForStatement statement) {
-        while (statement.condition is null
-                || integralValueOf(statement.condition) != 0) {
+        while (statement.condition is null || truthOf(statement.condition)) {
             if (statement._body !is null) {
                 statement._body.accept(this);
                 if (_returned)
@@ -441,6 +447,63 @@ extern(C++) private final class Evaluator: Visitor {
             if (statement.increment !is null)
                 runForEffect(statement.increment);
         }
+    }
+
+    // Whether `expression` is true where D asks for a condition. An
+    // integral is true when it is not zero. A dynamic array is true when it
+    // is not `null`, and a `null` array is both words zero: a non-null
+    // array of length zero - `arr[$ .. $]`, say - is true, so testing the
+    // length alone would answer the wrong way round for it. Any other type
+    // is refused rather than guessed at.
+    private bool truthOf(Expression expression) {
+        import std.conv: text;
+
+        auto type = expression.type;
+        const facts = factsOf(type);
+        if (facts.isIntegral)
+            return integralValueOf(expression, facts) != 0;
+
+        if (type.ty == Tarray) {
+            const slice = sliceOf(expression, facts);
+            return slice.ptr !is null || slice.length != 0;
+        }
+
+        throw new Exception(
+            text("interpreter cannot evaluate `", expression.toString,
+                "` as a condition: its type is `", type.toString, "`"),
+        );
+    }
+
+    // A dynamic array as compiled D lays one out: the length first, then
+    // the pointer to the elements. Nothing marshals it - this is the shape
+    // the guest's own frame slots and data-segment storage already hold.
+    private static struct GuestSlice {
+        size_t length;
+        ubyte* ptr;
+    }
+
+    // Evaluates a dynamic-array `expression` and hands back the pair, for a
+    // caller that needs to reach the elements or the length rather than a
+    // destination to leave the array itself at.
+    private GuestSlice sliceOf(Expression expression, in TypeFacts facts) {
+        import std.conv: text;
+
+        auto type = expression.type;
+        if (type.ty != Tarray)
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "` as a dynamic array: its type is `", type.toString,
+                    "`"),
+            );
+
+        align(GuestSlice.alignof) ubyte[GuestSlice.sizeof] buffer = void;
+        assert(facts.size == buffer.sizeof
+                && facts.alignment <= buffer.alignof,
+            "a dynamic array is not a (length, pointer) pair on this target");
+
+        evaluate(expression, type, facts, buffer.ptr);
+
+        return *cast(GuestSlice*) buffer.ptr;
     }
 
     // Evaluates `expression` and hands back its value, for a caller that
@@ -486,6 +549,37 @@ extern(C++) private final class Evaluator: Visitor {
         storeValue(_type, _facts, expression, _place);
     }
 
+    // `null` is all-zero bytes in native layout whatever it is being stored
+    // as - a pointer, or a dynamic array's (length, pointer) pair - so the
+    // destination's own width is all this needs to know.
+    override void visit(NullExp expression) {
+        import core.stdc.string: memset;
+
+        memset(_place, 0, _facts.size);
+    }
+
+    // A string literal's code units live in dmd's own memory for as long as
+    // the module does, exactly as a compiled program's live in its
+    // read-only data, so the guest gets an array aimed straight at them.
+    // Nothing is copied and nothing is allocated.
+    override void visit(StringExp expression) {
+        import std.conv: text;
+
+        if (_type.ty != Tarray)
+            throw new Exception(
+                text("interpreter cannot store the string literal `",
+                    expression.toString, "` as a `", _type.toString, "`"),
+            );
+
+        assert(_facts.size == GuestSlice.sizeof,
+            "a dynamic array is not a (length, pointer) pair on this target");
+
+        *cast(GuestSlice*) _place = GuestSlice(
+            expression.len,
+            cast(ubyte*) expression.peekData.ptr,
+        );
+    }
+
     override void visit(VarExp expression) {
         import core.stdc.string: memcpy;
 
@@ -513,6 +607,12 @@ extern(C++) private final class Evaluator: Visitor {
 
         if (variable.isDataseg)
             return staticSlotOf(variable);
+
+        // `$` reads the declaration `visit(IndexExp)` bound a moment ago,
+        // not a frame slot: it is the one variable a function body can
+        // mention that no statement in that body declares.
+        if (auto length = variable in _lengthVars)
+            return cast(ubyte*) length;
 
         return _frameBase + _layout.offsetOf(variable);
     }
@@ -658,16 +758,17 @@ extern(C++) private final class Evaluator: Visitor {
         storeIntegral(_place, sum, facts.size);
     }
 
-    // `<=`, `>` and `>=` arrive as this same node and are refused: nothing
-    // needs them yet, and answering them with `<` would be a wrong answer
-    // rather than a refusal.
+    // `!` negates a condition, so its operand is whatever D accepts as one:
+    // a dynamic array as much as an integral.
     override void visit(NotExp expression) {
         import snakebite.nativelayout: storeIntegral;
 
-        const operand = integralValueOf(expression.e1);
-        storeIntegral(_place, operand == 0 ? 1 : 0, _facts.size);
+        storeIntegral(_place, truthOf(expression.e1) ? 0 : 1, _facts.size);
     }
 
+    // `<=`, `>` and `>=` arrive as this same node and are refused: nothing
+    // needs them yet, and answering them with `<` would be a wrong answer
+    // rather than a refusal.
     override void visit(CmpExp expression) {
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
@@ -728,7 +829,7 @@ extern(C++) private final class Evaluator: Visitor {
                     expression.toString, "`"),
             );
 
-        if (integralValueOf(expression.e1) != 0)
+        if (truthOf(expression.e1))
             return;
 
         // What D does here is throw an `AssertError` the guest can catch,
@@ -739,6 +840,122 @@ extern(C++) private final class Evaluator: Visitor {
             text("interpreter: assertion failed: `", expression.toString,
                 "`"),
         );
+    }
+
+    // `+`, `-`, `*`, `&`, `|` and `^`, and no other binary operator. These
+    // six are exactly the ones whose result bits do not depend on how the
+    // operands are read: two's complement makes them the same bits signed
+    // or unsigned, so widening the operands to 64 bits and truncating the
+    // result back to the destination's width answers all of them the same
+    // way. `/`, `%` and the shifts do depend on it, and `/` and `%` need an
+    // answer for a zero divisor as well, so they stay refused until
+    // something needs them.
+    override void visit(AddExp expression) {
+        arithmetic(expression);
+    }
+
+    override void visit(MinExp expression) {
+        arithmetic(expression);
+    }
+
+    override void visit(MulExp expression) {
+        arithmetic(expression);
+    }
+
+    override void visit(AndExp expression) {
+        arithmetic(expression);
+    }
+
+    override void visit(OrExp expression) {
+        arithmetic(expression);
+    }
+
+    override void visit(XorExp expression) {
+        arithmetic(expression);
+    }
+
+    private void arithmetic(BinExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+
+        const a = integralValueOf(expression.e1);
+        const b = integralValueOf(expression.e2);
+
+        long result;
+        with (EXP) switch (expression.op) {
+            case add: result = a + b; break;
+            case min: result = a - b; break;
+            case mul: result = a * b; break;
+            case and: result = a & b; break;
+            case or: result = a | b; break;
+            case xor: result = a ^ b; break;
+            default: assert(0, "only the six operators above reach here");
+        }
+
+        storeIntegral(_place, cast(ulong) result, _facts.size);
+    }
+
+    override void visit(ArrayLengthExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+
+        auto array = expression.e1;
+        const length = sliceOf(array, factsOf(array.type)).length;
+
+        storeIntegral(_place, length, _facts.size);
+    }
+
+    // Reading one element of a dynamic array. The array is evaluated first
+    // and the index after it, the order D specifies, and the index is
+    // bounds-checked: reaching outside the array would read host memory the
+    // guest never owned, so it throws instead.
+    override void visit(IndexExp expression) {
+        import core.stdc.string: memcpy;
+        import std.conv: text;
+
+        auto array = expression.e1;
+        const slice = sliceOf(array, factsOf(array.type));
+        const index = indexOf(expression, slice.length);
+
+        if (index < 0 || cast(size_t) index >= slice.length)
+            throw new Exception(
+                text("interpreter cannot index `", expression.toString,
+                    "`: index ", index, " is outside an array of length ",
+                    slice.length),
+            );
+
+        memcpy(_place, slice.ptr + index * _facts.size, _facts.size);
+    }
+
+    // `expression`'s index, with `$` bound to `length` while it is being
+    // evaluated. Whatever `$` stood for before is put back afterwards, so
+    // an index expression that re-enters this same node - a recursive call
+    // between the two - still reads its own array's length.
+    private long indexOf(IndexExp expression, in size_t length) {
+        auto lengthVar = expression.lengthVar;
+        if (lengthVar is null)
+            return integralValueOf(expression.e2);
+
+        auto outer = lengthVar in _lengthVars;
+        const wasBound = outer !is null;
+        const outerLength = wasBound ? *outer : 0;
+        scope(exit) {
+            if (wasBound)
+                _lengthVars[lengthVar] = outerLength;
+            else
+                _lengthVars.remove(lengthVar);
+        }
+
+        _lengthVars[lengthVar] = length;
+
+        return integralValueOf(expression.e2);
+    }
+
+    // dmd builds one of these when it lowers a single source expression
+    // into several: the left side runs for its effects and the value of the
+    // whole is the right side's, which goes to this expression's own
+    // destination.
+    override void visit(CommaExp expression) {
+        runForEffect(expression.e1);
+        expression.e2.accept(this);
     }
 
     // `expression.f` is already statically resolved (dmd resolves direct
