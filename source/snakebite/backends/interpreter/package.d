@@ -65,16 +65,16 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout: storeValue, TypeFacts;
     import dmd.astenums: LINK, Tarray, Tnoreturn, Tpointer, Tvoid;
-    import dmd.declaration: VarDeclaration;
+    import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression:
-        AddAssignExp, AddExp, ArrayLengthExp, AndAssignExp, AndExp, AssertExp,
-        AssignExp, BinAssignExp, BinExp, CallExp, CastExp, CmpExp, ComExp,
-        CommaExp, CondExp, DeclarationExp, DivAssignExp, DivExp, EqualExp,
-        Expression, IndexExp, IntegerExp, LogicalExp, MinAssignExp, MinExp,
-        ModAssignExp, ModExp, MulAssignExp, MulExp, NegExp, NotExp, NullExp,
-        OrAssignExp, OrExp, PostExp, RealExp, ShlAssignExp, ShlExp,
-        ShrAssignExp, ShrExp, StringExp, UnaExp, UshrAssignExp, UshrExp,
-        VarExp, XorAssignExp, XorExp;
+        AddAssignExp, AddExp, AddrExp, ArrayLengthExp, AndAssignExp, AndExp,
+        AssertExp, AssignExp, BinAssignExp, BinExp, CallExp, CastExp, CmpExp,
+        ComExp, CommaExp, CondExp, DeclarationExp, DivAssignExp, DivExp,
+        EqualExp, Expression, IndexExp, IntegerExp, LogicalExp, MinAssignExp,
+        MinExp, ModAssignExp, ModExp, MulAssignExp, MulExp, NegExp, NotExp,
+        NullExp, OrAssignExp, OrExp, PostExp, PtrExp, RealExp, ShlAssignExp,
+        ShlExp, ShrAssignExp, ShrExp, StringExp, SymOffExp, UnaExp,
+        UshrAssignExp, UshrExp, VarExp, XorAssignExp, XorExp;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
@@ -585,6 +585,32 @@ extern(C++) private final class Evaluator: Visitor {
         return loadIntegral(buffer.ptr, facts.size, !facts.isUnsigned);
     }
 
+    // As `integralValueOf`, for a pointer: `Type.isIntegral` is false for
+    // `Tpointer` (a pointer is not an arithmetic type), so `integralValueOf`
+    // itself refuses one. A dereference needs the address a pointer
+    // expression evaluates to, not an integral value, hence the separate
+    // path - though the bytes are read the same way either type is stored.
+    private size_t pointerValueOf(Expression expression) {
+        import snakebite.nativelayout: loadIntegral;
+        import std.conv: text;
+
+        auto type = expression.type;
+        if (type.ty != Tpointer)
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "` as a pointer: its type is `", type.toString, "`"),
+            );
+
+        const facts = factsOf(type);
+        align(8) ubyte[8] buffer = void;
+        assert(facts.size <= buffer.sizeof && facts.alignment <= buffer.alignof,
+            "a pointer wider than a register reached the scratch buffer");
+
+        evaluate(expression, type, facts, buffer.ptr);
+
+        return cast(size_t) loadIntegral(buffer.ptr, facts.size, false);
+    }
+
     override void visit(Expression expression) {
         import std.conv: text;
 
@@ -632,12 +658,24 @@ extern(C++) private final class Evaluator: Visitor {
     // differ in what they do with the slot, not in how they find it, so
     // both come here.
     private ubyte* slotOf(VarExp expression) {
+        return slotOf(expression, expression.var);
+    }
+
+    // As above, for a caller that already has the `Declaration` in hand
+    // rather than a `VarExp` naming it - `SymOffExp`/`AddrExp` reach a
+    // variable's storage the same way a read does, just to take its
+    // address instead of copying its bytes, so this is the one place both
+    // paths resolve a name to a slot. `original` is only for the error
+    // message: it is the node the guest wrote, which may differ from
+    // `declaration` itself (a `SymOffExp` names its variable directly, but
+    // `original.toString` still renders the source expression).
+    private ubyte* slotOf(Expression original, Declaration declaration) {
         import std.conv: text;
 
-        auto variable = expression.var.isVarDeclaration;
+        auto variable = declaration.isVarDeclaration;
         if (variable is null)
             throw new Exception(
-                text("interpreter cannot reach `", expression.toString,
+                text("interpreter cannot reach `", original.toString,
                     "`: not a parameter or local in the current frame"),
             );
 
@@ -761,16 +799,28 @@ extern(C++) private final class Evaluator: Visitor {
 
         // Naming `e1` rather than the whole expression: dmd lowers
         // `s.length = n` into a node whose `toString` is a bare `=`.
-        auto variable = expression.e1.isVarExp;
-        if (variable is null)
-            throw new Exception(
-                text("interpreter cannot assign to `",
-                    expression.e1.toString, "`: it is not a variable"),
-            );
-
-        auto target = slotOf(variable);
+        auto target = assignmentTargetOf(expression.e1);
         evaluate(expression.e2, _type, _facts, target);
         memcpy(_place, target, _facts.size);
+    }
+
+    // Where an assignment's left side writes to: a variable's own slot, or
+    // - for `*p = ...` - the address `p` currently holds. Both a plain
+    // assignment and this dereferenced one write into that address the
+    // same way once it is found, so only finding the address differs.
+    private void* assignmentTargetOf(Expression target) {
+        import std.conv: text;
+
+        if (auto variable = target.isVarExp)
+            return slotOf(variable);
+
+        if (auto deref = target.isPtrExp)
+            return cast(void*) pointerValueOf(deref.e1);
+
+        throw new Exception(
+            text("interpreter cannot assign to `", target.toString,
+                "`: it is not a variable"),
+        );
     }
 
     override void visit(AddAssignExp expression) {
@@ -1077,6 +1127,50 @@ extern(C++) private final class Evaluator: Visitor {
             text("interpreter cannot evaluate a `", expression.op,
                 "` expression: `", expression.toString, "`"),
         );
+    }
+
+    // dmd folds `&variable` into this node directly rather than wrapping
+    // it in an `AddrExp` - `offset` is normally zero, but exists for `&`
+    // of a field reached through a pointer, which is out of scope here. A
+    // frame slot's address is a real machine address for the life of the
+    // frame - the frame stack never moves what it has already handed
+    // out - so this is just that address, stored as a `size_t` the same
+    // way any other pointer value is.
+    override void visit(SymOffExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+
+        const address =
+            cast(size_t) slotOf(expression, expression.var) + expression.offset;
+        storeIntegral(_place, address, _facts.size);
+    }
+
+    // The general `&expression` node, reached for an lvalue too complex to
+    // fold straight into a `SymOffExp` - a variable is the only lvalue the
+    // tests exercising this need, so anything else is refused the same way
+    // an unhandled node already is.
+    override void visit(AddrExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+        import std.conv: text;
+
+        auto variable = expression.e1.isVarExp;
+        if (variable is null)
+            throw new Exception(
+                text("interpreter cannot evaluate a `", expression.op,
+                    "` expression: `", expression.toString, "`"),
+            );
+
+        storeIntegral(_place, cast(size_t) slotOf(variable), _facts.size);
+    }
+
+    // `*p`: the address `p` evaluates to is not this expression's own
+    // destination - `_place`/`_facts` here are the pointee's, `int` for an
+    // `int*` - so the pointer itself is read into a scratch register first
+    // (`pointerValueOf`), the same two-step `assignmentTargetOf` uses to
+    // find where `*p = ...` writes.
+    override void visit(PtrExp expression) {
+        import core.stdc.string: memcpy;
+
+        memcpy(_place, cast(void*) pointerValueOf(expression.e1), _facts.size);
     }
 
     // Only the branch the condition selects is evaluated, the same way
