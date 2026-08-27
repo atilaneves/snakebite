@@ -241,3 +241,122 @@ unittest {
     (new Interpreter).call(function_, &result, [])
         .shouldThrow;
 }
+
+static foreach (backend; Matrix!()) {
+    @("arrays.literal.index." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        20.shouldBeRetOf!(
+            backend,
+            q{
+                int second() {
+                    int[] a = [10, 20, 30];
+                    return a[1];
+                }
+            },
+            "second",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.literal.length." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(3).shouldBeRetOf!(
+            backend,
+            q{
+                size_t length_() {
+                    int[] a = [1, 2, 3];
+                    return a.length;
+                }
+            },
+            "length_",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.literal.nonConstantElements." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // `x + 1` rules out an implementation that only copies constant-
+        // folded bytes dmd already computed instead of evaluating each
+        // element.
+        11.shouldBeRetOf!(
+            backend,
+            q{
+                int sum() {
+                    int x = 3;
+                    int[] a = [x, x + 1];
+                    return a[0] + a[1] * 2;
+                }
+            },
+            "sum",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.literal.single." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                int only() {
+                    int[] a = [42];
+                    return a[0];
+                }
+            },
+            "only",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.literal.empty.length." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(0).shouldBeRetOf!(
+            backend,
+            q{
+                size_t length_() {
+                    int[] a = [];
+                    return a.length;
+                }
+            },
+            "length_",
+        );
+    }
+}
+
+// A literal assigned to a `static` slice is built once, on whichever call
+// first reaches it - its elements must still be readable on a later call
+// to the same function, after the frame that built them has long since
+// been popped.
+@("arrays.literal.static.outlivesFrame.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        int second() {
+            static int[] arr;
+            if (!arr)
+                arr = [10, 20, 30];
+            return arr[1];
+        }
+    });
+    auto function_ = findFunction(module_, "second");
+    auto interpreter = new Interpreter;
+
+    int first;
+    interpreter.call(function_, &first, []);
+    first.shouldEqual(20);
+
+    int later;
+    interpreter.call(function_, &later, []);
+    later.shouldEqual(20);
+}

@@ -67,14 +67,15 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.astenums: LINK, Tarray, Tnoreturn, Tpointer, Tvoid;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression:
-        AddAssignExp, AddExp, AddrExp, ArrayLengthExp, AndAssignExp, AndExp,
-        AssertExp, AssignExp, BinAssignExp, BinExp, CallExp, CastExp, CmpExp,
-        ComExp, CommaExp, CondExp, DeclarationExp, DivAssignExp, DivExp,
-        EqualExp, Expression, IndexExp, IntegerExp, LogicalExp, MinAssignExp,
-        MinExp, ModAssignExp, ModExp, MulAssignExp, MulExp, NegExp, NotExp,
-        NullExp, OrAssignExp, OrExp, PostExp, PtrExp, RealExp, ShlAssignExp,
-        ShlExp, ShrAssignExp, ShrExp, StringExp, SymOffExp, UnaExp,
-        UshrAssignExp, UshrExp, VarExp, XorAssignExp, XorExp;
+        AddAssignExp, AddExp, AddrExp, ArrayLengthExp, ArrayLiteralExp,
+        AndAssignExp, AndExp, AssertExp, AssignExp, BinAssignExp, BinExp,
+        CallExp, CastExp, CmpExp, ComExp, CommaExp, CondExp, DeclarationExp,
+        DivAssignExp, DivExp, EqualExp, Expression, IndexExp, IntegerExp,
+        LogicalExp, MinAssignExp, MinExp, ModAssignExp, ModExp, MulAssignExp,
+        MulExp, NegExp, NotExp, NullExp, OrAssignExp, OrExp, PostExp, PtrExp,
+        RealExp, ShlAssignExp, ShlExp, ShrAssignExp, ShrExp, StringExp,
+        SymOffExp, UnaExp, UshrAssignExp, UshrExp, VarExp, XorAssignExp,
+        XorExp;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
@@ -1317,6 +1318,50 @@ extern(C++) private final class Evaluator: Visitor {
         _dollar = Dollar(lengthVar, length);
 
         return integralValueOf(expression.e2);
+    }
+
+    // `_d_arrayliteralTX`, the druntime hook real compiled D calls for a
+    // heap array literal, has no `FuncDeclaration` and no call node: dmd's
+    // `e2ir.d` conjures it by name only once it has already decided to
+    // lower an `ArrayLiteralExp` this way, so there is nothing here to
+    // interpret or call through. What that lowering does, though, is
+    // exactly what a tree-walking evaluator can do on its own: allocate
+    // room for the elements and evaluate each one into its slot. The room
+    // this evaluator allocates is a GC block, the same storage
+    // `staticSlotOf` already hands a `static` variable - a frame slot
+    // would vanish with the call that made it, and this literal's
+    // elements need to survive at least as long as whatever slice they
+    // are assigned to, `static` or not.
+    override void visit(ArrayLiteralExp expression) {
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset, storeIntegral;
+        import std.conv: text;
+
+        if (_type.ty != Tarray)
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "` as a `", _type.toString, "`: only a dynamic array ",
+                    "literal is supported"),
+            );
+
+        auto elementType = _type.nextOf;
+        const elementFacts = factsOf(elementType);
+        const length = expression.elements is null
+            ? 0 : expression.elements.length;
+
+        ubyte* elements = null;
+        if (length > 0) {
+            auto block = new ubyte[elementFacts.size * length];
+            foreach (i; 0 .. length)
+                evaluate(
+                    (*expression.elements)[i], elementType, elementFacts,
+                    block.ptr + i * elementFacts.size);
+            elements = block.ptr;
+        }
+
+        auto bytes = cast(ubyte*) _place;
+        storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
+        *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
     }
 
     override void visit(CommaExp expression) {
