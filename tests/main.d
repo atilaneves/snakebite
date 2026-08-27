@@ -6,6 +6,17 @@ int main(string[] args) {
 
     return args.runTests!(
         "ut.backends.run.main",
+        "ut.backends.run.arrays",
+        "ut.backends.run.associative",
+        "ut.backends.run.classes",
+        "ut.backends.run.control",
+        "ut.backends.run.declarations",
+        "ut.backends.run.delegates",
+        "ut.backends.run.enums",
+        "ut.backends.run.exceptions",
+        "ut.backends.run.operators",
+        "ut.backends.run.structs",
+        "ut.backends.run.templates",
         "ut.backends.call.func",
         "ut.backends.call.locals",
         "ut.backends.call.scope_",
