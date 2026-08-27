@@ -64,17 +64,17 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.ffi: PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout: storeValue, TypeFacts;
-    import dmd.astenums: LINK, Tarray, Tnoreturn, Tvoid;
+    import dmd.astenums: LINK, Tarray, Tnoreturn, Tpointer, Tvoid;
     import dmd.declaration: VarDeclaration;
     import dmd.expression:
         AddAssignExp, AddExp, ArrayLengthExp, AndAssignExp, AndExp, AssertExp,
-        AssignExp, BinAssignExp, BinExp, CallExp, CmpExp, ComExp, CommaExp,
-        CondExp, DeclarationExp, DivAssignExp, DivExp, EqualExp, Expression,
-        IndexExp, IntegerExp, LogicalExp, MinAssignExp, MinExp, ModAssignExp,
-        ModExp, MulAssignExp, MulExp, NegExp, NotExp, NullExp, OrAssignExp,
-        OrExp, PostExp, RealExp, ShlAssignExp, ShlExp, ShrAssignExp, ShrExp,
-        StringExp, UnaExp, UshrAssignExp, UshrExp, VarExp, XorAssignExp,
-        XorExp;
+        AssignExp, BinAssignExp, BinExp, CallExp, CastExp, CmpExp, ComExp,
+        CommaExp, CondExp, DeclarationExp, DivAssignExp, DivExp, EqualExp,
+        Expression, IndexExp, IntegerExp, LogicalExp, MinAssignExp, MinExp,
+        ModAssignExp, ModExp, MulAssignExp, MulExp, NegExp, NotExp, NullExp,
+        OrAssignExp, OrExp, PostExp, RealExp, ShlAssignExp, ShlExp,
+        ShrAssignExp, ShrExp, StringExp, UnaExp, UshrAssignExp, UshrExp,
+        VarExp, XorAssignExp, XorExp;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
@@ -1040,6 +1040,43 @@ extern(C++) private final class Evaluator: Visitor {
         const a = integralValueOf(expression.e1);
 
         storeIntegral(_place, cast(ulong) mixin(op ~ "a"), _facts.size);
+    }
+
+    // `integralValueOf` already sign- or zero-extends the operand to 64
+    // bits per its own signedness, so storing the destination's low bytes
+    // of that value is correct whichever way the width changes - the same
+    // widen-then-truncate the `combine`d binary operators already rely on,
+    // just with the two types differing instead of matching. A pointer
+    // cast reinterprets the same bits at their native width instead: a
+    // pointer's representation does not depend on its pointee, so no
+    // conversion is needed, only a copy. Anything else this node could
+    // mean - floating point, a class downcast, array reinterpretation - is
+    // refused the same way an unhandled node already is.
+    override void visit(CastExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+        import std.conv: text;
+
+        auto sourceType = expression.e1.type;
+
+        if (sourceType.ty == Tpointer && _type.ty == Tpointer) {
+            evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
+            return;
+        }
+
+        const sourceFacts = factsOf(sourceType);
+        if (sourceFacts.isIntegral && _facts.isIntegral) {
+            storeIntegral(
+                _place,
+                integralValueOf(expression.e1, sourceFacts),
+                _facts.size,
+            );
+            return;
+        }
+
+        throw new Exception(
+            text("interpreter cannot evaluate a `", expression.op,
+                "` expression: `", expression.toString, "`"),
+        );
     }
 
     // Only the branch the condition selects is evaluated, the same way

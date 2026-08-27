@@ -24,6 +24,7 @@ int main(string[] args) {
         "ut.backends.call.compare",
         "ut.backends.call.arithmetic",
         "ut.backends.call.assign",
+        "ut.backends.call.cast_",
         "ut.backends.call.wrap",
         "ut.backends.call.ffi",
         "ut.backends.call.arrays",
