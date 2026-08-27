@@ -57,9 +57,9 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.astenums: LINK, Tnoreturn, Tvoid;
     import dmd.declaration: VarDeclaration;
     import dmd.expression:
-        AddAssignExp, AssertExp, AssignExp, CallExp, CmpExp,
-        DeclarationExp, EqualExp, Expression, IntegerExp, NotExp, RealExp,
-        VarExp;
+        AddAssignExp, AddExp, AssertExp, AssignExp, BinExp, CallExp,
+        CmpExp, CondExp, DeclarationExp, EqualExp, Expression, IntegerExp,
+        MinExp, MulExp, NotExp, RealExp, VarExp;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
@@ -706,6 +706,53 @@ extern(C++) private final class Evaluator: Visitor {
         const answer = expression.op == EXP.equal ? a == b : a != b;
 
         storeIntegral(_place, answer ? 1 : 0, _facts.size);
+    }
+
+    override void visit(AddExp expression) {
+        storeArithmetic(expression, (a, b) => a + b);
+    }
+
+    override void visit(MinExp expression) {
+        storeArithmetic(expression, (a, b) => a - b);
+    }
+
+    override void visit(MulExp expression) {
+        storeArithmetic(expression, (a, b) => a * b);
+    }
+
+    // dmd's usual arithmetic conversions have already given both operands
+    // the result's own type, and `+`, `-` and `*` yield the same bits
+    // whether that type is signed or unsigned, so the arithmetic runs once
+    // at register width and the store keeps only the bits the destination
+    // holds - which is also what D promises on overflow.
+    private void storeArithmetic(
+        BinExp expression,
+        scope long function(long, long) @safe pure nothrow @nogc combine,
+    ) {
+        import snakebite.nativelayout: storeIntegral;
+        import std.conv: text;
+
+        if (!_facts.isIntegral)
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: its type is `", expression.type.toString, "`"),
+            );
+
+        const a = integralValueOf(expression.e1);
+        const b = integralValueOf(expression.e2);
+
+        storeIntegral(_place, cast(ulong) combine(a, b), _facts.size);
+    }
+
+    // Only the branch the condition selects is evaluated, the same way
+    // `if` only walks the branch it takes: D specifies the other one
+    // never runs, so nothing in it can have an effect.
+    override void visit(CondExp expression) {
+        auto taken = integralValueOf(expression.econd) != 0
+            ? expression.e1
+            : expression.e2;
+
+        evaluate(taken, _type, _facts, _place);
     }
 
     // An assertion is a statement's whole expression, so it arrives via

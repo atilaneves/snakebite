@@ -22,6 +22,7 @@ int main(string[] args) {
         "ut.backends.call.scope_",
         "ut.backends.call.loop",
         "ut.backends.call.compare",
+        "ut.backends.call.arithmetic",
         "ut.backends.call.assign",
         "ut.backends.call.wrap",
         "ut.backends.call.ffi",
