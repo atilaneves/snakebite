@@ -36,12 +36,12 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 
     version(unittest)
     public size_t nameLookups() @safe @nogc nothrow pure const scope {
-        return _evaluator.nameLookups;
+        return _evaluator.nameLookups();
     }
 
     version(unittest)
     public size_t typeLookups() @safe @nogc nothrow pure const scope {
-        return _evaluator.typeLookups;
+        return _evaluator.typeLookups();
     }
 }
 
@@ -67,10 +67,14 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.astenums: LINK, Tarray, Tnoreturn, Tvoid;
     import dmd.declaration: VarDeclaration;
     import dmd.expression:
-        AddAssignExp, AddExp, ArrayLengthExp, AssertExp, AssignExp, BinExp,
-        CallExp, CmpExp, CommaExp, CondExp, DeclarationExp, EqualExp,
-        Expression, IndexExp, IntegerExp, MinExp, MulExp, NotExp, NullExp,
-        RealExp, StringExp, VarExp;
+        AddAssignExp, AddExp, ArrayLengthExp, AndAssignExp, AndExp, AssertExp,
+        AssignExp, BinAssignExp, BinExp, CallExp, CmpExp, ComExp, CommaExp,
+        CondExp, DeclarationExp, DivAssignExp, DivExp, EqualExp, Expression,
+        IndexExp, IntegerExp, LogicalExp, MinAssignExp, MinExp, ModAssignExp,
+        ModExp, MulAssignExp, MulExp, NegExp, NotExp, NullExp, OrAssignExp,
+        OrExp, PostExp, RealExp, ShlAssignExp, ShlExp, ShrAssignExp, ShrExp,
+        StringExp, UnaExp, UshrAssignExp, UshrExp, VarExp, XorAssignExp,
+        XorExp;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
@@ -641,7 +645,6 @@ extern(C++) private final class Evaluator: Visitor {
             return staticSlotOf(variable);
 
         countForeignNameLookup;
-
         return _frameBase + _layout.offsetOf(variable);
     }
 
@@ -770,27 +773,107 @@ extern(C++) private final class Evaluator: Visitor {
         memcpy(_place, target, _facts.size);
     }
 
-    // The target is looked up once, not once to read and again to write:
-    // D evaluates the left side of a compound assignment a single time.
     override void visit(AddAssignExp expression) {
+        storeAssignExp!"+"(expression);
+    }
+
+    override void visit(MinAssignExp expression) {
+        storeAssignExp!"-"(expression);
+    }
+
+    override void visit(MulAssignExp expression) {
+        storeAssignExp!"*"(expression);
+    }
+
+    override void visit(DivAssignExp expression) {
+        storeAssignExp!"/"(expression);
+    }
+
+    override void visit(ModAssignExp expression) {
+        storeAssignExp!"%"(expression);
+    }
+
+    override void visit(AndAssignExp expression) {
+        storeAssignExp!"&"(expression);
+    }
+
+    override void visit(OrAssignExp expression) {
+        storeAssignExp!"|"(expression);
+    }
+
+    override void visit(XorAssignExp expression) {
+        storeAssignExp!"^"(expression);
+    }
+
+    override void visit(ShlAssignExp expression) {
+        storeAssignExp!"<<"(expression);
+    }
+
+    override void visit(ShrAssignExp expression) {
+        storeAssignExp!">>"(expression);
+    }
+
+    override void visit(UshrAssignExp expression) {
+        storeAssignExp!">>>"(expression);
+    }
+
+    // The target is looked up once, not once to read and again to write:
+    // D evaluates the left side of a compound assignment a single time. The
+    // right side runs before the target is read, since evaluating it can
+    // change what the target holds.
+    //
+    // `extern(D)`: a string template parameter has no C++ mangling.
+    private extern(D) void storeAssignExp(string op)(BinAssignExp expression) {
         import snakebite.nativelayout: loadIntegral, storeIntegral;
         import std.conv: text;
 
         auto variable = expression.e1.isVarExp;
-        auto facts = _facts;
-        if (variable is null || !facts.isIntegral)
+        const targetFacts = factsOf(expression.e1.type);
+        if (variable is null || !targetFacts.isIntegral)
             throw new Exception(
-                text("interpreter cannot add to `", expression.e1.toString,
-                    "`: `", expression.toString, "`"),
+                text("interpreter cannot assign to `",
+                    expression.e1.toString, "`: `", expression.toString,
+                    "`"),
             );
 
         auto target = slotOf(variable);
-        const added = integralValueOf(expression.e2);
-        const current = loadIntegral(target, facts.size, !facts.isUnsigned);
-        const sum = cast(ulong) (current + added);
+        const stepFacts = factsOf(expression.e2.type);
+        const step = integralValueOf(expression.e2, stepFacts);
+        const current =
+            loadIntegral(target, targetFacts.size, !targetFacts.isUnsigned);
+        const result =
+            combine!op(current, step, targetFacts, stepFacts, expression);
 
-        storeIntegral(target, sum, facts.size);
-        storeIntegral(_place, sum, facts.size);
+        storeIntegral(target, result, targetFacts.size);
+        storeIntegral(
+            _place,
+            loadIntegral(target, targetFacts.size, !targetFacts.isUnsigned),
+            _facts.size,
+        );
+    }
+
+    override void visit(PostExp expression) {
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+        import std.conv: text;
+
+        auto variable = expression.e1.isVarExp;
+        const facts = factsOf(expression.e1.type);
+        if (variable is null || !facts.isIntegral)
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: `", expression.e1.toString, "` is not an integral ",
+                    "variable"),
+            );
+
+        auto target = slotOf(variable);
+        const step = integralValueOf(expression.e2);
+        const current = loadIntegral(target, facts.size, !facts.isUnsigned);
+        const changed = expression.op == EXP.plusPlus
+            ? current + step
+            : current - step;
+
+        storeIntegral(target, changed, facts.size);
+        storeIntegral(_place, current, _facts.size);
     }
 
     override void visit(NotExp expression) {
@@ -800,23 +883,47 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(CmpExp expression) {
-        import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
-        if (expression.op != EXP.lessThan)
-            throw new Exception(
-                text("interpreter cannot evaluate a `", expression.op,
-                    "` expression: `", expression.toString, "`"),
-            );
+        with (EXP) switch (expression.op) {
+            case lessThan: return storeCmpExp!"<"(expression);
+            case lessOrEqual: return storeCmpExp!"<="(expression);
+            case greaterThan: return storeCmpExp!">"(expression);
+            case greaterOrEqual: return storeCmpExp!">="(expression);
+            default:
+                throw new Exception(
+                    text("interpreter cannot evaluate a `", expression.op,
+                        "` expression: `", expression.toString, "`"),
+                );
+        }
+    }
 
-        auto e1Facts = factsOf(expression.e1.type);
-        const a = integralValueOf(expression.e1, e1Facts);
-        const b = integralValueOf(expression.e2);
-        const less = e1Facts.isUnsigned
-            ? cast(ulong) a < cast(ulong) b
-            : a < b;
+    // An ordering answers differently depending on how the operands were
+    // read, so both are read with the signedness their own types give and
+    // the comparison is then made in the one signedness they share.
+    private extern(D) void storeCmpExp(string op)(CmpExp expression) {
+        import snakebite.nativelayout: storeIntegral;
 
-        storeIntegral(_place, less ? 1 : 0, _facts.size);
+        const aFacts = factsOf(expression.e1.type);
+        const bFacts = factsOf(expression.e2.type);
+        const a = integralValueOf(expression.e1, aFacts);
+        const b = integralValueOf(expression.e2, bFacts);
+        const answer = sharedSignedness(aFacts, bFacts, expression)
+            ? mixin("cast(ulong) a " ~ op ~ " cast(ulong) b")
+            : mixin("a " ~ op ~ " b");
+
+        storeIntegral(_place, answer ? 1 : 0, _facts.size);
+    }
+
+    override void visit(LogicalExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+
+        const left = integralValueOf(expression.e1) != 0;
+        const answer = expression.op == EXP.andAnd
+            ? left && integralValueOf(expression.e2) != 0
+            : left || integralValueOf(expression.e2) != 0;
+
+        storeIntegral(_place, answer ? 1 : 0, _facts.size);
     }
 
     // Signedness does not change the answer here the way it does for `<`:
@@ -851,12 +958,52 @@ extern(C++) private final class Evaluator: Visitor {
         storeBinaryExp!"*"(expression);
     }
 
-    // Each operand widens to 64 bits with its own signedness, and the
-    // store keeps only the bits the destination holds - which is what D
-    // promises on overflow. That holds because any width change arrives
-    // as a `CastExp`, which the interpreter refuses by name, and because
-    // `+`, `-` and `*` leave the same low bits whether their operands
-    // are read as signed or unsigned.
+    override void visit(DivExp expression) {
+        storeBinaryExp!"/"(expression);
+    }
+
+    override void visit(ModExp expression) {
+        storeBinaryExp!"%"(expression);
+    }
+
+    override void visit(AndExp expression) {
+        storeBinaryExp!"&"(expression);
+    }
+
+    override void visit(OrExp expression) {
+        storeBinaryExp!"|"(expression);
+    }
+
+    override void visit(XorExp expression) {
+        storeBinaryExp!"^"(expression);
+    }
+
+    override void visit(ShlExp expression) {
+        storeBinaryExp!"<<"(expression);
+    }
+
+    override void visit(ShrExp expression) {
+        storeBinaryExp!">>"(expression);
+    }
+
+    override void visit(UshrExp expression) {
+        storeBinaryExp!">>>"(expression);
+    }
+
+    override void visit(NegExp expression) {
+        storeUnaryExp!"-"(expression);
+    }
+
+    override void visit(ComExp expression) {
+        storeUnaryExp!"~"(expression);
+    }
+
+    // Each operand widens to 64 bits with the signedness its own type
+    // gives, `combine` reduces the two to one 64-bit result, and the store
+    // keeps only the bits the destination holds - which is what D promises
+    // on overflow. The destination is as wide as the left operand because
+    // any width change arrives as a `CastExp`, which the interpreter
+    // refuses by name.
     //
     // `extern(D)`: a string template parameter has no C++ mangling.
     private extern(D) void storeBinaryExp(string op)(BinExp expression) {
@@ -869,10 +1016,30 @@ extern(C++) private final class Evaluator: Visitor {
                     "`: its type is `", expression.type.toString, "`"),
             );
 
-        const a = integralValueOf(expression.e1);
-        const b = integralValueOf(expression.e2);
+        const aFacts = factsOf(expression.e1.type);
+        const bFacts = factsOf(expression.e2.type);
+        const a = integralValueOf(expression.e1, aFacts);
+        const b = integralValueOf(expression.e2, bFacts);
 
-        storeIntegral(_place, cast(ulong) mixin("a " ~ op ~ " b"), _facts.size);
+        storeIntegral(
+            _place, combine!op(a, b, aFacts, bFacts, expression), _facts.size);
+    }
+
+    // `-x` and `~x` leave the same low bits whether the operand was read as
+    // signed or unsigned, so neither needs the operand's own facts.
+    private extern(D) void storeUnaryExp(string op)(UnaExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+        import std.conv: text;
+
+        if (!_facts.isIntegral)
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: its type is `", expression.type.toString, "`"),
+            );
+
+        const a = integralValueOf(expression.e1);
+
+        storeIntegral(_place, cast(ulong) mixin(op ~ "a"), _facts.size);
     }
 
     // Only the branch the condition selects is evaluated, the same way
@@ -1066,6 +1233,125 @@ extern(C++) private final class Evaluator: Visitor {
     }
 }
 
+private ulong combine(string op)(
+    in long a,
+    in long b,
+    in imported!"snakebite.nativelayout".TypeFacts aFacts,
+    in imported!"snakebite.nativelayout".TypeFacts bFacts,
+    imported!"dmd.expression".Expression expression,
+) {
+    static if (op == "<<" || op == ">>" || op == ">>>")
+        return shifted!op(a, b, aFacts, expression);
+    else static if (op == "/" || op == "%")
+        return divided!op(
+            a, b, sharedSignedness(aFacts, bFacts, expression), expression);
+    else
+        // `+`, `-`, `*`, `&`, `|` and `^` leave the same low bits
+        // whichever way the operands were widened, so no signedness
+        // question arises.
+        return cast(ulong) mixin("a " ~ op ~ " b");
+}
+
+// The signedness that governs an operation whose answer depends on it.
+// dmd's usual arithmetic conversions bring both operands to one common
+// type before the interpreter sees the node - a narrower or differently
+// signed operand arrives wrapped in a `CastExp` - so the two agree. If
+// they ever do not, nothing here could pick between them, so this
+// refuses instead of answering from one of them.
+private bool sharedSignedness(
+    in imported!"snakebite.nativelayout".TypeFacts a,
+    in imported!"snakebite.nativelayout".TypeFacts b,
+    imported!"dmd.expression".Expression expression,
+) {
+    import std.conv: text;
+
+    if (a.isUnsigned != b.isUnsigned)
+        throw new Exception(
+            text("interpreter cannot evaluate `", expression.toString,
+                "`: its operands differ in signedness"),
+        );
+
+    return a.isUnsigned;
+}
+
+// D leaves a division by zero undefined, and the host's own divide
+// instruction raises SIGFPE on it, which would take the host process
+// down on guest input. The guest asked for something with no answer, so
+// this reports that to the host the same way a failed guest assertion
+// is reported: an exception the host survives, naming the expression.
+private ulong divided(string op)(
+    in long a,
+    in long b,
+    in bool unsigned,
+    imported!"dmd.expression".Expression expression,
+) {
+    import std.conv: text;
+
+    if (b == 0)
+        throw new Exception(
+            text("interpreter: division by zero in `",
+                expression.toString, "`"),
+        );
+
+    if (unsigned)
+        return mixin("cast(ulong) a " ~ op ~ " cast(ulong) b");
+
+    // The other input the host's divide instruction traps on:
+    // `long.min / -1` has no representable quotient. Negation and a
+    // zero remainder are the answers the instruction gives for every
+    // other dividend, and the two's complement wrap `long.min` needs.
+    if (b == -1) {
+        static if (op == "/")
+            return -cast(ulong) a;
+        else
+            return 0;
+    }
+
+    return cast(ulong) mixin("a " ~ op ~ " b");
+}
+
+// The left operand alone decides a shift: its width says how many bit
+// positions there are, and its signedness says whether `>>` copies the
+// sign bit down. The right operand is a count rather than a value in
+// the same domain - dmd leaves it its own type, which can differ in
+// signedness from the left one - so its facts say nothing here.
+//
+// A count outside `[0, width)` is undefined in D, and the host's shift
+// instruction answers it by taking the count modulo the register width,
+// which is a plausible wrong answer rather than the guest's own. It is
+// refused instead.
+private ulong shifted(string op)(
+    in long a,
+    in long b,
+    in imported!"snakebite.nativelayout".TypeFacts aFacts,
+    imported!"dmd.expression".Expression expression,
+) {
+    import std.conv: text;
+
+    const width = aFacts.size * 8;
+    if (b < 0 || b >= width)
+        throw new Exception(
+            text("interpreter cannot shift by ", b, " in `",
+                expression.toString, "`: the left operand has ", width,
+                " bits"),
+        );
+
+    static if (op == "<<")
+        return cast(ulong) a << b;
+    else static if (op == ">>")
+        return aFacts.isUnsigned
+            ? cast(ulong) a >> b
+            : cast(ulong) (a >> b);
+    else {
+        // `>>>` fills from the left with zeros within the operand's own
+        // width. `a` is 64 bits here, so a signed operand's sign
+        // extension above that width is cleared before the shift.
+        const bits = width == 64
+            ? cast(ulong) a
+            : cast(ulong) a & ((1UL << width) - 1);
+        return bits >> b;
+    }
+}
 // One of the evaluator's caches: an answer worked out on a cold path,
 // kept for the life of the evaluator, and read back by key on a hot one.
 // A plain associative array, and the number of times it has been probed.
@@ -1078,7 +1364,7 @@ extern(C++) private final class Evaluator: Visitor {
 // having to know the count exists.
 //
 // That is the whole of what the count covers: reads of the tables that
-// are `Cache`es. A plain associative array declared beside them, a probe
+// are `Cache`s. A plain associative array declared beside them, a probe
 // made inside `FrameLayout` or `PlanCache` to answer one query, and
 // `opIndexAssign` below - itself a hash lookup, though only ever on a
 // cold path - are all outside it, as is any read of `_entries` from
