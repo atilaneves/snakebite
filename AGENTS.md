@@ -61,3 +61,8 @@ This means there is no need to marshall or unmarshall when doing FFI.
   completes. If it's red once done, loop spawning fixer subagents
   until it's green.
 - Do not add a "test plan" section to a PR description, CI runs tests.
+
+## Code Reviews
+
+Review findings are to be posted on the PR in Github, not communicated
+between agents.
