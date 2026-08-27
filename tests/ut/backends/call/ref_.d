@@ -165,5 +165,7 @@ unittest {
 
     int result;
     (new Interpreter).call(function_, &result, [])
-        .shouldThrow;
+        .shouldThrowWithMessage(
+            "interpreter cannot call `identity` from the host: it " ~
+                "returns by `ref`");
 }

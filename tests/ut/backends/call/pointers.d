@@ -153,5 +153,7 @@ unittest {
 
     ubyte result;
     (new Interpreter).call(function_, &result, [])
-        .shouldThrow;
+        .shouldThrowWithMessage(
+            "interpreter cannot evaluate `(*p).b`: reading a bitfield is " ~
+                "not supported");
 }
