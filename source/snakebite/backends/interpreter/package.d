@@ -424,22 +424,12 @@ extern(C++) private final class Evaluator: Visitor {
         }
     }
 
-    // Evaluates `expression` and hands back its value. Every integral
-    // type dmd hands the interpreter is 8 bytes or narrower, so the bytes
-    // it is evaluated into fit a fixed buffer on the host's own stack -
-    // reclaimed the moment this returns, no bump-allocator reservation
-    // needed - because an expression is only ever evaluated into an
-    // address and never handed back as a value, so anything that needs
-    // the value itself, rather than a destination to leave it at, comes
-    // here.
+    // Evaluates `expression` and hands back its value, for a caller that
+    // needs the value itself rather than a destination to leave it at.
     private long integralValueOf(Expression expression) {
         return integralValueOf(expression, factsOf(expression.type));
     }
 
-    // As above, but for a caller that already holds `expression.type`'s
-    // facts - a `CmpExp` operand, whose facts its visit also needs for
-    // signedness - so this does not pay a second `factsOf` lookup for the
-    // same type.
     private long integralValueOf(Expression expression, in TypeFacts facts) {
         import snakebite.nativelayout: loadIntegral;
         import std.conv: text;
@@ -452,6 +442,9 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         align(8) ubyte[8] buffer = void;
+        assert(facts.size <= buffer.sizeof && facts.alignment <= buffer.alignof,
+            "an integral wider than a register reached the scratch buffer");
+
         evaluate(expression, type, facts, buffer.ptr);
 
         return loadIntegral(buffer.ptr, facts.size, !facts.isUnsigned);
