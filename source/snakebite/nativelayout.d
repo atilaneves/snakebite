@@ -62,6 +62,10 @@ public long loadIntegral(in void* place, in size_t size, in bool signed) {
     );
 }
 
+public enum arrayLengthOffset = 0;
+public enum arrayPointerOffset = size_t.sizeof;
+public enum arrayValueSize = size_t.sizeof + (void*).sizeof;
+
 // Whether `storeIntegral` has a layout for that width, so a caller that
 // must decide before it has a value to store asks the same question the
 // store itself would.
@@ -125,8 +129,10 @@ shared static this() {
 }
 
 // Writes a dmd constant-folded `value` into `place` as `type`'s native
-// layout: a `float` or `double` cast for the floating point widths, an
-// integral by way of `storeIntegral`.
+// layout: `null` as zero bytes, a string literal as the two words of a
+// dynamic array over the literal's own code units, a `float` or `double`
+// cast for the floating point widths, an integral by way of
+// `storeIntegral`.
 //
 // The interpreter, writing a literal into a frame slot, and the CTFE
 // backend, writing a call's result into its caller's return place, both
@@ -150,8 +156,46 @@ public void storeValue(
     imported!"dmd.expression".Expression value,
     void* place,
 ) {
-    import dmd.astenums: Tfloat32, Tfloat64;
+    import core.stdc.string: memset;
+    import dmd.astenums: Tarray, Tfloat32, Tfloat64;
     import std.conv: text;
+
+    // `null` is all-zero bytes whatever it is stored as - a pointer, a
+    // dynamic array's two words, a class reference - so the destination's
+    // width is all this needs to know.
+    if (value.isNullExp) {
+        memset(place, 0, facts.size);
+        return;
+    }
+
+    // The array points straight at the literal's own code units instead
+    // of copying them: they live in dmd's memory, kept alive by the module
+    // that holds them, for as long as that module is reachable. Nothing
+    // the guest holds is a root - a frame slot is unscanned host memory
+    // and a static slot is `NO_SCAN` - so a guest slice of a literal stays
+    // valid only while dmd keeps the module.
+    if (auto literal = value.isStringExp) {
+        // The literal's code-unit width has to match the destination's
+        // element width, or `literal.len` would be the wrong length for
+        // the bytes the pointer aims at. dmd inserts a `CastExp` for any
+        // change of width, and the backends refuse those, so this refuses
+        // by name rather than trusting the destination.
+        import dmd.typesem: size;
+
+        auto element = type.nextOf;
+        if (type.ty != Tarray || facts.size != arrayValueSize
+                || element is null || literal.sz != element.size)
+            throw new Exception(
+                text("no native layout for the string literal `",
+                    value.toString, "` as a `", type.toString, "`"),
+            );
+
+        auto bytes = cast(ubyte*) place;
+        storeIntegral(bytes + arrayLengthOffset, literal.len, size_t.sizeof);
+        *cast(const(void)**) (bytes + arrayPointerOffset) =
+            literal.peekData.ptr;
+        return;
+    }
 
     if (type.ty == Tfloat32) {
         *cast(float*) place = cast(float) value.toReal;

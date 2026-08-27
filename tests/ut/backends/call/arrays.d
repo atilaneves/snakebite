@@ -35,3 +35,209 @@ static foreach (backend; Matrix!(
         );
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("arrays.length." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // A string literal is a slice of code units the compiler already
+        // laid out, so `.length` is the first word of the pair without
+        // anything having to allocate.
+        size_t(5).shouldBeRetOf!(
+            backend,
+            q{
+                size_t length_() {
+                    string text = "hello";
+                    return text.length;
+                }
+            },
+            "length_",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.index." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        'e'.shouldBeRetOf!(
+            backend,
+            q{
+                char second() {
+                    string text = "hello";
+                    size_t index = 1;
+                    return text[index];
+                }
+            },
+            "second",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.dollar." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // `$` inside an index is a variable of its own that no statement
+        // declares: dmd rewrites `text[$ - 1]` into an index over a
+        // declaration it makes for the array's length.
+        'o'.shouldBeRetOf!(
+            backend,
+            q{
+                char last() {
+                    string text = "hello";
+                    return text[$ - 1];
+                }
+            },
+            "last",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.dollar.nested." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // Each index expression has its own `$`. `oneIfLastIsSet` indexes
+        // its own array while the outer index in `pick` is still being
+        // evaluated, so the inner `$` must stand for `flag`'s length, and
+        // the outer one for `text`'s again afterwards.
+        'l'.shouldBeRetOf!(
+            backend,
+            q{
+                size_t oneIfLastIsSet(string bytes) {
+                    if(bytes[$ - 1])
+                        return 1;
+                    return 0;
+                }
+
+                char pick() {
+                    string text = "hello";
+                    string flag = "yo";
+                    return text[$ - oneIfLastIsSet(flag) - 1];
+                }
+            },
+            "pick",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.truth.null." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // A `null` slice is false where D asks for a condition, and both
+        // words of it are zero.
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                int nothing() {
+                    string text = null;
+                    if(!text)
+                        return 1;
+                    return 0;
+                }
+            },
+            "nothing",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.truth.literal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(
+            backend,
+            q{
+                int something() {
+                    string text = "hello";
+                    if(text)
+                        return 2;
+                    return 0;
+                }
+            },
+            "something",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+    Omit!(Interpreter, Because.diverges,
+        "the interpreter refuses an out-of-range index instead, since it " ~
+        "has no guest try/catch to throw into"),
+)) {
+    @("arrays.index.outOfRange.throws.RangeError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // An index outside the array is a `RangeError`, which derives from
+        // `Error`: compiled D checks every index it cannot prove in range.
+        'x'.shouldBeRetOf!(
+            backend,
+            q{
+                char past() {
+                    import core.exception: RangeError;
+
+                    string text = "hello";
+                    size_t index = 5;
+
+                    try
+                        return text[index];
+                    catch(RangeError)
+                        return 'x';
+                }
+            },
+            "past",
+        );
+    }
+}
+
+// Compiled D throws a `RangeError` for an index outside the array, which
+// needs guest exceptions the interpreter does not have. It refuses the
+// index rather than reading the host address the guest asked for, so this
+// pins a refusal where the test above pins the throw.
+@("arrays.index.outOfRange.refused.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        char past() {
+            string text = "hello";
+            size_t index = 5;
+            return text[index];
+        }
+    });
+    auto function_ = findFunction(module_, "past");
+
+    char result;
+    (new Interpreter).call(function_, &result, [])
+        .shouldThrow;
+}
+
+// A `null` array is zero-length with a null pointer, so an index into it
+// is out of range like any other. Reading it instead would dereference
+// null and take down the host process, not the guest.
+@("arrays.index.nullArray.refused.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        char nothing() {
+            string text = null;
+            size_t index = 0;
+            return text[index];
+        }
+    });
+    auto function_ = findFunction(module_, "nothing");
+
+    char result;
+    (new Interpreter).call(function_, &result, [])
+        .shouldThrow;
+}

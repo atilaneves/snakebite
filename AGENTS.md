@@ -62,6 +62,10 @@ This means there is no need to marshall or unmarshall when doing FFI.
   until it's green.
 - Do not add a "test plan" section to a PR description, CI runs tests.
 
-## Reviews
+## Code Reviews
 
-Present review findings one by one for discussion and approval.
+Reviewer findings are to be posted on the PR in Github, not
+communicated between agents. Review subagents get the PR number and
+nothing else, they can read review comments and markdown
+instructions. Fixer subagents should resolve conversations after
+pushing, otherwise there's no new diff.
