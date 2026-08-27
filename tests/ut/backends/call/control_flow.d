@@ -187,3 +187,28 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("assert.passes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        5.shouldBeRetOf!(
+            backend,
+            q{
+                int one() {
+                    return 1;
+                }
+
+                int two() {
+                    return 2;
+                }
+
+                int result() {
+                    assert(one() < two());
+                    return 5;
+                }
+            },
+            "result",
+        );
+    }
+}

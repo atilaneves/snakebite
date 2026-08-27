@@ -54,11 +54,12 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.ffi: PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout: storeValue, TypeFacts;
-    import dmd.astenums: LINK, Tvoid;
+    import dmd.astenums: LINK, Tnoreturn, Tvoid;
     import dmd.declaration: VarDeclaration;
     import dmd.expression:
-        AddAssignExp, AssignExp, CallExp, CmpExp, DeclarationExp,
-        EqualExp, Expression, IntegerExp, NotExp, RealExp, VarExp;
+        AddAssignExp, AssertExp, AssignExp, CallExp, CmpExp,
+        DeclarationExp, EqualExp, Expression, IntegerExp, NotExp, RealExp,
+        VarExp;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
@@ -705,6 +706,39 @@ extern(C++) private final class Evaluator: Visitor {
         const answer = expression.op == EXP.equal ? a == b : a != b;
 
         storeIntegral(_place, answer ? 1 : 0, _facts.size);
+    }
+
+    // An assertion is a statement's whole expression, so it arrives via
+    // `visit(ExpStatement)` -> `runForEffect` with nowhere to leave a
+    // value: a passing assertion produces nothing, it only has to let the
+    // walk continue.
+    //
+    // dmd gives `assert(0)`/`assert(false)` the type `noreturn` because
+    // the spec makes it a halt rather than an assertion - it stays in the
+    // program under `-release`, where every other assertion is gone. A
+    // halt is not something this backend can produce, so it is refused by
+    // name instead of being answered with the ordinary failure below,
+    // which would be a different thing wearing the same words.
+    override void visit(AssertExp expression) {
+        import std.conv: text;
+
+        if (expression.type !is null && expression.type.ty == Tnoreturn)
+            throw new Exception(
+                text("interpreter cannot execute the halt `",
+                    expression.toString, "`"),
+            );
+
+        if (integralValueOf(expression.e1) != 0)
+            return;
+
+        // What D does here is throw an `AssertError` the guest can catch,
+        // and the interpreter has no guest exceptions yet. Reporting the
+        // failure to the host is the honest half of that: the assertion
+        // is not passed over, and no guest-visible exception is faked.
+        throw new Exception(
+            text("interpreter: assertion failed: `", expression.toString,
+                "`"),
+        );
     }
 
     // `expression.f` is already statically resolved (dmd resolves direct
