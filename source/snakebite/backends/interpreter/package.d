@@ -33,6 +33,16 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
             "eval not implemented for the interpreter yet",
         );
     }
+
+    version(unittest)
+    public size_t nameLookups() const {
+        return _evaluator.nameLookups;
+    }
+
+    version(unittest)
+    public size_t typeLookups() const {
+        return _evaluator.typeLookups;
+    }
 }
 
 import dmd.visitor: Visitor;
@@ -77,13 +87,13 @@ extern(C++) private final class Evaluator: Visitor {
     // Each guest function's frame layout, computed once on that
     // function's first call (the cold path) and reused by every call
     // after it.
-    private FrameLayout[FuncDeclaration] _layouts;
+    private Cache!(FuncDeclaration, FrameLayout) _layouts;
     // Storage for every data-segment variable the guest has reached so
     // far, keyed by its declaration. Such a variable is one variable per
     // program, not one per call, so a frame - popped on return - cannot
     // hold it. This outlives every call on this evaluator, which is the
     // guest state `Backend.call` promises persists across calls.
-    private ubyte[][VarDeclaration] _statics;
+    private Cache!(VarDeclaration, ubyte[]) _statics;
     // How to reach each already-compiled function this guest calls,
     // worked out on that function's first call and reused by every call
     // after it - the same cold-path-once shape as `_layouts`.
@@ -96,13 +106,17 @@ extern(C++) private final class Evaluator: Visitor {
     // reads the answer back out instead. Not per-function like
     // `_layouts`: a `Type` such as `int` is dmd's own shared, interned
     // instance, so the same entry serves every function that mentions it.
-    private TypeFacts[Type] _typeFacts;
+    private Cache!(Type, TypeFacts) _typeFacts;
     // The most recently asked-about `Type` and its facts: dmd interns
     // basic types, so a loop revisiting the same `int` node hits this
     // every time - a pointer compare instead of an AA hash lookup - and
     // only falls through to `_typeFacts` on an actual change of type.
     private Type _cachedType;
     private TypeFacts _cachedFacts;
+    // The hash lookups made against a table this evaluator does not own,
+    // so cannot have count itself: a frame layout's offsets, and the FFI
+    // plans. Counted here to complete `nameLookups` below.
+    version(unittest) private size_t _foreignNameLookups;
 
     // The destination: while walking statements, the enclosing function's
     // return type and return place; `evaluate` narrows it to each
@@ -152,6 +166,27 @@ extern(C++) private final class Evaluator: Visitor {
         auto frame = _frames.push(layout.size, layout.alignment);
 
         execute(function_, returnPlace, frame.base, layout);
+    }
+
+    // Every hash lookup this evaluator has made to find where a name
+    // lives: a variable's storage, or how to reach a called function.
+    version(unittest)
+    extern(D) final size_t nameLookups() const {
+        return _foreignNameLookups + _layouts.lookups + _statics.lookups;
+    }
+
+    // Every hash lookup this evaluator has made to find out what a `Type`
+    // is - counted apart from the name lookups because the two regress
+    // for unrelated reasons: a name lookup grows when the evaluator asks
+    // a second question to find one variable, a type lookup when an
+    // answer about a type stops being kept.
+    version(unittest)
+    extern(D) final size_t typeLookups() const {
+        return _typeFacts.lookups;
+    }
+
+    extern(D) private void countForeignNameLookup() {
+        version(unittest) ++_foreignNameLookups;
     }
 
     // `function_`'s frame layout, from the cache; computed on its first
@@ -232,6 +267,7 @@ extern(C++) private final class Evaluator: Visitor {
             const linkage = function_.resolvedLinkage;
             if (linkage != LINK.d && linkage != LINK.default_) {
                 const(void)*[maxArguments] slots;
+                countForeignNameLookup;
                 _plans.of(function_).call(
                     returnPlace, argumentSlots(slots, frameBase, layout));
                 return;
@@ -514,6 +550,8 @@ extern(C++) private final class Evaluator: Visitor {
         if (variable.isDataseg)
             return staticSlotOf(variable);
 
+        countForeignNameLookup;
+
         return _frameBase + _layout.offsetOf(variable);
     }
 
@@ -592,6 +630,7 @@ extern(C++) private final class Evaluator: Visitor {
         if (variable.isDataseg)
             return;
 
+        countForeignNameLookup;
         const offset = _layout.offsetOf(variable);
 
         auto expInitializer = variable._init.isExpInitializer;
@@ -872,6 +911,39 @@ extern(C++) private final class Evaluator: Visitor {
         _facts = facts;
         _place = place;
         expression.accept(this);
+    }
+}
+
+// One of the evaluator's caches: an answer worked out on a cold path,
+// kept for the life of the evaluator, and read back by key on a hot one.
+// A plain associative array, and the number of times it has been probed.
+//
+// The count is what makes it a type rather than an associative array
+// declaration. Every probe of one of these is a hash of a pointer on a
+// path the evaluator takes per node it visits, so how many of them a
+// guest construct needs is a property worth asserting on - and asserting
+// on it is only worth anything if a probe added later is counted without
+// whoever adds it having to know the count exists.
+//
+// The count itself is `bin/ut` only: an unconditional increment here
+// would be exactly the per-node cost it exists to measure.
+private struct Cache(Key, Value) {
+    private Value[Key] _entries;
+    version(unittest) private size_t _lookups;
+
+    public Value* opBinaryRight(string op: "in")(Key key) {
+        version(unittest) ++_lookups;
+
+        return key in _entries;
+    }
+
+    public void opIndexAssign(Value value, Key key) {
+        _entries[key] = value;
+    }
+
+    version(unittest)
+    public size_t lookups() const {
+        return _lookups;
     }
 }
 
