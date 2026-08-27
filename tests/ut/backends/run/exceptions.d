@@ -9,6 +9,47 @@ module ut.backends.run.exceptions;
 import ut.backends;
 
 
+// `catch` matches a thrown class against the declared type by walking the
+// base-class chain, not by exact type, so a `catch` naming a base class
+// catches a derived exception while a `catch` naming a sibling class does
+// not.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Interpreter, Because.unconfirmed),
+)) {
+    @("catchMatchesThrownClassByBaseType." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Expected : Exception {
+                this(string msg) {
+                    super(msg);
+                }
+            }
+
+            class Other : Exception {
+                this(string msg) {
+                    super(msg);
+                }
+            }
+
+            void main() {
+                int value = 1;
+
+                try {
+                    throw new Expected("expected");
+                } catch (Other) {
+                    value = 100;
+                } catch (Exception caught) {
+                    value += cast(int) caught.msg.length;
+                }
+
+                assert(value == 9);
+            }
+        });
+    }
+}
+
 // `throw` is an expression, so it can be a branch of a ternary whose other
 // branch has a value.
 static foreach (backend; Matrix!(

@@ -25,9 +25,11 @@ static foreach (backend; Matrix!(
 
             void main() {
                 int total;
+                int entered;
 
                 for (int i = 0; i < seed(1); ++i) {
                     try {
+                        ++entered;
                         throw new Exception("expected");
                     } catch (Exception) {
                         goto resumed;
@@ -39,6 +41,7 @@ static foreach (backend; Matrix!(
                     }
                 }
 
+                assert(entered == 1);
                 assert(total == 0);
             }
         });
@@ -79,13 +82,13 @@ static foreach (backend; Matrix!(
     }
 }
 
-// A `do` loop runs its body before it tests, so the body always runs at
-// least once.
+// `continue` in a `do`-`while` transfers control to the trailing
+// condition check, not back to the start of the body.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
-    @("doWhileRunsBodyBeforeTest." ~ backend.stringof)
+    @("continueInDoWhileJumpsToCondition." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -111,13 +114,13 @@ static foreach (backend; Matrix!(
     }
 }
 
-// A `switch` with no matching case and no default throws `SwitchError`,
-// which leaves `main` and fails the process.
+// `final switch` must cover every member of the enum it switches on, and
+// each case dispatches to its own body.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
-    @("unmatchedSwitchThrowsSwitchError." ~ backend.stringof)
+    @("finalSwitchDispatchesEveryEnumMember." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -155,13 +158,14 @@ static foreach (backend; Matrix!(
     }
 }
 
-// `static foreach` over a tuple unrolls at compile time, so the body is
-// compiled once per element with that element's type.
+// `foreach` over an `AliasSeq` unrolls into one statement per element at
+// compile time, so `break`/`continue` inside it control which of those
+// per-element statements run, exactly like an ordinary loop body.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
-    @("staticForeachUnrollsOverTuple." ~ backend.stringof)
+    @("breakAndContinueInUnrolledForeach." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{

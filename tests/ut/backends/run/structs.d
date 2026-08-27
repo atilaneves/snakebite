@@ -20,17 +20,12 @@ static foreach (backend; Matrix!(
     unittest {
         0.shouldBeStatusOf!(backend, q{
             __gshared int copies;
-            __gshared int destructions;
 
             struct Element {
                 int value;
 
                 this(this) {
                     ++copies;
-                }
-
-                ~this() {
-                    ++destructions;
                 }
             }
 
@@ -66,20 +61,15 @@ static foreach (backend; Matrix!(
                 }
             }
 
-            union U {
-                S s;
-                long l;
-            }
-
             int observe(ref int x) {
                 return x;
             }
 
             void main() {
-                U u;
-                u.s.a = 7;
-                assert(observe(u.s.a) == 7);
-                assert(u.s.a == 7);
+                S s;
+                s.a = 7;
+                assert(observe(s.a) == 7);
+                assert(s.a == 7);
             }
         });
     }

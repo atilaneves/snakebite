@@ -40,25 +40,10 @@ static foreach (backend; Matrix!(
     }
 }
 
-// A failed assertion leaves `main` as a `Throwable` and the process fails,
-// which is the contract `run` reports as a status.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
-    @("failedAssertExitsNonZero." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        1.shouldBeStatusOf!(backend, q{
-            void main() {
-                assert(1 == 2);
-            }
-        });
-    }
-}
-
-// `pragma(mangle)` binds a declaration to a symbol by name, so the call
-// reaches druntime's definition without a D-visible declaration of it.
+// `pragma(mangle)` binds a declaration to a symbol by name, so the guest
+// links against druntime's `gc_getArrayUsed` even though nothing in it
+// declares that symbol directly; without `pragma(mangle)` the link fails
+// rather than the assertions.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),

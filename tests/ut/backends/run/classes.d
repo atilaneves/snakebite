@@ -32,45 +32,6 @@ static foreach (backend; Matrix!(
     }
 }
 
-// `super` in a derived constructor runs the base constructor, so state the
-// base sets is in place before the derived body runs.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
-    @("superConstructorRunsBaseInitialiser." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            class Expected : Exception {
-                this(string msg) {
-                    super(msg);
-                }
-            }
-
-            class Other : Exception {
-                this(string msg) {
-                    super(msg);
-                }
-            }
-
-            void main() {
-                int value = 1;
-
-                try {
-                    throw new Expected("expected");
-                } catch (Other) {
-                    value = 100;
-                } catch (Exception caught) {
-                    value += cast(int) caught.msg.length;
-                }
-
-                assert(value == 9);
-            }
-        });
-    }
-}
-
 // A call through an interface reference finds the class's override, which
 // needs the interface's own offset rather than the class vtable.
 static foreach (backend; Matrix!(

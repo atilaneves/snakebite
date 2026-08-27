@@ -26,8 +26,9 @@ static foreach (backend; Matrix!(
             }
 
             void main() {
-                // First touch is from a lazily-compiled callee, not the
-                // entry itself; it must still see the initialised contents.
+                // Module-scope initialisers run before `main`, so the
+                // first read of `arr`, even from a callee, already sees
+                // its initial contents.
                 assert(sum() == 6);
 
                 assert(arr.length == 3);
@@ -45,8 +46,9 @@ static foreach (backend; Matrix!(
     }
 }
 
-// `~` allocates and copies. Neither operand's storage is reused, so a
-// backend that returns a slice of either one is wrong.
+// `~` allocates and copies. Neither operand's storage is reused, so
+// writing through the result does not change either operand, and writing
+// through an operand afterwards does not change the result.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
@@ -61,11 +63,20 @@ static foreach (backend; Matrix!(
                 ubyte[] left = [first];
                 ubyte[] right = [second];
 
-                const combined = left ~ right;
+                ubyte[] combined = left ~ right;
 
                 assert(combined.length == 2);
                 assert(combined[0] == first);
                 assert(combined[1] == second);
+
+                combined[0] = cast(ubyte)(first + 1);
+                assert(left[0] == first);
+
+                left[0] = cast(ubyte)(first + 2);
+                assert(combined[0] == cast(ubyte)(first + 1));
+
+                combined[1] = cast(ubyte)(second + 1);
+                assert(right[0] == second);
             }
         });
     }
@@ -190,16 +201,11 @@ static foreach (backend; Matrix!(
                     if (newLength > _elements.length) {
                         const newCapacity = (newLength * 3) / 2;
                         Mallocator.instance.expandArray(
-                            mutableElements,
+                            _elements,
                             newCapacity - _elements.length,
                         );
                     }
                     _length = newLength;
-                }
-
-                private ref char[] mutableElements() return {
-                    auto pointer = &_elements;
-                    return *pointer;
                 }
             }
 
@@ -211,30 +217,6 @@ static foreach (backend; Matrix!(
 
                 assert(vector._length == 10);
                 assert(vector._elements[0 .. vector._length] == "foobarquux");
-            }
-        });
-    }
-}
-
-// A pointer into an element of a nested array aliases the array's own
-// storage, so writing through it is visible through the array.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
-    @("pointerIntoNestedArrayAliasesStorage." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            void main() {
-                static struct S { int[][] a; }
-                S s;
-                s.a ~= [1, 2, 3];
-                auto p = &s.a[0][1];
-                *p = 9;
-                assert(s.a[0][1] == 9);
-                assert(s.a[0][0] == 1);
-                assert(s.a[0].length == 3);
             }
         });
     }

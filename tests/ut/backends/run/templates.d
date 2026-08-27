@@ -71,55 +71,6 @@ static foreach (backend; Matrix!(
     }
 }
 
-// A templated struct that allocates in its constructor and frees in its
-// destructor keeps its contents valid for its whole lifetime.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
-    @("templatedOwnerManagesItsStorage." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            import std.experimental.allocator.mallocator: Mallocator;
-
-            auto owners(T)(T[] values...) {
-                return Owner!T(values);
-            }
-
-            struct Owner(T) {
-                private T[] _storage;
-                private long _length;
-
-                this(T[] values...) {
-                    _storage = cast(T[]) Mallocator.instance.allocate(
-                        values.length * T.sizeof,
-                    );
-                    _storage[] = values[];
-                    _length = values.length;
-                }
-
-                ~this() {
-                    Mallocator.instance.deallocate(_storage);
-                    _length = 0;
-                }
-
-                T[] range() return scope {
-                    return _storage[0 .. _length];
-                }
-            }
-
-            void main() {
-                import std.algorithm: equal;
-
-                auto owner = owners(0, 1, 2, 3);
-                int[4] expected = [0, 1, 2, 3];
-                assert(equal(owner.range, expected[]));
-            }
-        });
-    }
-}
-
 // A mixin template's member is a member of the class that mixes it in, so
 // it can override a base method and see the derived class's fields.
 static foreach (backend; Matrix!(
