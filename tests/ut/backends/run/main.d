@@ -60,6 +60,23 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A failed assertion leaves `main` as a `Throwable` and the process fails,
+// which is the contract `run` reports as a status.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Interpreter, Because.unconfirmed),
+)) {
+    @("failedAssertExitsNonZero." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeStatusOf!(backend, q{
+            void main() {
+                assert(1 == 2);
+            }
+        });
+    }
+}
+
 // No `main` at all is not an error: the status is 0.
 static foreach (backend; Matrix!()) {
     @("noMain." ~ backend.stringof)
