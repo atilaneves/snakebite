@@ -30,6 +30,7 @@ int main(string[] args) {
         "ut.backends.call.control_flow",
         "ut.backends.call.exceptions",
         "ut.backends.eval.expressions.arithmetic",
+        "ut.backends.interpreter.cost",
         "ut.ffi.plan",
         "ut.ffi.cost",
         "ut.framestack",
