@@ -1352,7 +1352,6 @@ private ulong shifted(string op)(
         return bits >> b;
     }
 }
-
 // One of the evaluator's caches: an answer worked out on a cold path,
 // kept for the life of the evaluator, and read back by key on a hot one.
 // A plain associative array, and the number of times it has been probed.
@@ -1363,7 +1362,7 @@ private ulong shifted(string op)(
 // guest construct needs is a property worth asserting on, and a probe of
 // a table that is already a `Cache` is counted without whoever adds it
 // having to know the count exists.
-// 
+//
 // That is the whole of what the count covers: reads of the tables that
 // are `Cache`s. A plain associative array declared beside them, a probe
 // made inside `FrameLayout` or `PlanCache` to answer one query, and
