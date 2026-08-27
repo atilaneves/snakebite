@@ -1,4 +1,4 @@
-module snakebite.backends.interpreter.framestack;
+module snakebite.framestack;
 
 
 private:
@@ -17,8 +17,8 @@ private:
 // contributes: alignment above one byte is computed entirely by hand in
 // `push`, below - `Region` is built with `minAlign = 1`, so it never
 // rounds a request up on its own.
-package struct FrameStack {
-    import snakebite.backends.interpreter.alignment: alignUp;
+public struct FrameStack {
+    import snakebite.nativelayout: alignUp;
     import std.experimental.allocator.building_blocks.region: Region;
     import std.experimental.allocator.mallocator: Mallocator;
 
@@ -36,7 +36,9 @@ package struct FrameStack {
     // synthetic block it hands back to `Region.deallocate`.
     private ubyte* _base;
 
-    package this(size_t capacity) {
+    @disable this(this);
+
+    public this(size_t capacity) {
         _capacity = capacity;
         _region = typeof(_region)(capacity);
 
@@ -55,10 +57,10 @@ package struct FrameStack {
     // to the mark it was pushed at, the moment it goes out of scope -
     // copying it would let two handles pop the same bytes, so it can only
     // be moved.
-    package struct Frame {
+    public struct Frame {
         private FrameStack* _stack;
         private Mark _mark;
-        package ubyte* base;
+        public ubyte* base;
 
         @disable this(this);
 
@@ -70,7 +72,7 @@ package struct FrameStack {
 
     // Bump-allocates `size` bytes aligned to `alignment` and hands back a
     // handle that frees them again when it goes out of scope.
-    package Frame push(in size_t size, in uint alignment) {
+    public Frame push(in size_t size, in uint alignment) {
         import std.conv: text;
 
         const mark = this.mark;
@@ -91,7 +93,7 @@ package struct FrameStack {
         // throws instead.
         if (alignment > Mallocator.alignment)
             throw new Exception(
-                text("interpreter frame stack cannot honor a ", alignment,
+                text("frame stack cannot honor a ", alignment,
                     "-byte alignment: the backing buffer is only aligned ",
                     "to ", Mallocator.alignment, " byte(s)"),
             );
@@ -102,7 +104,7 @@ package struct FrameStack {
         auto block = _region.allocate(padding + size);
         if (block is null)
             throw new Exception(
-                text("interpreter frame stack overflow: need ", size,
+                text("frame stack overflow: need ", size,
                     " byte(s) at offset ", alignedUsed, " of ", _capacity),
             );
 
