@@ -4,7 +4,7 @@ uint factorial(uint i) {
 
 unittest {
     assert(factorial(5) == 120);
-    assert(factorial(10) == 3_628_800);
+    assert(factorial(12) == 479_001_600);
 }
 
 uint fibonacci(uint i) {
@@ -21,4 +21,6 @@ unittest {
     assert(fibonacci(5) == 5);
     assert(fibonacci(6) == 8);
     assert(fibonacci(21) == 10_946);
+    assert(fibonacci(22) == 17_711);
+    assert(fibonacci(23) == 28_657);
 }
