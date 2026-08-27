@@ -62,6 +62,14 @@ public long loadIntegral(in void* place, in size_t size, in bool signed) {
     );
 }
 
+// Where a dynamic array's two fields sit in the value compiled D lays out
+// for it, and how many bytes that value is. Field offsets, so reading
+// `arr.length` is the fixed-offset read of a field within a value, the
+// same operation any other aggregate's field is.
+public enum arrayLengthOffset = 0;
+public enum arrayPointerOffset = size_t.sizeof;
+public enum arrayValueSize = size_t.sizeof + (void*).sizeof;
+
 // Whether `storeIntegral` has a layout for that width, so a caller that
 // must decide before it has a value to store asks the same question the
 // store itself would.
@@ -125,8 +133,14 @@ shared static this() {
 }
 
 // Writes a dmd constant-folded `value` into `place` as `type`'s native
-// layout: a `float` or `double` cast for the floating point widths, an
-// integral by way of `storeIntegral`.
+// layout: `null` as zero bytes, a string literal as the two words of a
+// dynamic array over the literal's own code units, a `float` or `double`
+// cast for the floating point widths, an integral by way of
+// `storeIntegral`.
+//
+// This is the one direction that has to know what a value looks like:
+// bytes already in native layout are copied from slot to slot, and only a
+// value a dmd node stands for has to be made into bytes here.
 //
 // The interpreter, writing a literal into a frame slot, and the CTFE
 // backend, writing a call's result into its caller's return place, both
@@ -150,8 +164,35 @@ public void storeValue(
     imported!"dmd.expression".Expression value,
     void* place,
 ) {
-    import dmd.astenums: Tfloat32, Tfloat64;
+    import core.stdc.string: memset;
+    import dmd.astenums: Tarray, Tfloat32, Tfloat64;
     import std.conv: text;
+
+    // `null` is all-zero bytes in native layout whatever it is stored as -
+    // a pointer, a dynamic array's two words, a class reference - so the
+    // destination's own width is all this needs to know.
+    if (value.isNullExp) {
+        memset(place, 0, facts.size);
+        return;
+    }
+
+    // A string literal's code units live in dmd's own memory for as long
+    // as the module holding them does, the way a compiled program's live
+    // in its read-only data, so the array points straight at them.
+    // Nothing is copied and nothing is allocated.
+    if (auto literal = value.isStringExp) {
+        if (type.ty != Tarray || facts.size != arrayValueSize)
+            throw new Exception(
+                text("no native layout for the string literal `",
+                    value.toString, "` as a `", type.toString, "`"),
+            );
+
+        auto bytes = cast(ubyte*) place;
+        storeIntegral(bytes + arrayLengthOffset, literal.len, size_t.sizeof);
+        *cast(const(void)**) (bytes + arrayPointerOffset) =
+            literal.peekData.ptr;
+        return;
+    }
 
     if (type.ty == Tfloat32) {
         *cast(float*) place = cast(float) value.toReal;
