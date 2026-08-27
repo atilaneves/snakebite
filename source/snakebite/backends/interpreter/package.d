@@ -64,18 +64,19 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.ffi: PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout: storeValue, TypeFacts;
-    import dmd.astenums: LINK, Tarray, Tnoreturn, Tpointer, Tvoid;
+    import dmd.astenums: LINK, Tarray, Tnoreturn, Tpointer, Tsarray, Tvoid;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression:
         AddAssignExp, AddExp, AddrExp, ArrayLengthExp, ArrayLiteralExp,
         AndAssignExp, AndExp, AssertExp, AssignExp, BinAssignExp, BinExp,
-        CallExp, CastExp, CmpExp, ComExp, CommaExp, CondExp, DeclarationExp,
-        DivAssignExp, DivExp, EqualExp, Expression, IndexExp, IntegerExp,
-        LogicalExp, MinAssignExp, MinExp, ModAssignExp, ModExp, MulAssignExp,
-        MulExp, NegExp, NotExp, NullExp, OrAssignExp, OrExp, PostExp, PtrExp,
-        RealExp, ShlAssignExp, ShlExp, ShrAssignExp, ShrExp, StringExp,
-        SymOffExp, UnaExp, UshrAssignExp, UshrExp, VarExp, XorAssignExp,
-        XorExp;
+        CallExp, CastExp, CatAssignExp, CmpExp, ComExp, CommaExp, CondExp,
+        DeclarationExp, DivAssignExp, DivExp, DotVarExp, EqualExp,
+        Expression, IdentityExp, IndexExp, IntegerExp, LogicalExp,
+        MinAssignExp, MinExp, ModAssignExp, ModExp, MulAssignExp, MulExp,
+        NegExp, NotExp, NullExp,
+        OrAssignExp, OrExp, PostExp, PtrExp, RealExp, ShlAssignExp, ShlExp,
+        ShrAssignExp, ShrExp, SliceExp, StringExp, SymOffExp, TypeidExp,
+        UnaExp, UshrAssignExp, UshrExp, VarExp, XorAssignExp, XorExp;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
@@ -176,11 +177,26 @@ extern(C++) private final class Evaluator: Visitor {
     // parameter is not valid on an `extern(C++)` method, and this one is
     // never called from C++ - only `Visitor`'s `visit` overloads need
     // that linkage.
+    //
+    // Held for the whole call, not just the parts that reach into dmd's
+    // own state directly: a guest call can walk into a druntime hook
+    // (`~=`'s lowering, among others) whose body dmd has not finished
+    // analysing yet, and forcing that analysis (`layoutOf`) mutates
+    // `FuncDeclaration`/`Type` nodes another interpreter running on
+    // another thread can be reading at the very same moment, since those
+    // nodes are shared process-wide, not copied per snippet. The
+    // frontend has exactly one lock for exactly this reason - every
+    // other reach into it already goes through this same one - so a
+    // guest call, once it can reach dmd's own forward-reference
+    // machinery, joins that same one lock rather than adding a second
+    // one dmd's other callers do not know to take.
     extern(D) final void call(
         FuncDeclaration function_,
         void* returnPlace,
         void*[] args,
     ) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
         const parameterCount =
             function_.parameters is null ? 0 : function_.parameters.length;
         if (args.length != 0 || parameterCount != 0)
@@ -189,10 +205,12 @@ extern(C++) private final class Evaluator: Visitor {
                     "interpreter backend",
             );
 
-        auto layout = layoutOf(function_);
-        auto frame = _frames.push(layout.size, layout.alignment);
+        withCompilerLock({
+            auto layout = layoutOf(function_);
+            auto frame = _frames.push(layout.size, layout.alignment);
 
-        execute(function_, returnPlace, frame.base, layout);
+            execute(function_, returnPlace, frame.base, layout);
+        });
     }
 
     // Every hash lookup this evaluator has made to find where a name
@@ -222,6 +240,30 @@ extern(C++) private final class Evaluator: Visitor {
     private const(FrameLayout)* layoutOf(FuncDeclaration function_) {
         if (auto cached = function_ in _layouts)
             return cached;
+
+        // dmd only runs semantic3 - the pass that resolves a function
+        // body's own locals, `newCapacity` and the rest of druntime's
+        // append hooks among them - on a module it is compiling. A
+        // non-template function reached only by being called from one of
+        // those hooks, never itself instantiated or written by the guest,
+        // has a body dmd parsed but never finished analysing: its locals'
+        // `Type`s are still the unresolved placeholder dmd starts them at.
+        // dmd's own CTFE engine forces this same forward reference before
+        // interpreting such a body (`dinterpret.d`'s call to this same
+        // function); walking a body without it first would read those
+        // placeholders as real facts.
+        //
+        // `function_` here can be a druntime declaration many guest
+        // programs share the very same `FuncDeclaration` for - dmd's
+        // frontend is one process-global mutable structure, not one
+        // instance per snippet. Mutating its semantic state this way is
+        // safe only because `call` holds the frontend-wide compiler lock
+        // for the whole of a top-level call, the same lock every other
+        // reach into that structure already goes through - without it, a
+        // second interpreter forcing the same forward reference on
+        // another thread would race this one.
+        import dmd.funcsem: functionSemantic3;
+        functionSemantic3(function_);
 
         _layouts[function_] = FrameLayout.of(function_);
         return function_ in _layouts;
@@ -538,6 +580,13 @@ extern(C++) private final class Evaluator: Visitor {
         if (type.ty == Tarray)
             return evaluateArray(expression, facts).elements !is null;
 
+        // A pointer is true when it is not null, the same test `if (ptr)`
+        // means in ordinary compiled D - `__typeAttrs`, on the `~=`
+        // lowering's own chain, asks this of the block address it was
+        // handed to decide whether to consult the GC about it at all.
+        if (type.ty == Tpointer)
+            return pointerValueOf(expression) != 0;
+
         throw new Exception(
             text("interpreter cannot evaluate `", expression.toString,
                 "` as a condition: its type is `", type.toString, "`"),
@@ -782,6 +831,18 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(DeclarationExp expression) {
         import std.conv: text;
 
+        // `alias Unqual_T = Unqual!T;` binds a name to a type, not
+        // storage, and `enum mask(ulong lo) = ...;` (an eponymous
+        // template, folded to its value at each `mask!x` use rather than
+        // run from here) binds a name to neither a type nor a value of
+        // its own - druntime's own append hooks declare both kinds in
+        // their own bodies, the same way an `import` inside a function
+        // body binds a name with nothing left to execute (see
+        // `visit(ImportStatement)`).
+        if (expression.declaration.isAliasDeclaration !is null
+                || expression.declaration.isTemplateDeclaration !is null)
+            return;
+
         auto variable = expression.declaration.isVarDeclaration;
         if (variable is null)
             throw new Exception(
@@ -820,12 +881,18 @@ extern(C++) private final class Evaluator: Visitor {
         import core.stdc.string: memcpy;
         import std.conv: text;
 
-        // `ConstructExp` and `BlitExp` arrive as this same node and are
-        // refused: they fill storage that holds no value yet, where D
-        // neither destroys nor copy-assigns over what was there, so
-        // running them as a replacement would be a wrong answer rather
-        // than a refusal.
-        if (expression.op != EXP.assign)
+        // `ConstructExp` and `BlitExp` arrive as this same node. Over a
+        // type with a destructor or an overloaded assignment, running
+        // either as a plain store would be a wrong answer, not a
+        // refusal, since D specifies construction and assignment
+        // differently there - so both stay refused in general. An
+        // integral target has neither: constructing, blitting and
+        // assigning one are the same bytes written the same way, which
+        // is exactly the shape `_d_arrayappendcTX_`'s own lowering
+        // writes, on the `~=` lowering's own chain, into the slot it
+        // just extended (`a[a.length - 1] = 2`, dmd's own `construct`
+        // for filling storage the guest has not touched yet).
+        if (expression.op != EXP.assign && !_facts.isIntegral)
             throw new Exception(
                 text("interpreter cannot run a `", expression.op,
                     "` on `", expression.e1.toString, "`"),
@@ -865,10 +932,37 @@ extern(C++) private final class Evaluator: Visitor {
         if (auto call = target.isCallExp)
             return refCallAddress(call);
 
+        // `a[i] = x`: the address is the array's own element storage,
+        // found the same way a read (`visit(IndexExp)`) finds it - bounds
+        // checked the same way too, since writing past the array is the
+        // same fault reading past it already is. `_d_arrayappendcTX_`, on
+        // the `~=` lowering's own chain, writes the element it just grew
+        // room for this way.
+        if (auto index = target.isIndexExp)
+            return indexAddressOf(index);
+
         throw new Exception(
             text("interpreter cannot take the address of `",
                 target.toString, "`: it is not an lvalue"),
         );
+    }
+
+    private void* indexAddressOf(IndexExp expression) {
+        import std.conv: text;
+
+        auto array = expression.e1;
+        const value = evaluateArray(array, factsOf(array.type));
+        const index = indexOf(expression, value.length);
+
+        if (index < 0 || cast(size_t) index >= value.length)
+            throw new Exception(
+                text("interpreter cannot index `", array.toString,
+                    "` at ", index, ": the array is ", value.length,
+                    " long"),
+            );
+
+        const stride = factsOf(array.type.nextOf).size;
+        return cast(void*) (value.elements + index * stride);
     }
 
     override void visit(AddAssignExp expression) {
@@ -1044,6 +1138,39 @@ extern(C++) private final class Evaluator: Visitor {
         storeIntegral(_place, answer ? 1 : 0, _facts.size);
     }
 
+    // `is`/`!is`. Over most types it means the same thing `==`/`!=` does,
+    // but a pointer is not `isIntegral`, so `integralValueOf` cannot read
+    // one - `ptr is null`, on the `~=` lowering's own chain, needs the
+    // pointer's own bits read instead.
+    override void visit(IdentityExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+        import std.conv: text;
+
+        if (expression.op != EXP.identity && expression.op != EXP.notIdentity)
+            throw new Exception(
+                text("interpreter cannot evaluate a `", expression.op,
+                    "` expression: `", expression.toString, "`"),
+            );
+
+        auto type = expression.e1.type;
+        bool equal;
+        if (type.ty == Tpointer)
+            equal =
+                pointerValueOf(expression.e1) == pointerValueOf(expression.e2);
+        else if (factsOf(type).isIntegral)
+            equal =
+                integralValueOf(expression.e1) == integralValueOf(expression.e2);
+        else
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: its operands are of type `", type.toString, "`"),
+            );
+
+        const answer = expression.op == EXP.identity ? equal : !equal;
+
+        storeIntegral(_place, answer ? 1 : 0, _facts.size);
+    }
+
     override void visit(AddExp expression) {
         storeBinaryExp!"+"(expression);
     }
@@ -1147,9 +1274,14 @@ extern(C++) private final class Evaluator: Visitor {
     // just with the two types differing instead of matching. A pointer
     // cast reinterprets the same bits at their native width instead: a
     // pointer's representation does not depend on its pointee, so no
-    // conversion is needed, only a copy. Anything else this node could
-    // mean - floating point, a class downcast, array reinterpretation - is
-    // refused the same way an unhandled node already is.
+    // conversion is needed, only a copy. A dynamic-array-to-dynamic-array
+    // cast is the same idea again: druntime's own append hooks cast their
+    // result across a change of qualifiers alone (`Tarr` to `Unqual_Tarr`
+    // and back), never a change of element type, so the two share the
+    // same `{length, ptr}` layout and the cast is a copy too. Anything
+    // else this node could mean - floating point, a class downcast, array
+    // reinterpretation such as `arr.ptr` - is refused the same way an
+    // unhandled node already is.
     override void visit(CastExp expression) {
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
@@ -1158,6 +1290,27 @@ extern(C++) private final class Evaluator: Visitor {
 
         if (sourceType.ty == Tpointer && _type.ty == Tpointer) {
             evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
+            return;
+        }
+
+        if (sourceType.ty == Tarray && _type.ty == Tarray) {
+            evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
+            return;
+        }
+
+        // `arr.ptr` is not a real member: `.ptr` is one of the two
+        // properties dmd recognises directly on a dynamic array, and its
+        // semantic pass lowers a read of it into exactly this cast, over
+        // the array itself rather than a `.ptr` access node - reading the
+        // array's own pointer word is what this cast means, not an
+        // arbitrary reinterpretation of the array's bytes as a `T*`.
+        // `_d_arrayappendcTX_`, on the `~=` lowering's own chain, reads
+        // `px.ptr` this way to ask the GC what it already knows about the
+        // block backing the array being grown.
+        if (sourceType.ty == Tarray && _type.ty == Tpointer) {
+            const value = evaluateArray(expression.e1, factsOf(sourceType));
+            storeIntegral(
+                _place, cast(size_t) value.elements, _facts.size);
             return;
         }
 
@@ -1196,18 +1349,17 @@ extern(C++) private final class Evaluator: Visitor {
     // fold straight into a `SymOffExp` - a variable is the only lvalue the
     // tests exercising this need, so anything else is refused the same way
     // an unhandled node already is.
+    // `&x[length]`, on the `~=` lowering's own chain (`_d_arrayappendT`
+    // finds where the copied-in elements start this way), is the same
+    // question as any other `&lvalue`: `addressOf` already answers it for
+    // a variable, a dereference, a `ref`-typed branch or call, and an
+    // index - this just stores whichever one it finds as a `size_t`, the
+    // way any other pointer value is stored.
     override void visit(AddrExp expression) {
         import snakebite.nativelayout: storeIntegral;
-        import std.conv: text;
 
-        auto variable = expression.e1.isVarExp;
-        if (variable is null)
-            throw new Exception(
-                text("interpreter cannot evaluate a `", expression.op,
-                    "` expression: `", expression.toString, "`"),
-            );
-
-        storeIntegral(_place, cast(size_t) slotOf(variable), _facts.size);
+        storeIntegral(
+            _place, cast(size_t) addressOf(expression.e1), _facts.size);
     }
 
     // `*p`: the address `p` evaluates to is not this expression's own
@@ -1219,6 +1371,67 @@ extern(C++) private final class Evaluator: Visitor {
         import core.stdc.string: memcpy;
 
         memcpy(_place, cast(void*) pointerValueOf(expression.e1), _facts.size);
+    }
+
+    // `info.base`: a struct field read. `__typeAttrs`, on the `~=`
+    // lowering's own chain, reads two fields of the `BlkInfo` `GC.query`
+    // hands back this way. `expression.e1` is an lvalue for every use
+    // this needs (a local struct variable), so `addressOf` already finds
+    // its storage; the field's own byte offset within it is
+    // `expression.var.offset`, laid out by dmd's own struct semantics,
+    // not recomputed here.
+    override void visit(DotVarExp expression) {
+        import core.stdc.string: memcpy;
+        import std.conv: text;
+
+        auto field = expression.var.isVarDeclaration;
+        if (field is null)
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: only a struct field read is supported"),
+            );
+
+        auto base = cast(ubyte*) addressOf(expression.e1);
+        memcpy(_place, base + field.offset, _facts.size);
+    }
+
+    // `typeid(int)`: a class reference to a singleton dmd's glue layer -
+    // codegen, which this interpreter has none of - would normally
+    // conjure the storage for. dmd's frontend has already worked out
+    // that singleton's identity by the time it hands this node over
+    // (`Type.vtinfo`, set by `semanticTypeInfo` during this very node's
+    // own semantic pass), and that identity's own `ident` already spells
+    // its linker name: `TypeInfoDeclaration` is declared `extern(C)` with
+    // that identifier standing in directly for a mangled name
+    // (`declaration.d`'s `getTypeInfoIdent`), not a plain D identifier
+    // this evaluator would have to mangle itself. Resolving it is then
+    // the same question `execute`'s FFI branch already asks of any other
+    // symbol compiled elsewhere: is it in this process.
+    override void visit(TypeidExp expression) {
+        import dmd.dtemplate: isType;
+        import snakebite.ffi.symbol: symbolAddress;
+        import snakebite.nativelayout: storeIntegral;
+        import std.conv: text;
+        import std.string: toStringz;
+
+        auto type = isType(expression.obj);
+        if (type is null || type.vtinfo is null)
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: only `typeid` of a resolved type is supported"),
+            );
+
+        auto name = type.vtinfo.ident.toString;
+        countForeignNameLookup;
+        auto address = symbolAddress(name.toStringz);
+        if (address is null)
+            throw new Exception(
+                text("interpreter cannot resolve the symbol `", name,
+                    "` for `", expression.toString,
+                    "`: it is not in this process"),
+            );
+
+        storeIntegral(_place, cast(size_t) address, _facts.size);
     }
 
     // Only the branch the condition selects is evaluated, the same way
@@ -1280,6 +1493,31 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         auto array = expression.e1;
+
+        // A static array's own storage is already contiguous elements,
+        // not a `{length, ptr}` pair to a block elsewhere - `newCapacity`,
+        // on the `~=` lowering's own chain, indexes a `static immutable`
+        // lookup table this shape. The two differ only in how the
+        // elements' base address and count are found; the bounds check
+        // and the read below are the same read either way.
+        if (array.type.ty == Tsarray) {
+            const length = cast(size_t) array.type.isTypeSArray.dim.toInteger;
+            const index = indexOf(expression, length);
+            if (index < 0 || cast(size_t) index >= length)
+                throw new Exception(
+                    text("interpreter cannot index `", array.toString,
+                        "` at ", index, ": the array is ", length,
+                        " long"),
+                );
+
+            const stride = factsOf(array.type.nextOf).size;
+            assert(stride == _facts.size, "an index changed width");
+
+            auto base = cast(ubyte*) addressOf(array);
+            memcpy(_place, base + index * stride, stride);
+            return;
+        }
+
         const value = evaluateArray(array, factsOf(array.type));
         const index = indexOf(expression, value.length);
 
@@ -1320,6 +1558,70 @@ extern(C++) private final class Evaluator: Visitor {
         return integralValueOf(expression.e2);
     }
 
+    // `ptr[0 .. newlength]`: a dynamic array built from a pointer and a
+    // bound, rather than sliced from an existing array's own bytes -
+    // `_d_arrayappendcTX_`, on the `~=` lowering's own chain, does this
+    // once GC.malloc hands it fresh storage, to turn that raw pointer
+    // back into the array the guest sees. Slicing an existing array
+    // (rather than a bare pointer) works the same way, just starting
+    // from that array's own base and length instead of an unbounded one.
+    override void visit(SliceExp expression) {
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset, storeIntegral;
+        import std.conv: text;
+
+        auto array = expression.e1;
+        auto sourceType = array.type;
+
+        ubyte* base;
+        size_t sourceLength;
+        bool knownLength;
+        if (sourceType.ty == Tpointer) {
+            base = cast(ubyte*) pointerValueOf(array);
+        } else if (sourceType.ty == Tarray) {
+            const value = evaluateArray(array, factsOf(sourceType));
+            base = cast(ubyte*) value.elements;
+            sourceLength = value.length;
+            knownLength = true;
+        } else
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: only slicing a pointer or a dynamic array is ",
+                    "supported"),
+            );
+
+        auto lengthVar = expression.lengthVar;
+        auto outerDollar = _dollar;
+        scope(exit) if (lengthVar !is null) _dollar = outerDollar;
+        if (lengthVar !is null) {
+            if (!knownLength)
+                throw new Exception(
+                    text("interpreter cannot evaluate `",
+                        expression.toString, "`: `$` has no meaning ",
+                        "slicing a pointer"),
+                );
+
+            _dollar = Dollar(lengthVar, sourceLength);
+        }
+
+        const lo = expression.lwr is null ? 0 : integralValueOf(expression.lwr);
+        const hi = expression.upr is null
+            ? cast(long) sourceLength : integralValueOf(expression.upr);
+
+        if (lo < 0 || hi < lo
+                || (knownLength && cast(size_t) hi > sourceLength))
+            throw new Exception(
+                text("interpreter cannot slice `", array.toString, "` [",
+                    lo, " .. ", hi, "]"),
+            );
+
+        const stride = factsOf(sourceType.nextOf).size;
+        auto bytes = cast(ubyte*) _place;
+        storeIntegral(
+            bytes + arrayLengthOffset, cast(size_t) (hi - lo), size_t.sizeof);
+        *cast(ubyte**) (bytes + arrayPointerOffset) = base + lo * stride;
+    }
+
     // `_d_arrayliteralTX`, the druntime hook real compiled D calls for a
     // heap array literal, has no `FuncDeclaration` and no call node: dmd's
     // `e2ir.d` conjures it by name only once it has already decided to
@@ -1336,6 +1638,28 @@ extern(C++) private final class Evaluator: Visitor {
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
         import std.conv: text;
+
+        // A static array's elements are its own bytes, written straight
+        // into `_place` - unlike a dynamic array literal, nothing is
+        // allocated, because the destination already is the storage:
+        // `newCapacity`'s `static immutable multTable`, on the `~=`
+        // lowering's own chain, is one of these - dmd's own CTFE engine
+        // has already run its `(){ ... }()` initialiser and left this
+        // evaluator a plain literal of the result to place, the same as
+        // any other static's initializer (`staticSlotOf`).
+        if (_type.ty == Tsarray) {
+            auto elementType = _type.nextOf;
+            const elementFacts = factsOf(elementType);
+            const length = expression.elements is null
+                ? 0 : expression.elements.length;
+            auto bytes = cast(ubyte*) _place;
+
+            foreach (i; 0 .. length)
+                evaluate(
+                    (*expression.elements)[i], elementType, elementFacts,
+                    bytes + i * elementFacts.size);
+            return;
+        }
 
         if (_type.ty != Tarray)
             throw new Exception(
@@ -1362,6 +1686,31 @@ extern(C++) private final class Evaluator: Visitor {
         auto bytes = cast(ubyte*) _place;
         storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
+    }
+
+    // `~=` has no `FuncDeclaration` and no call node of its own either,
+    // but for a different reason than `ArrayLiteralExp`: dmd's semantic
+    // pass, not its glue layer, already rewrites `arr ~= x` into a call to
+    // `_d_arrayappendcTX` or `_d_arrayappendT` (`dmd/expression.d`'s
+    // `CatAssignExp.lowering`) - a real AST subtree naming a real,
+    // interpretable `FuncDeclaration`, just not one any visitor reaches by
+    // walking `expression`'s own children. Evaluating `lowering` instead
+    // of `expression` is therefore not a special case for `~=`: it is
+    // running the same tree-walking evaluator over the tree dmd already
+    // built, one dmd itself picked over the operator syntax. Nothing
+    // refuses `~=` by name; a `~=` semantic analysis left unlowered, if
+    // one exists, still falls through to the "cannot evaluate" refusal
+    // below.
+    override void visit(CatAssignExp expression) {
+        import std.conv: text;
+
+        if (expression.lowering is null)
+            throw new Exception(
+                text("interpreter cannot evaluate a `", expression.op,
+                    "` expression: `", expression.toString, "`"),
+            );
+
+        expression.lowering.accept(this);
     }
 
     override void visit(CommaExp expression) {

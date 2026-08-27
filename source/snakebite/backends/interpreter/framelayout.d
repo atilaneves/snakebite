@@ -199,6 +199,7 @@ import dmd.visitor: Visitor;
 // gap surfaces as `FrameLayout.offsetOf` failing to find that local, not
 // as a wrong answer.
 extern(C++) private final class LocalsCollector: Visitor {
+    import dmd.expression: Expression;
     import dmd.statement:
         CompoundStatement, ExpStatement, ForStatement, IfStatement,
         ImportStatement, ReturnStatement, ScopeStatement, Statement;
@@ -257,25 +258,52 @@ extern(C++) private final class LocalsCollector: Visitor {
     }
 
     override void visit(ExpStatement statement) {
-        if (statement.exp is null)
-            return;
+        if (statement.exp !is null)
+            collectDeclarations(statement.exp);
+    }
 
-        auto declarationExp = statement.exp.isDeclarationExp;
-        if (declarationExp is null)
-            return;
+    // A declaration this collector needs to find is not always the whole
+    // of a statement's expression, the way `long sum = 0;` is: dmd's own
+    // `~=` lowering (`CatAssignExp.lowering`) can introduce a compiler
+    // temporary - `__appendtmp*`, holding a right side too complex to
+    // evaluate twice - as a `DeclarationExp` buried inside a `CommaExp`
+    // chain, not the statement's own top-level expression. Walking into
+    // both is what finds it: a `CommaExp` runs both of its operands, so a
+    // declaration in either needs a slot the same as one at the top, and
+    // `lowering` is where `Evaluator` itself goes looking for a `~=`'s
+    // real work, so this follows it there too rather than missing
+    // whatever `Evaluator` will actually run.
+    private void collectDeclarations(Expression expression) {
+        import dmd.expression: CatAssignExp, CommaExp;
 
-        auto variable = declarationExp.declaration.isVarDeclaration;
-        if (variable is null)
-            return;
+        if (auto declarationExp = expression.isDeclarationExp) {
+            auto variable = declarationExp.declaration.isVarDeclaration;
+            if (variable is null)
+                return;
 
-        // A `static` local is one variable per function, not one per call,
-        // so a frame - popped on return - is the wrong storage for it.
-        // `Evaluator` keeps it elsewhere; with no slot here, a reach that
-        // looks in the frame instead is refused by `offsetOf` rather than
-        // reading a variable reset on every call.
-        if (variable.isDataseg)
-            return;
+            // A `static` local is one variable per function, not one per
+            // call, so a frame - popped on return - is the wrong storage
+            // for it. `Evaluator` keeps it elsewhere; with no slot here,
+            // a reach that looks in the frame instead is refused by
+            // `offsetOf` rather than reading a variable reset on every
+            // call.
+            if (variable.isDataseg)
+                return;
 
-        _layout._offsetOf[variable] = _layout.reserveSlot(variable.type).offset;
+            _layout._offsetOf[variable] =
+                _layout.reserveSlot(variable.type).offset;
+            return;
+        }
+
+        if (auto comma = expression.isCommaExp) {
+            collectDeclarations(comma.e1);
+            collectDeclarations(comma.e2);
+            return;
+        }
+
+        if (auto catAssign = cast(CatAssignExp) expression) {
+            if (catAssign.lowering !is null)
+                collectDeclarations(catAssign.lowering);
+        }
     }
 }

@@ -54,14 +54,19 @@ public struct Register {
     // in the wrong register, which would run and return a
     // plausible-looking wrong answer.
     public static Register of(imported!"dmd.mtype".Type type) {
-        import dmd.astenums: Tpointer, Tvoid;
+        import dmd.astenums: Tclass, Tpointer, Tvoid;
         import dmd.typesem: size;
         import std.conv: text;
 
         if (type.ty == Tvoid)
             return Register(Kind.none, 0);
 
-        if (type.ty == Tpointer)
+        // A class reference is a pointer at native layout, same as any
+        // other: `TypeInfo`, the one class-typed argument this ABI is
+        // asked to pass so far (`GC.malloc`'s `ti`), is a GC-owned object
+        // the guest never allocates or destructures, only hands over by
+        // its address.
+        if (type.ty == Tpointer || type.ty == Tclass)
             return Register(Kind.pointer, 8);
 
         if (type.isIntegral) {
@@ -80,6 +85,53 @@ public struct Register {
                 "`: only integer-class values are implemented"),
         );
     }
+}
+
+// How a single argument travels: one register for anything `Register`
+// alone already covers, or the two a dynamic array by value needs - the
+// System V AMD64 ABI classifies a 16-byte aggregate of two non-float
+// eightbytes into two general-purpose registers, and a dynamic array's
+// `{length, ptr}` is exactly that. druntime's own GC hooks
+// (`gc_expandArrayUsed`, `gc_shrinkArrayUsed`) take the array being
+// appended to this way, so this is not a value class the FFI can decline:
+// declining it would mean declining to call them at all.
+public struct ArgumentPlan {
+    public Register[2] registers;
+    public ubyte count;
+
+    public static ArgumentPlan of(imported!"dmd.mtype".Type type) {
+        import dmd.astenums: Tarray;
+
+        if (type.ty == Tarray) {
+            ArgumentPlan plan;
+            plan.registers[0] = Register(Register.Kind.unsigned, 8);
+            plan.registers[1] = Register(Register.Kind.pointer, 8);
+            plan.count = 2;
+            return plan;
+        }
+
+        ArgumentPlan plan;
+        plan.registers[0] = Register.of(type);
+        plan.count = 1;
+        return plan;
+    }
+}
+
+// Whether `type` returns through a hidden pointer instead of a register:
+// the System V AMD64 ABI classifies an aggregate over 16 bytes as MEMORY
+// regardless of its fields, which means the caller allocates the result's
+// storage and passes its address as an extra, invisible first argument -
+// `druntime`'s own `gc_query` (`GC.query`'s body-less leaf, reached when
+// appending to an already-allocated array asks the block it is growing
+// for its current attributes) returns `BlkInfo`, three words wide, this
+// way. A struct of 16 bytes or less is classified by its fields instead
+// and can travel in one or two registers - out of scope here, since
+// nothing on this path returns one, and `Register.of` still refuses it.
+public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type type) {
+    import dmd.astenums: Tstruct;
+    import dmd.typesem: size;
+
+    return type.ty == Tstruct && type.size > 16;
 }
 
 // Widens the native bytes at `slot` to the one argument register that

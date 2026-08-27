@@ -360,3 +360,123 @@ unittest {
     interpreter.call(function_, &later, []);
     later.shouldEqual(20);
 }
+
+// `~=` appending a single element lowers to `_d_arrayappendcTX`, dmd's
+// own hook for growing a `T[]` by one element and writing it into the
+// slot that growth made - `CatAssignExp.lowering` (`dmd/expression.d`),
+// not a node any of `expression`'s own children reach.
+static foreach (backend; Matrix!()) {
+    @("arrays.append.element." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(
+            backend,
+            q{
+                int second() {
+                    int[] a = [1];
+                    a ~= 2;
+                    return a[1];
+                }
+            },
+            "second",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.append.element.length." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(2).shouldBeRetOf!(
+            backend,
+            q{
+                size_t length_() {
+                    int[] a = [1];
+                    a ~= 2;
+                    return a.length;
+                }
+            },
+            "length_",
+        );
+    }
+}
+
+// Appending one element at a time past the literal's own capacity forces
+// at least one real reallocation - `_d_arrayappendcTX`'s own lowering
+// asks the GC to grow the block in place first and only calls
+// `GC.malloc` when that fails, so a loop long enough to outgrow the
+// first block's capacity is what actually exercises the move, not just
+// the append. Reading the first element back afterwards is what pins
+// that the move copied the old contents rather than losing them.
+static foreach (backend; Matrix!()) {
+    @("arrays.append.element.loop.survivesReallocation." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // a[0] == 100, a[1] == 101, a[50] == 150, a.length == 101.
+        452.shouldBeRetOf!(
+            backend,
+            q{
+                int grown() {
+                    int[] a = [100];
+                    foreach (i; 1 .. 101)
+                        a ~= 100 + i;
+                    return a[0] + a[1] + a[50] + cast(int) a.length;
+                }
+            },
+            "grown",
+        );
+    }
+}
+
+// `~=` appending a whole slice lowers to `_d_arrayappendT` instead of
+// `_d_arrayappendcTX` - a different hook, over the same `lowering` field,
+// for a different `CatAssignExp.op` (`concatenateAssign` rather than
+// `concatenateElemAssign`).
+static foreach (backend; Matrix!()) {
+    @("arrays.append.slice." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // a[2] == 3, a.length == 3.
+        303.shouldBeRetOf!(
+            backend,
+            q{
+                int appended() {
+                    int[] a = [1];
+                    int[] b = [2, 3];
+                    a ~= b;
+                    return a[2] * 100 + cast(int) a.length;
+                }
+            },
+            "appended",
+        );
+    }
+}
+
+// A `static` slice appended to on one call must still hold what an
+// earlier call appended to it: the slice is one variable per program,
+// not one per call, the same as `arrays.literal.static.outlivesFrame`
+// pins for a literal assignment rather than an append.
+@("arrays.append.static.acrossCalls.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        int accumulate() {
+            static int[] arr;
+            arr ~= arr.length ? 2 : 1;
+            return arr.length == 1 ? arr[0] : arr[0] * 10 + arr[1];
+        }
+    });
+    auto function_ = findFunction(module_, "accumulate");
+    auto interpreter = new Interpreter;
+
+    int first;
+    interpreter.call(function_, &first, []);
+    first.shouldEqual(1);
+
+    int second;
+    interpreter.call(function_, &second, []);
+    second.shouldEqual(12);
+}
