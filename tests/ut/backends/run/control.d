@@ -156,8 +156,11 @@ static foreach (backend; Matrix!(
 }
 
 // `foreach` over an `AliasSeq` unrolls into one statement per element at
-// compile time, so `break`/`continue` inside it control which of those
-// per-element statements run, exactly like an ordinary loop body.
+// compile time, one per element's own type, so `break`/`continue` inside
+// it control which of those per-element statements run, exactly like an
+// ordinary loop body. Mixed element types with no common type rule out
+// an ordinary array, whose single element type would need one shared
+// type for all three values.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
@@ -168,24 +171,27 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOf!(backend, q{
             import std.meta: AliasSeq;
 
-            int helper(int value) {
+            int helperInt(int value) {
+                return value + 1;
+            }
+
+            long helperLong(long value) {
                 return value + 1;
             }
 
             void main() {
-                int first = helper(1);
-                int second = helper(3);
-                int third = helper(5);
+                int first = helperInt(1);
+                string second = "skip";
+                long third = helperLong(5);
                 int sum;
 
                 foreach (value; AliasSeq!(first, second, third)) {
-                    if (value == second)
+                    static if (is(typeof(value) == string))
                         continue;
-
-                    if (value == third)
+                    else static if (is(typeof(value) == long))
                         break;
-
-                    sum += value;
+                    else
+                        sum += value;
                 }
 
                 assert(sum == 2);
