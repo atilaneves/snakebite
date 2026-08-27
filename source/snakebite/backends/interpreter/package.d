@@ -89,6 +89,12 @@ extern(C++) private final class Evaluator: Visitor {
     // `_layouts`: a `Type` such as `int` is dmd's own shared, interned
     // instance, so the same entry serves every function that mentions it.
     private TypeFacts[Type] _typeFacts;
+    // The most recently asked-about `Type` and its facts: dmd interns
+    // basic types, so a loop revisiting the same `int` node hits this
+    // every time - a pointer compare instead of an AA hash lookup - and
+    // only falls through to `_typeFacts` on an actual change of type.
+    private Type _cachedType;
+    private TypeFacts _cachedFacts;
 
     // The destination: while walking statements, the enclosing function's
     // return type and return place; `evaluate` narrows it to each
@@ -157,11 +163,19 @@ extern(C++) private final class Evaluator: Visitor {
     // pointer for, and nothing keeps a `TypeFacts` past the visit that
     // asked for it the way `_layout` outlives a whole call.
     private TypeFacts factsOf(Type type) {
-        if (auto cached = type in _typeFacts)
-            return *cached;
+        if (type is _cachedType)
+            return _cachedFacts;
+
+        if (auto cached = type in _typeFacts) {
+            _cachedType = type;
+            _cachedFacts = *cached;
+            return _cachedFacts;
+        }
 
         const facts = TypeFacts.of(type);
         _typeFacts[type] = facts;
+        _cachedType = type;
+        _cachedFacts = facts;
         return facts;
     }
 
@@ -333,8 +347,12 @@ extern(C++) private final class Evaluator: Visitor {
         if (statement.exp is null)
             return;
 
+        // `_type`/`_facts` are already this function's return type and
+        // its facts, set together on entry (`execute`) or by the last
+        // `evaluate` - so both branches below hand them to `expression`
+        // straight, with no fresh `factsOf` lookup.
         if (_place !is null) {
-            evaluate(statement.exp, _type, _place);
+            evaluate(statement.exp, _type, _facts, _place);
             return;
         }
 
@@ -343,7 +361,7 @@ extern(C++) private final class Evaluator: Visitor {
         // frame stack, popped when it goes out of scope, not into a GC
         // allocation.
         auto frame = _frames.push(_facts.size, _facts.alignment);
-        evaluate(statement.exp, _type, frame.base);
+        evaluate(statement.exp, _type, _facts, frame.base);
     }
 
     override void visit(ExpStatement statement) {
@@ -384,7 +402,7 @@ extern(C++) private final class Evaluator: Visitor {
         // bookkeeping and nothing to explicitly pop.
         if (facts.size <= 8 && facts.alignment <= 8) {
             align(8) ubyte[8] buffer = void;
-            evaluate(expression, type, buffer.ptr);
+            evaluate(expression, type, facts, buffer.ptr);
             return;
         }
 
@@ -392,7 +410,7 @@ extern(C++) private final class Evaluator: Visitor {
         // frame stack, popped when it goes out of scope, not into a GC
         // allocation.
         auto frame = _frames.push(facts.size, facts.alignment);
-        evaluate(expression, type, frame.base);
+        evaluate(expression, type, facts, frame.base);
     }
 
     override void visit(ForStatement statement) {
@@ -418,11 +436,18 @@ extern(C++) private final class Evaluator: Visitor {
     // the value itself, rather than a destination to leave it at, comes
     // here.
     private long integralValueOf(Expression expression) {
+        return integralValueOf(expression, factsOf(expression.type));
+    }
+
+    // As above, but for a caller that already holds `expression.type`'s
+    // facts - a `CmpExp` operand, whose facts its visit also needs for
+    // signedness - so this does not pay a second `factsOf` lookup for the
+    // same type.
+    private long integralValueOf(Expression expression, in TypeFacts facts) {
         import snakebite.nativelayout: loadIntegral;
         import std.conv: text;
 
         auto type = expression.type;
-        auto facts = factsOf(type);
         if (!facts.isIntegral)
             throw new Exception(
                 text("interpreter cannot evaluate `", expression.toString,
@@ -430,7 +455,7 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         align(8) ubyte[8] buffer = void;
-        evaluate(expression, type, buffer.ptr);
+        evaluate(expression, type, facts, buffer.ptr);
 
         return loadIntegral(buffer.ptr, facts.size, !facts.isUnsigned);
     }
@@ -525,9 +550,14 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         auto variable = expression.e1.isVarExp;
-        auto targetType = expression.e1.type;
-        auto targetFacts = factsOf(targetType);
-        if (variable is null || !targetFacts.isIntegral)
+        // dmd's semantic pass sets `exp.type = exp.e1.type` for every
+        // `BinAssignExp` (`AddAssignExp` among them), so `_facts` -
+        // `evaluate` already resolved for this node's own type - are
+        // `expression.e1.type`'s facts too. One name for the one value,
+        // used for both the target's slot and the write to `_place`; no
+        // second `factsOf` lookup needed either way.
+        auto facts = _facts;
+        if (variable is null || !facts.isIntegral)
             throw new Exception(
                 text("interpreter cannot add to `", expression.e1.toString,
                     "`: `", expression.toString, "`"),
@@ -535,15 +565,11 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto target = slotOf(variable);
         const added = integralValueOf(expression.e2);
-        const current =
-            loadIntegral(target, targetFacts.size, !targetFacts.isUnsigned);
+        const current = loadIntegral(target, facts.size, !facts.isUnsigned);
         const sum = cast(ulong) (current + added);
 
-        storeIntegral(target, sum, targetFacts.size);
-        // `expression` is this `AddAssignExp` itself, the node `evaluate`
-        // was last called with, so its type is `_type` and `_facts` is
-        // already its facts - no second `factsOf` lookup needed.
-        storeIntegral(_place, sum, _facts.size);
+        storeIntegral(target, sum, facts.size);
+        storeIntegral(_place, sum, facts.size);
     }
 
     // `<=`, `>` and `>=` arrive as this same node and are refused: nothing
@@ -559,9 +585,13 @@ extern(C++) private final class Evaluator: Visitor {
                     "` expression: `", expression.toString, "`"),
             );
 
-        const a = integralValueOf(expression.e1);
+        // `e1`'s facts, asked for once and handed to `integralValueOf`
+        // below instead of let it ask again for the same type: this visit
+        // also needs them itself, for signedness.
+        auto e1Facts = factsOf(expression.e1.type);
+        const a = integralValueOf(expression.e1, e1Facts);
         const b = integralValueOf(expression.e2);
-        const less = factsOf(expression.e1.type).isUnsigned
+        const less = e1Facts.isUnsigned
             ? cast(ulong) a < cast(ulong) b
             : a < b;
 
@@ -610,12 +640,16 @@ extern(C++) private final class Evaluator: Visitor {
 
         // Every argument is evaluated, even one the callee never reads,
         // since evaluating an argument can have effects. The loop already
-        // has the positional index `i`, so it indexes `offsets` directly
-        // instead of hashing a declaration through `offsetOf`.
+        // has the positional index `i`, so it indexes `offsets` and
+        // `offsetFacts` directly instead of hashing a declaration through
+        // `offsetOf` and a type through `factsOf` - a parameter's type
+        // never changes between calls, so `offsetFacts[i]` is already its
+        // facts.
         foreach (i; 0 .. parameterList.length)
             evaluate(
                 (*arguments)[i],
                 parameterList[i].type,
+                layout.offsetFacts[i],
                 frame.base + layout.offsets[i],
             );
 
@@ -625,6 +659,18 @@ extern(C++) private final class Evaluator: Visitor {
     // Evaluates `expression` into `type.size` bytes at `place`, then
     // restores the surrounding destination.
     private void evaluate(Expression expression, Type type, void* place) {
+        evaluate(expression, type, factsOf(type), place);
+    }
+
+    // As above, but for a caller that already holds `type`'s facts - from
+    // a `FrameLayout` slot, or its own `factsOf` call a moment ago - so
+    // this does not pay a second lookup for the same type.
+    private void evaluate(
+        Expression expression,
+        Type type,
+        in TypeFacts facts,
+        void* place,
+    ) {
         auto savedType = _type;
         auto savedFacts = _facts;
         auto savedPlace = _place;
@@ -635,7 +681,7 @@ extern(C++) private final class Evaluator: Visitor {
         }
 
         _type = type;
-        _facts = factsOf(type);
+        _facts = facts;
         _place = place;
         expression.accept(this);
     }
