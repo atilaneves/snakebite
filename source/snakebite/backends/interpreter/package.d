@@ -158,15 +158,7 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     // `type`'s facts, from the cache; computed on the first visit of any
-    // node with this type. Returned by value, unlike `layoutOf`: a
-    // `TypeFacts` is three small scalars, cheaper to copy than to chase a
-    // pointer for, and nothing keeps a `TypeFacts` past the visit that
-    // asked for it the way `_layout` outlives a whole call. `extern(D)`:
-    // this class is `extern(C++)` for its `Visitor` overrides, and a
-    // struct returned by value from a C++-linkage method is silently
-    // corrupted - wrong values, no crash - since it does not use D's own
-    // struct-return ABI. This method overrides nothing, so it is free to
-    // opt back into D linkage.
+    // node with this type.
     extern(D) private TypeFacts factsOf(Type type) {
         if (type is _cachedType)
             return _cachedFacts;
