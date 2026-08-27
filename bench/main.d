@@ -20,6 +20,7 @@ struct Options {
     uint runs = 10;
     uint warmup = 1;
     string[] backends;
+    string[] excluded;
     string[] importPaths;       // bare directories only; dub knows its own
     string[] stringImportPaths; // ditto
     string projectDirectory;
@@ -80,6 +81,8 @@ private Options parseOptions(string[] args) {
         "warmup|w", "How many warmup runs (default 1).", &options.warmup,
         "backend|b", "Benchmark only this backend; repeatable (default all).",
         &options.backends,
+        "exclude|e", "Do not benchmark this backend; repeatable. Applies "
+        ~ "after --backend.", &options.excluded,
         "import-path|I", "Import path for a bare directory of .d files; "
         ~ "repeatable.", &options.importPaths,
         "string-import-path|J", "String import path for a bare directory of "
@@ -109,12 +112,15 @@ private string validate(in Options options) {
     if (options.runs == 0)
         return "need at least one measured run";
 
-    foreach (name; options.backends)
+    foreach (name; options.backends ~ options.excluded)
         if (!knownBackendNames.canFind(name))
             return text(
                 "unknown backend `", name, "`; known: ",
                 knownBackendNames.join(", "),
             );
+
+    if (!knownBackendNames.canFind!(name => selected(options, name)))
+        return "no backends left to benchmark";
 
     return null;
 }
@@ -211,6 +217,9 @@ private BackendReport[] benchmarkAll(Project project, in Options options) {
 private bool selected(in Options options, in string name) {
     import std.algorithm.searching: canFind;
 
+    if (options.excluded.canFind(name))
+        return false;
+
     return options.backends.length == 0 || options.backends.canFind(name);
 }
 
@@ -305,7 +314,7 @@ private string defaultProjectDirectory() {
     import std.file: thisExePath;
     import std.path: buildNormalizedPath, dirName;
 
-    return thisExePath.dirName.buildNormalizedPath("..", "examples", "ct");
+    return thisExePath.dirName.buildNormalizedPath("..", "examples", "ct-easy");
 }
 
 // This process's resident set, from /proc/self/statm. In-process backends
