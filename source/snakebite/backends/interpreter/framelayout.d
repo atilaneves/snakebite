@@ -211,6 +211,14 @@ extern(C++) private final class LocalsCollector: Visitor {
         if (variable is null)
             return;
 
+        // A `static` local is one variable per function, not one per call,
+        // so a frame - popped on return - is the wrong storage for it.
+        // `Evaluator` keeps it elsewhere; with no slot here, a reach that
+        // looks in the frame instead is refused by `offsetOf` rather than
+        // reading a variable reset on every call.
+        if (variable.isDataseg)
+            return;
+
         _layout._offsetOf[variable] = _layout.reserveSlot(variable.type).offset;
     }
 }

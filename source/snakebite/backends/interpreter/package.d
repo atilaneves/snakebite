@@ -55,6 +55,7 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout: storeValue, TypeFacts;
     import dmd.astenums: LINK, Tvoid;
+    import dmd.declaration: VarDeclaration;
     import dmd.expression:
         AddAssignExp, CallExp, CmpExp, DeclarationExp, Expression,
         IntegerExp, RealExp, VarExp;
@@ -76,6 +77,12 @@ extern(C++) private final class Evaluator: Visitor {
     // function's first call (the cold path) and reused by every call
     // after it.
     private FrameLayout[FuncDeclaration] _layouts;
+    // Storage for every data-segment variable the guest has reached so
+    // far, keyed by its declaration. Such a variable is one variable per
+    // program, not one per call, so a frame - popped on return - cannot
+    // hold it. This outlives every call on this evaluator, which is the
+    // guest state `Backend.call` promises persists across calls.
+    private ubyte[][VarDeclaration] _statics;
     // How to reach each already-compiled function this guest calls,
     // worked out on that function's first call and reused by every call
     // after it - the same cold-path-once shape as `_layouts`.
@@ -477,9 +484,11 @@ extern(C++) private final class Evaluator: Visitor {
         memcpy(_place, slotOf(expression), _facts.size);
     }
 
-    // Where a parameter or local read or written by `expression` lives in
-    // the current frame. A read and a compound assignment differ in what
-    // they do with the slot, not in how they find it, so both come here.
+    // Where the variable read or written by `expression` lives: the
+    // current frame for a parameter or local, and storage of its own for
+    // anything in the data segment. A read and a compound assignment
+    // differ in what they do with the slot, not in how they find it, so
+    // both come here.
     private ubyte* slotOf(VarExp expression) {
         import std.conv: text;
 
@@ -490,7 +499,67 @@ extern(C++) private final class Evaluator: Visitor {
                     "`: not a parameter or local in the current frame"),
             );
 
+        if (variable.isDataseg)
+            return staticSlotOf(variable);
+
         return _frameBase + _layout.offsetOf(variable);
+    }
+
+    // Where `variable` lives outside any frame, created and initialised
+    // the first time the guest reaches it and the same address for every
+    // reach after that. Lazily rather than at layout time because the
+    // initialiser is a compile-time constant - D requires one here - so
+    // no guest code can observe the difference.
+    extern(D) private ubyte* staticSlotOf(VarDeclaration variable) {
+        import dmd.astenums: STC;
+        import dmd.typesem: defaultInit;
+        import std.conv: text;
+
+        if (auto existing = variable in _statics)
+            return existing.ptr;
+
+        // An `extern` variable is defined elsewhere - in a library the
+        // host already links, or in another object file. Storage made
+        // here would be a second variable that only looks like it, so
+        // this refuses rather than answering from a private copy.
+        if (variable.storage_class & STC.extern_)
+            throw new Exception(
+                text("interpreter cannot reach `", variable.toString,
+                    "`: it is `extern`, so its storage is not the ",
+                    "interpreter's to make"),
+            );
+
+        // No initializer at all means the declaration left the variable at
+        // its type's `.init`, which dmd renders as an expression like any
+        // other - so both spellings reach `evaluate` the same way.
+        Expression value;
+        if (variable._init is null)
+            value = defaultInit(variable.type, variable.loc);
+        else if (auto expInitializer = variable._init.isExpInitializer)
+            value = initializerValueOf(expInitializer);
+        else
+            throw new Exception(
+                text("interpreter cannot initialize `", variable.toString,
+                    "`: only a plain expression initializer is supported"),
+            );
+
+        // Over-allocated so the slot can start on the type's own
+        // alignment: the guest reads and writes it in native layout, and
+        // nothing in the GC's interface promises a block aligned for the
+        // type that lands in it. Alignments are powers of two, so the
+        // padding is the address masked into the block.
+        const facts = factsOf(variable.type);
+        auto block = new ubyte[facts.size + facts.alignment - 1];
+        const start = -cast(size_t) block.ptr & (facts.alignment - 1);
+        auto slot = block[start .. start + facts.size];
+
+        // Registered only once the initialiser has run: a slot in
+        // `_statics` means initialised, so a failed initialiser must not
+        // leave one behind for a later reach to read as a value.
+        evaluate(value, variable.type, facts, slot.ptr);
+        _statics[variable] = slot;
+
+        return slot.ptr;
     }
 
     // Runs a local's initializer into the frame slot `layoutOf` already
@@ -506,6 +575,11 @@ extern(C++) private final class Evaluator: Visitor {
                     "supported"),
             );
 
+        // A data-segment variable is initialised once, when the guest
+        // first reaches it, not every time its declaration executes.
+        if (variable.isDataseg)
+            return;
+
         const offset = _layout.offsetOf(variable);
 
         auto expInitializer = variable._init.isExpInitializer;
@@ -516,13 +590,8 @@ extern(C++) private final class Evaluator: Visitor {
                     "initializer is supported"),
             );
 
-        // dmd rewrites `long sum = 0;`'s initializer into a `ConstructExp`
-        // (`sum = 0`); only `e2`, the actual value, needs evaluating.
-        auto value = expInitializer.exp;
-        if (auto construct = value.isConstructExp)
-            value = construct.e2;
-
-        evaluate(value, variable.type, _frameBase + offset);
+        evaluate(initializerValueOf(expInitializer), variable.type,
+            _frameBase + offset);
     }
 
     // The target is looked up once, not once to read and again to write:
@@ -656,4 +725,17 @@ extern(C++) private final class Evaluator: Visitor {
         _place = place;
         expression.accept(this);
     }
+}
+
+// The value a declaration's initializer stores: dmd rewrites
+// `long sum = 0;`'s initializer into a `ConstructExp` (`sum = 0`), so only
+// `e2`, the actual value, needs evaluating.
+private imported!"dmd.expression".Expression initializerValueOf(
+    imported!"dmd.init".ExpInitializer initializer,
+) {
+    auto value = initializer.exp;
+    if (auto construct = value.isConstructExp)
+        return construct.e2;
+
+    return value;
 }

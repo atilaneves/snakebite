@@ -48,3 +48,35 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE can't mutate a static local"),
+)) {
+    @("locals.staticPersistsAcrossCalls." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // A `static` local's storage lives once per function, not once per
+        // call: `n` keeps whatever `inc` left it at, so five calls add
+        // 1 + 2 + 3 + 4 + 5. A backend that re-runs the initialiser on
+        // every call instead sees `n` reset to 0 each time, and returns 5.
+        15.shouldBeRetOf!(
+            backend,
+            q{
+                int inc() {
+                    static int n = 0;
+                    n += 1;
+                    return n;
+                }
+
+                int kindaMain() {
+                    int ret = 0;
+                    foreach(i; 0 .. 5) {
+                        ret += inc();
+                    }
+                    return ret;
+                }
+            },
+            "kindaMain",
+        );
+    }
+}
