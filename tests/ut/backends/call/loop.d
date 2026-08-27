@@ -76,3 +76,26 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("loop.commaInitialiser." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // Two expressions where a `for` initialiser wants one is a comma
+        // expression, the same node dmd builds when it lowers one source
+        // expression into several.
+        13.shouldBeRetOf!(
+            backend,
+            q{
+                int both() {
+                    int i;
+                    int j;
+                    for(i = 0, j = 10; i < 3; i = i + 1) {
+                    }
+                    return i + j;
+                }
+            },
+            "both",
+        );
+    }
+}

@@ -62,10 +62,6 @@ public long loadIntegral(in void* place, in size_t size, in bool signed) {
     );
 }
 
-// Where a dynamic array's two fields sit in the value compiled D lays out
-// for it, and how many bytes that value is. Field offsets, so reading
-// `arr.length` is the fixed-offset read of a field within a value, the
-// same operation any other aggregate's field is.
 public enum arrayLengthOffset = 0;
 public enum arrayPointerOffset = size_t.sizeof;
 public enum arrayValueSize = size_t.sizeof + (void*).sizeof;
@@ -138,10 +134,6 @@ shared static this() {
 // cast for the floating point widths, an integral by way of
 // `storeIntegral`.
 //
-// This is the one direction that has to know what a value looks like:
-// bytes already in native layout are copied from slot to slot, and only a
-// value a dmd node stands for has to be made into bytes here.
-//
 // The interpreter, writing a literal into a frame slot, and the CTFE
 // backend, writing a call's result into its caller's return place, both
 // convert a dmd value to native bytes this same way, differing only in
@@ -168,20 +160,31 @@ public void storeValue(
     import dmd.astenums: Tarray, Tfloat32, Tfloat64;
     import std.conv: text;
 
-    // `null` is all-zero bytes in native layout whatever it is stored as -
-    // a pointer, a dynamic array's two words, a class reference - so the
-    // destination's own width is all this needs to know.
+    // `null` is all-zero bytes whatever it is stored as - a pointer, a
+    // dynamic array's two words, a class reference - so the destination's
+    // width is all this needs to know.
     if (value.isNullExp) {
         memset(place, 0, facts.size);
         return;
     }
 
-    // A string literal's code units live in dmd's own memory for as long
-    // as the module holding them does, the way a compiled program's live
-    // in its read-only data, so the array points straight at them.
-    // Nothing is copied and nothing is allocated.
+    // The array points straight at the literal's own code units instead
+    // of copying them: they live in dmd's memory, kept alive by the module
+    // that holds them, for as long as that module is reachable. Nothing
+    // the guest holds is a root - a frame slot is unscanned host memory
+    // and a static slot is `NO_SCAN` - so a guest slice of a literal stays
+    // valid only while dmd keeps the module.
     if (auto literal = value.isStringExp) {
-        if (type.ty != Tarray || facts.size != arrayValueSize)
+        // The literal's code-unit width has to match the destination's
+        // element width, or `literal.len` would be the wrong length for
+        // the bytes the pointer aims at. dmd inserts a `CastExp` for any
+        // change of width, and the backends refuse those, so this refuses
+        // by name rather than trusting the destination.
+        import dmd.typesem: size;
+
+        auto element = type.nextOf;
+        if (type.ty != Tarray || facts.size != arrayValueSize
+                || element is null || literal.sz != element.size)
             throw new Exception(
                 text("no native layout for the string literal `",
                     value.toString, "` as a `", type.toString, "`"),

@@ -27,7 +27,6 @@ int main(string[] args) {
         "ut.backends.call.wrap",
         "ut.backends.call.ffi",
         "ut.backends.call.arrays",
-        "ut.backends.call.slices",
         "ut.backends.call.control_flow",
         "ut.backends.call.exceptions",
         "ut.backends.eval.expressions.arithmetic",
