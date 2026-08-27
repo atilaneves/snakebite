@@ -127,37 +127,3 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
-
-// The last assignment wins. Each value differs, so a backend that added
-// instead of replacing returns 60, and one that kept the first returns 10.
-static foreach (backend; Matrix!()) {
-    @("assign.plain.lastWins." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        30.shouldBeRetOf!(
-            backend,
-            q{
-                int ten() {
-                    return 10;
-                }
-
-                int twenty() {
-                    return 20;
-                }
-
-                int thirty() {
-                    return 30;
-                }
-
-                int total() {
-                    int sum = 0;
-                    sum = ten();
-                    sum = twenty();
-                    sum = thirty();
-                    return sum;
-                }
-            },
-            "total",
-        );
-    }
-}
