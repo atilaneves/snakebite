@@ -24,3 +24,18 @@ unittest {
     assert(fibonacci(22) == 17_711);
     assert(fibonacci(23) == 28_657);
 }
+
+int tak(int x, int y, int z) {
+    if (x <= y)
+        return y;
+
+    return tak(
+        tak(x - 1, y, z),
+        tak(y - 1, z, x),
+        tak(z - 1, x, y)
+    );
+}
+
+unittest {
+    assert(tak(15, 10, 5) == 15);
+}
