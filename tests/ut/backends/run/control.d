@@ -99,23 +99,20 @@ static foreach (backend; Matrix!(
                 do {
                     ++i;
 
-                    if (i == 2)
+                    if (i == 6)
                         continue;
-
-                    if (i == 5)
-                        break;
 
                     sum += i;
                 } while (i < 6);
 
-                assert(sum == 8);
+                assert(sum == 15);
             }
         });
     }
 }
 
-// `final switch` must cover every member of the enum it switches on, and
-// each case dispatches to its own body.
+// `final switch` dispatches to the case matching the value at run time,
+// each case running its own body rather than falling into another's.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),

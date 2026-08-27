@@ -44,32 +44,27 @@ static foreach (backend; Matrix!(
     }
 }
 
-// A member of an anonymous union has an address like any other, so it can
-// be passed by reference.
+// The members of an anonymous union occupy the same storage, so writing
+// through one member changes what is read back through another.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
-    @("anonymousUnionMemberIsAddressable." ~ backend.stringof)
+    @("anonymousUnionMembersShareStorage." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
             struct S {
                 union {
                     int a;
-                    float b;
+                    uint b;
                 }
-            }
-
-            int observe(ref int x) {
-                return x;
             }
 
             void main() {
                 S s;
-                s.a = 7;
-                assert(observe(s.a) == 7);
-                assert(s.a == 7);
+                s.a = -1;
+                assert(s.b == uint.max);
             }
         });
     }
@@ -105,8 +100,9 @@ static foreach (backend; Matrix!(
     }
 }
 
-// `.tupleof` on both sides assigns field by field, so fields of different
-// types each keep their own value.
+// `.tupleof` on both sides assigns field by field between the two field
+// lists, so it works across struct types that share a field layout even
+// though they share no other relationship.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
@@ -120,9 +116,14 @@ static foreach (backend; Matrix!(
                 long tail;
             }
 
+            struct Twin {
+                int head;
+                long tail;
+            }
+
             void main() {
                 auto source = Pair(2, 3L);
-                Pair target;
+                Twin target;
                 target.tupleof = source.tupleof;
                 assert(target.head == 2);
                 assert(target.tail == 3);

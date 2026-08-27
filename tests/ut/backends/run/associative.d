@@ -9,8 +9,9 @@ module ut.backends.run.associative;
 import ut.backends;
 
 
-// An associative array literal takes its keys at run time, so the keys
-// cannot be folded into the literal.
+// An associative array literal evaluates its key expressions and builds
+// the table from those run-time values, rather than from anything fixed
+// at compile time.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
