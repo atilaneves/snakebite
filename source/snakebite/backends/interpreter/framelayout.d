@@ -16,33 +16,37 @@ package struct FrameLayout {
 
     package size_t size;
     package uint alignment = 1;
+
+    // One parameter's slot: its offset into the frame, the facts needed
+    // to place a value there, and whether it is `ref` - decided together,
+    // from the same `TypeFacts.of` call, since a parameter's type never
+    // changes between calls. For a `ref` parameter, `facts` are a
+    // pointer's, not the parameter's own type's: a `ref` parameter
+    // occupies a pointer slot in a compiled frame, the address of the
+    // argument's own storage rather than a copy of its value.
+    package struct Parameter {
+        package size_t offset;
+        package TypeFacts facts;
+        package bool isRef;
+    }
+
     // Parallel to the function's parameter list, indexed positionally.
     // The argument-evaluation loop already has the positional index in
     // hand, so it never pays an AA hash lookup for the hottest path.
-    package size_t[] offsets;
-    // A parameter's facts, alongside its offset in `offsets` above and
-    // decided at the same time, from the same `TypeFacts.of` call: the
-    // argument-evaluation loop needs both to place a value, and a
-    // parameter's type never changes between calls, so this is decided
-    // once per function instead of once per call. For a `ref` parameter
-    // these are a pointer's facts, not `parameter.type`'s - see `refs`.
-    package TypeFacts[] offsetFacts;
-    // Parallel to `offsets`/`offsetFacts`: whether that parameter is
-    // `ref`, so the argument-evaluation loop knows, by position and
-    // without a further lookup, whether to bind the argument's address
-    // into the slot instead of evaluating its value there.
-    package bool[] refs;
+    package Parameter[] parameters;
+
     // Keyed by declaration instead of position: `visit(VarExp)` resolves
-    // a parameter read from a `VarDeclaration` it found by name lookup,
-    // not by position, so it still needs a hash lookup. Reached only
-    // through `offsetOf` below - never read or written directly outside
-    // this module.
-    private size_t[VarDeclaration] _offsetOf;
-    // As `_offsetOf`, for whether that same variable is a `ref`
-    // parameter - only ever populated for one, never for a local, so
-    // `isRef` below answers `false` for anything else without having to
-    // ask what kind of declaration it is. Reached only through `isRef`.
-    private bool[VarDeclaration] _isRefOf;
+    // a parameter or local read from a `VarDeclaration` it found by name
+    // lookup, not by position, so it still needs a hash lookup. `isRef`
+    // is only ever `true` for a `ref` parameter, never for a local - a
+    // local's own slot never indirects. Reached only through `offsetOf`
+    // and `isRef` below - never read or written directly outside this
+    // module.
+    private struct VariableSlot {
+        size_t offset;
+        bool isRef;
+    }
+    private VariableSlot[VarDeclaration] _slotOf;
 
     package static FrameLayout of(FuncDeclaration function_) {
         import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -59,9 +63,7 @@ package struct FrameLayout {
         // declaration to key `offsetOf` by.
         auto parameterList = typeFunctionOf(function_).parameterList;
         auto variables = function_.parameters;
-        layout.offsets.length = parameterList.length;
-        layout.offsetFacts.length = parameterList.length;
-        layout.refs.length = parameterList.length;
+        layout.parameters.length = parameterList.length;
 
         foreach (i; 0 .. parameterList.length) {
             auto parameter = parameterList[i];
@@ -78,24 +80,18 @@ package struct FrameLayout {
 
             const isRefParameter = (parameter.storageClass & STC.ref_) != 0;
 
-            // A `ref` parameter occupies a pointer slot in a compiled
-            // frame - the address of the argument's own storage, not a
-            // copy of its value - so its facts are a pointer's, not
-            // `parameter.type`'s.
             auto slot = isRefParameter
                 ? layout.reserveSlot(
                     TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
                 : layout.reserveSlot(parameter.type);
 
-            layout.offsets[i] = slot.offset;
-            layout.offsetFacts[i] = slot.facts;
-            layout.refs[i] = isRefParameter;
+            layout.parameters[i] =
+                Parameter(slot.offset, slot.facts, isRefParameter);
 
             if (variables !is null) {
                 auto variable = (*variables)[i];
-                layout._offsetOf[variable] = slot.offset;
-                if (isRefParameter)
-                    layout._isRefOf[variable] = true;
+                layout._slotOf[variable] =
+                    VariableSlot(slot.offset, isRefParameter);
             }
         }
 
@@ -151,14 +147,14 @@ package struct FrameLayout {
     package size_t offsetOf(VarDeclaration variable) const {
         import std.conv: text;
 
-        auto offset = variable in _offsetOf;
-        if (offset is null)
+        auto slot = variable in _slotOf;
+        if (slot is null)
             throw new Exception(
                 text("interpreter cannot reach `", variable.toString,
                     "`: not a parameter or local in the current frame"),
             );
 
-        return *offset;
+        return slot.offset;
     }
 
     // Whether `variable` is a `ref` parameter: its own frame slot holds
@@ -170,7 +166,8 @@ package struct FrameLayout {
     // every local as well as a variable this layout never reserved a slot
     // for at all.
     package bool isRef(VarDeclaration variable) const {
-        return (variable in _isRefOf) !is null;
+        auto slot = variable in _slotOf;
+        return slot !is null && slot.isRef;
     }
 }
 
@@ -290,8 +287,9 @@ extern(C++) private final class LocalsCollector: Visitor {
             if (variable.isDataseg)
                 return;
 
-            _layout._offsetOf[variable] =
-                _layout.reserveSlot(variable.type).offset;
+            _layout._slotOf[variable] =
+                FrameLayout.VariableSlot(
+                    _layout.reserveSlot(variable.type).offset, false);
             return;
         }
 
