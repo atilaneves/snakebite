@@ -49,6 +49,29 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("locals.noInitialiser." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        20.shouldBeRetOf!(
+            backend,
+            q{
+                int ten() {
+                    return 10;
+                }
+
+                int total() {
+                    int ret;  // blit init
+                    ret += ten();
+                    ret += ten();
+                    return ret;
+                }
+            },
+            "total",
+        );
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE can't mutate a static local"),
 )) {

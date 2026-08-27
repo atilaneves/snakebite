@@ -757,7 +757,8 @@ extern(C++) private final class Evaluator: Visitor {
 }
 
 // The value a declaration's initializer stores: dmd rewrites
-// `long sum = 0;`'s initializer into a `ConstructExp` (`sum = 0`), so only
+// `long sum = 0;`'s initializer into a `ConstructExp` (`sum = 0`), and
+// `int ret;`'s missing initializer into a `BlitExp` (`ret = 0`), so only
 // `e2`, the actual value, needs evaluating.
 private imported!"dmd.expression".Expression initializerValueOf(
     imported!"dmd.init".ExpInitializer initializer,
@@ -765,6 +766,8 @@ private imported!"dmd.expression".Expression initializerValueOf(
     auto value = initializer.exp;
     if (auto construct = value.isConstructExp)
         return construct.e2;
+    if (auto blit = value.isBlitExp)
+        return blit.e2;
 
     return value;
 }
