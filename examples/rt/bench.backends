@@ -1,0 +1,3 @@
+# unit-threaded's `@ShouldFail` reads as a real failure to the backends;
+# only the oracle runs the real workflow.
+dmd

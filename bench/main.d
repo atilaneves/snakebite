@@ -1,5 +1,8 @@
-// Benchmark harness for snakebite backends. Point it at a project (default:
-// examples/ct). The frontend parses and semantically analyses the project
+// Benchmark harness for snakebite backends. Point it at a benchmark - a name
+// under `examples/`, like `ct-easy`, or a path to any other project - and it
+// runs the backends that benchmark declares in its `bench.backends` file
+// (all of them if it has none), which `--backend` and `--exclude` still
+// override. The frontend parses and semantically analyses the project
 // once, reported as `frontend` in the header so it never pollutes the
 // per-backend numbers. Each backend then runs the whole program through
 // `Backend.run` - the backend does whatever compiled D would do, the
@@ -21,6 +24,7 @@ struct Options {
     uint warmup = 1;
     string[] backends;
     string[] excluded;
+    string[] declared;          // what the benchmark itself asks for
     string[] importPaths;       // bare directories only; dub knows its own
     string[] stringImportPaths; // ditto
     string projectDirectory;
@@ -79,7 +83,8 @@ private Options parseOptions(string[] args) {
         args,
         "runs|r", "How many measured runs (default 10).", &options.runs,
         "warmup|w", "How many warmup runs (default 1).", &options.warmup,
-        "backend|b", "Benchmark only this backend; repeatable (default all).",
+        "backend|b", "Benchmark only this backend; repeatable (default: "
+        ~ "what the benchmark declares, else all).",
         &options.backends,
         "exclude|e", "Do not benchmark this backend; repeatable. Applies "
         ~ "after --backend.", &options.excluded,
@@ -91,7 +96,9 @@ private Options parseOptions(string[] args) {
 
     if (result.helpWanted) {
         defaultGetoptPrinter(
-            "usage: bench [options] [project-directory]",
+            "usage: bench [options] [benchmark]\n\n"
+            ~ "A benchmark is a name under examples/ (default "
+            ~ defaultBenchmark ~ ") or a path to a project directory.",
             result.options,
         );
         options.helpWanted = true;
@@ -99,10 +106,69 @@ private Options parseOptions(string[] args) {
     }
 
     options.projectDirectory =
-        args.length > 1 ? args[1] : defaultProjectDirectory;
+        projectDirectory(args.length > 1 ? args[1] : defaultBenchmark);
+    options.declared = declaredBackends(options.projectDirectory);
 
     return options;
 }
+
+// A benchmark is named, not spelled out: `ct-easy` means `examples/ct-easy`.
+// A path to a directory still works, for projects outside `examples/`.
+private string projectDirectory(in string nameOrPath) {
+    import std.array: join;
+    import std.conv: text;
+    import std.file: exists, isDir;
+    import std.path: absolutePath, buildNormalizedPath;
+
+    if (nameOrPath.exists && nameOrPath.isDir)
+        return nameOrPath.absolutePath.buildNormalizedPath;
+
+    const candidate = buildNormalizedPath(examplesDirectory, nameOrPath);
+    if (candidate.exists && candidate.isDir)
+        return candidate;
+
+    throw new Exception(text(
+        "unknown benchmark `", nameOrPath, "`; known: ",
+        benchmarkNames.join(", "),
+    ));
+}
+
+// Not every benchmark suits every backend - a backend that cannot run one
+// yet would only ever report FAIL there. Each benchmark says which backends
+// to run in a `bench.backends` file, one name per line, `#` comments and
+// blank lines ignored. No file means all of them.
+private string[] declaredBackends(in string directory) {
+    import std.algorithm.iteration: filter, map, splitter;
+    import std.algorithm.searching: canFind, startsWith;
+    import std.array: array, join;
+    import std.conv: text;
+    import std.file: exists, readText;
+    import std.path: buildPath;
+    import std.string: strip;
+
+    const file = buildPath(directory, backendsFileName);
+    if (!file.exists)
+        return null;
+
+    // `const` would not convert back to the mutable `string[]` returned.
+    auto names = file
+        .readText
+        .splitter('\n')
+        .map!strip
+        .filter!(line => line.length && !line.startsWith("#"))
+        .array;
+
+    foreach (name; names)
+        if (!knownBackendNames.canFind(name))
+            throw new Exception(text(
+                file, ": unknown backend `", name, "`; known: ",
+                knownBackendNames.join(", "),
+            ));
+
+    return names;
+}
+
+private enum backendsFileName = "bench.backends";
 
 private string validate(in Options options) {
     import std.algorithm.searching: canFind;
@@ -220,7 +286,10 @@ private bool selected(in Options options, in string name) {
     if (options.excluded.canFind(name))
         return false;
 
-    return options.backends.length == 0 || options.backends.canFind(name);
+    // `--backend` overrides what the benchmark declares; both filter down
+    // from every known backend, so an empty list means all of them.
+    const wanted = options.backends.length ? options.backends : options.declared;
+    return wanted.length == 0 || wanted.canFind(name);
 }
 
 private BackendReport benchmark(
@@ -310,11 +379,29 @@ private string hostCompiler() {
     return text(compiler, " ", __VERSION__, flags);
 }
 
-private string defaultProjectDirectory() {
+private enum defaultBenchmark = "ct-easy";
+
+private string examplesDirectory() {
     import std.file: thisExePath;
     import std.path: buildNormalizedPath, dirName;
 
-    return thisExePath.dirName.buildNormalizedPath("..", "examples", "ct-easy");
+    return thisExePath.dirName.buildNormalizedPath("..", "examples");
+}
+
+private string[] benchmarkNames() {
+    import std.algorithm.iteration: filter, map;
+    import std.algorithm.sorting: sort;
+    import std.array: array;
+    import std.file: dirEntries, SpanMode;
+    import std.path: baseName;
+
+    return examplesDirectory
+        .dirEntries(SpanMode.shallow)
+        .filter!(entry => entry.isDir)
+        .map!(entry => entry.name.baseName)
+        .array
+        .sort
+        .release;
 }
 
 // This process's resident set, from /proc/self/statm. In-process backends
