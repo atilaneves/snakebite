@@ -539,12 +539,6 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         auto variable = expression.e1.isVarExp;
-        // dmd's semantic pass sets `exp.type = exp.e1.type` for every
-        // `BinAssignExp` (`AddAssignExp` among them), so `_facts` -
-        // `evaluate` already resolved for this node's own type - are
-        // `expression.e1.type`'s facts too. One name for the one value,
-        // used for both the target's slot and the write to `_place`; no
-        // second `factsOf` lookup needed either way.
         auto facts = _facts;
         if (variable is null || !facts.isIntegral)
             throw new Exception(
@@ -574,9 +568,6 @@ extern(C++) private final class Evaluator: Visitor {
                     "` expression: `", expression.toString, "`"),
             );
 
-        // `e1`'s facts, asked for once and handed to `integralValueOf`
-        // below instead of let it ask again for the same type: this visit
-        // also needs them itself, for signedness.
         auto e1Facts = factsOf(expression.e1.type);
         const a = integralValueOf(expression.e1, e1Facts);
         const b = integralValueOf(expression.e2);
@@ -584,8 +575,6 @@ extern(C++) private final class Evaluator: Visitor {
             ? cast(ulong) a < cast(ulong) b
             : a < b;
 
-        // `expression` is the node `evaluate` was last called with, so
-        // its type is `_type` and `_facts` is already its facts.
         storeIntegral(_place, less ? 1 : 0, _facts.size);
     }
 
