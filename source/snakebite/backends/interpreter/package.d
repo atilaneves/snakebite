@@ -50,9 +50,10 @@ import dmd.visitor: Visitor;
 // `Interpreter`-side cache to hold.
 extern(C++) private final class Evaluator: Visitor {
     import snakebite.backends.interpreter.framelayout: FrameLayout;
-    import snakebite.backends.interpreter.framestack: FrameStack;
+    import snakebite.framestack: FrameStack;
     import snakebite.ffi: PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
+    import snakebite.nativelayout: storeValue;
     import dmd.astenums: LINK, Tvoid;
     import dmd.expression:
         AddAssignExp, CallExp, CmpExp, DeclarationExp, Expression,
@@ -280,7 +281,7 @@ extern(C++) private final class Evaluator: Visitor {
     // its own scope this way, even one with no `if`/`while`/loop
     // introducing it. There is no separate scope to enter here: `layoutOf`
     // already gave every local inside it a slot in the function's one
-    // frame (see `collectLocals` in `framelayout`), so running it is
+    // frame (see `LocalsCollector` in `framelayout`), so running it is
     // just running whatever it wraps, honouring `_returned` the same way
     // `visit(CompoundStatement)` does for its own children.
     override void visit(ScopeStatement statement) {
@@ -398,11 +399,11 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(IntegerExp expression) {
-        writeLiteral(_type, expression, _place);
+        storeValue(_type, expression, _place);
     }
 
     override void visit(RealExp expression) {
-        writeLiteral(_type, expression, _place);
+        storeValue(_type, expression, _place);
     }
 
     override void visit(VarExp expression) {
@@ -410,7 +411,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         // The slot already holds native bytes of the destination's exact
         // type (the variable's declared type), so this is a plain copy,
-        // not a conversion - unlike a literal, which `writeLiteral` has
+        // not a conversion - unlike a literal, which `storeValue` has
         // to convert from its dmd node first.
         memcpy(_place, slotOf(expression), _type.size);
     }
@@ -422,15 +423,13 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         auto variable = expression.var.isVarDeclaration;
-        auto offset =
-            variable is null ? null : variable in _layout.offsetOf;
-        if (offset is null)
+        if (variable is null)
             throw new Exception(
                 text("interpreter cannot reach `", expression.toString,
                     "`: not a parameter or local in the current frame"),
             );
 
-        return _frameBase + *offset;
+        return _frameBase + _layout.offsetOf(variable);
     }
 
     // Runs a local's initializer into the frame slot `layoutOf` already
@@ -446,13 +445,7 @@ extern(C++) private final class Evaluator: Visitor {
                     "supported"),
             );
 
-        auto offset = variable in _layout.offsetOf;
-        if (offset is null)
-            throw new Exception(
-                text("interpreter cannot run declaration `",
-                    expression.toString, "`: no frame slot was laid out ",
-                    "for it"),
-            );
+        const offset = _layout.offsetOf(variable);
 
         auto expInitializer = variable._init.isExpInitializer;
         if (expInitializer is null)
@@ -468,7 +461,7 @@ extern(C++) private final class Evaluator: Visitor {
         if (auto construct = value.isConstructExp)
             value = construct.e2;
 
-        evaluate(value, variable.type, _frameBase + *offset);
+        evaluate(value, variable.type, _frameBase + offset);
     }
 
     // The target is looked up once, not once to read and again to write:
@@ -583,39 +576,4 @@ extern(C++) private final class Evaluator: Visitor {
         _place = place;
         expression.accept(this);
     }
-}
-
-// Converts one dmd literal node (`IntegerExp`/`RealExp`) to native
-// bytes: writes its value into `place` in native layout, exactly
-// `type`'s size.
-private void writeLiteral(
-    imported!"dmd.mtype".Type type,
-    imported!"dmd.expression".Expression value,
-    void* place,
-) {
-    import dmd.astenums: Tfloat32, Tfloat64;
-    import dmd.typesem: size;
-    import std.conv: text;
-
-    if (type.ty == Tfloat32) {
-        *cast(float*) place = cast(float) value.toReal;
-        return;
-    }
-
-    if (type.ty == Tfloat64) {
-        *cast(double*) place = cast(double) value.toReal;
-        return;
-    }
-
-    if (type.isIntegral) {
-        import snakebite.nativelayout: storeIntegral;
-
-        storeIntegral(place, value.toInteger, type.size);
-        return;
-    }
-
-    throw new Exception(
-        text("interpreter cannot write a value of type `",
-            type.toString, "`"),
-    );
 }

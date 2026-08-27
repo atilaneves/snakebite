@@ -128,6 +128,31 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!()) {
+    @("call.unreachableAfterReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // dmd keeps an `if` after an unconditional `return` in the body
+        // (it only warns about it with `-w`), so a backend must accept a
+        // function with a statement kind it does not otherwise support,
+        // as long as nothing ever runs it. Laying out a frame is not the
+        // same question as running the body: a pass that inspects every
+        // statement the parser kept, rather than only the ones a call
+        // would actually execute, must not refuse the function over one
+        // it would never reach.
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                int answer() {
+                    return 42;
+                    if (1) { }
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
     @("call.void." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

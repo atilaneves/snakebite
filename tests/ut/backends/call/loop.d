@@ -48,3 +48,31 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+// `step` is declared inside the loop body, not hoisted out the way a
+// `for`'s own initialiser is - so this pins a local frame slot getting
+// reserved for a declaration a backend only ever reaches by walking into
+// the body of a statement it already knows how to run, not by walking a
+// separate, narrower list of statement kinds a local can be found in.
+// 0 + 1 + 2 is 3; a `step` stuck at its first value or never added in
+// would give a different answer.
+static foreach (backend; Matrix!()) {
+    @("loop.localInBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.shouldBeRetOf!(
+            backend,
+            q{
+                int sum() {
+                    int total = 0;
+                    for (int i = 0; i < 3; ++i) {
+                        int step = i;
+                        total += step;
+                    }
+                    return total;
+                }
+            },
+            "sum",
+        );
+    }
+}
