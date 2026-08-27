@@ -57,8 +57,8 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.astenums: LINK, Tvoid;
     import dmd.declaration: VarDeclaration;
     import dmd.expression:
-        AddAssignExp, CallExp, CmpExp, DeclarationExp, Expression,
-        IntegerExp, RealExp, VarExp;
+        AddAssignExp, AssignExp, CallExp, CmpExp, DeclarationExp,
+        Expression, IntegerExp, RealExp, VarExp;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
@@ -592,6 +592,35 @@ extern(C++) private final class Evaluator: Visitor {
 
         evaluate(initializerValueOf(expInitializer), variable.type,
             _frameBase + offset);
+    }
+
+    // Assignment is an expression: it yields the value it assigned, so the
+    // right side is evaluated straight into the target's slot and the
+    // result is that slot's own bytes. `_facts` is the target's facts
+    // here: dmd's semantic pass wraps an assignment feeding a wider
+    // destination in a cast of its own, which is a node this interpreter
+    // refuses rather than one it reaches this code with.
+    override void visit(AssignExp expression) {
+        import core.stdc.string: memcpy;
+        import std.conv: text;
+
+        // `ConstructExp` and `BlitExp` arrive as this same node and are
+        // refused: they fill storage that holds no value yet, where D
+        // neither destroys nor copy-assigns over what was there, so
+        // running them as a replacement would be a wrong answer rather
+        // than a refusal.
+        auto variable =
+            expression.op == EXP.assign ? expression.e1.isVarExp : null;
+        if (variable is null)
+            throw new Exception(
+                text("interpreter cannot assign to `",
+                    expression.e1.toString, "`: `", expression.toString,
+                    "`"),
+            );
+
+        auto target = slotOf(variable);
+        evaluate(expression.e2, _type, _facts, target);
+        memcpy(_place, target, _facts.size);
     }
 
     // The target is looked up once, not once to read and again to write:
