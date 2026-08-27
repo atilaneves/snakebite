@@ -26,6 +26,7 @@ int main(string[] args) {
         "ut.backends.call.assign",
         "ut.backends.call.cast_",
         "ut.backends.call.pointers",
+        "ut.backends.call.ref_",
         "ut.backends.call.wrap",
         "ut.backends.call.ffi",
         "ut.backends.call.arrays",

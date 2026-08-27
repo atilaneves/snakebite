@@ -157,6 +157,12 @@ extern(C++) private final class Evaluator: Visitor {
     // so without this flag a statement after `return` would still
     // execute and silently overwrite an already-computed result.
     private bool _returned;
+    // Whether the currently executing function returns `ref`, set by
+    // `execute` from the function's own type. Checked by
+    // `visit(ReturnStatement)`: a `ref` return's `_place` is the address a
+    // `return` statement's lvalue names, not the value that lvalue holds,
+    // so the two need different code, and this is what tells them apart.
+    private bool _returnsRef;
 
     public this() {
         _frames = FrameStack(1024 * 1024);
@@ -305,6 +311,7 @@ extern(C++) private final class Evaluator: Visitor {
         auto savedFrameBase = _frameBase;
         auto savedLayout = _layout;
         auto savedReturned = _returned;
+        auto savedReturnsRef = _returnsRef;
         scope(exit) {
             _type = savedType;
             _facts = savedFacts;
@@ -312,6 +319,7 @@ extern(C++) private final class Evaluator: Visitor {
             _frameBase = savedFrameBase;
             _layout = savedLayout;
             _returned = savedReturned;
+            _returnsRef = savedReturnsRef;
         }
 
         _type = function_.type.nextOf;
@@ -320,6 +328,7 @@ extern(C++) private final class Evaluator: Visitor {
         _frameBase = frameBase;
         _layout = layout;
         _returned = false;
+        _returnsRef = typeFunctionOf(function_).isRef;
         body_.accept(this);
     }
 
@@ -407,6 +416,19 @@ extern(C++) private final class Evaluator: Visitor {
         // to write into. `visit(ExpStatement)` is where that call runs.
         if (statement.exp is null)
             return;
+
+        // A `ref` return hands the caller the address of `statement.exp`'s
+        // storage, not a copy of its value - `_place` here is the small
+        // scratch buffer `visit(CallExp)`/`refCallAddress` set up to hold
+        // exactly that address, sized for a pointer regardless of what
+        // `_facts.size` says the callee's own type is.
+        if (_returnsRef) {
+            import snakebite.nativelayout: storeIntegral;
+
+            storeIntegral(
+                _place, cast(size_t) addressOf(statement.exp), size_t.sizeof);
+            return;
+        }
 
         // `_type`/`_facts` are already this function's return type and
         // its facts, set together on entry (`execute`) or by the last
@@ -670,6 +692,7 @@ extern(C++) private final class Evaluator: Visitor {
     // `declaration` itself (a `SymOffExp` names its variable directly, but
     // `original.toString` still renders the source expression).
     private ubyte* slotOf(Expression original, Declaration declaration) {
+        import snakebite.nativelayout: loadIntegral;
         import std.conv: text;
 
         auto variable = declaration.isVarDeclaration;
@@ -683,7 +706,17 @@ extern(C++) private final class Evaluator: Visitor {
             return staticSlotOf(variable);
 
         countForeignNameLookup;
-        return _frameBase + _layout.offsetOf(variable);
+        auto slot = _frameBase + _layout.offsetOf(variable);
+
+        // A `ref` parameter's own slot holds the address of the
+        // argument's storage, not the storage itself - reading through
+        // it once more here, the one place every read, write and
+        // address-of a variable resolves its slot, is what makes a
+        // reach of the parameter reach the argument instead.
+        if (_layout.isRef(variable))
+            return cast(ubyte*) loadIntegral(slot, size_t.sizeof, false);
+
+        return slot;
     }
 
     // Where `variable` lives outside any frame, created and initialised
@@ -799,16 +832,20 @@ extern(C++) private final class Evaluator: Visitor {
 
         // Naming `e1` rather than the whole expression: dmd lowers
         // `s.length = n` into a node whose `toString` is a bare `=`.
-        auto target = assignmentTargetOf(expression.e1);
+        auto target = addressOf(expression.e1);
         evaluate(expression.e2, _type, _facts, target);
         memcpy(_place, target, _facts.size);
     }
 
-    // Where an assignment's left side writes to: a variable's own slot, or
-    // - for `*p = ...` - the address `p` currently holds. Both a plain
-    // assignment and this dereferenced one write into that address the
-    // same way once it is found, so only finding the address differs.
-    private void* assignmentTargetOf(Expression target) {
+    // The address of the storage `target` names: a variable's own slot
+    // (through a `ref` parameter's indirection, if it is one - see
+    // `slotOf`), the address a pointer currently holds for `*p`, whichever
+    // branch a `ref`-typed `cond ? a : b` took, or the address a `ref`-
+    // returning call hands back. An assignment's left side and a `ref`
+    // argument's binding both need exactly this - "where does this
+    // lvalue live" - so both come here rather than each walking the same
+    // handful of node kinds on their own.
+    private void* addressOf(Expression target) {
         import std.conv: text;
 
         if (auto variable = target.isVarExp)
@@ -817,9 +854,19 @@ extern(C++) private final class Evaluator: Visitor {
         if (auto deref = target.isPtrExp)
             return cast(void*) pointerValueOf(deref.e1);
 
+        // Only the branch taken is ever an lvalue this needs the address
+        // of - the other one, like an `if`'s untaken branch, never runs,
+        // so evaluating its address would be reaching into storage this
+        // call was never given.
+        if (auto cond = target.isCondExp)
+            return addressOf(truthOf(cond.econd) ? cond.e1 : cond.e2);
+
+        if (auto call = target.isCallExp)
+            return refCallAddress(call);
+
         throw new Exception(
-            text("interpreter cannot assign to `", target.toString,
-                "`: it is not a variable"),
+            text("interpreter cannot take the address of `",
+                target.toString, "`: it is not an lvalue"),
         );
     }
 
@@ -1280,12 +1327,17 @@ extern(C++) private final class Evaluator: Visitor {
     // `expression.f` is already statically resolved (dmd resolves direct
     // calls during semantic analysis), so no name lookup or virtual
     // dispatch happens here. This caller reserves the callee's frame and
-    // evaluates each argument expression straight into its slot - against
-    // its own frame, since arguments are the caller's expressions - so
-    // the callee starts with its frame ready-made and never builds one.
-    // The callee's `return` value lands straight in `_place`, the same
-    // destination this call itself was asked to evaluate into.
+    // binds each argument into its slot - against its own frame, since
+    // arguments are the caller's expressions - so the callee starts with
+    // its frame ready-made and never builds one.
+    //
+    // A callee that returns `ref` hands back an address, not a value - the
+    // caller reads through it here rather than everywhere a call result is
+    // used, so this is the one place a `ref`-returning call is told apart
+    // from an ordinary one when its value, not its address, is wanted (see
+    // `addressOf` for the other one).
     override void visit(CallExp expression) {
+        import core.stdc.string: memcpy;
         import std.conv: text;
 
         auto function_ = expression.f;
@@ -1300,6 +1352,32 @@ extern(C++) private final class Evaluator: Visitor {
         // every call this backend makes, not only ones that arrive as a
         // guest `CallExp`.
         auto layout = layoutOf(function_);
+        auto frame = bindFrame(expression, function_, layout);
+
+        if (typeFunctionOf(function_).isRef) {
+            memcpy(
+                _place, resolvedRefAddress(function_, frame.base, layout),
+                _facts.size);
+            return;
+        }
+
+        execute(function_, _place, frame.base, layout);
+    }
+
+    // Reserves `function_`'s frame and binds every argument into it: a
+    // `ref` parameter's slot gets the argument's address (`addressOf`),
+    // everything else gets its value (`evaluate`), exactly as a compiled
+    // frame would be filled. Shared between an ordinary call and one only
+    // wanted for the address a `ref` return hands back (`refCallAddress`),
+    // since both fill a frame the same way and differ only in what they
+    // do with the callee once it has run.
+    private FrameStack.Frame bindFrame(
+        CallExp expression,
+        FuncDeclaration function_,
+        const(FrameLayout)* layout,
+    ) {
+        import snakebite.nativelayout: storeIntegral;
+        import std.conv: text;
 
         // The callee's parameter types, which a body-less declaration has
         // just as much as one with a body - unlike `parameters`, which
@@ -1317,20 +1395,69 @@ extern(C++) private final class Evaluator: Visitor {
 
         // Every argument is evaluated, even one the callee never reads,
         // since evaluating an argument can have effects. The loop already
-        // has the positional index `i`, so it indexes `offsets` and
-        // `offsetFacts` directly instead of hashing a declaration through
-        // `offsetOf` and a type through `factsOf` - a parameter's type
-        // never changes between calls, so `offsetFacts[i]` is already its
-        // facts.
-        foreach (i; 0 .. parameterList.length)
-            evaluate(
-                (*arguments)[i],
-                parameterList[i].type,
-                layout.offsetFacts[i],
-                frame.base + layout.offsets[i],
+        // has the positional index `i`, so it indexes `offsets`,
+        // `offsetFacts` and `refs` directly instead of hashing a
+        // declaration through `offsetOf` and a type through `factsOf` - a
+        // parameter's type never changes between calls, so
+        // `offsetFacts[i]` is already its facts.
+        foreach (i; 0 .. parameterList.length) {
+            auto argument = (*arguments)[i];
+            auto slot = frame.base + layout.offsets[i];
+
+            if (layout.refs[i])
+                storeIntegral(
+                    slot, cast(size_t) addressOf(argument), size_t.sizeof);
+            else
+                evaluate(
+                    argument, parameterList[i].type, layout.offsetFacts[i],
+                    slot);
+        }
+
+        return frame;
+    }
+
+    // Runs a `ref`-returning `function_` to completion and reads back the
+    // address its `return` statement named: `execute` writes that address,
+    // as a pointer, into a scratch buffer sized for exactly that,
+    // regardless of what the callee's own return type's facts say.
+    private void* resolvedRefAddress(
+        FuncDeclaration function_,
+        ubyte* frameBase,
+        const(FrameLayout)* layout,
+    ) {
+        import snakebite.nativelayout: loadIntegral;
+
+        align(8) ubyte[8] resultAddress = void;
+        execute(function_, resultAddress.ptr, frameBase, layout);
+        return cast(void*)
+            loadIntegral(resultAddress.ptr, size_t.sizeof, false);
+    }
+
+    // The address a `ref`-returning call hands back, for `addressOf` when
+    // the call itself is the lvalue - `pick(a, b, true) = 5;`'s left side,
+    // or a `ref` argument bound to another call's `ref` result. dmd only
+    // ever types-checks a call as an lvalue when it does return `ref`, so
+    // the check below is a defence against this interpreter reaching this
+    // path some other way, not a guest mistake any test here can trigger.
+    private void* refCallAddress(CallExp expression) {
+        import std.conv: text;
+
+        auto function_ = expression.f;
+        if (function_ is null)
+            throw new Exception(
+                text("interpreter cannot call an unresolved function: `",
+                    expression.toString, "`"),
             );
 
-        execute(function_, _place, frame.base, layout);
+        if (!typeFunctionOf(function_).isRef)
+            throw new Exception(
+                text("interpreter cannot take the address of `",
+                    expression.toString, "`: it does not return `ref`"),
+            );
+
+        auto layout = layoutOf(function_);
+        auto frame = bindFrame(expression, function_, layout);
+        return resolvedRefAddress(function_, frame.base, layout);
     }
 
     // Evaluates `expression` into `type.size` bytes at `place`, then

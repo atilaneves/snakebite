@@ -24,14 +24,25 @@ package struct FrameLayout {
     // decided at the same time, from the same `TypeFacts.of` call: the
     // argument-evaluation loop needs both to place a value, and a
     // parameter's type never changes between calls, so this is decided
-    // once per function instead of once per call.
+    // once per function instead of once per call. For a `ref` parameter
+    // these are a pointer's facts, not `parameter.type`'s - see `refs`.
     package TypeFacts[] offsetFacts;
+    // Parallel to `offsets`/`offsetFacts`: whether that parameter is
+    // `ref`, so the argument-evaluation loop knows, by position and
+    // without a further lookup, whether to bind the argument's address
+    // into the slot instead of evaluating its value there.
+    package bool[] refs;
     // Keyed by declaration instead of position: `visit(VarExp)` resolves
     // a parameter read from a `VarDeclaration` it found by name lookup,
     // not by position, so it still needs a hash lookup. Reached only
     // through `offsetOf` below - never read or written directly outside
     // this module.
     private size_t[VarDeclaration] _offsetOf;
+    // As `_offsetOf`, for whether that same variable is a `ref`
+    // parameter - only ever populated for one, never for a local, so
+    // `isRef` below answers `false` for anything else without having to
+    // ask what kind of declaration it is. Reached only through `isRef`.
+    private bool[VarDeclaration] _isRefOf;
 
     package static FrameLayout of(FuncDeclaration function_) {
         import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -50,27 +61,42 @@ package struct FrameLayout {
         auto variables = function_.parameters;
         layout.offsets.length = parameterList.length;
         layout.offsetFacts.length = parameterList.length;
+        layout.refs.length = parameterList.length;
 
         foreach (i; 0 .. parameterList.length) {
             auto parameter = parameterList[i];
 
-            // A `ref`/`out` parameter occupies a pointer slot in a
-            // compiled frame, and `lazy` a delegate; `parameter.type`
-            // is still the pointed-to/lazily-evaluated type either
-            // way, so a value slot of that type's size would be the
-            // wrong layout. Not supported, so this throws.
-            if (parameter.storageClass & (STC.ref_ | STC.out_ | STC.lazy_))
+            // `out` needs its own zero-before-call semantics on top of
+            // the same pointer-slot shape `ref` gets below, and `lazy`
+            // is a delegate, not a pointer at all - neither has a frame
+            // layout this interpreter builds yet, so both still throw.
+            if (parameter.storageClass & (STC.out_ | STC.lazy_))
                 throw new Exception(
-                    text("interpreter cannot pass `ref`/`out`/`lazy` ",
-                        "parameter ", i, " of `", function_.toString,
-                        "` by value"),
+                    text("interpreter cannot pass `out`/`lazy` parameter ",
+                        i, " of `", function_.toString, "` by value"),
                 );
 
-            auto slot = layout.reserveSlot(parameter.type);
+            const isRefParameter = (parameter.storageClass & STC.ref_) != 0;
+
+            // A `ref` parameter occupies a pointer slot in a compiled
+            // frame - the address of the argument's own storage, not a
+            // copy of its value - so its facts are a pointer's, not
+            // `parameter.type`'s.
+            auto slot = isRefParameter
+                ? layout.reserveSlot(
+                    TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
+                : layout.reserveSlot(parameter.type);
+
             layout.offsets[i] = slot.offset;
             layout.offsetFacts[i] = slot.facts;
-            if (variables !is null)
-                layout._offsetOf[(*variables)[i]] = slot.offset;
+            layout.refs[i] = isRefParameter;
+
+            if (variables !is null) {
+                auto variable = (*variables)[i];
+                layout._offsetOf[variable] = slot.offset;
+                if (isRefParameter)
+                    layout._isRefOf[variable] = true;
+            }
         }
 
         // Locals share the same frame as the parameters: each one gets a
@@ -100,7 +126,14 @@ package struct FrameLayout {
     // facts. A parameter and a local differ in what they key the offset
     // by, not in how the frame grows to fit them, so both come here.
     private Slot reserveSlot(Type type) {
-        const facts = TypeFacts.of(type);
+        return reserveSlot(TypeFacts.of(type));
+    }
+
+    // As above, for a caller that already knows the slot's facts rather
+    // than a `Type` to derive them from - a `ref` parameter's slot is a
+    // pointer's regardless of what it points to, so nothing about
+    // `parameter.type` is involved in sizing it.
+    private Slot reserveSlot(in TypeFacts facts) {
         const offset = alignUp(this.size, facts.alignment);
         this.size = offset + facts.size;
         if (facts.alignment > this.alignment)
@@ -126,6 +159,18 @@ package struct FrameLayout {
             );
 
         return *offset;
+    }
+
+    // Whether `variable` is a `ref` parameter: its own frame slot holds
+    // the address of the argument's storage rather than the storage
+    // itself, so `Evaluator.slotOf` - the one place every read, write and
+    // address-of a variable goes through - reads through it once more
+    // before handing back an address any of them can use directly.
+    // `false` for anything this layout never marked as one, which covers
+    // every local as well as a variable this layout never reserved a slot
+    // for at all.
+    package bool isRef(VarDeclaration variable) const {
+        return (variable in _isRefOf) !is null;
     }
 }
 
