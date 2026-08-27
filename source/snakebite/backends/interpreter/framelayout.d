@@ -271,7 +271,7 @@ extern(C++) private final class LocalsCollector: Visitor {
     // real work, so this follows it there too rather than missing
     // whatever `Evaluator` will actually run.
     private void collectDeclarations(Expression expression) {
-        import dmd.expression: CatAssignExp, CommaExp;
+        import dmd.expression: CatAssignExp;
 
         if (auto declarationExp = expression.isDeclarationExp) {
             auto variable = declarationExp.declaration.isVarDeclaration;
@@ -299,9 +299,26 @@ extern(C++) private final class LocalsCollector: Visitor {
             return;
         }
 
-        if (auto catAssign = cast(CatAssignExp) expression) {
-            if (catAssign.lowering !is null)
-                collectDeclarations(catAssign.lowering);
-        }
+        // dmd's parser always builds a `CatAssignExp` for `~=`, then
+        // semantic() narrows it in place to whichever of the two `final`
+        // subclasses fits - `CatElemAssignExp` for appending one element
+        // (`arr ~= x;`, the common case) or `CatDcharAssignExp` for a
+        // `dchar` - and leaves it a plain `CatAssignExp` only for the
+        // third case, appending a whole slice. `lowering` lives on the
+        // base class, so all three carry it; matching only
+        // `isCatAssignExp` here would miss the element and dchar cases,
+        // which is where a compiler temp (`__appendtmp*`) actually
+        // appears. Each `isXxxExp` compares `Expression.op` and hands
+        // back a reference to `this` at its own static type - a widening
+        // upcast to `CatAssignExp` from there is a plain pointer
+        // conversion, not a class-to-class downcast, so it stays sound.
+        CatAssignExp catAssign = expression.isCatAssignExp;
+        if (catAssign is null)
+            catAssign = expression.isCatElemAssignExp;
+        if (catAssign is null)
+            catAssign = expression.isCatDcharAssignExp;
+
+        if (catAssign !is null && catAssign.lowering !is null)
+            collectDeclarations(catAssign.lowering);
     }
 }
