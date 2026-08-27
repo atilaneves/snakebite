@@ -54,7 +54,8 @@ druntime is not be emulated or reimplemented. It is either interpreted,
 compiled, or called via FFI.
 
 All backends use native layout in memory as normal compiled D would.
-For instance, dynamic arrays are equivalent to (ptr, length) pairs.
+For instance, a dynamic array is `struct { size_t length; T* ptr; }`:
+length at offset 0, pointer at offset 8 (on 64-bit).
 This means there is no need to marshall or unmarshall when doing FFI.
 
 # Do nots
