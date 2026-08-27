@@ -58,13 +58,13 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.declaration: VarDeclaration;
     import dmd.expression:
         AddAssignExp, AssignExp, CallExp, CmpExp, DeclarationExp,
-        Expression, IntegerExp, RealExp, VarExp;
+        Expression, IntegerExp, NotExp, RealExp, VarExp;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
     import dmd.statement:
-        CompoundStatement, ExpStatement, ForStatement, ImportStatement,
-        ReturnStatement, ScopeStatement, Statement;
+        CompoundStatement, ExpStatement, ForStatement, IfStatement,
+        ImportStatement, ReturnStatement, ScopeStatement, Statement;
     import dmd.tokens: EXP;
 
     alias visit = Visitor.visit;
@@ -417,6 +417,17 @@ extern(C++) private final class Evaluator: Visitor {
         evaluate(expression, type, facts, frame.base);
     }
 
+    // Only the branch that runs is walked: the other one never executes,
+    // so nothing in it is ever evaluated, not even to be discarded.
+    override void visit(IfStatement statement) {
+        auto taken = integralValueOf(statement.condition) != 0
+            ? statement.ifbody
+            : statement.elsebody;
+
+        if (taken !is null)
+            taken.accept(this);
+    }
+
     override void visit(ForStatement statement) {
         while (statement.condition is null
                 || integralValueOf(statement.condition) != 0) {
@@ -649,6 +660,13 @@ extern(C++) private final class Evaluator: Visitor {
     // `<=`, `>` and `>=` arrive as this same node and are refused: nothing
     // needs them yet, and answering them with `<` would be a wrong answer
     // rather than a refusal.
+    override void visit(NotExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+
+        const operand = integralValueOf(expression.e1);
+        storeIntegral(_place, operand == 0 ? 1 : 0, _facts.size);
+    }
+
     override void visit(CmpExp expression) {
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;

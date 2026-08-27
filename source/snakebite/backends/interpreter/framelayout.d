@@ -133,9 +133,9 @@ import dmd.visitor: Visitor;
 
 // Decides which locals get a frame slot by walking the statement kinds a
 // function body is built from: `CompoundStatement` and `ScopeStatement`
-// because they only introduce scope, `ForStatement` because its body runs
-// like any other, and `ExpStatement` is where a `long sum = 0;` local
-// declaration itself is found. `ReturnStatement` and `ImportStatement` can
+// because they only introduce scope, `ForStatement` and `IfStatement`
+// because their branches run like any other statement, and `ExpStatement`
+// is where a `long sum = 0;` local declaration itself is found. `ReturnStatement` and `ImportStatement` can
 // never contain a nested declaration of their own, so they are recognised
 // and skipped rather than walked into.
 //
@@ -155,8 +155,8 @@ import dmd.visitor: Visitor;
 // as a wrong answer.
 extern(C++) private final class LocalsCollector: Visitor {
     import dmd.statement:
-        CompoundStatement, ExpStatement, ForStatement, ImportStatement,
-        ReturnStatement, ScopeStatement, Statement;
+        CompoundStatement, ExpStatement, ForStatement, IfStatement,
+        ImportStatement, ReturnStatement, ScopeStatement, Statement;
 
     alias visit = Visitor.visit;
 
@@ -197,6 +197,18 @@ extern(C++) private final class LocalsCollector: Visitor {
     override void visit(ForStatement statement) {
         if (statement._body !is null)
             statement._body.accept(this);
+    }
+
+    // Both branches are walked even though at most one of them runs: this
+    // layout is computed once for the whole body, before any condition is
+    // known, and a local in the branch not taken this call is in the one
+    // taken the next.
+    override void visit(IfStatement statement) {
+        if (statement.ifbody !is null)
+            statement.ifbody.accept(this);
+
+        if (statement.elsebody !is null)
+            statement.elsebody.accept(this);
     }
 
     override void visit(ExpStatement statement) {
