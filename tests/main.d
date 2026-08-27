@@ -17,5 +17,6 @@ int main(string[] args) {
         "ut.backends.eval.expressions.arithmetic",
         "ut.ffi.plan",
         "ut.ffi.cost",
+        "ut.framestack",
     );
 }

@@ -9,7 +9,7 @@ private:
 // the frame stack. A pure function of the declaration, so it is computed
 // once per function and cached, never per call.
 package struct FrameLayout {
-    import snakebite.backends.interpreter.alignment: alignUp;
+    import snakebite.nativelayout: alignUp;
     import dmd.declaration: VarDeclaration;
     import dmd.func: FuncDeclaration;
     import dmd.mtype: Type;
