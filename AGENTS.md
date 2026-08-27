@@ -64,5 +64,8 @@ This means there is no need to marshall or unmarshall when doing FFI.
 
 ## Code Reviews
 
-Review findings are to be posted on the PR in Github, not communicated
-between agents.
+Reviewer findings are to be posted on the PR in Github, not
+communicated between agents. Review subagents get the PR number and
+nothing else, they can read review comments and markdown
+instructions. Fixer subagents should resolve conversations after
+pushing, otherwise there's no new diff.
