@@ -352,6 +352,32 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `uint.max <= 1u` is false. Read as two's complement the same bits are -1,
+// which would make it true.
+static foreach (backend; Matrix!()) {
+    @("compare.lessOrEqual.unsigned." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        false.shouldBeRetOf!(
+            backend,
+            q{
+                uint top() {
+                    return uint.max;
+                }
+
+                uint one() {
+                    return 1u;
+                }
+
+                bool notMore() {
+                    return top() <= one();
+                }
+            },
+            "notMore",
+        );
+    }
+}
+
 // `-1 < 0` is true. Read as an unsigned bit pattern the same bits are
 // `uint.max`, which would make it false.
 static foreach (backend; Matrix!()) {

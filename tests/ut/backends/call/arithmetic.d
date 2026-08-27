@@ -309,6 +309,74 @@ unittest {
             "interpreter: division by zero in `seven() % zero()`");
 }
 
+// The zero-divisor guard sits above the signedness question, so unsigned
+// division and modulo are refused the same way. Without these, a guard
+// moved below the unsigned path would still leave the signed pair passing
+// while the host died on `uint / 0u`.
+@("arithmetic.divide.byZero.unsigned.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        uint seven() { return 7u; }
+        uint zero() { return 0u; }
+        uint quotient() { return seven() / zero(); }
+    });
+    auto function_ = findFunction(module_, "quotient");
+
+    uint result;
+    (new Interpreter).call(function_, &result, [])
+        .shouldThrowWithMessage(
+            "interpreter: division by zero in `seven() / zero()`");
+}
+
+@("arithmetic.modulo.byZero.unsigned.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        uint seven() { return 7u; }
+        uint zero() { return 0u; }
+        uint remainder() { return seven() % zero(); }
+    });
+    auto function_ = findFunction(module_, "remainder");
+
+    uint result;
+    (new Interpreter).call(function_, &result, [])
+        .shouldThrowWithMessage(
+            "interpreter: division by zero in `seven() % zero()`");
+}
+
+// `long.min / -1L` has no representable quotient, and the host's divide
+// instruction traps on it exactly as it does on a zero divisor. D's wrap
+// answer is `long.min` itself, and the remainder is 0. Pinned for the
+// interpreter alone because the native oracle really does die here.
+@("arithmetic.divide.longMinByMinusOne.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        long lowest() { return long.min; }
+        long negative() { return -1L; }
+        long quotient() { return lowest() / negative(); }
+        long remainder() { return lowest() % negative(); }
+    });
+
+    long quotient;
+    (new Interpreter).call(findFunction(module_, "quotient"), &quotient, []);
+    quotient.shouldEqual(long.min);
+
+    long remainder;
+    (new Interpreter).call(findFunction(module_, "remainder"), &remainder, []);
+    remainder.shouldEqual(0);
+}
+
 static foreach (backend; Matrix!()) {
     @("arithmetic.bitwiseAnd." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -861,6 +929,34 @@ static foreach (backend; Matrix!()) {
             "shifted",
         );
     }
+}
+
+// dmd's integral promotions widen a target narrower than `int` before the
+// operator is applied, so the left side arrives as `cast(int)b` rather than
+// a variable and the interpreter refuses. Pinned so the boundary is
+// deliberate: every compound assignment above works at 4 and 8 bytes only.
+@("arithmetic.addAssign.narrowTarget.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        byte start() { return 100; }
+        byte step() { return 100; }
+        byte wrapped() {
+            byte value = start();
+            value += step();
+            return value;
+        }
+    });
+    auto function_ = findFunction(module_, "wrapped");
+
+    byte result;
+    (new Interpreter).call(function_, &result, [])
+        .shouldThrowWithMessage(
+            "interpreter cannot assign to `cast(int)value`: " ~
+            "`cast(int)value += cast(int)step()`");
 }
 
 // dmd's semantic pass rewrites `--x` into `x -= 1`, so this pins the

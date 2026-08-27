@@ -711,13 +711,13 @@ extern(C++) private final class Evaluator: Visitor {
             combine!op(current, step, targetFacts, stepFacts, expression);
 
         storeIntegral(target, result, targetFacts.size);
-        storeIntegral(_place, result, _facts.size);
+        storeIntegral(
+            _place,
+            loadIntegral(target, targetFacts.size, !targetFacts.isUnsigned),
+            _facts.size,
+        );
     }
 
-    // `x++`/`x--` yield what the variable held before the change, so the
-    // destination gets the old value and the slot the new one. Only the
-    // postfix forms arrive here: dmd's semantic pass rewrites `++x`/`--x`
-    // into `x += 1`/`x -= 1`, which are `BinAssignExp` nodes.
     override void visit(PostExp expression) {
         import snakebite.nativelayout: loadIntegral, storeIntegral;
         import std.conv: text;
@@ -738,8 +738,8 @@ extern(C++) private final class Evaluator: Visitor {
             ? current + step
             : current - step;
 
-        storeIntegral(target, cast(ulong) changed, facts.size);
-        storeIntegral(_place, cast(ulong) current, _facts.size);
+        storeIntegral(target, changed, facts.size);
+        storeIntegral(_place, current, _facts.size);
     }
 
     override void visit(NotExp expression) {
@@ -782,18 +782,8 @@ extern(C++) private final class Evaluator: Visitor {
         storeIntegral(_place, answer ? 1 : 0, _facts.size);
     }
 
-    // `&&` and `||`: the right side runs only when the left side did not
-    // already decide the answer, which is what D promises and what makes an
-    // effect on the right side observable or not.
     override void visit(LogicalExp expression) {
         import snakebite.nativelayout: storeIntegral;
-        import std.conv: text;
-
-        if (expression.op != EXP.andAnd && expression.op != EXP.orOr)
-            throw new Exception(
-                text("interpreter cannot evaluate a `", expression.op,
-                    "` expression: `", expression.toString, "`"),
-            );
 
         const left = integralValueOf(expression.e1) != 0;
         const answer = expression.op == EXP.andAnd
@@ -917,129 +907,6 @@ extern(C++) private final class Evaluator: Visitor {
         const a = integralValueOf(expression.e1);
 
         storeIntegral(_place, cast(ulong) mixin(op ~ "a"), _facts.size);
-    }
-
-    // What `op` makes of two operands already widened to 64 bits: `a` read
-    // with `aFacts`'s signedness, `b` with `bFacts`'s. The caller keeps the
-    // low bits its destination holds.
-    private extern(D) ulong combine(string op)(
-        in long a,
-        in long b,
-        in TypeFacts aFacts,
-        in TypeFacts bFacts,
-        Expression expression,
-    ) {
-        static if (op == "<<" || op == ">>" || op == ">>>")
-            return shifted!op(a, b, aFacts, expression);
-        else static if (op == "/" || op == "%")
-            return divided!op(
-                a, b, sharedSignedness(aFacts, bFacts, expression), expression);
-        else
-            // `+`, `-`, `*`, `&`, `|` and `^` leave the same low bits
-            // whichever way the operands were widened, so no signedness
-            // question arises.
-            return cast(ulong) mixin("a " ~ op ~ " b");
-    }
-
-    // The signedness that governs an operation whose answer depends on it.
-    // dmd's usual arithmetic conversions bring both operands to one common
-    // type before the interpreter sees the node - a narrower or differently
-    // signed operand arrives wrapped in a `CastExp` - so the two agree. If
-    // they ever do not, nothing here could pick between them, so this
-    // refuses instead of answering from one of them.
-    private extern(D) bool sharedSignedness(
-        in TypeFacts a,
-        in TypeFacts b,
-        Expression expression,
-    ) {
-        import std.conv: text;
-
-        if (a.isUnsigned != b.isUnsigned)
-            throw new Exception(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: its operands differ in signedness"),
-            );
-
-        return a.isUnsigned;
-    }
-
-    // D leaves a division by zero undefined, and the host's own divide
-    // instruction raises SIGFPE on it, which would take the host process
-    // down on guest input. The guest asked for something with no answer, so
-    // this reports that to the host the same way a failed guest assertion
-    // is reported: an exception the host survives, naming the expression.
-    private extern(D) ulong divided(string op)(
-        in long a,
-        in long b,
-        in bool unsigned,
-        Expression expression,
-    ) {
-        import std.conv: text;
-
-        if (b == 0)
-            throw new Exception(
-                text("interpreter: division by zero in `",
-                    expression.toString, "`"),
-            );
-
-        if (unsigned)
-            return mixin("cast(ulong) a " ~ op ~ " cast(ulong) b");
-
-        // The other input the host's divide instruction traps on:
-        // `long.min / -1` has no representable quotient. Negation and a
-        // zero remainder are the answers the instruction gives for every
-        // other dividend, and the two's complement wrap `long.min` needs.
-        if (b == -1) {
-            static if (op == "/")
-                return -cast(ulong) a;
-            else
-                return 0;
-        }
-
-        return cast(ulong) mixin("a " ~ op ~ " b");
-    }
-
-    // The left operand alone decides a shift: its width says how many bit
-    // positions there are, and its signedness says whether `>>` copies the
-    // sign bit down. The right operand is a count rather than a value in
-    // the same domain - dmd leaves it its own type, which can differ in
-    // signedness from the left one - so its facts say nothing here.
-    //
-    // A count outside `[0, width)` is undefined in D, and the host's shift
-    // instruction answers it by taking the count modulo the register width,
-    // which is a plausible wrong answer rather than the guest's own. It is
-    // refused instead.
-    private extern(D) ulong shifted(string op)(
-        in long a,
-        in long b,
-        in TypeFacts aFacts,
-        Expression expression,
-    ) {
-        import std.conv: text;
-
-        const width = aFacts.size * 8;
-        if (b < 0 || b >= width)
-            throw new Exception(
-                text("interpreter cannot shift by ", b, " in `",
-                    expression.toString, "`: the left operand has ", width,
-                    " bits"),
-            );
-
-        static if (op == "<<")
-            return cast(ulong) a << b;
-        else static if (op == ">>")
-            return aFacts.isUnsigned
-                ? cast(ulong) a >> b
-                : cast(ulong) (a >> b);
-        else {
-            // `>>>` fills from the left with zeros within the operand's own
-            // width. `a` is 64 bits here, so a signed operand's sign
-            // extension above that width is cleared before the shift.
-            const bits = width == 64
-                ? cast(ulong) a
-                : cast(ulong) a & ((1UL << width) - 1);
-            return bits >> b;
-        }
     }
 
     // Only the branch the condition selects is evaluated, the same way
@@ -1170,6 +1037,126 @@ extern(C++) private final class Evaluator: Visitor {
         _facts = facts;
         _place = place;
         expression.accept(this);
+    }
+}
+
+private ulong combine(string op)(
+    in long a,
+    in long b,
+    in imported!"snakebite.nativelayout".TypeFacts aFacts,
+    in imported!"snakebite.nativelayout".TypeFacts bFacts,
+    imported!"dmd.expression".Expression expression,
+) {
+    static if (op == "<<" || op == ">>" || op == ">>>")
+        return shifted!op(a, b, aFacts, expression);
+    else static if (op == "/" || op == "%")
+        return divided!op(
+            a, b, sharedSignedness(aFacts, bFacts, expression), expression);
+    else
+        // `+`, `-`, `*`, `&`, `|` and `^` leave the same low bits
+        // whichever way the operands were widened, so no signedness
+        // question arises.
+        return cast(ulong) mixin("a " ~ op ~ " b");
+}
+
+// The signedness that governs an operation whose answer depends on it.
+// dmd's usual arithmetic conversions bring both operands to one common
+// type before the interpreter sees the node - a narrower or differently
+// signed operand arrives wrapped in a `CastExp` - so the two agree. If
+// they ever do not, nothing here could pick between them, so this
+// refuses instead of answering from one of them.
+private bool sharedSignedness(
+    in imported!"snakebite.nativelayout".TypeFacts a,
+    in imported!"snakebite.nativelayout".TypeFacts b,
+    imported!"dmd.expression".Expression expression,
+) {
+    import std.conv: text;
+
+    if (a.isUnsigned != b.isUnsigned)
+        throw new Exception(
+            text("interpreter cannot evaluate `", expression.toString,
+                "`: its operands differ in signedness"),
+        );
+
+    return a.isUnsigned;
+}
+
+// D leaves a division by zero undefined, and the host's own divide
+// instruction raises SIGFPE on it, which would take the host process
+// down on guest input. The guest asked for something with no answer, so
+// this reports that to the host the same way a failed guest assertion
+// is reported: an exception the host survives, naming the expression.
+private ulong divided(string op)(
+    in long a,
+    in long b,
+    in bool unsigned,
+    imported!"dmd.expression".Expression expression,
+) {
+    import std.conv: text;
+
+    if (b == 0)
+        throw new Exception(
+            text("interpreter: division by zero in `",
+                expression.toString, "`"),
+        );
+
+    if (unsigned)
+        return mixin("cast(ulong) a " ~ op ~ " cast(ulong) b");
+
+    // The other input the host's divide instruction traps on:
+    // `long.min / -1` has no representable quotient. Negation and a
+    // zero remainder are the answers the instruction gives for every
+    // other dividend, and the two's complement wrap `long.min` needs.
+    if (b == -1) {
+        static if (op == "/")
+            return -cast(ulong) a;
+        else
+            return 0;
+    }
+
+    return cast(ulong) mixin("a " ~ op ~ " b");
+}
+
+// The left operand alone decides a shift: its width says how many bit
+// positions there are, and its signedness says whether `>>` copies the
+// sign bit down. The right operand is a count rather than a value in
+// the same domain - dmd leaves it its own type, which can differ in
+// signedness from the left one - so its facts say nothing here.
+//
+// A count outside `[0, width)` is undefined in D, and the host's shift
+// instruction answers it by taking the count modulo the register width,
+// which is a plausible wrong answer rather than the guest's own. It is
+// refused instead.
+private ulong shifted(string op)(
+    in long a,
+    in long b,
+    in imported!"snakebite.nativelayout".TypeFacts aFacts,
+    imported!"dmd.expression".Expression expression,
+) {
+    import std.conv: text;
+
+    const width = aFacts.size * 8;
+    if (b < 0 || b >= width)
+        throw new Exception(
+            text("interpreter cannot shift by ", b, " in `",
+                expression.toString, "`: the left operand has ", width,
+                " bits"),
+        );
+
+    static if (op == "<<")
+        return cast(ulong) a << b;
+    else static if (op == ">>")
+        return aFacts.isUnsigned
+            ? cast(ulong) a >> b
+            : cast(ulong) (a >> b);
+    else {
+        // `>>>` fills from the left with zeros within the operand's own
+        // width. `a` is 64 bits here, so a signed operand's sign
+        // extension above that width is cleared before the shift.
+        const bits = width == 64
+            ? cast(ulong) a
+            : cast(ulong) a & ((1UL << width) - 1);
+        return bits >> b;
     }
 }
 
