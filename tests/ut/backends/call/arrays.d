@@ -5,10 +5,10 @@ import ut.backends;
 
 
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
-    Omit!(Interpreter, Because.inexpressible, "Can't do this"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot hold mutable static state across calls"),
 )) {
-    @("compare.lessThan.true." ~ backend.stringof)
+    @("arrays.append.static.repeatedCalls." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         4.shouldBeRetOf!(
