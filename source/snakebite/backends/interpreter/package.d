@@ -35,12 +35,12 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     }
 
     version(unittest)
-    public size_t nameLookups() const {
+    public size_t nameLookups() @safe @nogc nothrow pure const scope {
         return _evaluator.nameLookups;
     }
 
     version(unittest)
-    public size_t typeLookups() const {
+    public size_t typeLookups() @safe @nogc nothrow pure const scope {
         return _evaluator.typeLookups;
     }
 }
@@ -113,9 +113,12 @@ extern(C++) private final class Evaluator: Visitor {
     // only falls through to `_typeFacts` on an actual change of type.
     private Type _cachedType;
     private TypeFacts _cachedFacts;
-    // The hash lookups made against a table this evaluator does not own,
-    // so cannot have count itself: a frame layout's offsets, and the FFI
-    // plans. Counted here to complete `nameLookups` below.
+    // The hash lookups this evaluator makes through another type's
+    // interface rather than through a `Cache` of its own: a frame
+    // layout's `offsetOf`, and an FFI plan's `of`. Counted at the call
+    // and by hand, so what is counted is what this evaluator asks for -
+    // one query, one lookup. Whatever the callee does inside to answer is
+    // its own, and is not counted here.
     version(unittest) private size_t _foreignNameLookups;
 
     // The destination: while walking statements, the enclosing function's
@@ -171,7 +174,7 @@ extern(C++) private final class Evaluator: Visitor {
     // Every hash lookup this evaluator has made to find where a name
     // lives: a variable's storage, or how to reach a called function.
     version(unittest)
-    extern(D) final size_t nameLookups() const {
+    extern(D) final size_t nameLookups() @safe @nogc nothrow pure const scope {
         return _foreignNameLookups + _layouts.lookups + _statics.lookups;
     }
 
@@ -181,11 +184,11 @@ extern(C++) private final class Evaluator: Visitor {
     // a second question to find one variable, a type lookup when an
     // answer about a type stops being kept.
     version(unittest)
-    extern(D) final size_t typeLookups() const {
+    extern(D) final size_t typeLookups() @safe @nogc nothrow pure const scope {
         return _typeFacts.lookups;
     }
 
-    extern(D) private void countForeignNameLookup() {
+    extern(D) private void countForeignNameLookup() @safe @nogc nothrow pure {
         version(unittest) ++_foreignNameLookups;
     }
 
@@ -921,9 +924,18 @@ extern(C++) private final class Evaluator: Visitor {
 // The count is what makes it a type rather than an associative array
 // declaration. Every probe of one of these is a hash of a pointer on a
 // path the evaluator takes per node it visits, so how many of them a
-// guest construct needs is a property worth asserting on - and asserting
-// on it is only worth anything if a probe added later is counted without
-// whoever adds it having to know the count exists.
+// guest construct needs is a property worth asserting on, and a probe of
+// a table that is already a `Cache` is counted without whoever adds it
+// having to know the count exists.
+//
+// That is the whole of what the count covers: reads of the tables that
+// are `Cache`es. A plain associative array declared beside them, a probe
+// made inside `FrameLayout` or `PlanCache` to answer one query, and
+// `opIndexAssign` below - itself a hash lookup, though only ever on a
+// cold path - are all outside it, as is any read of `_entries` from
+// elsewhere in this module, since `private` in D is module-scoped. What
+// this feeds is a budget on the paths it does cover, not a fence around
+// the evaluator.
 //
 // The count itself is `bin/ut` only: an unconditional increment here
 // would be exactly the per-node cost it exists to measure.
@@ -937,12 +949,12 @@ private struct Cache(Key, Value) {
         return key in _entries;
     }
 
-    public void opIndexAssign(Value value, Key key) {
+    public void opIndexAssign(Value value, Key key) @safe nothrow pure {
         _entries[key] = value;
     }
 
     version(unittest)
-    public size_t lookups() const {
+    public size_t lookups() @safe @nogc nothrow pure const scope {
         return _lookups;
     }
 }

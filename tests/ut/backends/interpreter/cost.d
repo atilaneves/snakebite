@@ -65,7 +65,7 @@ private string loopFunction(in string name, in int trips) {
 // A bare loop over locals: no call of any kind, so this is the evaluator's
 // own statement and expression walking with nothing else in the way.
 @("steadyState.arithmetic.allocatesNothing")
-@Tags("interpreter")
+@Tags(Interpreter.stringof)
 unittest {
     shouldNotAllocate("arithmetic");
 }
@@ -74,7 +74,7 @@ unittest {
 // A guest function calling a guest function in a loop, which is what
 // pushes and pops a frame and fills a parameter slot on every trip.
 @("steadyState.guestCall.allocatesNothing")
-@Tags("interpreter")
+@Tags(Interpreter.stringof)
 unittest {
     shouldNotAllocate("calls");
 }
@@ -84,7 +84,7 @@ unittest {
 // and the register words it widens them into are fixed-size buffers, so no
 // call builds an array for either.
 @("steadyState.ffiCall.allocatesNothing")
-@Tags("interpreter")
+@Tags(Interpreter.stringof)
 unittest {
     shouldNotAllocate("ffi");
 }
@@ -97,6 +97,18 @@ unittest {
 // scratch destination is a fixed-size buffer on the host stack. A
 // steady-state call therefore costs the collector nothing at all, which is
 // an exact zero rather than a threshold.
+//
+// The zero is exactly as wide as what it measures - bytes the garbage
+// collector handed to this thread while running these guest programs -
+// and three kinds of per-call cost fall outside it. The frame stack is a
+// `Region` over `Mallocator`, so the day it learns to grow it will do so
+// through `malloc`, which the collector does not count. An allocation on
+// another thread is not counted either: that is what makes the reading
+// deterministic under the parallel runner, and it is also why this says
+// nothing about a backend that allocates elsewhere. And an evaluator path
+// none of these three programs executes is not covered at all -
+// `staticSlotOf` allocates a block per static variable it reaches, by
+// design, and no guest here reaches one.
 //
 // `allocatedInCurrentThread` and not `GC.stats.usedSize`: the latter is
 // process-wide, and `bin/ut` runs its tests in parallel by default, so
@@ -114,13 +126,11 @@ private void shouldNotAllocate(
     auto function_ = guestFunction(parseSnippet(guest), functionName);
     long result;
 
-    // More than one warm-up call: the first reaches every cold path, and
-    // the ones after it cover the one-off costs that are invisible in the
-    // source - an associative array growing past a bucket threshold, or
-    // the GC creating the pool for a size class the first time anything
-    // asks for one.
-    foreach (_; 0 .. 4)
-        backend.call(function_, &result, []);
+    // One warm-up call, because exactly one call is cold. Measured per
+    // call over twelve consecutive cold calls of each guest here, the
+    // first allocates of the order of a kilobyte - between 1008 and 1488
+    // bytes across the three - and every call after it allocates zero.
+    backend.call(function_, &result, []);
 
     enum calls = 100;
     const before = GC.allocatedInCurrentThread;
@@ -131,8 +141,9 @@ private void shouldNotAllocate(
     if (allocated != 0)
         throw new UnitTestException(
             text("`", functionName, "` allocated ", allocated,
-                " byte(s) across ", calls, " steady-state calls; a ",
-                "steady-state call must allocate nothing"),
+                " byte(s) of GC memory on this thread across ", calls,
+                " steady-state calls; the evaluator paths these calls ",
+                "take must allocate none"),
             file, line,
         );
 }
@@ -148,25 +159,27 @@ private enum nameLookupsPerIteration = 4;
 
 // A type's size, alignment and signedness are fixed for the life of the
 // program, so the evaluator asks about each type once and keeps the
-// answer rather than asking once per node it visits. What is left is the
-// two changes of type each iteration makes: the condition `i < n` is
-// `bool` where everything around it is `long`, and the kept answer is the
-// last type asked about, so the type changing back and forth costs one
-// lookup each way. Every other question an iteration asks about a type is
-// answered without one.
+// answer rather than asking once per node it visits. What is left today
+// is the two changes of type each iteration makes: the condition `i < n`
+// is `bool` where everything around it is `long`, and the kept answer is
+// the last type asked about, so the type changing back and forth costs
+// one lookup each way. Every other question an iteration asks about a
+// type is answered without one. A second entry in front of the type-facts
+// table would take this to zero, so this number is a ceiling that is
+// expected to fall, not a shape worth keeping.
 private enum typeLookupsPerIteration = 2;
 
 
-// An iteration of the loop may cost one lookup per variable it reaches,
-// and two more for a `bool` condition among `long`s - not a lookup per
-// node visited.
+// An iteration of the loop may cost at most one lookup per variable it
+// reaches, and at most two more for a `bool` condition among `long`s -
+// not a lookup per node visited.
 //
 // Measured as the difference between two functions that differ only in how
 // many times they go round the loop, so what a call pays regardless of the
 // loop - finding the frame layout, running the two declarations, reading
 // the result back - cancels instead of having to be counted.
 @("steadyState.lookupsPerIteration")
-@Tags("interpreter")
+@Tags(Interpreter.stringof)
 unittest {
     shouldCostPerIteration!"name"(nameLookupsPerIteration);
     shouldCostPerIteration!"type"(typeLookupsPerIteration);
@@ -182,6 +195,12 @@ private enum perIterationCalls = 10;
 // Runs the two functions that differ only in trip count and checks what
 // the extra iterations cost in lookups of one kind against `budget` per
 // iteration.
+//
+// A ceiling and not an equality. Every reason to touch these paths is a
+// reason to make the number smaller - the type budget in particular is
+// two only because a single-entry cache alternates and misses both ways -
+// and a guard that went red when the count fell would be a guard against
+// the improvement it exists to protect.
 private void shouldCostPerIteration(string kind)(
     in size_t budget,
     in string file = __FILE__,
@@ -210,11 +229,11 @@ private void shouldCostPerIteration(string kind)(
     const iterations = perIterationCalls * (manyTrips - fewTrips);
     const spentTotal = spent(many) - spent(few);
 
-    if (spentTotal != iterations * budget)
+    if (spentTotal > iterations * budget)
         throw new UnitTestException(
             text(iterations, " extra loop iterations cost ", spentTotal,
                 " ", kind, " lookup(s); the budget is ", budget,
-                " per iteration, ", iterations * budget, " in total"),
+                " per iteration, ", iterations * budget, " at most"),
             file, line,
         );
 }
