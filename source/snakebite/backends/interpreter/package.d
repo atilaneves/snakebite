@@ -64,7 +64,8 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.ffi: PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout: storeValue, TypeFacts;
-    import dmd.astenums: LINK, Tarray, Tnoreturn, Tpointer, Tsarray, Tvoid;
+    import dmd.astenums:
+        LINK, Tarray, Tbool, Tnoreturn, Tpointer, Tsarray, Tvoid;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression:
         AddAssignExp, AddExp, AddrExp, ArrayLengthExp, ArrayLiteralExp,
@@ -196,6 +197,7 @@ extern(C++) private final class Evaluator: Visitor {
         void*[] args,
     ) {
         import snakebite.frontend.compiler: withCompilerLock;
+        import std.conv: text;
 
         const parameterCount =
             function_.parameters is null ? 0 : function_.parameters.length;
@@ -203,6 +205,22 @@ extern(C++) private final class Evaluator: Visitor {
             throw new Exception(
                 "host-to-guest arguments not yet supported by the " ~
                     "interpreter backend",
+            );
+
+        // A `ref` return hands the caller the *address* of the result, in
+        // a scratch buffer `visit(ReturnStatement)` always sizes for a
+        // pointer (`resolvedRefAddress` is where a guest `CallExp` reads
+        // that address back and copies through it). This is the host
+        // entry point, not a guest `CallExp`: `returnPlace` is storage
+        // the host itself owns, sized for the callee's return type -
+        // `int`, say - and `execute` would still write `size_t.sizeof`
+        // bytes of an address into it. `ffi/plan.d`'s `prepare` refuses a
+        // `ref` return for exactly this reason; this is the interpreter's
+        // own entry point, so it gets the same refusal.
+        if (typeFunctionOf(function_).isRef)
+            throw new Exception(
+                text("interpreter cannot call `", function_.toString,
+                    "` from the host: it returns by `ref`"),
             );
 
         withCompilerLock({
@@ -243,15 +261,21 @@ extern(C++) private final class Evaluator: Visitor {
 
         // dmd only runs semantic3 - the pass that resolves a function
         // body's own locals, `newCapacity` and the rest of druntime's
-        // append hooks among them - on a module it is compiling. A
-        // non-template function reached only by being called from one of
-        // those hooks, never itself instantiated or written by the guest,
-        // has a body dmd parsed but never finished analysing: its locals'
-        // `Type`s are still the unresolved placeholder dmd starts them at.
-        // dmd's own CTFE engine forces this same forward reference before
-        // interpreting such a body (`dinterpret.d`'s call to this same
-        // function); walking a body without it first would read those
-        // placeholders as real facts.
+        // append hooks among them - on a module passed to it as a *root*
+        // module, the ones actually being built; parsing a module dmd
+        // reaches only through an `import`, as every druntime module
+        // here is, does not run semantic3 over it. A non-template
+        // function reached only by being called from one of those
+        // hooks, never itself instantiated or written by the guest, has
+        // a body dmd parsed but never finished analysing: its locals'
+        // `Type`s are still the unresolved placeholder dmd starts them
+        // at. dmd's own CTFE engine forces this same forward reference
+        // before interpreting such a body (`dinterpret.d`'s call to this
+        // same function) - which is why `Ctfe`, this interpreter's
+        // sibling backend, does not need this forcing of its own: it
+        // walks no body itself, `dinterpret.d` does, and already forces
+        // it there. Walking a body here without first forcing it would
+        // read those placeholders as real facts.
         //
         // `function_` here can be a druntime declaration many guest
         // programs share the very same `FuncDeclaration` for - dmd's
@@ -388,10 +412,10 @@ extern(C++) private final class Evaluator: Visitor {
         ubyte* frameBase,
         const(FrameLayout)* layout,
     ) {
-        foreach (i, offset; layout.offsets)
-            slots[i] = frameBase + offset;
+        foreach (i, parameter; layout.parameters)
+            slots[i] = frameBase + parameter.offset;
 
-        return slots[0 .. layout.offsets.length];
+        return slots[0 .. layout.parameters.length];
     }
 
     override void visit(Statement statement) {
@@ -526,8 +550,11 @@ extern(C++) private final class Evaluator: Visitor {
         // fits in a plain buffer on the host's own stack - reclaimed the
         // moment this returns, on every exit path, with no bump-allocator
         // bookkeeping and nothing to explicitly pop.
-        if (facts.size <= 8 && facts.alignment <= 8) {
-            align(8) ubyte[8] buffer = void;
+        // `8` is a register's width on the one ABI this project supports
+        // (`ffi.abi.supported` is `false` everywhere else) - `size_t.sizeof`
+        // names that rather than repeating the literal.
+        if (facts.size <= size_t.sizeof && facts.alignment <= size_t.sizeof) {
+            align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
             evaluate(expression, type, facts, buffer.ptr);
             return;
         }
@@ -618,10 +645,11 @@ extern(C++) private final class Evaluator: Visitor {
                     "`"),
             );
 
-        assert(facts.size == arrayValueSize && facts.alignment <= 8,
+        assert(facts.size == arrayValueSize
+                && facts.alignment <= size_t.sizeof,
             "a dynamic array is not two words on this target");
 
-        align(8) ubyte[arrayValueSize] value = void;
+        align(size_t.sizeof) ubyte[arrayValueSize] value = void;
         evaluate(expression, type, facts, value.ptr);
 
         return ArrayValue(
@@ -648,7 +676,7 @@ extern(C++) private final class Evaluator: Visitor {
                     "` as an integral: its type is `", type.toString, "`"),
             );
 
-        align(8) ubyte[8] buffer = void;
+        align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
         assert(facts.size <= buffer.sizeof && facts.alignment <= buffer.alignof,
             "an integral wider than a register reached the scratch buffer");
 
@@ -674,7 +702,7 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         const facts = factsOf(type);
-        align(8) ubyte[8] buffer = void;
+        align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
         assert(facts.size <= buffer.sizeof && facts.alignment <= buffer.alignof,
             "a pointer wider than a register reached the scratch buffer");
 
@@ -838,7 +866,12 @@ extern(C++) private final class Evaluator: Visitor {
         // its own - druntime's own append hooks declare both kinds in
         // their own bodies, the same way an `import` inside a function
         // body binds a name with nothing left to execute (see
-        // `visit(ImportStatement)`).
+        // `visit(ImportStatement)`). `Ctfe`, this interpreter's sibling
+        // backend, needs no special case of its own for either: it runs
+        // dmd's own `dinterpret.d`, which already knows a body can hold
+        // both. Any future backend that walks a body's AST itself,
+        // rather than handing it to dmd's engine, inherits the same
+        // need.
         if (expression.declaration.isAliasDeclaration !is null
                 || expression.declaration.isTemplateDeclaration !is null)
             return;
@@ -1275,15 +1308,22 @@ extern(C++) private final class Evaluator: Visitor {
     // cast reinterprets the same bits at their native width instead: a
     // pointer's representation does not depend on its pointee, so no
     // conversion is needed, only a copy. A dynamic-array-to-dynamic-array
-    // cast is the same idea again: druntime's own append hooks cast their
-    // result across a change of qualifiers alone (`Tarr` to `Unqual_Tarr`
-    // and back), never a change of element type, so the two share the
-    // same `{length, ptr}` layout and the cast is a copy too. Anything
-    // else this node could mean - floating point, a class downcast, array
+    // cast is the same idea again *when the element size does not
+    // change*: druntime's own append hooks cast their result across a
+    // change of qualifiers alone (`Tarr` to `Unqual_Tarr` and back),
+    // never a change of element type, so the two share the same
+    // `{length, ptr}` layout and the cast is a copy too. A change of
+    // element size - `T[]` to `void[]`, which the same append hooks also
+    // do, to pass a `void[]` byte range through hooks with no reason to
+    // know the element type - is not that cast: D defines it as scaling
+    // the length by the ratio of the two element sizes, not copying it
+    // verbatim, and that scaling is what this does below. Anything else
+    // this node could mean - floating point, a class downcast, array
     // reinterpretation such as `arr.ptr` - is refused the same way an
     // unhandled node already is.
     override void visit(CastExp expression) {
-        import snakebite.nativelayout: storeIntegral;
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset, storeIntegral;
         import std.conv: text;
 
         auto sourceType = expression.e1.type;
@@ -1294,7 +1334,32 @@ extern(C++) private final class Evaluator: Visitor {
         }
 
         if (sourceType.ty == Tarray && _type.ty == Tarray) {
-            evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
+            const sourceElementSize = factsOf(sourceType.nextOf).size;
+            const destElementSize = factsOf(_type.nextOf).size;
+
+            if (sourceElementSize == destElementSize) {
+                evaluate(
+                    expression.e1, sourceType, factsOf(sourceType), _place);
+                return;
+            }
+
+            // D reinterprets the same bytes at the new element width, so
+            // the byte count - not the element count - is what has to
+            // stay the same across the cast. `newlength` is truncated,
+            // the same truncation `object.d`'s own `T[] to U[]` cast
+            // does, rather than refused on a remainder: a remainder means
+            // the source array's byte length is not a whole number of
+            // destination elements, which is druntime's call to make, not
+            // this interpreter's.
+            const value = evaluateArray(expression.e1, factsOf(sourceType));
+            const newLength =
+                value.length * sourceElementSize / destElementSize;
+
+            auto bytes = cast(ubyte*) _place;
+            storeIntegral(
+                bytes + arrayLengthOffset, newLength, size_t.sizeof);
+            *cast(const(void)**) (bytes + arrayPointerOffset) =
+                value.elements;
             return;
         }
 
@@ -1315,6 +1380,20 @@ extern(C++) private final class Evaluator: Visitor {
         }
 
         const sourceFacts = factsOf(sourceType);
+
+        // dmd classifies `bool` as `integral | unsigned` (`mtype.d`), so
+        // without this check the branch below would take it as an
+        // ordinary integral-to-integral narrowing and store the operand's
+        // low byte. D specifies `cast(bool) x` as `x != 0`, not "keep the
+        // low byte": `cast(bool) 256` is `true` in D, not the `false` a
+        // truncation would store, and a truncation can also store a value
+        // like `2` in a `bool` slot that no compiled D ever produces.
+        if (sourceFacts.isIntegral && _type.ty == Tbool) {
+            const value = integralValueOf(expression.e1, sourceFacts);
+            storeIntegral(_place, value != 0, _facts.size);
+            return;
+        }
+
         if (sourceFacts.isIntegral && _facts.isIntegral) {
             storeIntegral(
                 _place,
@@ -1365,8 +1444,8 @@ extern(C++) private final class Evaluator: Visitor {
     // `*p`: the address `p` evaluates to is not this expression's own
     // destination - `_place`/`_facts` here are the pointee's, `int` for an
     // `int*` - so the pointer itself is read into a scratch register first
-    // (`pointerValueOf`), the same two-step `assignmentTargetOf` uses to
-    // find where `*p = ...` writes.
+    // (`pointerValueOf`), the same two-step `addressOf` uses to find
+    // where `*p = ...` writes.
     override void visit(PtrExp expression) {
         import core.stdc.string: memcpy;
 
@@ -1389,6 +1468,17 @@ extern(C++) private final class Evaluator: Visitor {
             throw new Exception(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: only a struct field read is supported"),
+            );
+
+        // `field.offset` below is a whole-byte offset. A bitfield is also
+        // a `VarDeclaration`, but its storage is a sub-byte slice of that
+        // offset's byte, which a plain `memcpy` from it would read as
+        // whole bytes instead - refused rather than run to a wrong
+        // answer, the same way an unhandled node already is.
+        if (field.isBitFieldDeclaration !is null)
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: reading a bitfield is not supported"),
             );
 
         auto base = cast(ubyte*) addressOf(expression.e1);
@@ -1518,28 +1608,23 @@ extern(C++) private final class Evaluator: Visitor {
             return;
         }
 
-        const value = evaluateArray(array, factsOf(array.type));
-        const index = indexOf(expression, value.length);
-
-        // Compiled D throws a `RangeError` here, which needs guest
-        // exceptions this interpreter does not have. The alternative is
-        // not "no check": an unchecked read hands back a byte of the
-        // host's own memory as a guest value, or faults the host process
-        // outright, so this refuses instead.
-        if (index < 0 || cast(size_t) index >= value.length)
-            throw new Exception(
-                text("interpreter cannot index `", array.toString,
-                    "` at ", index, ": the array is ", value.length,
-                    " long"),
-            );
-
+        // `indexAddressOf` does the same evaluate-index-bounds-check-
+        // stride work an assignment's left side (`addressOf`) needs to
+        // find this same element's address; a read just copies out of it
+        // instead of writing through it. Compiled D throws a `RangeError`
+        // on an out-of-range index, which needs guest exceptions this
+        // interpreter does not have - `indexAddressOf` refuses instead,
+        // since an unchecked read would hand back a byte of the host's
+        // own memory as a guest value, or fault the host process
+        // outright.
+        //
         // The array's own element width, not the destination's: they
         // agree only because dmd wraps this in a `CastExp` for any change
         // of width, and `cast` is refused.
         const stride = factsOf(array.type.nextOf).size;
         assert(stride == _facts.size, "an index changed width");
 
-        memcpy(_place, value.elements + index * stride, stride);
+        memcpy(_place, indexAddressOf(expression), stride);
     }
 
     private long indexOf(IndexExp expression, in size_t length) {
@@ -1727,9 +1812,15 @@ extern(C++) private final class Evaluator: Visitor {
     //
     // A callee that returns `ref` hands back an address, not a value - the
     // caller reads through it here rather than everywhere a call result is
-    // used, so this is the one place a `ref`-returning call is told apart
-    // from an ordinary one when its value, not its address, is wanted (see
-    // `addressOf` for the other one).
+    // used, so this is the one place a `ref`-returning *guest* call is told
+    // apart from an ordinary one when its value, not its address, is
+    // wanted (see `addressOf`/`refCallAddress` for the other one). Two
+    // more places check the same `isRef`, for the opposite reason -
+    // refusing rather than running: `Evaluator.call`, the host entry
+    // point, since the host is never the guest `CallExp` this branch
+    // reads through, and `ffi/plan.d`'s `prepare`, since an
+    // `extern(C)`-declared `ref`-returning function has no guest body for
+    // this branch to run in the first place.
     override void visit(CallExp expression) {
         import core.stdc.string: memcpy;
         import std.conv: text;
@@ -1789,22 +1880,22 @@ extern(C++) private final class Evaluator: Visitor {
 
         // Every argument is evaluated, even one the callee never reads,
         // since evaluating an argument can have effects. The loop already
-        // has the positional index `i`, so it indexes `offsets`,
-        // `offsetFacts` and `refs` directly instead of hashing a
-        // declaration through `offsetOf` and a type through `factsOf` - a
-        // parameter's type never changes between calls, so
-        // `offsetFacts[i]` is already its facts.
+        // has the positional index `i`, so it indexes `layout.parameters`
+        // directly instead of hashing a declaration through `offsetOf` and
+        // a type through `factsOf` - a parameter's type never changes
+        // between calls, so `layout.parameters[i].facts` is already its
+        // facts.
         foreach (i; 0 .. parameterList.length) {
             auto argument = (*arguments)[i];
-            auto slot = frame.base + layout.offsets[i];
+            auto parameter = layout.parameters[i];
+            auto slot = frame.base + parameter.offset;
 
-            if (layout.refs[i])
+            if (parameter.isRef)
                 storeIntegral(
                     slot, cast(size_t) addressOf(argument), size_t.sizeof);
             else
                 evaluate(
-                    argument, parameterList[i].type, layout.offsetFacts[i],
-                    slot);
+                    argument, parameterList[i].type, parameter.facts, slot);
         }
 
         return frame;
@@ -1821,7 +1912,7 @@ extern(C++) private final class Evaluator: Visitor {
     ) {
         import snakebite.nativelayout: loadIntegral;
 
-        align(8) ubyte[8] resultAddress = void;
+        align(size_t.sizeof) ubyte[size_t.sizeof] resultAddress = void;
         execute(function_, resultAddress.ptr, frameBase, layout);
         return cast(void*)
             loadIntegral(resultAddress.ptr, size_t.sizeof, false);

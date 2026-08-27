@@ -142,3 +142,28 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+// `Evaluator.call` is the host entry point, not a guest `CallExp`: a
+// `ref`-returning function called through it hands the host a scratch
+// buffer sized for the callee's own return type - `int`, 4 bytes here -
+// but `visit(ReturnStatement)` always writes `size_t.sizeof` (8) bytes
+// for a `ref` return, regardless of `_facts.size`. Unrefused, this call
+// would write 8 bytes into the host's 4-byte `int`.
+@("ref.return.hostCall.refused.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        ref int identity() {
+            static int x = 5;
+            return x;
+        }
+    });
+    auto function_ = findFunction(module_, "identity");
+
+    int result;
+    (new Interpreter).call(function_, &result, [])
+        .shouldThrow;
+}

@@ -95,3 +95,80 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+// `cast(void[])` of a `T[]` scales the length by `T.sizeof`, the same
+// conversion `core.internal.array.appending` applies before calling
+// `gc_expandArrayUsed`/`gc_shrinkArrayUsed`, both of which take `void[]`.
+// `int.sizeof` (4) isolates the scaling from a verbatim `{length, ptr}`
+// copy: a 1-byte element would leave the length unchanged and the two
+// implementations indistinguishable.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE keeps a `cast(void[])` array's length as an " ~
+        "element count, not a byte count - pinned below"),
+)) {
+    @("cast.arrayToVoid.scalesLength." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(12).shouldBeRetOf!(
+            backend,
+            q{
+                int[] ints() {
+                    return [1, 2, 3];
+                }
+
+                size_t voidLength() {
+                    void[] bytes = cast(void[]) ints();
+                    return bytes.length;
+                }
+            },
+            "voidLength",
+        );
+    }
+}
+
+// dmd's own CTFE does not scale the length through a `cast(void[])` the
+// way runtime D does - pins the divergence; the native side (checked
+// above for every other backend) scales it.
+@("cast.arrayToVoid.scalesLength.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    size_t(3).shouldBeRetOf!(
+        Ctfe,
+        q{
+            int[] ints() {
+                return [1, 2, 3];
+            }
+
+            size_t voidLength() {
+                void[] bytes = cast(void[]) ints();
+                return bytes.length;
+            }
+        },
+        "voidLength",
+    );
+}
+
+// dmd classifies `bool` as `integral | unsigned`, so a naive integral
+// narrowing takes the operand's low byte instead of comparing it against
+// zero. `256`'s low byte is `0`, which a truncating implementation would
+// store as `false` - D specifies `cast(bool) 256` as `true`.
+static foreach (backend; Matrix!()) {
+    @("cast.bool.nonZeroIsTrue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int wide() {
+                    return 256;
+                }
+
+                bool truthy() {
+                    return cast(bool) wide();
+                }
+            },
+            "truthy",
+        );
+    }
+}

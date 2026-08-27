@@ -119,3 +119,39 @@ static foreach (backend; Matrix!(
         );
     }
 }
+
+// `field.offset` in `visit(DotVarExp)` is read as a whole-byte offset. A
+// bitfield is also a `VarDeclaration`, but its storage is a sub-byte
+// slice of that byte - a plain `memcpy` from it reads the whole packed
+// byte instead of masking and shifting out just the bitfield, so a
+// memcpy-based read of `b` below would answer the packed byte `0x53`
+// truncated to `ubyte` rather than `b`'s own 4-bit value, 5. Refused
+// rather than run to that wrong answer. Field assignment through a
+// struct variable is not an lvalue `addressOf` handles yet, so the
+// packed byte is built by hand - `a` (3) in the low nibble, `b` (5) in
+// the high one, the same layout `S` itself packs `a`/`b` into - and read
+// back through a `S*` a pointer cast produces.
+@("pointers.dotVar.bitfield.refused.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        struct S {
+            ubyte a : 4;
+            ubyte b : 4;
+        }
+
+        ubyte readB() {
+            ubyte raw = 0x53;
+            S* p = cast(S*) &raw;
+            return p.b;
+        }
+    });
+    auto function_ = findFunction(module_, "readB");
+
+    ubyte result;
+    (new Interpreter).call(function_, &result, [])
+        .shouldThrow;
+}
