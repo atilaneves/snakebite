@@ -74,7 +74,8 @@ public struct CallPlan {
             const plan = _arguments[i];
             auto bytes = cast(ubyte*) argument;
             foreach (j; 0 .. plan.count)
-                words[slot++] = word(plan.registers[j], bytes + j * 8);
+                words[slot++] =
+                    word(plan.registers[j], bytes + j * size_t.sizeof);
         }
 
         const result = invoke(cast(void*) _address, words[0 .. slot]);

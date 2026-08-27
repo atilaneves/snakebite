@@ -191,6 +191,19 @@ extern(C++) private final class Evaluator: Visitor {
     // guest call, once it can reach dmd's own forward-reference
     // machinery, joins that same one lock rather than adding a second
     // one dmd's other callers do not know to take.
+    //
+    // This serialises every interpreted call in the process against
+    // every other one - accepted for now, not measured away: `bench/`
+    // runs one backend on one thread, so it cannot see the cost of two
+    // `Interpreter`s contending for this lock, only an uncontended
+    // mutex round trip per top-level call. The place this cost is real
+    // is concurrent guest execution - the test suite's own parallel
+    // runner is already that today, and a program's unittests running
+    // in parallel would be more of it. What would lift it: a pre-pass
+    // that walks the callee graph reachable from `function_` and forces
+    // `functionSemantic3` on all of it once, under the lock, before
+    // `execute` runs the body unlocked - not attempted here, since nothing
+    // has measured whether it is worth the surgery.
     extern(D) final void call(
         FuncDeclaration function_,
         void* returnPlace,
@@ -840,8 +853,30 @@ extern(C++) private final class Evaluator: Visitor {
         // nothing in the GC's interface promises a block aligned for the
         // type that lands in it. Alignments are powers of two, so the
         // padding is the address masked into the block.
+        //
+        // `GC.malloc` rather than `new ubyte[]`: `ubyte`'s own `TypeInfo`
+        // has no pointers, so `new ubyte[]` always marks the block
+        // `NO_SCAN`, regardless of `variable`'s actual type. A static
+        // holding a guest array or pointer stores that pointer in these
+        // bytes, invisible to the GC unless the block itself is scanned
+        // - `NO_SCAN` here is the same hazard `_statics` values must not
+        // have. `variable.type.hasPointers` decides the attribute the
+        // way dmd's own codegen would, rather than always scanning: a
+        // block dmd's `GC.query` says is `NO_SCAN` (this one, if
+        // `variable`'s type has no pointers) is also what druntime's own
+        // `__typeAttrs` copies onto a reallocation of storage this slot
+        // points to, on the `~=` path this backend interprets - an
+        // always-scanned block here would make that copy answer "has
+        // pointers" for a type that does not.
+        import core.memory: GC;
+        import dmd.typesem: hasPointers;
+
         const facts = factsOf(variable.type);
-        auto block = new ubyte[facts.size + facts.alignment - 1];
+        const blockSize = facts.size + facts.alignment - 1;
+        const attrs = variable.type.hasPointers
+            ? 0 : GC.BlkAttr.NO_SCAN;
+        auto block =
+            (cast(ubyte*) GC.malloc(blockSize, attrs))[0 .. blockSize];
         const start = -cast(size_t) block.ptr & (facts.alignment - 1);
         auto slot = block[start .. start + facts.size];
 
@@ -972,7 +1007,7 @@ extern(C++) private final class Evaluator: Visitor {
         // the `~=` lowering's own chain, writes the element it just grew
         // room for this way.
         if (auto index = target.isIndexExp)
-            return indexAddressOf(index);
+            return indexAddressOf(index).ptr;
 
         throw new Exception(
             text("interpreter cannot take the address of `",
@@ -980,7 +1015,20 @@ extern(C++) private final class Evaluator: Visitor {
         );
     }
 
-    private void* indexAddressOf(IndexExp expression) {
+    // An element's address and its own type's stride, from the one
+    // `indexAddressOf` call both a read (`visit(IndexExp)`) and a write
+    // (`addressOf`) need: `FrameLayout.Slot` already hands an offset and
+    // its facts back together for the same reason - a caller that
+    // computed the stride itself first, then called here for the
+    // address, would pay `factsOf(array.type.nextOf)` twice, evicting
+    // and refilling the one-entry `_cachedType` in between with
+    // `factsOf(array.type)`, this call's own first lookup.
+    private struct ElementAddress {
+        void* ptr;
+        size_t stride;
+    }
+
+    private ElementAddress indexAddressOf(IndexExp expression) {
         import std.conv: text;
 
         auto array = expression.e1;
@@ -995,7 +1043,8 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         const stride = factsOf(array.type.nextOf).size;
-        return cast(void*) (value.elements + index * stride);
+        return ElementAddress(
+            cast(void*) (value.elements + index * stride), stride);
     }
 
     override void visit(AddAssignExp expression) {
@@ -1317,10 +1366,11 @@ extern(C++) private final class Evaluator: Visitor {
     // do, to pass a `void[]` byte range through hooks with no reason to
     // know the element type - is not that cast: D defines it as scaling
     // the length by the ratio of the two element sizes, not copying it
-    // verbatim, and that scaling is what this does below. Anything else
-    // this node could mean - floating point, a class downcast, array
-    // reinterpretation such as `arr.ptr` - is refused the same way an
-    // unhandled node already is.
+    // verbatim, and that scaling is what this does below. `arr.ptr` is
+    // handled too, further down, since dmd lowers it into a `Tarray` to
+    // `Tpointer` cast over the array itself. Anything else this node
+    // could mean - floating point, a class downcast - is refused the
+    // same way an unhandled node already is.
     override void visit(CastExp expression) {
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
@@ -1621,10 +1671,10 @@ extern(C++) private final class Evaluator: Visitor {
         // The array's own element width, not the destination's: they
         // agree only because dmd wraps this in a `CastExp` for any change
         // of width, and `cast` is refused.
-        const stride = factsOf(array.type.nextOf).size;
-        assert(stride == _facts.size, "an index changed width");
+        const element = indexAddressOf(expression);
+        assert(element.stride == _facts.size, "an index changed width");
 
-        memcpy(_place, indexAddressOf(expression), stride);
+        memcpy(_place, element.ptr, element.stride);
     }
 
     private long indexOf(IndexExp expression, in size_t length) {
@@ -1741,7 +1791,7 @@ extern(C++) private final class Evaluator: Visitor {
 
             foreach (i; 0 .. length)
                 evaluate(
-                    (*expression.elements)[i], elementType, elementFacts,
+                    elementAt(expression, i), elementType, elementFacts,
                     bytes + i * elementFacts.size);
             return;
         }
@@ -1760,10 +1810,26 @@ extern(C++) private final class Evaluator: Visitor {
 
         ubyte* elements = null;
         if (length > 0) {
-            auto block = new ubyte[elementFacts.size * length];
+            // `GC.malloc`, not `new ubyte[]`: see the matching comment in
+            // `staticSlotOf`. This storage outlives the frame the same
+            // way a static's does, and an element type with its own
+            // pointers (a `string[]` literal, say) needs this block
+            // scanned for the GC to see them. `elementType.hasPointers`
+            // picks the attribute the way `elementType`'s own `TypeInfo`
+            // would, so a later reallocation of this same storage (the
+            // `~=` lowering's `GC.malloc`, guided by `__typeAttrs`
+            // copying the attributes of the block it replaces) sees the
+            // same answer a real compiled append would.
+            import core.memory: GC;
+            import dmd.typesem: hasPointers;
+
+            const blockSize = elementFacts.size * length;
+            const attrs = elementType.hasPointers ? 0 : GC.BlkAttr.NO_SCAN;
+            auto block =
+                (cast(ubyte*) GC.malloc(blockSize, attrs))[0 .. blockSize];
             foreach (i; 0 .. length)
                 evaluate(
-                    (*expression.elements)[i], elementType, elementFacts,
+                    elementAt(expression, i), elementType, elementFacts,
                     block.ptr + i * elementFacts.size);
             elements = block.ptr;
         }
@@ -1771,6 +1837,32 @@ extern(C++) private final class Evaluator: Visitor {
         auto bytes = cast(ubyte*) _place;
         storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
+    }
+
+    // `expression.elements`, dmd documents, "can be sparse" whenever
+    // `basis` is set - a default-init literal for a static array
+    // (`typesem.d`'s `TypeSArray.defaultInitLiteral`) is exactly that: an
+    // array of `null`s with `basis` holding the one fill value every
+    // element takes. Indexing `elements` directly, as both branches of
+    // `visit(ArrayLiteralExp)` above used to, reads that `null` straight
+    // through; `expression[i]` is dmd's own `opIndex`, which falls back
+    // to `basis` for a sparse entry the way every other reader of an
+    // `ArrayLiteralExp` is expected to. The result can still be `null` -
+    // sparse without a `basis` is not a case this interpreter has a guest
+    // program that reaches - so this refuses rather than handing
+    // `evaluate` a null `Expression` to dereference.
+    private Expression elementAt(ArrayLiteralExp expression, size_t i) {
+        import std.conv: text;
+
+        auto element = expression[i];
+        if (element is null)
+            throw new Exception(
+                text("interpreter cannot evaluate element ", i, " of `",
+                    expression.toString, "`: it is sparse with no `basis` ",
+                    "fill value"),
+            );
+
+        return element;
     }
 
     // `~=` has no `FuncDeclaration` and no call node of its own either,

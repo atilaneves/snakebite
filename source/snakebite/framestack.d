@@ -17,17 +17,27 @@ private:
 // contributes: alignment above one byte is computed entirely by hand in
 // `push`, below - `Region` is built with `minAlign = 1`, so it never
 // rounds a request up on its own.
+//
+// The backing buffer itself comes from `GCAllocator`, not `Mallocator`: a
+// pushed frame can hold a guest pointer into GC-owned storage (an array's
+// `ptr` field, for instance) for as long as the frame is live, and nothing
+// else roots that storage - the guest variable holding it is a slot in
+// this buffer, not a D variable the GC already scans. `Mallocator` memory
+// is invisible to a collection; a scanned `GC.malloc` block, which is what
+// `GCAllocator` hands back, is exactly as visible as any other D array,
+// with no separate range-registration lifecycle to keep in step with the
+// buffer's own.
 public struct FrameStack {
     import snakebite.nativelayout: alignUp;
     import std.experimental.allocator.building_blocks.region: Region;
-    import std.experimental.allocator.mallocator: Mallocator;
+    import std.experimental.allocator.gc_allocator: GCAllocator;
 
     // A byte position: how many bytes of the backing buffer were in use
     // at some earlier point. Never exposed outside this struct - `Frame`
     // is what a call site holds instead.
     private alias Mark = size_t;
 
-    private Region!(Mallocator, 1) _region;
+    private Region!(GCAllocator, 1) _region;
     private size_t _capacity;
     // The backing buffer's own base address, learned once at construction
     // (`allocateAll` hands back the whole buffer; `deallocate` immediately
@@ -88,14 +98,14 @@ public struct FrameStack {
 
         // The padding math below only lands a slot on its requested
         // alignment because the buffer's own base is aligned to at least
-        // that much. `Mallocator` guarantees `platformAlignment`; a
+        // that much. `GCAllocator` guarantees `platformAlignment`; a
         // request beyond that would be silently misaligned, so this
         // throws instead.
-        if (alignment > Mallocator.alignment)
+        if (alignment > GCAllocator.alignment)
             throw new Exception(
                 text("frame stack cannot honor a ", alignment,
                     "-byte alignment: the backing buffer is only aligned ",
-                    "to ", Mallocator.alignment, " byte(s)"),
+                    "to ", GCAllocator.alignment, " byte(s)"),
             );
 
         const alignedUsed = alignUp(mark, alignment);
