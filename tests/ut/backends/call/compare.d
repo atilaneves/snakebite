@@ -81,61 +81,275 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// The interpreter answers `<` and refuses the other three comparisons, so
-// that a missing one is a refusal rather than a wrong answer. Compiled D
-// answers them all, which is why this is pinned for the interpreter alone.
-@("compare.lessOrEqual.refused.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
+// The three orderings besides `<`. Each is pinned on both sides of its
+// boundary and on the boundary itself, so an implementation that answers
+// one of them with another - `<=` with `<`, say - fails the equal case.
+static foreach (backend; Matrix!()) {
+    @("compare.lessOrEqual.true." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int small() {
+                    return 1;
+                }
 
-    auto module_ = parseSnippet(q{
-        int small() { return 1; }
-        int big() { return 2; }
-        bool notMore() { return small() <= big(); }
-    });
-    auto function_ = findFunction(module_, "notMore");
+                int big() {
+                    return 2;
+                }
 
-    bool result;
-    (new Interpreter).call(function_, &result, [])
-        .shouldThrow;
+                bool notMore() {
+                    return small() <= big();
+                }
+            },
+            "notMore",
+        );
+    }
 }
 
-@("compare.greaterThan.refused.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
+static foreach (backend; Matrix!()) {
+    @("compare.lessOrEqual.equal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int one() {
+                    return 1;
+                }
 
-    auto module_ = parseSnippet(q{
-        int small() { return 1; }
-        int big() { return 2; }
-        bool more() { return big() > small(); }
-    });
-    auto function_ = findFunction(module_, "more");
+                int uno() {
+                    return 1;
+                }
 
-    bool result;
-    (new Interpreter).call(function_, &result, [])
-        .shouldThrow;
+                bool notMore() {
+                    return one() <= uno();
+                }
+            },
+            "notMore",
+        );
+    }
 }
 
-@("compare.greaterOrEqual.refused.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
+static foreach (backend; Matrix!()) {
+    @("compare.lessOrEqual.false." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        false.shouldBeRetOf!(
+            backend,
+            q{
+                int small() {
+                    return 1;
+                }
 
-    auto module_ = parseSnippet(q{
-        int small() { return 1; }
-        int big() { return 2; }
-        bool notLess() { return big() >= small(); }
-    });
-    auto function_ = findFunction(module_, "notLess");
+                int big() {
+                    return 2;
+                }
 
-    bool result;
-    (new Interpreter).call(function_, &result, [])
-        .shouldThrow;
+                bool notMore() {
+                    return big() <= small();
+                }
+            },
+            "notMore",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("compare.greaterThan.true." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int small() {
+                    return 1;
+                }
+
+                int big() {
+                    return 2;
+                }
+
+                bool more() {
+                    return big() > small();
+                }
+            },
+            "more",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("compare.greaterThan.equal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        false.shouldBeRetOf!(
+            backend,
+            q{
+                int one() {
+                    return 1;
+                }
+
+                int uno() {
+                    return 1;
+                }
+
+                bool more() {
+                    return one() > uno();
+                }
+            },
+            "more",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("compare.greaterThan.false." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        false.shouldBeRetOf!(
+            backend,
+            q{
+                int small() {
+                    return 1;
+                }
+
+                int big() {
+                    return 2;
+                }
+
+                bool more() {
+                    return small() > big();
+                }
+            },
+            "more",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("compare.greaterOrEqual.true." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int small() {
+                    return 1;
+                }
+
+                int big() {
+                    return 2;
+                }
+
+                bool notLess() {
+                    return big() >= small();
+                }
+            },
+            "notLess",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("compare.greaterOrEqual.equal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int one() {
+                    return 1;
+                }
+
+                int uno() {
+                    return 1;
+                }
+
+                bool notLess() {
+                    return one() >= uno();
+                }
+            },
+            "notLess",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("compare.greaterOrEqual.false." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        false.shouldBeRetOf!(
+            backend,
+            q{
+                int small() {
+                    return 1;
+                }
+
+                int big() {
+                    return 2;
+                }
+
+                bool notLess() {
+                    return small() >= big();
+                }
+            },
+            "notLess",
+        );
+    }
+}
+
+// `uint.max > 1u` is true. Read as two's complement the same bits are -1,
+// which would make it false.
+static foreach (backend; Matrix!()) {
+    @("compare.greaterThan.unsigned." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                uint top() {
+                    return uint.max;
+                }
+
+                uint one() {
+                    return 1u;
+                }
+
+                bool more() {
+                    return top() > one();
+                }
+            },
+            "more",
+        );
+    }
+}
+
+// `-1 >= 0` is false. Read as an unsigned bit pattern the same bits are
+// `uint.max`, which would make it true.
+static foreach (backend; Matrix!()) {
+    @("compare.greaterOrEqual.signed." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        false.shouldBeRetOf!(
+            backend,
+            q{
+                int negative() {
+                    return -1;
+                }
+
+                int zero() {
+                    return 0;
+                }
+
+                bool notLess() {
+                    return negative() >= zero();
+                }
+            },
+            "notLess",
+        );
+    }
 }
 
 // `-1 < 0` is true. Read as an unsigned bit pattern the same bits are
@@ -256,6 +470,233 @@ static foreach (backend; Matrix!()) {
                 }
             },
             "neq",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("logical.and.true." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool yes() {
+                    return true;
+                }
+
+                bool si() {
+                    return true;
+                }
+
+                bool both() {
+                    return yes() && si();
+                }
+            },
+            "both",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("logical.and.false." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        false.shouldBeRetOf!(
+            backend,
+            q{
+                bool yes() {
+                    return true;
+                }
+
+                bool no() {
+                    return false;
+                }
+
+                bool both() {
+                    return yes() && no();
+                }
+            },
+            "both",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("logical.or.true." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool no() {
+                    return false;
+                }
+
+                bool yes() {
+                    return true;
+                }
+
+                bool either() {
+                    return no() || yes();
+                }
+            },
+            "either",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("logical.or.false." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        false.shouldBeRetOf!(
+            backend,
+            q{
+                bool no() {
+                    return false;
+                }
+
+                bool nein() {
+                    return false;
+                }
+
+                bool either() {
+                    return no() || nein();
+                }
+            },
+            "either",
+        );
+    }
+}
+
+// D specifies that `&&` evaluates its right side only when the left side is
+// true, so `bump` never runs here and `calls` stays at zero. An
+// implementation that evaluates both sides answers one instead.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read or write mutable module-level state"),
+)) {
+    @("logical.and.shortCircuits." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeRetOf!(
+            backend,
+            q{
+                int calls;
+
+                bool no() {
+                    return false;
+                }
+
+                bool bump() {
+                    calls += 1;
+                    return true;
+                }
+
+                int rightSideRuns() {
+                    bool ignored = no() && bump();
+                    return calls;
+                }
+            },
+            "rightSideRuns",
+        );
+    }
+}
+
+// The other half of the pair: with the left side true the right side does
+// run, so a backend that never evaluates it fails this one.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read or write mutable module-level state"),
+)) {
+    @("logical.and.evaluatesRightSide." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                int calls;
+
+                bool yes() {
+                    return true;
+                }
+
+                bool bump() {
+                    calls += 1;
+                    return true;
+                }
+
+                int rightSideRuns() {
+                    bool ignored = yes() && bump();
+                    return calls;
+                }
+            },
+            "rightSideRuns",
+        );
+    }
+}
+
+// `||` evaluates its right side only when the left side is false.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read or write mutable module-level state"),
+)) {
+    @("logical.or.shortCircuits." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeRetOf!(
+            backend,
+            q{
+                int calls;
+
+                bool yes() {
+                    return true;
+                }
+
+                bool bump() {
+                    calls += 1;
+                    return false;
+                }
+
+                int rightSideRuns() {
+                    bool ignored = yes() || bump();
+                    return calls;
+                }
+            },
+            "rightSideRuns",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read or write mutable module-level state"),
+)) {
+    @("logical.or.evaluatesRightSide." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                int calls;
+
+                bool no() {
+                    return false;
+                }
+
+                bool bump() {
+                    calls += 1;
+                    return false;
+                }
+
+                int rightSideRuns() {
+                    bool ignored = no() || bump();
+                    return calls;
+                }
+            },
+            "rightSideRuns",
         );
     }
 }
