@@ -155,12 +155,14 @@ static foreach (backend; Matrix!(
     }
 }
 
-// `foreach` over an `AliasSeq` unrolls into one statement per element at
-// compile time, one per element's own type, so `break`/`continue` inside
-// it control which of those per-element statements run, exactly like an
-// ordinary loop body. Mixed element types with no common type rule out
-// an ordinary array, whose single element type would need one shared
-// type for all three values.
+// `foreach` over an `AliasSeq` unrolls into one statement per element
+// at compile time, one per element's own type. Mixed element types
+// with no common type rule out an ordinary array, whose single
+// element type would need one shared type for all the values. Within
+// each unrolled statement, `continue` skips the rest of that
+// statement's own body and moves to the next element's, while `break`
+// skips every remaining element's statement entirely, exactly like an
+// ordinary loop body.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
@@ -182,19 +184,25 @@ static foreach (backend; Matrix!(
             void main() {
                 int first = helperInt(1);
                 string second = "skip";
-                long third = helperLong(5);
-                int sum;
+                int third = helperInt(3);
+                long fourth = helperLong(5);
+                int fifth = helperInt(9);
+                int sum, visited;
 
-                foreach (value; AliasSeq!(first, second, third)) {
+                foreach (value;
+                    AliasSeq!(first, second, third, fourth, fifth)) {
                     static if (is(typeof(value) == string))
                         continue;
                     else static if (is(typeof(value) == long))
                         break;
                     else
                         sum += value;
+
+                    ++visited;
                 }
 
-                assert(sum == 2);
+                assert(sum == 6, "sum");
+                assert(visited == 2, "visited");
             }
         });
     }
