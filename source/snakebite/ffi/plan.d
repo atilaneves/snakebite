@@ -141,7 +141,7 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
         ArgumentPlan, Register, maxArguments, needsHiddenReturnPointer,
         supported;
     import snakebite.ffi.symbol: symbolAddress;
-    import dmd.astenums: VarArg;
+    import dmd.astenums: STC, VarArg;
     import dmd.mangle: mangleExact;
     import std.conv: text;
     import std.string: fromStringz;
@@ -197,6 +197,24 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
             registers = 1;
 
         foreach (i; 0 .. count) {
+            // A `ref` parameter occupies a pointer slot in the caller's
+            // frame - the address of the argument's own storage, not a
+            // copy of its value (see `FrameLayout.of` in
+            // `interpreter/framelayout.d`, which lays such a slot out the
+            // same way). `parameterList[i].type` is the *pointee* type,
+            // so classifying by it describes a value that never travels:
+            // `Register.of(int)` for `ref int` reads 4 bytes of an
+            // address as if they were the value, and `ArgumentPlan.of` for
+            // `ref int[]` reserves two registers and reads 8 bytes past
+            // the single pointer slot the argument actually is. Refusing
+            // here restores the same boundary `FrameLayout.of` used to
+            // draw before it grew a real `ref` layout of its own.
+            if (type.parameterList[i].storageClass & STC.ref_)
+                throw new Exception(
+                    text("ffi cannot call `", function_.toString,
+                        "`: parameter ", i, " is `ref`"),
+                );
+
             auto argument = ArgumentPlan.of(type.parameterList[i].type);
             registers += argument.count;
             if (registers > maxArguments)
