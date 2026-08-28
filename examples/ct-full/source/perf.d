@@ -114,9 +114,13 @@ unittest {
 @("kernel.structs") unittest {
     struct KernelPoint { int x; int y; }
     auto pts = new KernelPoint[](600);
-    foreach (i, ref p; pts) p = KernelPoint(cast(int) i, cast(int) -i);
+    foreach (i, ref p; pts)
+        p = KernelPoint(cast(int) i, cast(int) -i);
     long acc;
-    foreach (_; 0 .. 10)
-        foreach (p; pts) { const q = p; acc += q.x + q.y; }
+    foreach (_; 0 .. 10) {
+        foreach (p; pts) {
+            const q = p; acc += q.x + q.y;
+        }
+    }
     assert(acc == 0);
 }

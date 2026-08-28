@@ -112,13 +112,17 @@ unittest {
     assert(bytes[1_499] == cast(ubyte) 1_499);
 }
 
-// Keep aggregate copies in the hot loop to exercise native struct layout.
+// Struct copies through a slice: 6k element struct stores and loads.
 @("kernel.structs") unittest {
     struct KernelPoint { int x; int y; }
     auto pts = new KernelPoint[](600);
-    foreach (i, ref p; pts) p = KernelPoint(cast(int) i, cast(int) -i);
+    foreach (i, ref p; pts)
+        p = KernelPoint(cast(int) i, cast(int) -i);
     long acc;
-    foreach (_; 0 .. 10)
-        foreach (p; pts) { const copy = p; acc += copy.x + copy.y; }
+    foreach (_; 0 .. 10) {
+        foreach (p; pts) {
+            const q = p; acc += q.x + q.y;
+        }
+    }
     assert(acc == 0);
 }
