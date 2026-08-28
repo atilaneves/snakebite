@@ -1,3 +1,6 @@
+module rt_bottom_up.perf;
+
+
 uint factorial(uint i) {
     return i == 0 ? 1 : i * factorial(i - 1);
 }

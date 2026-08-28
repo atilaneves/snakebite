@@ -1,3 +1,5 @@
+module rt_bottom_up.lib;
+
 // The sum only exists to keep the calls: `abs` is `pure`, so a bare
 // `abs(i);` statement does not compile. Nothing reads the total.
 unittest {
