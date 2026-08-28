@@ -65,15 +65,16 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout: storeValue, TypeFacts;
     import dmd.astenums:
-        LINK, Tarray, Tbool, Tnoreturn, Tpointer, Tsarray, Tvoid;
+        LINK, Tarray, Tbool, Tnoreturn, Tpointer, Tsarray, Tuns32, Tvoid;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
     import dmd.statement:
-        CompoundStatement, ExpStatement, ForStatement, IfStatement,
-        ImportStatement, ReturnStatement, ScopeStatement, Statement;
+        CompoundStatement, ContinueStatement, ExpStatement, ForStatement,
+        IfStatement, ImportStatement, ReturnStatement, ScopeStatement,
+        Statement;
     import dmd.tokens: EXP;
 
     alias visit = Visitor.visit;
@@ -92,6 +93,9 @@ extern(C++) private final class Evaluator: Visitor {
     // hold it. This outlives every call on this evaluator, which is the
     // guest state `Backend.call` promises persists across calls.
     private Cache!(VarDeclaration, void[]) _statics;
+    // A guest pointer can live in an unscanned frame, so the evaluator keeps
+    // each backing allocation reachable for as long as guest state can be.
+    private ubyte[][] _allocations;
     // dmd gives every `arr[... $ ...]` a `lengthVar` declaration for its
     // `$`, which no statement declares and which therefore has no frame
     // slot - and needs none, since the length is a value `visit(IndexExp)`
@@ -150,6 +154,9 @@ extern(C++) private final class Evaluator: Visitor {
     // so without this flag a statement after `return` would still
     // execute and silently overwrite an already-computed result.
     private bool _returned;
+    // Set until the nearest loop consumes it, so enclosing compounds stop
+    // before they execute the statements that `continue` skips.
+    private bool _continued;
     // Whether the currently executing function returns `ref`, set by
     // `execute` from the function's own type. Checked by
     // `visit(ReturnStatement)`: a `ref` return's `_place` is the address a
@@ -381,6 +388,7 @@ extern(C++) private final class Evaluator: Visitor {
         auto savedFrameBase = _frameBase;
         auto savedLayout = _layout;
         auto savedReturned = _returned;
+        auto savedContinued = _continued;
         auto savedReturnsRef = _returnsRef;
         scope(exit) {
             _type = savedType;
@@ -389,6 +397,7 @@ extern(C++) private final class Evaluator: Visitor {
             _frameBase = savedFrameBase;
             _layout = savedLayout;
             _returned = savedReturned;
+            _continued = savedContinued;
             _returnsRef = savedReturnsRef;
         }
 
@@ -398,6 +407,7 @@ extern(C++) private final class Evaluator: Visitor {
         _frameBase = frameBase;
         _layout = layout;
         _returned = false;
+        _continued = false;
         _returnsRef = typeFunctionOf(function_).isRef;
         body_.accept(this);
     }
@@ -454,7 +464,7 @@ extern(C++) private final class Evaluator: Visitor {
         foreach (child; *statement.statements) {
             if (child !is null) {
                 child.accept(this);
-                if (_returned)
+                if (_returned || _continued)
                     return;
             }
         }
@@ -586,11 +596,21 @@ extern(C++) private final class Evaluator: Visitor {
                 statement._body.accept(this);
                 if (_returned)
                     return;
+                _continued = false;
             }
 
             if (statement.increment !is null)
                 runForEffect(statement.increment);
         }
+    }
+
+    override void visit(ContinueStatement statement) {
+        if (statement.ident !is null)
+            throw new Exception(
+                "interpreter cannot execute a labelled `continue` statement",
+            );
+
+        _continued = true;
     }
 
     private bool truthOf(Expression expression) {
@@ -788,11 +808,10 @@ extern(C++) private final class Evaluator: Visitor {
         countForeignNameLookup;
         auto slot = _frameBase + _layout.offsetOf(variable);
 
-        // A `ref` parameter's own slot holds the address of the
-        // argument's storage, not the storage itself - reading through
-        // it once more here, the one place every read, write and
-        // address-of a variable resolves its slot, is what makes a
-        // reach of the parameter reach the argument instead.
+        // A `ref` variable's own slot holds the address of the referenced
+        // storage, not the storage itself. Reading through it once more here,
+        // the one place every read, write and address-of a variable resolves
+        // its slot, makes a reach of the variable reach its target instead.
         if (_layout.isRef(variable))
             return cast(ubyte*) loadIntegral(slot, size_t.sizeof, false);
 
@@ -903,8 +922,19 @@ extern(C++) private final class Evaluator: Visitor {
                     "initializer is supported"),
             );
 
-        evaluate(initializerValueOf(expInitializer), variable.type,
-            _frameBase + offset);
+        auto value = initializerValueOf(expInitializer);
+        if (_layout.isRef(variable)) {
+            import snakebite.nativelayout: storeIntegral;
+
+            storeIntegral(
+                _frameBase + offset,
+                cast(size_t) addressOf(value),
+                size_t.sizeof,
+            );
+            return;
+        }
+
+        evaluate(value, variable.type, _frameBase + offset);
     }
 
     // Assignment is an expression: it yields the value it assigned, so the
@@ -1789,6 +1819,42 @@ extern(C++) private final class Evaluator: Visitor {
         auto bytes = cast(ubyte*) _place;
         storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
+    }
+
+    override void visit(NewExp expression) {
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset, storeIntegral;
+        import std.conv: text;
+
+        auto arguments = expression.arguments;
+        if (expression.type.ty != Tarray || arguments is null
+                || arguments.length != 1)
+            throw new Exception(
+                text("interpreter cannot evaluate a `", expression.op,
+                    "` expression: `", expression.toString, "`"),
+            );
+
+        auto elementType = expression.type.nextOf;
+        const elementFacts = factsOf(elementType);
+        if (elementType.ty != Tbool && elementType.ty != Tuns32)
+            throw new Exception(
+                text("interpreter cannot allocate an array of unsupported `",
+                    elementType.toString, "` elements"),
+            );
+
+        const length = cast(size_t) asIntegral((*arguments)[0]);
+        if (elementFacts.size != 0 && length > size_t.max / elementFacts.size)
+            throw new Exception(
+                text("interpreter cannot allocate `", expression.toString,
+                    "`: its byte size overflows `size_t`"),
+            );
+
+        auto elements = new ubyte[](length * elementFacts.size);
+        _allocations ~= elements;
+
+        auto bytes = cast(ubyte*) _place;
+        storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
+        *cast(ubyte**) (bytes + arrayPointerOffset) = elements.ptr;
     }
 
     // `expression.elements`, dmd documents, "can be sparse" whenever
