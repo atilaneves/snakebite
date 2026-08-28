@@ -1,0 +1,14 @@
+name "rt-simple"
+targetType "library"
+targetPath "bin"
+
+configuration "unittest" {
+    targetType "executable"
+    targetName "ut"
+    targetPath "bin"
+
+    mainSourceFile "tests/main.d"
+    excludedSourceFiles "source/main.d"
+    sourcePaths "tests"
+    importPaths "tests"
+}
