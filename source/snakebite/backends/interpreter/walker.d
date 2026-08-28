@@ -941,12 +941,13 @@ extern(C++) private final class Evaluator: Visitor {
         evaluate(value, variable.type, _frameBase + offset);
     }
 
-    // Assignment is an expression: it yields the value it assigned, so the
-    // right side is evaluated straight into the target's slot and the
-    // result is that slot's own bytes. `_facts` is the target's facts
-    // here: dmd's semantic pass wraps an assignment feeding a wider
-    // destination in a cast of its own, which is a node this interpreter
-    // refuses rather than one it reaches this code with.
+    // Assignment is an expression: it yields the value it assigned. A
+    // struct right side needs scratch storage so evaluating a literal does
+    // not clear an aliased target before all of its fields are read.
+    // `_facts` is the target's facts here: dmd's semantic pass wraps an
+    // assignment feeding a wider destination in a cast of its own, which is
+    // a node this interpreter refuses rather than one it reaches this code
+    // with.
     override void visit(AssignExp expression) {
         import core.stdc.string: memcpy;
         import std.conv: text;
@@ -962,8 +963,15 @@ extern(C++) private final class Evaluator: Visitor {
         // writes, on the `~=` lowering's own chain, into the slot it
         // just extended (`a[a.length - 1] = 2`, dmd's own `construct`
         // for filling storage the guest has not touched yet).
-        const isSupportedStruct = _type.isTypeStruct !is null
+        auto structType = _type.isTypeStruct;
+        const isSupportedStruct = structType !is null
             && supportsStruct(_type);
+        if (structType !is null && !isSupportedStruct)
+            throw new Exception(
+                text("interpreter cannot assign unsupported struct `",
+                    structType.toString, "`"),
+            );
+
         if (expression.op != EXP.assign && !_facts.isIntegral
                 && !isSupportedStruct)
             throw new Exception(
@@ -974,7 +982,13 @@ extern(C++) private final class Evaluator: Visitor {
         // Naming `e1` rather than the whole expression: dmd lowers
         // `s.length = n` into a node whose `toString` is a bare `=`.
         auto target = addressOf(expression.e1);
-        evaluate(expression.e2, _type, _facts, target);
+        if (isSupportedStruct) {
+            auto scratch = _frames.push(_facts.size, _facts.alignment);
+            evaluate(expression.e2, _type, _facts, scratch.base);
+            memcpy(target, scratch.base, _facts.size);
+        } else {
+            evaluate(expression.e2, _type, _facts, target);
+        }
         memcpy(_place, target, _facts.size);
     }
 
@@ -1868,18 +1882,22 @@ extern(C++) private final class Evaluator: Visitor {
     private bool supportsStruct(Type type) {
         import dmd.astenums: STC;
 
-        auto typeStruct = type.isTypeStruct;
-        if (typeStruct is null)
+        auto structType = type.isTypeStruct;
+        if (structType is null)
             return false;
 
-        auto struct_ = typeStruct.sym;
-        if (struct_.isUnionDeclaration !is null || struct_.enclosing !is null
-                || struct_.postblit !is null || struct_.hasCopyCtor
-                || struct_.dtor !is null || struct_.hasIdentityAssign
-                || struct_.hasBlitAssign)
+        auto declaration = structType.sym;
+        // A non-zero `.init` needs field initializers that this bytewise
+        // evaluator does not run for omitted fields.
+        if (!declaration.zeroInit
+                || declaration.isUnionDeclaration !is null
+                || declaration.enclosing !is null
+                || declaration.postblit !is null || declaration.hasCopyCtor
+                || declaration.dtor !is null
+                || declaration.hasIdentityAssign || declaration.hasBlitAssign)
             return false;
 
-        foreach (field; struct_.fields) {
+        foreach (field; declaration.fields) {
             if (field.isBitFieldDeclaration !is null
                     || field.storage_class & STC.ref_)
                 return false;
@@ -1902,8 +1920,8 @@ extern(C++) private final class Evaluator: Visitor {
         import core.stdc.string: memset;
         import std.conv: text;
 
-        auto typeStruct = _type.isTypeStruct;
-        if (typeStruct is null || typeStruct.sym != expression.sd
+        auto structType = _type.isTypeStruct;
+        if (structType is null || structType.sym != expression.sd
                 || !supportsStruct(_type))
             throw new Exception(
                 text("interpreter cannot evaluate `", expression.toString,
