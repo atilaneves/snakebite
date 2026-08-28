@@ -60,6 +60,20 @@ public struct Program {
             }
         }
     }
+
+    public bool isInterpreted(
+        imported!"dmd.func".FuncDeclaration function_,
+    ) const {
+        if (function_ is null)
+            return false;
+
+        const module_ = function_.getModule;
+        foreach (rootModule; rootModules)
+            if (module_ is rootModule)
+                return true;
+
+        return false;
+    }
 }
 
 
