@@ -992,6 +992,43 @@ extern(C++) private final class Evaluator: Visitor {
         memcpy(_place, target, _facts.size);
     }
 
+    private bool supportsStruct(Type type) {
+        import dmd.astenums: STC;
+
+        auto structType = type.isTypeStruct;
+        if (structType is null)
+            return false;
+
+        auto declaration = structType.sym;
+        // A non-zero `.init` needs field initializers that this bytewise
+        // evaluator does not run for omitted fields.
+        if (!declaration.zeroInit
+                || declaration.isUnionDeclaration !is null
+                || declaration.enclosing !is null
+                || declaration.postblit !is null || declaration.hasCopyCtor
+                || declaration.dtor !is null
+                || declaration.hasIdentityAssign || declaration.hasBlitAssign)
+            return false;
+
+        foreach (field; declaration.fields) {
+            if (field.isBitFieldDeclaration !is null
+                    || field.storage_class & STC.ref_)
+                return false;
+
+            if (field.type.isTypeStruct !is null) {
+                if (!supportsStruct(field.type))
+                    return false;
+                continue;
+            }
+
+            const facts = factsOf(field.type);
+            if (!facts.isIntegral || !isIntegralSize(facts.size))
+                return false;
+        }
+
+        return true;
+    }
+
     // The address of the storage `target` names: a variable's own slot
     // (through a `ref` parameter's indirection, if it is one - see
     // `slotOf`), the address a pointer currently holds for `*p`, whichever
@@ -1879,43 +1916,6 @@ extern(C++) private final class Evaluator: Visitor {
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements.ptr;
     }
 
-    private bool supportsStruct(Type type) {
-        import dmd.astenums: STC;
-
-        auto structType = type.isTypeStruct;
-        if (structType is null)
-            return false;
-
-        auto declaration = structType.sym;
-        // A non-zero `.init` needs field initializers that this bytewise
-        // evaluator does not run for omitted fields.
-        if (!declaration.zeroInit
-                || declaration.isUnionDeclaration !is null
-                || declaration.enclosing !is null
-                || declaration.postblit !is null || declaration.hasCopyCtor
-                || declaration.dtor !is null
-                || declaration.hasIdentityAssign || declaration.hasBlitAssign)
-            return false;
-
-        foreach (field; declaration.fields) {
-            if (field.isBitFieldDeclaration !is null
-                    || field.storage_class & STC.ref_)
-                return false;
-
-            if (field.type.isTypeStruct !is null) {
-                if (!supportsStruct(field.type))
-                    return false;
-                continue;
-            }
-
-            const facts = factsOf(field.type);
-            if (!facts.isIntegral || !isIntegralSize(facts.size))
-                return false;
-        }
-
-        return true;
-    }
-
     override void visit(StructLiteralExp expression) {
         import core.stdc.string: memset;
         import std.conv: text;
@@ -1943,13 +1943,6 @@ extern(C++) private final class Evaluator: Visitor {
                 continue;
 
             auto field = expression.sd.fields[i];
-            if (field.isBitFieldDeclaration !is null)
-                throw new Exception(
-                    text("interpreter cannot evaluate `",
-                        expression.toString,
-                        "`: bitfield construction is not supported"),
-                );
-
             evaluate(
                 element,
                 field.type,
