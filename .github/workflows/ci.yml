@@ -17,12 +17,19 @@ jobs:
 
       # Before the matrix compiler: setup-dlang's $DC follows whichever
       # install ran last, and build/ci.sh relies on $DC being the matrix
-      # dmd. build/bench.sh finds ldc by binary name, not $DC, so it only
-      # needs ldc on PATH - order here doesn't affect it.
+      # dmd. Preserve LDC's absolute path for build/bench.sh before the
+      # second setup changes the active compiler environment.
       - name: Install ldc (for the bench)
         uses: dlang-community/setup-dlang@v2
         with:
           compiler: ldc-latest
+
+      - name: Record ldc path
+        run: |
+          echo "LDC=$DC" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/ldc-bin"
+          ln -s "$DC" "$RUNNER_TEMP/ldc-bin/ldc"
+          echo "$RUNNER_TEMP/ldc-bin" >> "$GITHUB_PATH"
 
       - name: Install D compiler
         uses: dlang-community/setup-dlang@v2

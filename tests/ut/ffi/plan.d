@@ -77,6 +77,27 @@ unittest {
 }
 
 
+@("refused.refParameter")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(C) void bump(ref int x);
+    });
+    auto function_ = findFunction(guestModule, "bump");
+    assert(function_ !is null, "No function `bump` in the guest program");
+
+    PlanCache cache;
+
+    // A `ref` parameter occupies a pointer slot in the caller's frame -
+    // the address of the argument's own storage, not a copy of its value.
+    // `parameterList[i].type` is the pointee type, so classifying by it
+    // describes a value that never travels: `Register.of(int)` for
+    // `ref int` reads 4 bytes of an address as though they were the
+    // value. Refused when the plan is prepared, before anything runs.
+    cache.of(function_).shouldThrowWithMessage(
+        "ffi cannot call `bump`: parameter 0 is `ref`");
+}
+
+
 @("refused.tooManyArguments")
 unittest {
     auto guestModule = parseSnippet(q{

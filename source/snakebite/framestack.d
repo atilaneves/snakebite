@@ -17,7 +17,13 @@ private:
 // contributes: alignment above one byte is computed entirely by hand in
 // `push`, below - `Region` is built with `minAlign = 1`, so it never
 // rounds a request up on its own.
+//
+// A pushed frame can hold a guest pointer into GC-owned storage (an array's
+// `ptr` field, for instance) for as long as the frame is live, and nothing
+// else roots that storage. The backing buffer therefore stays registered
+// with the GC for its whole lifetime, although `Mallocator` owns it.
 public struct FrameStack {
+    import core.memory: GC;
     import snakebite.nativelayout: alignUp;
     import std.experimental.allocator.building_blocks.region: Region;
     import std.experimental.allocator.mallocator: Mallocator;
@@ -39,13 +45,18 @@ public struct FrameStack {
     @disable this(this);
 
     public this(size_t capacity) {
-        _capacity = capacity;
         _region = typeof(_region)(capacity);
 
         auto whole = _region.allocateAll;
+        _capacity = whole.length;
         _base = cast(ubyte*) whole.ptr;
         const freed = _region.deallocate(whole);
         assert(freed, "could not reclaim the frame stack's own buffer");
+        GC.addRange(_base, _capacity);
+    }
+
+    ~this() {
+        GC.removeRange(_base);
     }
 
     private Mark mark() const {

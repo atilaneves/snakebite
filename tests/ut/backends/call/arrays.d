@@ -5,10 +5,10 @@ import ut.backends;
 
 
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
-    Omit!(Interpreter, Because.inexpressible, "Can't do this"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot hold mutable static state across calls"),
 )) {
-    @("compare.lessThan.true." ~ backend.stringof)
+    @("arrays.append.static.repeatedCalls." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         4.shouldBeRetOf!(
@@ -240,4 +240,243 @@ unittest {
     char result;
     (new Interpreter).call(function_, &result, [])
         .shouldThrow;
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.literal.index." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        20.shouldBeRetOf!(
+            backend,
+            q{
+                int second() {
+                    int[] a = [10, 20, 30];
+                    return a[1];
+                }
+            },
+            "second",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.literal.length." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(3).shouldBeRetOf!(
+            backend,
+            q{
+                size_t length_() {
+                    int[] a = [1, 2, 3];
+                    return a.length;
+                }
+            },
+            "length_",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.literal.nonConstantElements." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // `x + 1` rules out an implementation that only copies constant-
+        // folded bytes dmd already computed instead of evaluating each
+        // element.
+        11.shouldBeRetOf!(
+            backend,
+            q{
+                int sum() {
+                    int x = 3;
+                    int[] a = [x, x + 1];
+                    return a[0] + a[1] * 2;
+                }
+            },
+            "sum",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.literal.single." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                int only() {
+                    int[] a = [42];
+                    return a[0];
+                }
+            },
+            "only",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.literal.empty.length." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(0).shouldBeRetOf!(
+            backend,
+            q{
+                size_t length_() {
+                    int[] a = [];
+                    return a.length;
+                }
+            },
+            "length_",
+        );
+    }
+}
+
+// A literal assigned to a `static` slice is built once, on whichever call
+// first reaches it - its elements must still be readable on a later call
+// to the same function, after the frame that built them has long since
+// been popped.
+@("arrays.literal.static.outlivesFrame.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        int second() {
+            static int[] arr;
+            if (!arr)
+                arr = [10, 20, 30];
+            return arr[1];
+        }
+    });
+    auto function_ = findFunction(module_, "second");
+    auto interpreter = new Interpreter;
+
+    int first;
+    interpreter.call(function_, &first, []);
+    first.shouldEqual(20);
+
+    int later;
+    interpreter.call(function_, &later, []);
+    later.shouldEqual(20);
+}
+
+// `~=` appending a single element lowers to `_d_arrayappendcTX`, dmd's
+// own hook for growing a `T[]` by one element and writing it into the
+// slot that growth made - `CatAssignExp.lowering` (`dmd/expression.d`),
+// not a node any of `expression`'s own children reach.
+static foreach (backend; Matrix!()) {
+    @("arrays.append.element." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(
+            backend,
+            q{
+                int second() {
+                    int[] a = [1];
+                    a ~= 2;
+                    return a[1];
+                }
+            },
+            "second",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.append.element.length." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(2).shouldBeRetOf!(
+            backend,
+            q{
+                size_t length_() {
+                    int[] a = [1];
+                    a ~= 2;
+                    return a.length;
+                }
+            },
+            "length_",
+        );
+    }
+}
+
+// Appending one element at a time past the literal's own capacity forces
+// at least one real reallocation - `_d_arrayappendcTX`'s own lowering
+// asks the GC to grow the block in place first and only calls
+// `GC.malloc` when that fails, so a loop long enough to outgrow the
+// first block's capacity is what actually exercises the move, not just
+// the append. Reading the first element back afterwards is what pins
+// that the move copied the old contents rather than losing them.
+static foreach (backend; Matrix!()) {
+    @("arrays.append.element.loop.survivesReallocation." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // a[0] == 100, a[1] == 101, a[50] == 150, a.length == 101.
+        452.shouldBeRetOf!(
+            backend,
+            q{
+                int grown() {
+                    int[] a = [100];
+                    foreach (i; 1 .. 101)
+                        a ~= 100 + i;
+                    return a[0] + a[1] + a[50] + cast(int) a.length;
+                }
+            },
+            "grown",
+        );
+    }
+}
+
+// `~=` appending a whole slice lowers to `_d_arrayappendT` instead of
+// `_d_arrayappendcTX` - a different hook, over the same `lowering` field,
+// for a different `CatAssignExp.op` (`concatenateAssign` rather than
+// `concatenateElemAssign`).
+static foreach (backend; Matrix!()) {
+    @("arrays.append.slice." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // a[2] == 3, a.length == 3.
+        303.shouldBeRetOf!(
+            backend,
+            q{
+                int appended() {
+                    int[] a = [1];
+                    int[] b = [2, 3];
+                    a ~= b;
+                    return a[2] * 100 + cast(int) a.length;
+                }
+            },
+            "appended",
+        );
+    }
+}
+
+// A `static` slice appended to on one call must still hold what an
+// earlier call appended to it: the slice is one variable per program,
+// not one per call, the same as `arrays.literal.static.outlivesFrame`
+// pins for a literal assignment rather than an append.
+@("arrays.append.static.acrossCalls.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        int accumulate() {
+            static int[] arr;
+            arr ~= arr.length ? 2 : 1;
+            return arr.length == 1 ? arr[0] : arr[0] * 10 + arr[1];
+        }
+    });
+    auto function_ = findFunction(module_, "accumulate");
+    auto interpreter = new Interpreter;
+
+    int first;
+    interpreter.call(function_, &first, []);
+    first.shouldEqual(1);
+
+    int second;
+    interpreter.call(function_, &second, []);
+    second.shouldEqual(12);
 }

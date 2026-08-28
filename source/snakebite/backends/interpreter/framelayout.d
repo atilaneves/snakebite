@@ -16,22 +16,37 @@ package struct FrameLayout {
 
     package size_t size;
     package uint alignment = 1;
+
+    // One parameter's slot: its offset into the frame, the facts needed
+    // to place a value there, and whether it is `ref` - decided together,
+    // from the same `TypeFacts.of` call, since a parameter's type never
+    // changes between calls. For a `ref` parameter, `facts` are a
+    // pointer's, not the parameter's own type's: a `ref` parameter
+    // occupies a pointer slot in a compiled frame, the address of the
+    // argument's own storage rather than a copy of its value.
+    package struct Parameter {
+        package size_t offset;
+        package TypeFacts facts;
+        package bool isRef;
+    }
+
     // Parallel to the function's parameter list, indexed positionally.
     // The argument-evaluation loop already has the positional index in
     // hand, so it never pays an AA hash lookup for the hottest path.
-    package size_t[] offsets;
-    // A parameter's facts, alongside its offset in `offsets` above and
-    // decided at the same time, from the same `TypeFacts.of` call: the
-    // argument-evaluation loop needs both to place a value, and a
-    // parameter's type never changes between calls, so this is decided
-    // once per function instead of once per call.
-    package TypeFacts[] offsetFacts;
+    package Parameter[] parameters;
+
     // Keyed by declaration instead of position: `visit(VarExp)` resolves
-    // a parameter read from a `VarDeclaration` it found by name lookup,
-    // not by position, so it still needs a hash lookup. Reached only
-    // through `offsetOf` below - never read or written directly outside
-    // this module.
-    private size_t[VarDeclaration] _offsetOf;
+    // a parameter or local read from a `VarDeclaration` it found by name
+    // lookup, not by position, so it still needs a hash lookup. `isRef`
+    // is only ever `true` for a `ref` parameter, never for a local - a
+    // local's own slot never indirects. Reached only through `offsetOf`
+    // and `isRef` below - never read or written directly outside this
+    // module.
+    private struct VariableSlot {
+        size_t offset;
+        bool isRef;
+    }
+    private VariableSlot[VarDeclaration] _slotOf;
 
     package static FrameLayout of(FuncDeclaration function_) {
         import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -48,29 +63,36 @@ package struct FrameLayout {
         // declaration to key `offsetOf` by.
         auto parameterList = typeFunctionOf(function_).parameterList;
         auto variables = function_.parameters;
-        layout.offsets.length = parameterList.length;
-        layout.offsetFacts.length = parameterList.length;
+        layout.parameters.length = parameterList.length;
 
         foreach (i; 0 .. parameterList.length) {
             auto parameter = parameterList[i];
 
-            // A `ref`/`out` parameter occupies a pointer slot in a
-            // compiled frame, and `lazy` a delegate; `parameter.type`
-            // is still the pointed-to/lazily-evaluated type either
-            // way, so a value slot of that type's size would be the
-            // wrong layout. Not supported, so this throws.
-            if (parameter.storageClass & (STC.ref_ | STC.out_ | STC.lazy_))
+            // `out` needs its own zero-before-call semantics on top of
+            // the same pointer-slot shape `ref` gets below, and `lazy`
+            // is a delegate, not a pointer at all - neither has a frame
+            // layout this interpreter builds yet, so both still throw.
+            if (parameter.storageClass & (STC.out_ | STC.lazy_))
                 throw new Exception(
-                    text("interpreter cannot pass `ref`/`out`/`lazy` ",
-                        "parameter ", i, " of `", function_.toString,
-                        "` by value"),
+                    text("interpreter cannot pass `out`/`lazy` parameter ",
+                        i, " of `", function_.toString, "` by value"),
                 );
 
-            auto slot = layout.reserveSlot(parameter.type);
-            layout.offsets[i] = slot.offset;
-            layout.offsetFacts[i] = slot.facts;
-            if (variables !is null)
-                layout._offsetOf[(*variables)[i]] = slot.offset;
+            const isRefParameter = (parameter.storageClass & STC.ref_) != 0;
+
+            auto slot = isRefParameter
+                ? layout.reserveSlot(
+                    TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
+                : layout.reserveSlot(parameter.type);
+
+            layout.parameters[i] =
+                Parameter(slot.offset, slot.facts, isRefParameter);
+
+            if (variables !is null) {
+                auto variable = (*variables)[i];
+                layout._slotOf[variable] =
+                    VariableSlot(slot.offset, isRefParameter);
+            }
         }
 
         // Locals share the same frame as the parameters: each one gets a
@@ -100,7 +122,14 @@ package struct FrameLayout {
     // facts. A parameter and a local differ in what they key the offset
     // by, not in how the frame grows to fit them, so both come here.
     private Slot reserveSlot(Type type) {
-        const facts = TypeFacts.of(type);
+        return reserveSlot(TypeFacts.of(type));
+    }
+
+    // As above, for a caller that already knows the slot's facts rather
+    // than a `Type` to derive them from - a `ref` parameter's slot is a
+    // pointer's regardless of what it points to, so nothing about
+    // `parameter.type` is involved in sizing it.
+    private Slot reserveSlot(in TypeFacts facts) {
         const offset = alignUp(this.size, facts.alignment);
         this.size = offset + facts.size;
         if (facts.alignment > this.alignment)
@@ -118,14 +147,27 @@ package struct FrameLayout {
     package size_t offsetOf(VarDeclaration variable) const {
         import std.conv: text;
 
-        auto offset = variable in _offsetOf;
-        if (offset is null)
+        auto slot = variable in _slotOf;
+        if (slot is null)
             throw new Exception(
                 text("interpreter cannot reach `", variable.toString,
                     "`: not a parameter or local in the current frame"),
             );
 
-        return *offset;
+        return slot.offset;
+    }
+
+    // Whether `variable` is a `ref` parameter: its own frame slot holds
+    // the address of the argument's storage rather than the storage
+    // itself, so `Evaluator.slotOf` - the one place every read, write and
+    // address-of a variable goes through - reads through it once more
+    // before handing back an address any of them can use directly.
+    // `false` for anything this layout never marked as one, which covers
+    // every local as well as a variable this layout never reserved a slot
+    // for at all.
+    package bool isRef(VarDeclaration variable) const {
+        auto slot = variable in _slotOf;
+        return slot !is null && slot.isRef;
     }
 }
 
@@ -154,6 +196,7 @@ import dmd.visitor: Visitor;
 // gap surfaces as `FrameLayout.offsetOf` failing to find that local, not
 // as a wrong answer.
 extern(C++) private final class LocalsCollector: Visitor {
+    import dmd.expression: Expression;
     import dmd.statement:
         CompoundStatement, ExpStatement, ForStatement, IfStatement,
         ImportStatement, ReturnStatement, ScopeStatement, Statement;
@@ -212,25 +255,70 @@ extern(C++) private final class LocalsCollector: Visitor {
     }
 
     override void visit(ExpStatement statement) {
-        if (statement.exp is null)
-            return;
+        if (statement.exp !is null)
+            collectDeclarations(statement.exp);
+    }
 
-        auto declarationExp = statement.exp.isDeclarationExp;
-        if (declarationExp is null)
-            return;
+    // A declaration this collector needs to find is not always the whole
+    // of a statement's expression, the way `long sum = 0;` is: dmd's own
+    // `~=` lowering (`CatAssignExp.lowering`) can introduce a compiler
+    // temporary - `__appendtmp*`, holding a right side too complex to
+    // evaluate twice - as a `DeclarationExp` buried inside a `CommaExp`
+    // chain, not the statement's own top-level expression. Walking into
+    // both is what finds it: a `CommaExp` runs both of its operands, so a
+    // declaration in either needs a slot the same as one at the top, and
+    // `lowering` is where `Evaluator` itself goes looking for a `~=`'s
+    // real work, so this follows it there too rather than missing
+    // whatever `Evaluator` will actually run.
+    private void collectDeclarations(Expression expression) {
+        import dmd.expression: CatAssignExp;
 
-        auto variable = declarationExp.declaration.isVarDeclaration;
-        if (variable is null)
-            return;
+        if (auto declarationExp = expression.isDeclarationExp) {
+            auto variable = declarationExp.declaration.isVarDeclaration;
+            if (variable is null)
+                return;
 
-        // A `static` local is one variable per function, not one per call,
-        // so a frame - popped on return - is the wrong storage for it.
-        // `Evaluator` keeps it elsewhere; with no slot here, a reach that
-        // looks in the frame instead is refused by `offsetOf` rather than
-        // reading a variable reset on every call.
-        if (variable.isDataseg)
-            return;
+            // A `static` local is one variable per function, not one per
+            // call, so a frame - popped on return - is the wrong storage
+            // for it. `Evaluator` keeps it elsewhere; with no slot here,
+            // a reach that looks in the frame instead is refused by
+            // `offsetOf` rather than reading a variable reset on every
+            // call.
+            if (variable.isDataseg)
+                return;
 
-        _layout._offsetOf[variable] = _layout.reserveSlot(variable.type).offset;
+            _layout._slotOf[variable] =
+                FrameLayout.VariableSlot(
+                    _layout.reserveSlot(variable.type).offset, false);
+            return;
+        }
+
+        if (auto comma = expression.isCommaExp) {
+            collectDeclarations(comma.e1);
+            collectDeclarations(comma.e2);
+            return;
+        }
+
+        // dmd's parser always builds a `CatAssignExp` for `~=`, then
+        // semantic() narrows it in place to whichever of the two `final`
+        // subclasses fits - `CatElemAssignExp` for appending one element
+        // (`arr ~= x;`, the common case) or `CatDcharAssignExp` for a
+        // `dchar` - and leaves it a plain `CatAssignExp` only for the
+        // third case, appending a whole slice. `lowering` lives on the
+        // base class, so all three carry it; matching only
+        // `isCatAssignExp` here would miss the element and dchar cases,
+        // which is where a compiler temp (`__appendtmp*`) actually
+        // appears. Each `isXxxExp` compares `Expression.op` and hands
+        // back a reference to `this` at its own static type - a widening
+        // upcast to `CatAssignExp` from there is a plain pointer
+        // conversion, not a class-to-class downcast, so it stays sound.
+        CatAssignExp catAssign = expression.isCatAssignExp;
+        if (catAssign is null)
+            catAssign = expression.isCatElemAssignExp;
+        if (catAssign is null)
+            catAssign = expression.isCatDcharAssignExp;
+
+        if (catAssign !is null && catAssign.lowering !is null)
+            collectDeclarations(catAssign.lowering);
     }
 }

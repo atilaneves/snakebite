@@ -18,12 +18,18 @@ private:
 // A plan is immutable once built, and holds no dmd types, so calling
 // through one touches nothing the frontend owns.
 public struct CallPlan {
-    import snakebite.ffi.abi: Register, maxArguments;
+    import snakebite.ffi.abi: ArgumentPlan, Register, maxArguments;
 
     private void* _address;
-    private Register[maxArguments] _arguments;
-    private size_t _count;
+    // Indexed by parameter, not by register: a dynamic-array parameter
+    // reserves one entry here and two registers at call time, since the
+    // two travel together as one argument the guest evaluated once.
+    private ArgumentPlan[maxArguments] _arguments;
+    private size_t _parameterCount;
     private Register _return;
+    // Whether `_return` is meaningless because the result travels through
+    // a hidden pointer instead - see `needsHiddenReturnPointer`.
+    private bool _hiddenReturnPointer;
 
     // Calls the function this plan was prepared for.
     //
@@ -41,21 +47,46 @@ public struct CallPlan {
         import snakebite.ffi.abi: invoke, word, writeWord;
         import std.conv: text;
 
-        if (arguments.length != _count)
+        if (arguments.length != _parameterCount)
             throw new Exception(
-                text("ffi: this plan takes ", _count, " argument(s), got ",
-                    arguments.length),
+                text("ffi: this plan takes ", _parameterCount,
+                    " argument(s), got ", arguments.length),
             );
 
         size_t[maxArguments] words;
-        foreach (i, argument; arguments)
-            words[i] = word(_arguments[i], argument);
+        size_t slot;
 
-        const result = invoke(cast(void*) _address, words[0 .. _count]);
+        // The hidden pointer is itself the first argument register, ahead
+        // of every real one - the callee writes the result through it
+        // rather than leaving it in a register, so the caller must have
+        // supplied somewhere for that to land.
+        if (_hiddenReturnPointer) {
+            if (returnPlace is null)
+                throw new Exception(
+                    "ffi: this plan returns a value larger than a " ~
+                        "register, and needs somewhere to write it",
+                );
 
-        // A `void` callee leaves the return register holding whatever it
-        // last used it for, so reading it would be reading garbage.
-        if (returnPlace !is null)
+            words[slot++] = cast(size_t) returnPlace;
+        }
+
+        foreach (i, argument; arguments) {
+            const plan = _arguments[i];
+            auto bytes = cast(ubyte*) argument;
+            foreach (j; 0 .. plan.count)
+                words[slot++] =
+                    word(plan.registers[j], bytes + j * size_t.sizeof);
+        }
+
+        const result = invoke(cast(void*) _address, words[0 .. slot]);
+
+        // A hidden-pointer return already left its bytes at `returnPlace`
+        // through that pointer, not in the return register - which the
+        // callee leaves holding that same pointer, not the value. A `void`
+        // callee leaves the register holding whatever it last used it for,
+        // so reading it in either case would be reading garbage or an
+        // address, not the result.
+        if (!_hiddenReturnPointer && returnPlace !is null)
             writeWord(_return, result, returnPlace);
     }
 }
@@ -107,9 +138,11 @@ public struct PlanCache {
 // ABI does not cover throws, naming what it could not pass - here, when
 // the plan is prepared, rather than on every call that would use it.
 private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
-    import snakebite.ffi.abi: Register, maxArguments, supported;
+    import snakebite.ffi.abi:
+        ArgumentPlan, Register, maxArguments, needsHiddenReturnPointer,
+        supported;
     import snakebite.ffi.symbol: symbolAddress;
-    import dmd.astenums: VarArg;
+    import dmd.astenums: STC, VarArg;
     import dmd.mangle: mangleExact;
     import std.conv: text;
     import std.string: fromStringz;
@@ -157,6 +190,44 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
                     " are passed in registers"),
             );
 
+        CallPlan plan;
+        plan._hiddenReturnPointer = needsHiddenReturnPointer(type.nextOf);
+
+        size_t registers;
+        if (plan._hiddenReturnPointer)
+            registers = 1;
+
+        foreach (i; 0 .. count) {
+            // A `ref` parameter occupies a pointer slot in the caller's
+            // frame - the address of the argument's own storage, not a
+            // copy of its value (see `FrameLayout.of` in
+            // `interpreter/framelayout.d`, which lays such a slot out the
+            // same way). `parameterList[i].type` is the *pointee* type,
+            // so classifying by it describes a value that never travels:
+            // `Register.of(int)` for `ref int` reads 4 bytes of an
+            // address as if they were the value, and `ArgumentPlan.of` for
+            // `ref int[]` reserves two registers and reads 8 bytes past
+            // the single pointer slot the argument actually is. Refusing
+            // here restores the same boundary `FrameLayout.of` used to
+            // draw before it grew a real `ref` layout of its own.
+            if (type.parameterList[i].storageClass & STC.ref_)
+                throw new Exception(
+                    text("ffi cannot call `", function_.toString,
+                        "`: parameter ", i, " is `ref`"),
+                );
+
+            auto argument = ArgumentPlan.of(type.parameterList[i].type);
+            registers += argument.count;
+            if (registers > maxArguments)
+                throw new Exception(
+                    text("ffi cannot call `", function_.toString,
+                        "`: its arguments need more than ", maxArguments,
+                        " registers"),
+                );
+
+            plan._arguments[i] = argument;
+        }
+
         auto name = mangleExact(function_);
         auto address = symbolAddress(name);
         if (address is null)
@@ -166,12 +237,10 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
                     "`: it is not in this process"),
             );
 
-        CallPlan plan;
         plan._address = address;
-        plan._count = count;
-        foreach (i; 0 .. count)
-            plan._arguments[i] = Register.of(type.parameterList[i].type);
-        plan._return = Register.of(type.nextOf);
+        plan._parameterCount = count;
+        if (!plan._hiddenReturnPointer)
+            plan._return = Register.of(type.nextOf);
 
         return plan;
     }
