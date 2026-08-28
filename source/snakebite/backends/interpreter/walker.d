@@ -149,6 +149,7 @@ extern(C++) private final class Evaluator: Visitor {
     // The currently executing function's frame.
     private ubyte* _frameBase;
     private const(FrameLayout)* _layout;
+    private VarDeclaration _this;
     // Set by `visit(ReturnStatement)`; checked by `visit(CompoundStatement)`
     // to stop walking sibling statements once one has run. dmd accepts
     // unreachable statements after a `return` (it only warns with `-w`),
@@ -340,19 +341,14 @@ extern(C++) private final class Evaluator: Visitor {
         // `function_` being resolved only means a declaration was found;
         // it does not mean this call is safe to run directly. For
         // `obj.method(...)`, dmd sets the resolved declaration to the
-        // statically known method even though the call needs `this` -
-        // running it here would silently devirtualize it and drop the
-        // context, and a nested function's static chain is dropped the
-        // same way. A zero-parameter method or nested function has no
-        // parameter to give it away either, so this check cannot be
-        // folded into the parameter-count check below. Both are
-        // unsupported constructs this interpreter has no representation
-        // for, so this throws loudly instead of running with a missing
-        // context and returning a plausible-looking wrong answer.
-        if (function_.isThis() !is null || function_.isNested())
+        // statically known method still needs its `this` frame slot, which
+        // `bindFrame` fills from the call's receiver. A nested function's
+        // static chain has no such compiler-provided representation here,
+        // so this throws loudly instead of running with missing context.
+        if (function_.isNested())
             throw new Exception(
                 text("interpreter cannot call `", function_.toString,
-                    "`: it needs a `this` or a static chain, which the ",
+                    "`: it needs a static chain, which the ",
                     "interpreter does not provide"),
             );
 
@@ -388,6 +384,7 @@ extern(C++) private final class Evaluator: Visitor {
         auto savedPlace = _place;
         auto savedFrameBase = _frameBase;
         auto savedLayout = _layout;
+        auto savedThis = _this;
         auto savedReturned = _returned;
         auto savedContinued = _continued;
         auto savedReturnsRef = _returnsRef;
@@ -397,6 +394,7 @@ extern(C++) private final class Evaluator: Visitor {
             _place = savedPlace;
             _frameBase = savedFrameBase;
             _layout = savedLayout;
+            _this = savedThis;
             _returned = savedReturned;
             _continued = savedContinued;
             _returnsRef = savedReturnsRef;
@@ -407,6 +405,7 @@ extern(C++) private final class Evaluator: Visitor {
         _place = returnPlace;
         _frameBase = frameBase;
         _layout = layout;
+        _this = function_.vthis;
         _returned = false;
         _continued = false;
         _returnsRef = typeFunctionOf(function_).isRef;
@@ -966,6 +965,8 @@ extern(C++) private final class Evaluator: Visitor {
         auto structType = _type.isTypeStruct;
         const isSupportedStruct = structType !is null
             && supportsStruct(_type);
+        const isSupportedArray = _type.ty == Tarray
+            && expression.e1.isDotVarExp !is null;
         if (structType !is null && !isSupportedStruct)
             throw new Exception(
                 text("interpreter cannot assign unsupported struct `",
@@ -973,7 +974,7 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         if (expression.op != EXP.assign && !_facts.isIntegral
-                && !isSupportedStruct)
+                && !isSupportedStruct && !isSupportedArray)
             throw new Exception(
                 text("interpreter cannot run a `", expression.op,
                     "` on `", expression.e1.toString, "`"),
@@ -1021,6 +1022,9 @@ extern(C++) private final class Evaluator: Visitor {
                 continue;
             }
 
+            if (field.type.ty == Tarray)
+                continue;
+
             const facts = factsOf(field.type);
             if (!facts.isIntegral || !isIntegralSize(facts.size))
                 return false;
@@ -1039,6 +1043,9 @@ extern(C++) private final class Evaluator: Visitor {
     // handful of node kinds on their own.
     private void* addressOf(Expression target) {
         import std.conv: text;
+
+        if (auto thisExp = target.isThisExp)
+            return slotOf(thisExp, thisExp.var is null ? _this : thisExp.var);
 
         if (auto variable = target.isVarExp)
             return slotOf(variable);
@@ -1064,6 +1071,18 @@ extern(C++) private final class Evaluator: Visitor {
         // room for this way.
         if (auto index = target.isIndexExp)
             return indexAddressOf(index).ptr;
+
+        if (auto dot = target.isDotVarExp) {
+            auto field = dot.var.isVarDeclaration;
+            if (field is null || dot.e1.isThisExp is null)
+                throw new Exception(
+                    text("interpreter cannot take the address of `",
+                        target.toString,
+                        "`: only a field of `this` is supported"),
+                );
+
+            return cast(ubyte*) addressOf(dot.e1) + field.offset;
+        }
 
         throw new Exception(
             text("interpreter cannot take the address of `",
@@ -2082,6 +2101,21 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         auto frame = _frames.push(layout.size, layout.alignment);
+
+        if (function_.vthis !is null) {
+            auto dot = expression.e1.isDotVarExp;
+            if (dot is null)
+                throw new Exception(
+                    text("interpreter cannot call `", function_.toString,
+                        "`: its `this` receiver is not a struct lvalue"),
+                );
+
+            storeIntegral(
+                frame.base + layout.thisParameter.offset,
+                cast(size_t) addressOf(dot.e1),
+                size_t.sizeof,
+            );
+        }
 
         // Every argument is evaluated, even one the callee never reads,
         // since evaluating an argument can have effects. The loop already

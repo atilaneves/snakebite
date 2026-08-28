@@ -35,6 +35,10 @@ package struct FrameLayout {
     // hand, so it never pays an AA hash lookup for the hottest path.
     package Parameter[] parameters;
 
+    // A struct method's hidden `this` parameter is a pointer slot before
+    // the explicit parameters, as it is in the native calling layout.
+    package Parameter thisParameter;
+
     // Keyed by declaration instead of position: `visit(VarExp)` resolves
     // a parameter or local read from a `VarDeclaration` it found by name
     // lookup, not by position, so it still needs a hash lookup. A `ref`
@@ -52,6 +56,19 @@ package struct FrameLayout {
         import std.conv: text;
 
         FrameLayout layout;
+
+        if (function_.vthis !is null) {
+            const isRefThis = (function_.vthis.storage_class & STC.ref_) != 0;
+            auto slot = isRefThis
+                ? layout.reserveSlot(
+                    TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
+                : layout.reserveSlot(function_.vthis.type);
+
+            layout.thisParameter =
+                Parameter(slot.offset, slot.facts, isRefThis);
+            layout._slotOf[function_.vthis] =
+                VariableSlot(slot.offset, isRefThis);
+        }
 
         // The parameter *types* are part of the function's own type, and
         // are there whether or not it has a body. `parameters` - the
