@@ -25,7 +25,7 @@ jobs:
           compiler: ldc-latest
 
       - name: Record ldc path
-        run: echo "LDC=$(command -v ldc2)" >> "$GITHUB_ENV"
+        run: echo "LDC=$DC" >> "$GITHUB_ENV"
 
       - name: Install D compiler
         uses: dlang-community/setup-dlang@v2
