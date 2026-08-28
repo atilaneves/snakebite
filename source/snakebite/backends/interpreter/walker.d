@@ -63,7 +63,8 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.framestack: FrameStack;
     import snakebite.ffi: PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
-    import snakebite.nativelayout: storeValue, TypeFacts;
+    import snakebite.nativelayout:
+        isIntegralSize, storeValue, TypeFacts;
     import dmd.astenums:
         LINK, Tarray, Tbool, Tnoreturn, Tpointer, Tsarray, Tuns32, Tvoid;
     import dmd.declaration: Declaration, VarDeclaration;
@@ -881,6 +882,9 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(DeclarationExp expression) {
         import std.conv: text;
 
+        if (expression.declaration.isStructDeclaration !is null)
+            return;
+
         // `alias Unqual_T = Unqual!T;` binds a name to a type, not
         // storage, and `enum mask(ulong lo) = ...;` (an eponymous
         // template, folded to its value at each `mask!x` use rather than
@@ -958,7 +962,10 @@ extern(C++) private final class Evaluator: Visitor {
         // writes, on the `~=` lowering's own chain, into the slot it
         // just extended (`a[a.length - 1] = 2`, dmd's own `construct`
         // for filling storage the guest has not touched yet).
-        if (expression.op != EXP.assign && !_facts.isIntegral)
+        const isSupportedStruct = _type.isTypeStruct !is null
+            && supportsStruct(_type);
+        if (expression.op != EXP.assign && !_facts.isIntegral
+                && !isSupportedStruct)
             throw new Exception(
                 text("interpreter cannot run a `", expression.op,
                     "` on `", expression.e1.toString, "`"),
@@ -1836,7 +1843,8 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto elementType = expression.type.nextOf;
         const elementFacts = factsOf(elementType);
-        if (elementType.ty != Tbool && elementType.ty != Tuns32)
+        if (elementType.ty != Tbool && elementType.ty != Tuns32
+                && !supportsStruct(elementType))
             throw new Exception(
                 text("interpreter cannot allocate an array of unsupported `",
                     elementType.toString, "` elements"),
@@ -1855,6 +1863,82 @@ extern(C++) private final class Evaluator: Visitor {
         auto bytes = cast(ubyte*) _place;
         storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements.ptr;
+    }
+
+    private bool supportsStruct(Type type) {
+        import dmd.astenums: STC;
+
+        auto typeStruct = type.isTypeStruct;
+        if (typeStruct is null)
+            return false;
+
+        auto struct_ = typeStruct.sym;
+        if (struct_.isUnionDeclaration !is null || struct_.enclosing !is null
+                || struct_.postblit !is null || struct_.hasCopyCtor
+                || struct_.dtor !is null || struct_.hasIdentityAssign
+                || struct_.hasBlitAssign)
+            return false;
+
+        foreach (field; struct_.fields) {
+            if (field.isBitFieldDeclaration !is null
+                    || field.storage_class & STC.ref_)
+                return false;
+
+            if (field.type.isTypeStruct !is null) {
+                if (!supportsStruct(field.type))
+                    return false;
+                continue;
+            }
+
+            const facts = factsOf(field.type);
+            if (!facts.isIntegral || !isIntegralSize(facts.size))
+                return false;
+        }
+
+        return true;
+    }
+
+    override void visit(StructLiteralExp expression) {
+        import core.stdc.string: memset;
+        import std.conv: text;
+
+        auto typeStruct = _type.isTypeStruct;
+        if (typeStruct is null || typeStruct.sym != expression.sd
+                || !supportsStruct(_type))
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: unsupported struct literal"),
+            );
+
+        memset(_place, 0, _facts.size);
+        if (expression.elements is null || expression.elements.length == 0)
+            return;
+
+        if (expression.elements.length > expression.sd.fields.length)
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: its fields do not match the struct layout"),
+            );
+
+        foreach (i, element; *expression.elements) {
+            if (element is null)
+                continue;
+
+            auto field = expression.sd.fields[i];
+            if (field.isBitFieldDeclaration !is null)
+                throw new Exception(
+                    text("interpreter cannot evaluate `",
+                        expression.toString,
+                        "`: bitfield construction is not supported"),
+                );
+
+            evaluate(
+                element,
+                field.type,
+                factsOf(field.type),
+                cast(ubyte*) _place + field.offset,
+            );
+        }
     }
 
     // `expression.elements`, dmd documents, "can be sparse" whenever
