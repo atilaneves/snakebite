@@ -63,7 +63,8 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.framestack: FrameStack;
     import snakebite.ffi: PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
-    import snakebite.nativelayout: storeValue, TypeFacts;
+    import snakebite.nativelayout:
+        isIntegralSize, storeValue, TypeFacts;
     import dmd.astenums:
         LINK, Tarray, Tbool, Tnoreturn, Tpointer, Tsarray, Tuns32, Tvoid;
     import dmd.declaration: Declaration, VarDeclaration;
@@ -881,6 +882,8 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(DeclarationExp expression) {
         import std.conv: text;
 
+        // Semantic analysis has already established a function-local
+        // struct's type, so declaring it needs no runtime action. Likewise,
         // `alias Unqual_T = Unqual!T;` binds a name to a type, not
         // storage, and `enum mask(ulong lo) = ...;` (an eponymous
         // template, folded to its value at each `mask!x` use rather than
@@ -894,7 +897,8 @@ extern(C++) private final class Evaluator: Visitor {
         // both. Any future backend that walks a body's AST itself,
         // rather than handing it to dmd's engine, inherits the same
         // need.
-        if (expression.declaration.isAliasDeclaration !is null
+        if (expression.declaration.isStructDeclaration !is null
+                || expression.declaration.isAliasDeclaration !is null
                 || expression.declaration.isTemplateDeclaration !is null)
             return;
 
@@ -937,12 +941,13 @@ extern(C++) private final class Evaluator: Visitor {
         evaluate(value, variable.type, _frameBase + offset);
     }
 
-    // Assignment is an expression: it yields the value it assigned, so the
-    // right side is evaluated straight into the target's slot and the
-    // result is that slot's own bytes. `_facts` is the target's facts
-    // here: dmd's semantic pass wraps an assignment feeding a wider
-    // destination in a cast of its own, which is a node this interpreter
-    // refuses rather than one it reaches this code with.
+    // Assignment is an expression: it yields the value it assigned. A
+    // struct right side needs scratch storage so evaluating a literal does
+    // not clear an aliased target before all of its fields are read.
+    // `_facts` is the target's facts here: dmd's semantic pass wraps an
+    // assignment feeding a wider destination in a cast of its own, which is
+    // a node this interpreter refuses rather than one it reaches this code
+    // with.
     override void visit(AssignExp expression) {
         import core.stdc.string: memcpy;
         import std.conv: text;
@@ -958,7 +963,17 @@ extern(C++) private final class Evaluator: Visitor {
         // writes, on the `~=` lowering's own chain, into the slot it
         // just extended (`a[a.length - 1] = 2`, dmd's own `construct`
         // for filling storage the guest has not touched yet).
-        if (expression.op != EXP.assign && !_facts.isIntegral)
+        auto structType = _type.isTypeStruct;
+        const isSupportedStruct = structType !is null
+            && supportsStruct(_type);
+        if (structType !is null && !isSupportedStruct)
+            throw new Exception(
+                text("interpreter cannot assign unsupported struct `",
+                    structType.toString, "`"),
+            );
+
+        if (expression.op != EXP.assign && !_facts.isIntegral
+                && !isSupportedStruct)
             throw new Exception(
                 text("interpreter cannot run a `", expression.op,
                     "` on `", expression.e1.toString, "`"),
@@ -967,8 +982,51 @@ extern(C++) private final class Evaluator: Visitor {
         // Naming `e1` rather than the whole expression: dmd lowers
         // `s.length = n` into a node whose `toString` is a bare `=`.
         auto target = addressOf(expression.e1);
-        evaluate(expression.e2, _type, _facts, target);
+        if (isSupportedStruct) {
+            auto scratch = _frames.push(_facts.size, _facts.alignment);
+            evaluate(expression.e2, _type, _facts, scratch.base);
+            memcpy(target, scratch.base, _facts.size);
+        } else {
+            evaluate(expression.e2, _type, _facts, target);
+        }
         memcpy(_place, target, _facts.size);
+    }
+
+    private bool supportsStruct(Type type) {
+        import dmd.astenums: STC;
+
+        auto structType = type.isTypeStruct;
+        if (structType is null)
+            return false;
+
+        auto declaration = structType.sym;
+        // A non-zero `.init` needs field initializers that this bytewise
+        // evaluator does not run for omitted fields.
+        if (!declaration.zeroInit
+                || declaration.isUnionDeclaration !is null
+                || declaration.enclosing !is null
+                || declaration.postblit !is null || declaration.hasCopyCtor
+                || declaration.dtor !is null
+                || declaration.hasIdentityAssign || declaration.hasBlitAssign)
+            return false;
+
+        foreach (field; declaration.fields) {
+            if (field.isBitFieldDeclaration !is null
+                    || field.storage_class & STC.ref_)
+                return false;
+
+            if (field.type.isTypeStruct !is null) {
+                if (!supportsStruct(field.type))
+                    return false;
+                continue;
+            }
+
+            const facts = factsOf(field.type);
+            if (!facts.isIntegral || !isIntegralSize(facts.size))
+                return false;
+        }
+
+        return true;
     }
 
     // The address of the storage `target` names: a variable's own slot
@@ -1836,7 +1894,8 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto elementType = expression.type.nextOf;
         const elementFacts = factsOf(elementType);
-        if (elementType.ty != Tbool && elementType.ty != Tuns32)
+        if (elementType.ty != Tbool && elementType.ty != Tuns32
+                && !supportsStruct(elementType))
             throw new Exception(
                 text("interpreter cannot allocate an array of unsupported `",
                     elementType.toString, "` elements"),
@@ -1855,6 +1914,42 @@ extern(C++) private final class Evaluator: Visitor {
         auto bytes = cast(ubyte*) _place;
         storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements.ptr;
+    }
+
+    override void visit(StructLiteralExp expression) {
+        import core.stdc.string: memset;
+        import std.conv: text;
+
+        auto structType = _type.isTypeStruct;
+        if (structType is null || structType.sym != expression.sd
+                || !supportsStruct(_type))
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: unsupported struct literal"),
+            );
+
+        memset(_place, 0, _facts.size);
+        if (expression.elements is null || expression.elements.length == 0)
+            return;
+
+        if (expression.elements.length > expression.sd.fields.length)
+            throw new Exception(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: its fields do not match the struct layout"),
+            );
+
+        foreach (i, element; *expression.elements) {
+            if (element is null)
+                continue;
+
+            auto field = expression.sd.fields[i];
+            evaluate(
+                element,
+                field.type,
+                factsOf(field.type),
+                cast(ubyte*) _place + field.offset,
+            );
+        }
     }
 
     // `expression.elements`, dmd documents, "can be sparse" whenever
