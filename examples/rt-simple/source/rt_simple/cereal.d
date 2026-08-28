@@ -1,52 +1,90 @@
 module rt_simple.cereal;
 
+
 private:
 
 
-public ubyte[] cerealise(T)(auto ref T value) {
-    import core.stdc.string: memcpy;
-    import std.range.primitives: ElementType;
-    import std.traits: isDynamicArray;
+public struct Cerealiser {
+    private ubyte[] _bytes;
 
-    static if (isDynamicArray!T) {
-        alias E = ElementType!T;
+    public const(ubyte)[] bytes() const @property @safe pure nothrow {
+        return _bytes;
+    }
 
-        const dataSize = value.length * E.sizeof;
-        auto bytes = new ubyte[size_t.sizeof + dataSize];
-        const length = value.length;
-        memcpy(bytes.ptr, &length, length.sizeof);
-        if (dataSize)
-            memcpy(bytes.ptr + length.sizeof, value.ptr, dataSize);
-        return bytes;
-    } else {
-        auto bytes = new ubyte[T.sizeof];
-        memcpy(bytes.ptr, &value, value.sizeof);
-        return bytes;
+    public void grain(Length = size_t, T)(auto ref T value) @trusted {
+        import core.stdc.string: memcpy;
+        import std.range.primitives: ElementType;
+        import std.traits: isDynamicArray;
+
+        static if (isDynamicArray!T) {
+            alias E = ElementType!T;
+
+            const length = cast(Length) value.length;
+            assert(length == value.length);
+            grain(length);
+
+            const oldLength = _bytes.length;
+            const dataSize = value.length * E.sizeof;
+            _bytes.length += dataSize;
+            if (dataSize)
+                memcpy(_bytes.ptr + oldLength, value.ptr, dataSize);
+        } else {
+            const oldLength = _bytes.length;
+            _bytes.length += T.sizeof;
+            memcpy(_bytes.ptr + oldLength, &value, value.sizeof);
+        }
     }
 }
 
 
-public T decerealise(T)(in ubyte[] bytes) {
-    import core.stdc.string: memcpy;
-    import std.range.primitives: ElementType;
-    import std.traits: isDynamicArray;
+public struct Decerealiser {
+    private const(ubyte)[] _bytes;
 
-    static if (isDynamicArray!T) {
-        alias E = ElementType!T;
-
-        assert(bytes.length >= size_t.sizeof);
-        size_t length;
-        memcpy(&length, bytes.ptr, length.sizeof);
-        assert(bytes.length == length.sizeof + length * E.sizeof);
-
-        auto value = new E[length];
-        if (length)
-            memcpy(value.ptr, bytes.ptr + length.sizeof, length * E.sizeof);
-        return value;
-    } else {
-        assert(bytes.length == T.sizeof);
-        T value;
-        memcpy(&value, bytes.ptr, value.sizeof);
-        return value;
+    public this(in ubyte[] bytes) @safe pure nothrow {
+        _bytes = bytes;
     }
+
+    public const(ubyte)[] bytes() const @property @safe pure nothrow {
+        return _bytes;
+    }
+
+    public void grain(Length = size_t, T)(ref T value) @trusted {
+        import core.stdc.string: memcpy;
+        import std.range.primitives: ElementType;
+        import std.traits: isDynamicArray;
+
+        static if (isDynamicArray!T) {
+            alias E = ElementType!T;
+
+            Length length;
+            grain(length);
+
+            const dataSize = length * E.sizeof;
+            assert(_bytes.length >= dataSize);
+            value = new E[length];
+            if (dataSize)
+                memcpy(value.ptr, _bytes.ptr, dataSize);
+            _bytes = _bytes[dataSize .. $];
+        } else {
+            assert(_bytes.length >= T.sizeof);
+            memcpy(&value, _bytes.ptr, value.sizeof);
+            _bytes = _bytes[T.sizeof .. $];
+        }
+    }
+}
+
+
+public ubyte[] cerealise(T)(auto ref T value) {
+    auto cerealiser = Cerealiser();
+    cerealiser.grain(value);
+    return cerealiser.bytes.dup;
+}
+
+
+public T decerealise(T)(in ubyte[] bytes) {
+    auto cerealiser = Decerealiser(bytes);
+    T value;
+    cerealiser.grain(value);
+    assert(cerealiser.bytes.length == 0);
+    return value;
 }

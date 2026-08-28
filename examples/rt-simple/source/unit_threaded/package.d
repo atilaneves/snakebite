@@ -3,7 +3,7 @@ module unit_threaded;
 private:
 
 
-public void check(alias F)() {
+public void check(alias F)() @safe {
     import std.traits: Parameters, ReturnType;
 
     static assert(Parameters!F.length == 1);
@@ -16,7 +16,12 @@ public void check(alias F)() {
 }
 
 
-private T randomValue(T)() {
+public void shouldEqual(T, U)(in T actual, in U expected) @safe {
+    assert(actual == expected);
+}
+
+
+private T randomValue(T)() @safe {
     import std.range.primitives: ElementType;
     import std.traits: isDynamicArray, isFloatingPoint, isIntegral, isSomeChar;
 
@@ -40,7 +45,7 @@ private T randomValue(T)() {
 }
 
 
-private ulong randomBits() {
+private ulong randomBits() @safe {
     static ulong state = 0x4d595df4d0f33173;
     state = state * 6_364_136_223_846_793_005UL + 1;
     return state;
