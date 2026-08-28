@@ -103,3 +103,11 @@ unittest {
         foreach (b; buf) sum += b;
     assert(sum == 5UL * 4_498_500UL);
 }
+
+// Allocation-heavy: 1.5k appends through druntime.
+@("kernel.append") unittest {
+    ubyte[] bytes;
+    foreach (i; 0 .. 1_500) bytes ~= cast(ubyte) i;
+    assert(bytes.length == 1_500);
+    assert(bytes[1_499] == cast(ubyte) 1_499);
+}

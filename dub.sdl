@@ -34,6 +34,7 @@ configuration "bench" {
     targetType "executable"
     targetName "bench"
     targetPath "bin"
+    lflags "--export-dynamic" platform="linux"
 
     mainSourceFile "bench/main.d"
     sourcePaths "bench"
