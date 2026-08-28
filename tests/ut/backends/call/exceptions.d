@@ -73,6 +73,80 @@ static foreach (backend; Matrix!(
     }
 }
 
+@("tryCatchThrowable.passingTrySkipsCatch.Interpreter")
+@Tags("Interpreter")
+unittest {
+    1.shouldBeRetOf!(
+        Interpreter,
+        q{
+            int result() {
+                int value;
+                try {
+                    value = 1;
+                } catch(Throwable caught) {
+                    value = 2;
+                }
+                return value;
+            }
+        },
+        "result",
+    );
+}
+
+@("tryCatchThrowable.catchesGuestAssertion.Interpreter")
+@Tags("Interpreter")
+unittest {
+    2.shouldBeRetOf!(
+        Interpreter,
+        q{
+            bool fail() {
+                return false;
+            }
+
+            int result() {
+                int value;
+                try {
+                    assert(fail());
+                    value = 1;
+                } catch(Throwable caught) {
+                    value = 2;
+                }
+                return value;
+            }
+        },
+        "result",
+    );
+}
+
+@("tryCatchThrowable.doesNotCatchInterpreterFailure.Interpreter")
+@Tags("Interpreter")
+unittest {
+    void run() {
+        2.shouldBeRetOf!(
+            Interpreter,
+            q{
+                int result() {
+                    try {
+                        switch (1) {
+                            case 1:
+                                break;
+
+                            default:
+                                break;
+                        }
+                    } catch(Throwable) {
+                        return 1;
+                    }
+                    return 2;
+                }
+            },
+            "result",
+        );
+    }
+
+    run.shouldThrow;
+}
+
 // `AssertError` derives from `Error`, not from `Exception`, so a
 // `catch(Exception)` never matches a failing assertion: the error keeps
 // unwinding to the `catch(AssertError)` outside it.

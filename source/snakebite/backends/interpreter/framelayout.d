@@ -194,8 +194,9 @@ import dmd.visitor: Visitor;
 extern(C++) private final class LocalsCollector: Visitor {
     import dmd.expression: Expression;
     import dmd.statement:
-        CompoundStatement, ExpStatement, ForStatement, IfStatement,
-        ImportStatement, ReturnStatement, ScopeStatement, Statement;
+        Catch, CompoundStatement, ExpStatement, ForStatement, IfStatement,
+        ImportStatement, ReturnStatement, ScopeStatement, Statement,
+        TryCatchStatement;
 
     alias visit = Visitor.visit;
 
@@ -248,6 +249,25 @@ extern(C++) private final class LocalsCollector: Visitor {
 
         if (statement.elsebody !is null)
             statement.elsebody.accept(this);
+    }
+
+    override void visit(TryCatchStatement statement) {
+        if (statement._body !is null)
+            statement._body.accept(this);
+
+        foreach (catch_; *statement.catches) {
+            if (catch_.var !is null)
+                collectCatchVariable(catch_);
+
+            if (catch_.handler !is null)
+                catch_.handler.accept(this);
+        }
+    }
+
+    private void collectCatchVariable(Catch catch_) {
+        const slot = _layout.reserveSlot(catch_.var.type);
+        _layout._slotOf[catch_.var] =
+            FrameLayout.VariableSlot(slot.offset, false);
     }
 
     override void visit(ExpStatement statement) {

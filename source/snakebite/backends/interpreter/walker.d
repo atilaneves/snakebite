@@ -45,6 +45,18 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     }
 }
 
+// A guest throw must remain distinguishable from a refusal to interpret a
+// guest construct. The runner catches this wrapper, while interpreter
+// failures continue through the host unchanged.
+private final class GuestException: Exception {
+    public Throwable guest;
+
+    public this(Throwable guest) {
+        super(guest.msg);
+        this.guest = guest;
+    }
+}
+
 import dmd.visitor: Visitor;
 
 // The evaluation context: executes statements and evaluates expressions,
@@ -73,9 +85,9 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
     import dmd.statement:
-        CompoundStatement, ContinueStatement, ExpStatement, ForStatement,
-        IfStatement, ImportStatement, ReturnStatement, ScopeStatement,
-        Statement;
+        Catch, CompoundStatement, ContinueStatement, ExpStatement,
+        ForStatement, IfStatement, ImportStatement, ReturnStatement,
+        ScopeStatement, Statement, TryCatchStatement;
     import dmd.tokens: EXP;
 
     alias visit = Visitor.visit;
@@ -456,6 +468,39 @@ extern(C++) private final class Evaluator: Visitor {
     // arrives with its callee resolved. Nothing is left to execute, so
     // this runs no code rather than refusing the statement.
     override void visit(ImportStatement statement) {
+    }
+
+    override void visit(TryCatchStatement statement) {
+        try {
+            statement._body.accept(this);
+        } catch (GuestException exception) {
+            foreach (catch_; *statement.catches) {
+                if (!matchesThrowable(catch_))
+                    continue;
+
+                bindCatchVariable(catch_, exception.guest);
+                catch_.handler.accept(this);
+                return;
+            }
+
+            throw exception;
+        }
+    }
+
+    private bool matchesThrowable(Catch catch_) {
+        auto typeClass = catch_.type.isTypeClass;
+        return typeClass !is null
+            && typeClass.sym.ident.toString == "Throwable";
+    }
+
+    private void bindCatchVariable(Catch catch_, Throwable guest) {
+        if (catch_.var is null)
+            return;
+
+        import snakebite.nativelayout: storeIntegral;
+
+        auto slot = _frameBase + _layout.offsetOf(catch_.var);
+        storeIntegral(slot, cast(size_t) cast(void*) guest, size_t.sizeof);
     }
 
     override void visit(CompoundStatement statement) {
@@ -1663,14 +1708,18 @@ extern(C++) private final class Evaluator: Visitor {
         if (truthOf(expression.e1))
             return;
 
-        // What D does here is throw an `AssertError` the guest can catch,
-        // and the interpreter has no guest exceptions yet. Reporting the
-        // failure to the host is the honest half of that: the assertion
-        // is not passed over, and no guest-visible exception is faked.
-        throw new Exception(
+        import core.exception: AssertError;
+
+        // What D does here is throw an `AssertError` the guest can catch.
+        // Keep it inside an interpreter-owned wrapper so a guest catch does
+        // not also catch the interpreter's own unsupported-node failures.
+        auto guest = new AssertError(
             text("interpreter: assertion failed: `", expression.toString,
                 "`"),
+            __FILE__,
+            __LINE__,
         );
+        throw new GuestException(guest);
     }
 
     override void visit(ArrayLengthExp expression) {
