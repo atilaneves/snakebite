@@ -42,3 +42,29 @@ int tak(int x, int y, int z) {
 unittest {
     assert(tak(15, 10, 5) == 15);
 }
+
+long binarySearch(const(long)[] a, long x) {
+    long lo = 0;
+    long hi = a.length;
+
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+
+        if (a[mid] == x)
+            return mid;
+
+        if (a[mid] < x)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+
+    return -1;
+}
+
+unittest {
+    const long[] data = [1, 4, 7, 10, 15, 21, 28, 36, 45, 55, 66, 78, 91];
+    assert(binarySearch(data, 78) == 11);
+    assert(binarySearch(data, 15) == 4);
+    assert(binarySearch(data, 42) == -1);
+}

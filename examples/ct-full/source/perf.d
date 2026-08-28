@@ -23,36 +23,6 @@ unittest {
     assert(fibonacci(20) == 6765);
 }
 
-// Loop-heavy over a buffer: 15k element reads and adds, no allocation.
-@("kernel.loop") unittest {
-    auto buf = new uint[](3_000);
-    foreach (i, ref b; buf) b = cast(uint) i;
-    ulong sum;
-    foreach (_; 0 .. 5)
-        foreach (b; buf) sum += b;
-    assert(sum == 5UL * 4_498_500UL);
-}
-
-struct KernelPoint { int x; int y; }
-
-// Struct copies through a slice: 6k element struct stores and loads.
-@("kernel.structs") unittest {
-    auto pts = new KernelPoint[](600);
-    foreach (i, ref p; pts) p = KernelPoint(cast(int) i, cast(int) -i);
-    long acc;
-    foreach (_; 0 .. 10)
-        foreach (p; pts) { const q = p; acc += q.x + q.y; }
-    assert(acc == 0);
-}
-
-// Allocation-heavy: 1.5k appends through druntime.
-@("kernel.append") unittest {
-    ubyte[] bytes;
-    foreach (i; 0 .. 1_500) bytes ~= cast(ubyte) i;
-    assert(bytes.length == 1_500);
-    assert(bytes[1_499] == cast(ubyte) 1_499);
-}
-
 int tak(int x, int y, int z) {
     if (x <= y)
         return y;
@@ -119,4 +89,34 @@ unittest {
     assert(countPrimes(100) == 25);
     assert(countPrimes(1_000) == 168);
     assert(countPrimes(10_000) == 1_229);
+}
+
+// Loop-heavy over a buffer: 15k element reads and adds, no allocation.
+@("kernel.loop") unittest {
+    auto buf = new uint[](3_000);
+    foreach (i, ref b; buf) b = cast(uint) i;
+    ulong sum;
+    foreach (_; 0 .. 5)
+        foreach (b; buf) sum += b;
+    assert(sum == 5UL * 4_498_500UL);
+}
+
+struct KernelPoint { int x; int y; }
+
+// Struct copies through a slice: 6k element struct stores and loads.
+@("kernel.structs") unittest {
+    auto pts = new KernelPoint[](600);
+    foreach (i, ref p; pts) p = KernelPoint(cast(int) i, cast(int) -i);
+    long acc;
+    foreach (_; 0 .. 10)
+        foreach (p; pts) { const q = p; acc += q.x + q.y; }
+    assert(acc == 0);
+}
+
+// Allocation-heavy: 1.5k appends through druntime.
+@("kernel.append") unittest {
+    ubyte[] bytes;
+    foreach (i; 0 .. 1_500) bytes ~= cast(ubyte) i;
+    assert(bytes.length == 1_500);
+    assert(bytes[1_499] == cast(ubyte) 1_499);
 }
