@@ -25,4 +25,7 @@ if [[ ! -f "$builddir/build.ninja" ]]; then
 fi
 
 ninja -C "$builddir" bench
+printf "\n"
+echo "----------------------------------------"
 bin/bench "$@"
+printf "\n"
