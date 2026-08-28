@@ -67,17 +67,7 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.astenums:
         LINK, Tarray, Tbool, Tnoreturn, Tpointer, Tsarray, Tvoid;
     import dmd.declaration: Declaration, VarDeclaration;
-    import dmd.expression:
-        AddAssignExp, AddExp, AddrExp, ArrayLengthExp, ArrayLiteralExp,
-        AndAssignExp, AndExp, AssertExp, AssignExp, BinAssignExp, BinExp,
-        CallExp, CastExp, CatAssignExp, CmpExp, ComExp, CommaExp, CondExp,
-        DeclarationExp, DivAssignExp, DivExp, DotVarExp, EqualExp,
-        Expression, IdentityExp, IndexExp, IntegerExp, LogicalExp,
-        MinAssignExp, MinExp, ModAssignExp, ModExp, MulAssignExp, MulExp,
-        NegExp, NotExp, NullExp,
-        OrAssignExp, OrExp, PostExp, PtrExp, RealExp, ShlAssignExp, ShlExp,
-        ShrAssignExp, ShrExp, SliceExp, StringExp, SymOffExp, TypeidExp,
-        UnaExp, UshrAssignExp, UshrExp, VarExp, XorAssignExp, XorExp;
+    import dmd.expression;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
@@ -101,7 +91,7 @@ extern(C++) private final class Evaluator: Visitor {
     // program, not one per call, so a frame - popped on return - cannot
     // hold it. This outlives every call on this evaluator, which is the
     // guest state `Backend.call` promises persists across calls.
-    private Cache!(VarDeclaration, ubyte[]) _statics;
+    private Cache!(VarDeclaration, void[]) _statics;
     // dmd gives every `arr[... $ ...]` a `lengthVar` declaration for its
     // `$`, which no statement declares and which therefore has no frame
     // slot - and needs none, since the length is a value `visit(IndexExp)`
@@ -609,7 +599,7 @@ extern(C++) private final class Evaluator: Visitor {
         auto type = expression.type;
         const facts = factsOf(type);
         if (facts.isIntegral)
-            return integralValueOf(expression, facts) != 0;
+            return asIntegral(expression, facts) != 0;
 
         // The pointer alone decides. dmd 2.112 and ldc2 1.42 disagree on
         // an array with a length but a null pointer - dmd calls it true,
@@ -625,7 +615,7 @@ extern(C++) private final class Evaluator: Visitor {
         // lowering's own chain, asks this of the block address it was
         // handed to decide whether to consult the GC about it at all.
         if (type.ty == Tpointer)
-            return pointerValueOf(expression) != 0;
+            return asPointer(expression) !is null;
 
         throw new Exception(
             text("interpreter cannot evaluate `", expression.toString,
@@ -674,11 +664,11 @@ extern(C++) private final class Evaluator: Visitor {
 
     // Evaluates `expression` and hands back its value, for a caller that
     // needs the value itself rather than a destination to leave it at.
-    private long integralValueOf(Expression expression) {
-        return integralValueOf(expression, factsOf(expression.type));
+    private long asIntegral(Expression expression) {
+        return asIntegral(expression, factsOf(expression.type));
     }
 
-    private long integralValueOf(Expression expression, in TypeFacts facts) {
+    private long asIntegral(Expression expression, in TypeFacts facts) {
         import snakebite.nativelayout: loadIntegral;
         import std.conv: text;
 
@@ -698,13 +688,12 @@ extern(C++) private final class Evaluator: Visitor {
         return loadIntegral(buffer.ptr, facts.size, !facts.isUnsigned);
     }
 
-    // As `integralValueOf`, for a pointer: `Type.isIntegral` is false for
-    // `Tpointer` (a pointer is not an arithmetic type), so `integralValueOf`
+    // As `asIntegral`, for a pointer: `Type.isIntegral` is false for
+    // `Tpointer` (a pointer is not an arithmetic type), so `asIntegral`
     // itself refuses one. A dereference needs the address a pointer
     // expression evaluates to, not an integral value, hence the separate
     // path - though the bytes are read the same way either type is stored.
-    private size_t pointerValueOf(Expression expression) {
-        import snakebite.nativelayout: loadIntegral;
+    private void* asPointer(Expression expression) {
         import std.conv: text;
 
         auto type = expression.type;
@@ -721,7 +710,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         evaluate(expression, type, facts, buffer.ptr);
 
-        return cast(size_t) loadIntegral(buffer.ptr, facts.size, false);
+        return *cast(void**) buffer.ptr;
     }
 
     override void visit(Expression expression) {
@@ -821,7 +810,7 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         if (auto existing = variable in _statics)
-            return existing.ptr;
+            return cast(ubyte*) existing.ptr;
 
         // An `extern` variable is defined elsewhere - in a library the
         // host already links, or in another object file. Storage made
@@ -853,30 +842,9 @@ extern(C++) private final class Evaluator: Visitor {
         // nothing in the GC's interface promises a block aligned for the
         // type that lands in it. Alignments are powers of two, so the
         // padding is the address masked into the block.
-        //
-        // `GC.malloc` rather than `new ubyte[]`: `ubyte`'s own `TypeInfo`
-        // has no pointers, so `new ubyte[]` always marks the block
-        // `NO_SCAN`, regardless of `variable`'s actual type. A static
-        // holding a guest array or pointer stores that pointer in these
-        // bytes, invisible to the GC unless the block itself is scanned
-        // - `NO_SCAN` here is the same hazard `_statics` values must not
-        // have. `variable.type.hasPointers` decides the attribute the
-        // way dmd's own codegen would, rather than always scanning: a
-        // block dmd's `GC.query` says is `NO_SCAN` (this one, if
-        // `variable`'s type has no pointers) is also what druntime's own
-        // `__typeAttrs` copies onto a reallocation of storage this slot
-        // points to, on the `~=` path this backend interprets - an
-        // always-scanned block here would make that copy answer "has
-        // pointers" for a type that does not.
-        import core.memory: GC;
-        import dmd.typesem: hasPointers;
-
         const facts = factsOf(variable.type);
         const blockSize = facts.size + facts.alignment - 1;
-        const attrs = variable.type.hasPointers
-            ? 0 : GC.BlkAttr.NO_SCAN;
-        auto block =
-            (cast(ubyte*) GC.malloc(blockSize, attrs))[0 .. blockSize];
+        auto block = new void[](blockSize);
         const start = -cast(size_t) block.ptr & (facts.alignment - 1);
         auto slot = block[start .. start + facts.size];
 
@@ -886,7 +854,7 @@ extern(C++) private final class Evaluator: Visitor {
         evaluate(value, variable.type, facts, slot.ptr);
         _statics[variable] = slot;
 
-        return slot.ptr;
+        return cast(ubyte*) slot.ptr;
     }
 
     // Runs a local's initializer into the frame slot `layoutOf` already
@@ -988,7 +956,7 @@ extern(C++) private final class Evaluator: Visitor {
             return slotOf(variable);
 
         if (auto deref = target.isPtrExp)
-            return cast(void*) pointerValueOf(deref.e1);
+            return asPointer(deref.e1);
 
         // Only the branch taken is ever an lvalue this needs the address
         // of - the other one, like an `if`'s untaken branch, never runs,
@@ -1112,7 +1080,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto target = slotOf(variable);
         const stepFacts = factsOf(expression.e2.type);
-        const step = integralValueOf(expression.e2, stepFacts);
+        const step = asIntegral(expression.e2, stepFacts);
         const current =
             loadIntegral(target, targetFacts.size, !targetFacts.isUnsigned);
         const result =
@@ -1140,7 +1108,7 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         auto target = slotOf(variable);
-        const step = integralValueOf(expression.e2);
+        const step = asIntegral(expression.e2);
         const current = loadIntegral(target, facts.size, !facts.isUnsigned);
         const changed = expression.op == EXP.plusPlus
             ? current + step
@@ -1180,8 +1148,8 @@ extern(C++) private final class Evaluator: Visitor {
 
         const aFacts = factsOf(expression.e1.type);
         const bFacts = factsOf(expression.e2.type);
-        const a = integralValueOf(expression.e1, aFacts);
-        const b = integralValueOf(expression.e2, bFacts);
+        const a = asIntegral(expression.e1, aFacts);
+        const b = asIntegral(expression.e2, bFacts);
         const answer = sharedSignedness(aFacts, bFacts, expression)
             ? mixin("cast(ulong) a " ~ op ~ " cast(ulong) b")
             : mixin("a " ~ op ~ " b");
@@ -1192,10 +1160,10 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(LogicalExp expression) {
         import snakebite.nativelayout: storeIntegral;
 
-        const left = integralValueOf(expression.e1) != 0;
+        const left = asIntegral(expression.e1) != 0;
         const answer = expression.op == EXP.andAnd
-            ? left && integralValueOf(expression.e2) != 0
-            : left || integralValueOf(expression.e2) != 0;
+            ? left && asIntegral(expression.e2) != 0
+            : left || asIntegral(expression.e2) != 0;
 
         storeIntegral(_place, answer ? 1 : 0, _facts.size);
     }
@@ -1213,15 +1181,15 @@ extern(C++) private final class Evaluator: Visitor {
                     "` expression: `", expression.toString, "`"),
             );
 
-        const a = integralValueOf(expression.e1);
-        const b = integralValueOf(expression.e2);
+        const a = asIntegral(expression.e1);
+        const b = asIntegral(expression.e2);
         const answer = expression.op == EXP.equal ? a == b : a != b;
 
         storeIntegral(_place, answer ? 1 : 0, _facts.size);
     }
 
     // `is`/`!is`. Over most types it means the same thing `==`/`!=` does,
-    // but a pointer is not `isIntegral`, so `integralValueOf` cannot read
+    // but a pointer is not `isIntegral`, so `asIntegral` cannot read
     // one - `ptr is null`, on the `~=` lowering's own chain, needs the
     // pointer's own bits read instead.
     override void visit(IdentityExp expression) {
@@ -1237,11 +1205,10 @@ extern(C++) private final class Evaluator: Visitor {
         auto type = expression.e1.type;
         bool equal;
         if (type.ty == Tpointer)
-            equal =
-                pointerValueOf(expression.e1) == pointerValueOf(expression.e2);
+            equal = asPointer(expression.e1) == asPointer(expression.e2);
         else if (factsOf(type).isIntegral)
             equal =
-                integralValueOf(expression.e1) == integralValueOf(expression.e2);
+                asIntegral(expression.e1) == asIntegral(expression.e2);
         else
             throw new Exception(
                 text("interpreter cannot evaluate `", expression.toString,
@@ -1325,8 +1292,8 @@ extern(C++) private final class Evaluator: Visitor {
 
         const aFacts = factsOf(expression.e1.type);
         const bFacts = factsOf(expression.e2.type);
-        const a = integralValueOf(expression.e1, aFacts);
-        const b = integralValueOf(expression.e2, bFacts);
+        const a = asIntegral(expression.e1, aFacts);
+        const b = asIntegral(expression.e2, bFacts);
 
         storeIntegral(
             _place, combine!op(a, b, aFacts, bFacts, expression), _facts.size);
@@ -1344,12 +1311,12 @@ extern(C++) private final class Evaluator: Visitor {
                     "`: its type is `", expression.type.toString, "`"),
             );
 
-        const a = integralValueOf(expression.e1);
+        const a = asIntegral(expression.e1);
 
         storeIntegral(_place, cast(ulong) mixin(op ~ "a"), _facts.size);
     }
 
-    // `integralValueOf` already sign- or zero-extends the operand to 64
+    // `asIntegral` already sign- or zero-extends the operand to 64
     // bits per its own signedness, so storing the destination's low bytes
     // of that value is correct whichever way the width changes - the same
     // widen-then-truncate the `combine`d binary operators already rely on,
@@ -1439,7 +1406,7 @@ extern(C++) private final class Evaluator: Visitor {
         // truncation would store, and a truncation can also store a value
         // like `2` in a `bool` slot that no compiled D ever produces.
         if (sourceFacts.isIntegral && _type.ty == Tbool) {
-            const value = integralValueOf(expression.e1, sourceFacts);
+            const value = asIntegral(expression.e1, sourceFacts);
             storeIntegral(_place, value != 0, _facts.size);
             return;
         }
@@ -1447,7 +1414,7 @@ extern(C++) private final class Evaluator: Visitor {
         if (sourceFacts.isIntegral && _facts.isIntegral) {
             storeIntegral(
                 _place,
-                integralValueOf(expression.e1, sourceFacts),
+                asIntegral(expression.e1, sourceFacts),
                 _facts.size,
             );
             return;
@@ -1494,12 +1461,12 @@ extern(C++) private final class Evaluator: Visitor {
     // `*p`: the address `p` evaluates to is not this expression's own
     // destination - `_place`/`_facts` here are the pointee's, `int` for an
     // `int*` - so the pointer itself is read into a scratch register first
-    // (`pointerValueOf`), the same two-step `addressOf` uses to find
+    // (`asPointer`), the same two-step `addressOf` uses to find
     // where `*p = ...` writes.
     override void visit(PtrExp expression) {
         import core.stdc.string: memcpy;
 
-        memcpy(_place, cast(void*) pointerValueOf(expression.e1), _facts.size);
+        memcpy(_place, asPointer(expression.e1), _facts.size);
     }
 
     // `info.base`: a struct field read. `__typeAttrs`, on the `~=`
@@ -1680,7 +1647,7 @@ extern(C++) private final class Evaluator: Visitor {
     private long indexOf(IndexExp expression, in size_t length) {
         auto lengthVar = expression.lengthVar;
         if (lengthVar is null)
-            return integralValueOf(expression.e2);
+            return asIntegral(expression.e2);
 
         // An index nested in this one - or one a guest call from here
         // reaches - binds its own `$`, so this one's is put back rather
@@ -1690,7 +1657,7 @@ extern(C++) private final class Evaluator: Visitor {
         scope(exit) _dollar = outer;
         _dollar = Dollar(lengthVar, length);
 
-        return integralValueOf(expression.e2);
+        return asIntegral(expression.e2);
     }
 
     // `ptr[0 .. newlength]`: a dynamic array built from a pointer and a
@@ -1712,7 +1679,7 @@ extern(C++) private final class Evaluator: Visitor {
         size_t sourceLength;
         bool knownLength;
         if (sourceType.ty == Tpointer) {
-            base = cast(ubyte*) pointerValueOf(array);
+            base = cast(ubyte*) asPointer(array);
         } else if (sourceType.ty == Tarray) {
             const value = evaluateArray(array, factsOf(sourceType));
             base = cast(ubyte*) value.elements;
@@ -1739,9 +1706,9 @@ extern(C++) private final class Evaluator: Visitor {
             _dollar = Dollar(lengthVar, sourceLength);
         }
 
-        const lo = expression.lwr is null ? 0 : integralValueOf(expression.lwr);
+        const lo = expression.lwr is null ? 0 : asIntegral(expression.lwr);
         const hi = expression.upr is null
-            ? cast(long) sourceLength : integralValueOf(expression.upr);
+            ? cast(long) sourceLength : asIntegral(expression.upr);
 
         if (lo < 0 || hi < lo
                 || (knownLength && cast(size_t) hi > sourceLength))
@@ -1810,28 +1777,13 @@ extern(C++) private final class Evaluator: Visitor {
 
         ubyte* elements = null;
         if (length > 0) {
-            // `GC.malloc`, not `new ubyte[]`: see the matching comment in
-            // `staticSlotOf`. This storage outlives the frame the same
-            // way a static's does, and an element type with its own
-            // pointers (a `string[]` literal, say) needs this block
-            // scanned for the GC to see them. `elementType.hasPointers`
-            // picks the attribute the way `elementType`'s own `TypeInfo`
-            // would, so a later reallocation of this same storage (the
-            // `~=` lowering's `GC.malloc`, guided by `__typeAttrs`
-            // copying the attributes of the block it replaces) sees the
-            // same answer a real compiled append would.
-            import core.memory: GC;
-            import dmd.typesem: hasPointers;
-
             const blockSize = elementFacts.size * length;
-            const attrs = elementType.hasPointers ? 0 : GC.BlkAttr.NO_SCAN;
-            auto block =
-                (cast(ubyte*) GC.malloc(blockSize, attrs))[0 .. blockSize];
+            auto block = new void[](blockSize);
             foreach (i; 0 .. length)
                 evaluate(
                     elementAt(expression, i), elementType, elementFacts,
-                    block.ptr + i * elementFacts.size);
-            elements = block.ptr;
+                    cast(ubyte*) block.ptr + i * elementFacts.size);
+            elements = cast(ubyte*) block.ptr;
         }
 
         auto bytes = cast(ubyte*) _place;
