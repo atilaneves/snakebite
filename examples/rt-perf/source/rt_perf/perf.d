@@ -68,3 +68,38 @@ unittest {
     assert(binarySearch(data, 15) == 4);
     assert(binarySearch(data, 42) == -1);
 }
+
+int countPrimes(int n) {
+    auto composite = new bool[n + 1];
+    int count;
+
+    for (int p = 2; p <= n; ++p) {
+        if (composite[p])
+            continue;
+
+        ++count;
+
+        if (p <= n / p) {
+            for (int i = p * p; i <= n; i += p)
+                composite[i] = true;
+        }
+    }
+
+    return count;
+}
+
+unittest {
+    assert(countPrimes(100) == 25);
+    assert(countPrimes(1_000) == 168);
+    assert(countPrimes(10_000) == 1_229);
+}
+
+// Loop-heavy over a buffer: 15k element reads and adds, no allocation.
+@("kernel.loop") unittest {
+    auto buf = new uint[](3_000);
+    foreach (i, ref b; buf) b = cast(uint) i;
+    ulong sum;
+    foreach (_; 0 .. 5)
+        foreach (b; buf) sum += b;
+    assert(sum == 5UL * 4_498_500UL);
+}
