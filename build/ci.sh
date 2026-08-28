@@ -8,9 +8,5 @@ if [[ ! -f build.ninja ]]; then
     dub run reggae --compiler="${DC:-ldc}" -- -b ninja
 fi
 
-ninja bin/ut
-bin/ut
-
-for benchmark in ct-easy ct-full rt-bottom-up rt; do
-    build/bench.sh "$benchmark" -w 0 -r 1
-done
+ninja bin/ut && bin/ut
+build/benches.sh
