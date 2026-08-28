@@ -14,7 +14,7 @@ command -v "$compiler" > /dev/null
 # changed gets rebuilt. It uses its own build directory, separate from
 # bin/ut's build.ninja, since the two are generated from different dub
 # configurations.
-builddir=.reggae-bench
+builddir=bin
 if [[ ! -f "$builddir/build.ninja" ]]; then
     mkdir -p "$builddir"
     # Absolute paths: reggae bakes these arguments into the generated
@@ -25,7 +25,4 @@ if [[ ! -f "$builddir/build.ninja" ]]; then
 fi
 
 ninja -C "$builddir" bench
-mkdir -p bin
-cp "$builddir/bench" bin/bench
-
-exec bin/bench "$@"
+bin/bench "$@"
