@@ -1,4 +1,4 @@
-module rt_bottom_up.lib;
+module rt_perf.lib;
 
 unittest {
     import core.stdc.stdlib: abs;

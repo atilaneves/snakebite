@@ -1,4 +1,4 @@
-module rt_bottom_up.perf;
+module rt_perf.perf;
 
 
 uint factorial(uint i) {
