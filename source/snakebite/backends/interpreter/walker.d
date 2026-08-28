@@ -882,9 +882,8 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(DeclarationExp expression) {
         import std.conv: text;
 
-        if (expression.declaration.isStructDeclaration !is null)
-            return;
-
+        // Semantic analysis has already established a function-local
+        // struct's type, so declaring it needs no runtime action. Likewise,
         // `alias Unqual_T = Unqual!T;` binds a name to a type, not
         // storage, and `enum mask(ulong lo) = ...;` (an eponymous
         // template, folded to its value at each `mask!x` use rather than
@@ -898,7 +897,8 @@ extern(C++) private final class Evaluator: Visitor {
         // both. Any future backend that walks a body's AST itself,
         // rather than handing it to dmd's engine, inherits the same
         // need.
-        if (expression.declaration.isAliasDeclaration !is null
+        if (expression.declaration.isStructDeclaration !is null
+                || expression.declaration.isAliasDeclaration !is null
                 || expression.declaration.isTemplateDeclaration !is null)
             return;
 
