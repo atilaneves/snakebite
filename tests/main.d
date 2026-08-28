@@ -35,6 +35,7 @@ int main(string[] args) {
         "ut.backends.eval.expressions.arithmetic",
         "ut.backends.interpreter.cost",
         "ut.backends.interpreter.framelayout",
+        "ut.backends.program",
         "ut.ffi.plan",
         "ut.ffi.cost",
         "ut.framestack",
