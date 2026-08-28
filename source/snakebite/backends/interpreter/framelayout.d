@@ -37,11 +37,9 @@ package struct FrameLayout {
 
     // Keyed by declaration instead of position: `visit(VarExp)` resolves
     // a parameter or local read from a `VarDeclaration` it found by name
-    // lookup, not by position, so it still needs a hash lookup. `isRef`
-    // is only ever `true` for a `ref` parameter, never for a local - a
-    // local's own slot never indirects. Reached only through `offsetOf`
-    // and `isRef` below - never read or written directly outside this
-    // module.
+    // lookup, not by position, so it still needs a hash lookup. A `ref`
+    // parameter or local occupies a pointer slot, which `Evaluator.slotOf`
+    // reads through. Reached only through `offsetOf` and `isRef` below.
     private struct VariableSlot {
         size_t offset;
         bool isRef;
@@ -157,14 +155,12 @@ package struct FrameLayout {
         return slot.offset;
     }
 
-    // Whether `variable` is a `ref` parameter: its own frame slot holds
-    // the address of the argument's storage rather than the storage
+    // Whether `variable` is a `ref` parameter or local: its own frame slot
+    // holds the address of the referenced storage rather than the storage
     // itself, so `Evaluator.slotOf` - the one place every read, write and
-    // address-of a variable goes through - reads through it once more
-    // before handing back an address any of them can use directly.
-    // `false` for anything this layout never marked as one, which covers
-    // every local as well as a variable this layout never reserved a slot
-    // for at all.
+    // address-of a variable goes through - reads through it once more before
+    // handing back an address any of them can use directly. `false` for a
+    // value variable or one this layout never reserved a slot for.
     package bool isRef(VarDeclaration variable) const {
         auto slot = variable in _slotOf;
         return slot !is null && slot.isRef;
@@ -272,6 +268,7 @@ extern(C++) private final class LocalsCollector: Visitor {
     // whatever `Evaluator` will actually run.
     private void collectDeclarations(Expression expression) {
         import dmd.expression: CatAssignExp;
+        import snakebite.nativelayout: TypeFacts;
 
         if (auto declarationExp = expression.isDeclarationExp) {
             auto variable = declarationExp.declaration.isVarDeclaration;
@@ -287,9 +284,15 @@ extern(C++) private final class LocalsCollector: Visitor {
             if (variable.isDataseg)
                 return;
 
+            import dmd.astenums: STC;
+
+            const isRef = (variable.storage_class & STC.ref_) != 0;
+            const slot = isRef
+                ? _layout.reserveSlot(
+                    TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
+                : _layout.reserveSlot(variable.type);
             _layout._slotOf[variable] =
-                FrameLayout.VariableSlot(
-                    _layout.reserveSlot(variable.type).offset, false);
+                FrameLayout.VariableSlot(slot.offset, isRef);
             return;
         }
 

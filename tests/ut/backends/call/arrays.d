@@ -331,6 +331,48 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("arrays.new.runtimeLength.initialiseAndWrite." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(
+            backend,
+            q{
+                int useNewArray() {
+                    size_t n = 3;
+                    bool[] values = new bool[n];
+                    const initiallyFalse = !values[0] && !values[2];
+                    values[1] = true;
+                    return cast(int) values.length + initiallyFalse * 3
+                        + values[1];
+                }
+            },
+            "useNewArray",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.new.uint.initialiseAndWrite." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        uint(3_008).shouldBeRetOf!(
+            backend,
+            q{
+                uint useNewArray() {
+                    size_t n = 3_000;
+                    uint[] values = new uint[n];
+                    const initiallyZero = values[2_999] == 0;
+                    values[17] = 7;
+                    return cast(uint) values.length + initiallyZero
+                        + values[17];
+                }
+            },
+            "useNewArray",
+        );
+    }
+}
+
 // A literal assigned to a `static` slice is built once, on whichever call
 // first reaches it - its elements must still be readable on a later call
 // to the same function, after the frame that built them has long since

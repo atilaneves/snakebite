@@ -23,6 +23,55 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("loop.forContinueAppliesToNearestLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        366.shouldBeRetOf!(
+            backend,
+            q{
+                int sum() {
+                    int total;
+                    for (int i = 0; i < 3; ++i) {
+                        for (int j = 0; j < 3; ++j) {
+                            if (j == 1)
+                                continue;
+                            total += i * 10 + j;
+                        }
+                        total += 100;
+                    }
+                    return total;
+                }
+            },
+            "sum",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("loop.foreachRefInitialisesArrayForNestedReads." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        20UL.shouldBeRetOf!(
+            backend,
+            q{
+                ulong sum() {
+                    auto values = new uint[](4);
+                    foreach (i, ref value; values)
+                        value = cast(uint) (i + 1);
+
+                    ulong total;
+                    foreach (_; 0 .. 2)
+                        foreach (value; values)
+                            total += value;
+                    return total;
+                }
+            },
+            "sum",
+        );
+    }
+}
+
 // Three iterations add up to 3. A body run once, or an `i` that never
 // increments, gives a different answer or no answer at all. `one` is behind
 // a call so the total cannot be folded before a backend runs.
