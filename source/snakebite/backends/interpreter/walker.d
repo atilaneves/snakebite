@@ -1044,12 +1044,14 @@ extern(C++) private final class Evaluator: Visitor {
                 continue;
             }
 
-            // A dynamic array field is native layout's two-word
-            // `{ size_t length; T* ptr; }` with no copy hook of its own,
-            // so the bytewise copy this predicate guards handles it: the
-            // copy shares the same elements, exactly as compiled D
-            // assignment of a slice does. It is not integral, so without
-            // this the size/integrality check below would reject it.
+            // A dynamic array field is a plain two-word slice - a
+            // length and a pointer, in whichever order the compiler's
+            // ABI puts them - with no copy hook of its own, so the
+            // bytewise copy this predicate guards handles it: the copy
+            // shares the same elements, exactly as compiled D
+            // assignment of a slice does. It is not integral, so
+            // without this the size/integrality check below would
+            // reject it.
             if (field.type.ty == Tarray)
                 continue;
 
@@ -1084,7 +1086,7 @@ extern(C++) private final class Evaluator: Visitor {
             return slotOf(
                 thisExp,
                 thisExp.var is null
-                    ? cast() _layout.thisVariable
+                    ? cast() _layout.hiddenThis.variable
                     : thisExp.var,
             );
 
@@ -2152,7 +2154,7 @@ extern(C++) private final class Evaluator: Visitor {
                 );
 
             storeIntegral(
-                frame.base + layout.thisParameter.offset,
+                frame.base + layout.hiddenThis.parameter.offset,
                 cast(size_t) addressOf(dot.e1),
                 size_t.sizeof,
             );

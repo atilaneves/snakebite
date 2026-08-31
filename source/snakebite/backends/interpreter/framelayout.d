@@ -35,18 +35,23 @@ package struct FrameLayout {
     // hand, so it never pays an AA hash lookup for the hottest path.
     package Parameter[] parameters;
 
-    // A struct method's hidden `this` is a `ref` parameter: its slot,
-    // before the explicit parameters as in the native calling layout,
-    // holds the receiver's address, the same shape every other `ref`
+    // A struct method's hidden `this`, together in one place: the slot
+    // and the declaration that owns it always exist - or not - as a
+    // pair. The hidden `this` is a `ref` parameter: its slot, before
+    // the explicit parameters as in the native calling layout, holds
+    // the receiver's address, the same shape every other `ref`
     // parameter's slot has above.
-    package Parameter thisParameter;
+    package struct HiddenThis {
+        package Parameter parameter;
 
-    // The declaration that owns `thisParameter`'s slot; null for a
-    // function with no `this`. dmd resolves a `this` the guest wrote to
-    // this same declaration, but a constructor's implicit `return this;`
-    // is a `ThisExp` dmd synthesises with no `var` at all, so the
-    // evaluator reaches the slot through this instead for that node.
-    package VarDeclaration thisVariable;
+        // dmd resolves a `this` the guest wrote to this same
+        // declaration, but a constructor's implicit `return this;` is a
+        // `ThisExp` dmd synthesises with no `var` at all, so the
+        // evaluator reaches the slot through this instead for that
+        // node. Null for a function with no `this`.
+        package VarDeclaration variable;
+    }
+    package HiddenThis hiddenThis;
 
     // Keyed by declaration instead of position: `visit(VarExp)` resolves
     // a parameter or local read from a `VarDeclaration` it found by name
@@ -73,9 +78,10 @@ package struct FrameLayout {
                     TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
                 : layout.reserveSlot(function_.vthis.type);
 
-            layout.thisParameter =
-                Parameter(slot.offset, slot.facts, isRefThis);
-            layout.thisVariable = function_.vthis;
+            layout.hiddenThis = HiddenThis(
+                Parameter(slot.offset, slot.facts, isRefThis),
+                function_.vthis,
+            );
             layout._slotOf[function_.vthis] =
                 VariableSlot(slot.offset, isRefThis);
         }
