@@ -2,6 +2,15 @@ module ut.backends.call.ffi;
 
 
 import ut.backends;
+import snakebite.ffi: PlanCache;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
+
+
+private extern(C) ubyte[] snakebite_ut_dynamic_array() {
+    static ubyte[] values = [17, 31, 47];
+    return values;
+}
 
 
 // `abs` is declared `extern(C)` with no body: nothing in the guest program
@@ -46,6 +55,27 @@ static foreach (backend; Matrix!(
             "answer",
         );
     }
+}
+
+
+@("dynamicArrayReturn.nativeFFI.Interpreter")
+@Tags("Interpreter")
+unittest {
+    auto module_ = parseSnippet(q{
+        extern(C) ubyte[] snakebite_ut_dynamic_array();
+    });
+    auto function_ = findFunction(module_, "snakebite_ut_dynamic_array");
+    assert(function_ !is null,
+        "No `snakebite_ut_dynamic_array` function in the guest program");
+
+    PlanCache cache;
+    ubyte[] result;
+    cache.of(function_).call(&result, []);
+
+    result.length.shouldEqual(3);
+    result[0].shouldEqual(17);
+    result[1].shouldEqual(31);
+    result[2].shouldEqual(47);
 }
 
 static foreach (backend; Matrix!(

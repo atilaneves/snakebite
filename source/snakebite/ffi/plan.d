@@ -26,7 +26,7 @@ public struct CallPlan {
     // two travel together as one argument the guest evaluated once.
     private ArgumentPlan[maxArguments] _arguments;
     private size_t _parameterCount;
-    private Register _return;
+    private ArgumentPlan _return;
     // Whether `_return` is meaningless because the result travels through
     // a hidden pointer instead - see `needsHiddenReturnPointer`.
     private bool _hiddenReturnPointer;
@@ -93,13 +93,20 @@ public struct CallPlan {
         const result = invoke(cast(void*) _address, words[0 .. slot]);
 
         // A hidden-pointer return already left its bytes at `returnPlace`
-        // through that pointer, not in the return register - which the
+        // through that pointer, not in the return registers - which the
         // callee leaves holding that same pointer, not the value. A `void`
-        // callee leaves the register holding whatever it last used it for,
-        // so reading it in either case would be reading garbage or an
-        // address, not the result.
-        if (!_hiddenReturnPointer && returnPlace !is null)
-            writeWord(_return, result, returnPlace);
+        // callee leaves the registers holding whatever it last used them
+        // for, so reading them in either case would be reading garbage or
+        // an address, not the result.
+        if (!_hiddenReturnPointer && returnPlace !is null) {
+            const size_t[2] resultWords = [result.first, result.second];
+            auto bytes = cast(ubyte*) returnPlace;
+            foreach (i; 0 .. _return.count)
+                writeWord(
+                    _return.registers[i], resultWords[i],
+                    bytes + i * size_t.sizeof,
+                );
+        }
     }
 }
 
@@ -251,10 +258,12 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
 
         plan._address = address;
         plan._parameterCount = count;
-        if (returnsRef)
-            plan._return = Register(Register.Kind.pointer, 8);
-        else if (!plan._hiddenReturnPointer)
-            plan._return = Register.of(type.nextOf);
+        if (returnsRef) {
+            plan._return = ArgumentPlan(
+                [Register(Register.Kind.pointer, 8), Register.init], 1,
+            );
+        } else if (!plan._hiddenReturnPointer)
+            plan._return = ArgumentPlan.of(type.nextOf);
 
         return plan;
     }
