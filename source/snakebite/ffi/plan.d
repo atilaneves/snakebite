@@ -49,6 +49,12 @@ public struct CallPlan {
     private bool _reversedArguments;
     private FastPath _fastPath;
 
+    // The address is used by backends that have their own DMD-free runtime
+    // representation of a native call site.
+    public void* nativeAddress() const @safe @nogc nothrow pure {
+        return cast(void*) _address;
+    }
+
     // Calls the function this plan was prepared for.
     //
     // `arguments` are the addresses of each argument's native bytes, in

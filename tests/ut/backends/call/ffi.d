@@ -24,7 +24,6 @@ private extern(C) ubyte[] snakebite_ut_dynamic_array() {
 // a callee that merely negates, so one argument is positive: `abs` must
 // leave it alone.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {
     @("abs.negative." ~ backend.stringof)
@@ -60,7 +59,6 @@ static foreach (backend; Matrix!(
 
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {
     @("callSite.cacheSurvivesPlanCacheGrowth." ~ backend.stringof)
@@ -70,12 +68,12 @@ static foreach (backend; Matrix!(
             backend,
             q{
                 int repeat() {
-                    import core.stdc.stdlib: abs, free;
+                    import core.stdc.stdlib: abs;
                     int result;
                     for (int i = 0; i < 2; ++i) {
                         result = abs(-42);
                         if (i == 0)
-                            free(null);
+                            result = abs(result);
                     }
                     return result;
                 }

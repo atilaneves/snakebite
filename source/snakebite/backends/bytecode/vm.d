@@ -23,6 +23,7 @@ package struct CallSite {
     package const(Function)* callee;
     package Arg[] args;
     package size_t returnWidth;
+    package void* nativeAddress;
 }
 
 
@@ -269,6 +270,16 @@ package const(Instruction)* opCall(
     import core.stdc.string: memcpy;
 
     const site = callSites[pc.source];
+    if (site.nativeAddress !is null) {
+        assert(site.args.length == 1);
+        assert(site.returnWidth == int.sizeof);
+        alias Native = extern(C) int function(int);
+        auto argument = *cast(const int*) (frame + site.args[0].callerOffset);
+        auto result = (cast(Native) site.nativeAddress)(argument);
+        if (pc.destination != discardResult)
+            *cast(int*) (frame + pc.destination) = result;
+        return pc + 1;
+    }
     auto callee = site.callee;
 
     auto calleeFrame = frames.push(callee.frameSize, callee.frameAlignment);
