@@ -91,6 +91,31 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("assign.dynamicArrayStructFieldCompound." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        9.shouldBeRetOf!(
+            backend,
+            q{
+                struct Box {
+                    uint[] values;
+                }
+
+                int answer() {
+                    Box box;
+                    box.values = new uint[](1);
+                    box.values[0] = 4;
+                    box.values ~= 7;
+                    return cast(int) box.values.length +
+                        cast(int) box.values[1];
+                }
+            },
+            "answer",
+        );
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot call native memcpy"),
 )) {
