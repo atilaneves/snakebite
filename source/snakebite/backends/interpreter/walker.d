@@ -1926,7 +1926,10 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto type = expression.e1.type;
         bool equal;
-        if (type.ty == Tpointer)
+        if (type.ty == Tclass)
+            equal = classReferenceOf(expression.e1)
+                == classReferenceOf(expression.e2);
+        else if (type.ty == Tpointer)
             equal = asPointer(expression.e1) == asPointer(expression.e2);
         else if (factsOf(type).isIntegral)
             equal =
@@ -3047,7 +3050,10 @@ extern(C++) private final class Evaluator: Visitor {
             return;
         }
 
-        execute(function_, _place, frame.base, layout, expression);
+        execute(
+            function_, _place, frame.base, layout, expression,
+            function_.isCtorDeclaration() !is null,
+        );
     }
 
     // The callee of a call dmd left unresolved: one reached through a

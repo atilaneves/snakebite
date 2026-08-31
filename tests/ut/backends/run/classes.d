@@ -115,6 +115,52 @@ unittest {
     });
 }
 
+@("classConstructionCallsGuestBaseConstructor.Interpreter")
+@Tags(Interpreter.stringof)
+unittest {
+    0.shouldBeStatusOf!(Interpreter, q{
+        class Base {
+            int value;
+
+            this(int value_) {
+                value = value_;
+            }
+        }
+
+        class Derived : Base {
+            this() {
+                super(42);
+            }
+        }
+
+        void main() {
+            auto derived = new Derived;
+            assert(derived.value == 42);
+        }
+    });
+}
+
+@("classCastUsesGuestClassHierarchy.Interpreter")
+@Tags(Interpreter.stringof)
+unittest {
+    0.shouldBeStatusOf!(Interpreter, q{
+        class Base {
+        }
+
+        class Derived : Base {
+        }
+
+        class Other {
+        }
+
+        void main() {
+            Base base = new Derived;
+            assert(cast(Derived) base !is null);
+            assert(cast(Other) base is null);
+        }
+    });
+}
+
 // A call through an interface reference finds the class's override, which
 // needs the interface's own offset rather than the class vtable.
 static foreach (backend; Matrix!(

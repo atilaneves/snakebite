@@ -9,6 +9,39 @@ module ut.backends.run.exceptions;
 import ut.backends;
 
 
+@("catchMatchesGuestClassByBaseType.Interpreter")
+@Tags(Interpreter.stringof)
+unittest {
+    0.shouldBeStatusOf!(Interpreter, q{
+        class Expected : Exception {
+            this() {
+                super(null);
+            }
+        }
+
+        class Other : Exception {
+            this() {
+                super(null);
+            }
+        }
+
+        void main() {
+            int value = 1;
+
+            try {
+                throw new Expected;
+            } catch (Other) {
+                value = 100;
+            } catch (Exception) {
+                value = 9;
+            }
+
+            assert(value == 9);
+        }
+    });
+}
+
+
 // `catch` matches a thrown class against the declared type by walking the
 // base-class chain, not by exact type, so a `catch` naming a base class
 // catches a derived exception while a `catch` naming a sibling class does
