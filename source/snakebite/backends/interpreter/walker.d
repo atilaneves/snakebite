@@ -1095,6 +1095,13 @@ extern(C++) private final class Evaluator: Visitor {
         evaluate(value, variable.type, _frameBase + offset);
     }
 
+    // DMD lowers dynamic-array length assignment to a native druntime call
+    // so allocation, prefix preservation, and the array pointer update stay
+    // in druntime rather than being emulated by the interpreter.
+    override void visit(LoweredAssignExp expression) {
+        expression.lowering.accept(this);
+    }
+
     // Assignment is an expression: it yields the value it assigned. A
     // struct right side needs scratch storage so evaluating a literal does
     // not clear an aliased target before all of its fields are read.
