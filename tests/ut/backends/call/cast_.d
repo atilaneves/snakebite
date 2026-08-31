@@ -149,6 +149,107 @@ unittest {
     );
 }
 
+// `16_777_217` is `2^24 + 1`, the first integer a `float`'s 24-bit
+// significand cannot hold, so D's integral-to-floating conversion rounds
+// it to the nearest representable value, `16_777_216`. The operand comes
+// from a function call because dmd folds a cast of a literal during
+// semantic analysis, so a literal operand would never reach a backend. An
+// implementation that converts through a wider intermediate and rounds
+// once more, or that reinterprets the operand's bits, fails this.
+static foreach (backend; Matrix!()) {
+    @("cast.ulongToFloat.roundsToFloatPrecision." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        16_777_216.0f.shouldBeRetOf!(
+            backend,
+            q{
+                ulong bits() {
+                    return 16_777_217UL;
+                }
+
+                float converted() {
+                    return cast(float) bits();
+                }
+            },
+            "converted",
+        );
+    }
+}
+
+// The same operand as the `float` test above: a `double`'s 53-bit
+// significand holds `2^24 + 1` exactly, so the conversion is exact. An
+// implementation that converts every floating destination at `float`
+// precision fails this while passing the `float` test.
+static foreach (backend; Matrix!()) {
+    @("cast.ulongToDouble.isExact." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        16_777_217.0.shouldBeRetOf!(
+            backend,
+            q{
+                ulong bits() {
+                    return 16_777_217UL;
+                }
+
+                double converted() {
+                    return cast(double) bits();
+                }
+            },
+            "converted",
+        );
+    }
+}
+
+// A runtime `ulong` reduced by `%`, converted to `float`, then divided
+// and offset: dmd's usual arithmetic conversions turn `1_000_000` and `1`
+// into `float` operands, so after the cast every operation is
+// floating-point. `3_500_001 % 2_000_001` is `1_500_000`, and
+// `1.5 - 1.0` is exact at every precision, so the expectation does not
+// depend on rounding. The operand comes from a function call because dmd
+// folds literal-only arithmetic during semantic analysis.
+static foreach (backend; Matrix!()) {
+    @("cast.ulongToFloat.thenDivideAndSubtract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.5f.shouldBeRetOf!(
+            backend,
+            q{
+                ulong bits() {
+                    return 3_500_001UL;
+                }
+
+                float value() {
+                    return cast(float) (bits() % 2_000_001) / 1_000_000 - 1;
+                }
+            },
+            "value",
+        );
+    }
+}
+
+// As above, with a `double` destination: the conversions of `1_000_000`
+// and `1` follow the cast's own type, so the whole chain runs at `double`
+// precision instead.
+static foreach (backend; Matrix!()) {
+    @("cast.ulongToDouble.thenDivideAndSubtract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.5.shouldBeRetOf!(
+            backend,
+            q{
+                ulong bits() {
+                    return 3_500_001UL;
+                }
+
+                double value() {
+                    return cast(double) (bits() % 2_000_001) / 1_000_000 - 1;
+                }
+            },
+            "value",
+        );
+    }
+}
+
 // dmd classifies `bool` as `integral | unsigned`, so a naive integral
 // narrowing takes the operand's low byte instead of comparing it against
 // zero. `256`'s low byte is `0`, which a truncating implementation would
