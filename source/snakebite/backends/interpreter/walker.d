@@ -591,6 +591,12 @@ extern(C++) private final class Evaluator: Visitor {
         if (statement.exp is null)
             return;
 
+        // dmd appends `return 0;` to every `main`, including `void main`.
+        // A void return has no destination, so discard that synthetic value
+        // instead of trying to lay it out as `void`.
+        if (_type.ty == Tvoid)
+            return;
+
         // A `ref` return hands the caller the address of `statement.exp`'s
         // storage, not a copy of its value - `_place` here is the small
         // scratch buffer `visit(CallExp)`/`refCallAddress` set up to hold
