@@ -26,6 +26,15 @@ package struct CallSite {
 }
 
 
+// `opCall`'s own `pc.b` operand, when the caller has nowhere for the
+// call's result to go - a `void` callee, or a non-`void` one run at
+// statement level for its effects alone. Not a byte offset any frame ever
+// has, so it cannot collide with one: `_tempSize`/`layout.size` never grow
+// past a compiled function's own frame size, which stays far short of
+// `size_t.max`.
+package enum discardResult = size_t.max;
+
+
 package struct Instruction {
     public alias Handler = extern(C) void function(
         const(Instruction)* pc,
@@ -157,8 +166,8 @@ package extern(C) void opCopy(
 // not a tail one, so control comes back here once the callee's own
 // `opReturn`/`opReturnVoid` stops instead of chaining to a next
 // instruction of its own - copies the result to `frame + pc.b` (unless
-// `pc.b` is `size_t.max`, the caller discarding it), and only then tail-
-// calls this call's own next instruction.
+// `pc.b` is `discardResult`), and only then tail-calls this call's own
+// next instruction.
 package extern(C) void opCall(
     const(Instruction)* pc,
     ubyte* frame,
@@ -194,7 +203,7 @@ package extern(C) void opCall(
         callee.callSites, frames,
     );
 
-    if (pc.b != size_t.max && site.returnWidth != 0)
+    if (pc.b != discardResult && site.returnWidth != 0)
         memcpy(frame + pc.b, returnScratch.ptr, site.returnWidth);
 
     const next = pc + 1;

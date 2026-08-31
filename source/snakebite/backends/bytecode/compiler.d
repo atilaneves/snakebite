@@ -146,8 +146,8 @@ private final class FunctionCompiler {
         CompoundStatement, ExpStatement, ReturnStatement, ScopeStatement,
         Statement;
     import snakebite.backends.bytecode.vm:
-        Arg, CallSite, Function, Instruction, opCall, opConstant, opCopy,
-        opReturn, opReturnVoid;
+        Arg, CallSite, discardResult, Function, Instruction, opCall,
+        opConstant, opCopy, opReturn, opReturnVoid;
     import snakebite.backends.layout: FrameLayout;
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout: alignUp, isIntegralSize, TypeFacts;
@@ -288,12 +288,12 @@ private final class FunctionCompiler {
         }
 
         if (auto call = expression.isCallExp) {
-            compileCall(call, size_t.max);
+            compileCall(call, discardResult);
             return;
         }
 
         if (auto assign = assignLike(expression)) {
-            compileAssign(assign, size_t.max);
+            compileAssign(assign, discardResult);
             return;
         }
 
@@ -357,8 +357,8 @@ private final class FunctionCompiler {
 
     // A plain `=` to a local or parameter. `destOffset` is where the
     // assignment's own value (D specifies an assignment as an expression)
-    // goes too, `size_t.max` when a caller at statement level has nowhere
-    // for it and does not want it.
+    // goes too, `discardResult` when a caller at statement level has
+    // nowhere for it and does not want it.
     private void compileAssign(AssignExp expression, in size_t destOffset) {
         auto varExp = expression.e1.isVarExp;
         auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
@@ -374,7 +374,7 @@ private final class FunctionCompiler {
         const targetOffset = _layout.offsetOf(variable);
         evalInto(expression.e2, targetOffset, facts.size);
 
-        if (destOffset != size_t.max && destOffset != targetOffset)
+        if (destOffset != discardResult && destOffset != targetOffset)
             emit(&opCopy, destOffset, targetOffset, facts.size);
     }
 
@@ -418,9 +418,9 @@ private final class FunctionCompiler {
     // Compiles a call to `expression.f`: every argument evaluated into a
     // temporary of this function's own, in the callee's parameter order,
     // then one `opCall` naming the call site those temporaries and the
-    // compiled callee are recorded under. `destOffset` is `size_t.max` for
-    // a call run at statement level, whose result (`void` or otherwise) is
-    // discarded.
+    // compiled callee are recorded under. `destOffset` is `discardResult`
+    // for a call run at statement level, whose result (`void` or
+    // otherwise) is discarded.
     private void compileCall(CallExp expression, in size_t destOffset) {
         import dmd.astenums: Tvoid;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -467,7 +467,7 @@ private final class FunctionCompiler {
                 && !(returnFacts.isIntegral && isIntegralSize(returnFacts.size)))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
-        if (isVoidCallee && destOffset != size_t.max)
+        if (isVoidCallee && destOffset != discardResult)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
