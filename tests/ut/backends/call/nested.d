@@ -113,8 +113,19 @@ static foreach (backend; Matrix!()) {
                     return fibonacci(n - 1) + fibonacci(n - 2);
                 }
 
+                int tak(int x, int y, int z) {
+                    if (x <= y)
+                        return y;
+                    return tak(
+                        tak(x - 1, y, z),
+                        tak(y - 1, z, x),
+                        tak(z - 1, x, y),
+                    );
+                }
+
                 int main() {
-                    return fibonacci(12) == 144 ? 0 : 1;
+                    return fibonacci(12) == 144 && tak(6, 4, 2) == 6
+                        ? 0 : 1;
                 }
             },
         );
