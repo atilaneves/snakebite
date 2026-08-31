@@ -4,17 +4,15 @@ module snakebite.ffi.abi;
 private:
 
 
-// How many arguments this can hand over.
-//
-// The System V AMD64 ABI passes the first six integer-class arguments -
-// integers, pointers, and anything else that fits one general-purpose
-// register - in registers, and the rest on the stack in a layout this does
-// not build. Six is therefore the limit, not an arbitrary cap.
-public enum maxArguments = 6;
+// The call plan keeps this many parameter slots. The integer register
+// limit is separate: values after the first six integer words go on the
+// stack, but they still belong to the function's parameter list.
+public enum maxArguments = 16;
+public enum maxIntegerArguments = 6;
+public enum maxFloatingArguments = 8;
 
-// Whether this can call anything at all: the register count above, and
-// `Register`'s widening rules, are this one ABI's, and no other is
-// implemented.
+// Whether this can call anything at all: these rules are for the SysV
+// AMD64 ABI, and no other host ABI is implemented.
 public enum supported = () {
     version (Posix) {
         version (X86_64)
@@ -27,9 +25,7 @@ public enum supported = () {
 
 // Whether native `extern(D)` code in this process assigns parameters to
 // registers in reverse declaration order. dmd's `extern(D)` variant of the
-// System V convention does; ldc and gdc keep the C order. The compiler
-// that built this binary also built the druntime it links, so this is a
-// compile-time fact about the host process, not about the guest.
+// System V convention does; ldc and gdc keep the C order.
 public enum reversedDParameters = () {
     version (DigitalMars)
         return true;
@@ -48,18 +44,15 @@ public enum contextPrecedesHiddenReturnPointer = () {
 }();
 
 // What one value's bytes have to become to travel in one argument or
-// return register - all a call needs to know about a type, decided once
-// from the dmd `Type` and then kept, so no call reads a dmd type again.
+// return register. `integer` is used for an aggregate eightbyte; the
+// scalar kinds retain their widening rules.
 public struct Register {
-    // Which widening rule the ABI applies. The distinction is not
-    // cosmetic: a callee reading a 32-bit `int` argument out of a 64-bit
-    // register expects the high bits to carry the sign, so widening a
-    // negative `int` with zeroes would hand it a large positive number
-    // instead.
     public enum Kind {
         signed,
         unsigned,
         pointer,
+        integer,
+        sse,
         none, // nothing travels: a `void` return
     }
 
@@ -67,113 +60,275 @@ public struct Register {
     // In bytes, and always 1, 2, 4 or 8 for anything but `none`.
     public ubyte size;
 
-    // The rule for `type`, or a refusal naming what could not travel.
-    //
-    // A floating-point value travels in an SSE register, and a struct by
-    // value can be split across several registers or go on the stack
-    // entirely, by a classification this does not implement. Both are
-    // refused here - once, when the plan is prepared - rather than passed
-    // in the wrong register, which would run and return a
-    // plausible-looking wrong answer.
     public static Register of(imported!"dmd.mtype".Type type) {
-        import dmd.astenums: Taarray, Tclass, Tpointer, Tvoid;
-        import dmd.typesem: size;
-        import std.conv: text;
+        import dmd.astenums: Tvoid;
 
         if (type.ty == Tvoid)
             return Register(Kind.none, 0);
 
-        // A class reference is a pointer at native layout, same as any
-        // other: `TypeInfo`, the one class-typed argument this ABI is
-        // asked to pass so far (`GC.malloc`'s `ti`), is a GC-owned object
-        // the guest never allocates or destructures, only hands over by
-        // its address. An associative array is the same shape again: its
-        // native representation is one pointer to druntime's own `Impl`
-        // (or null, for an empty one) - `V[K]`, the parameter
-        // `_d_aaGetRvalueX` (on the rvalue-AA-index lowering's own chain)
-        // takes its associative array by, is exactly this.
-        if (type.ty == Tpointer || type.ty == Tclass || type.ty == Taarray)
-            return Register(Kind.pointer, 8);
+        const plan = aggregatePlan(type);
+        if (plan.memory || plan.count == 0) {
+            import std.conv: text;
 
-        if (type.isIntegral) {
-            import snakebite.nativelayout: isIntegralSize;
-
-            const bytes = type.size;
-            if (bytes.isIntegralSize)
-                return Register(
-                    type.isUnsigned ? Kind.unsigned : Kind.signed,
-                    cast(ubyte) bytes,
-                );
+            throw new Exception(
+                text("ffi cannot pass a value of type `", type.toString,
+                    "` in one register"),
+            );
         }
-
-        throw new Exception(
-            text("ffi cannot pass a value of type `", type.toString,
-                "`: only integer-class values are implemented"),
-        );
+        return plan.registers[0];
     }
 }
 
-// How a single argument travels: one register for anything `Register`
-// alone already covers, or the two a dynamic array by value needs - the
-// System V AMD64 ABI classifies a 16-byte aggregate of two non-float
-// eightbytes into two general-purpose registers, and a dynamic array's
-// `{length, ptr}` is exactly that. druntime's own GC hooks
-// (`gc_expandArrayUsed`, `gc_shrinkArrayUsed`) take the array being
-// appended to this way, so this is not a value class the FFI can decline:
-// declining it would mean declining to call them at all.
+// How a value travels. A regular value has at most two eightbytes after
+// the SysV cleanup rule. A MEMORY value is handled by a hidden pointer for
+// returns and is refused for explicit parameters until stack memory values
+// have a separate call path.
 public struct ArgumentPlan {
+    private enum ValueClass {
+        none,
+        integer,
+        sse,
+        memory,
+    }
+
     public Register[2] registers;
     public ubyte count;
+    public bool memory;
 
     public static ArgumentPlan of(imported!"dmd.mtype".Type type) {
-        import dmd.astenums: Tarray;
+        auto plan = aggregatePlan(type);
+        if (plan.memory) {
+            import std.conv: text;
 
-        if (type.ty == Tarray) {
-            ArgumentPlan plan;
-            plan.registers[0] = Register(Register.Kind.unsigned, 8);
-            plan.registers[1] = Register(Register.Kind.pointer, 8);
-            plan.count = 2;
-            return plan;
+            throw new Exception(
+                text("ffi cannot pass a value of type `", type.toString,
+                    "`: its ABI class is MEMORY"),
+            );
         }
-
-        ArgumentPlan plan;
-        plan.registers[0] = Register.of(type);
-        plan.count = 1;
         return plan;
     }
 }
 
-// The return words from an indirect call. A dynamic array's native value is
-// two integer-class words, and the other supported return values use only the
-// first word. Keeping both words here lets the caller preserve the exact
-// native return representation without converting it.
+// The return words from an indirect call. This is output storage for the
+// invocation helper, not a type used as the native function's return type:
+// the native return type must itself have the right INTEGER/SSE ABI class.
 public struct ReturnWords {
+    private enum ReturnKind {
+        void_,
+        integer,
+        integerPair,
+        sse,
+        ssePair,
+        mixed,
+    }
+
     public size_t first;
     public size_t second;
+    public size_t floatingFirst;
+    public size_t floatingSecond;
 }
 
-// Whether `type` returns through a hidden pointer instead of a register:
-// the System V AMD64 ABI classifies an aggregate over 16 bytes as MEMORY
-// regardless of its fields, which means the caller allocates the result's
-// storage and passes its address as an extra, invisible first argument -
-// `druntime`'s own `gc_query` (`GC.query`'s body-less leaf, reached when
-// appending to an already-allocated array asks the block it is growing
-// for its current attributes) returns `BlkInfo`, three words wide, this
-// way. A struct of 16 bytes or less is classified by its fields instead
-// and can travel in one or two registers - out of scope here, since
-// nothing on this path returns one, and `Register.of` still refuses it.
+// The SysV ABI classifies a MEMORY result as a hidden return pointer. This
+// also catches an unaligned aggregate, which the ABI classifies as MEMORY
+// even when its size is at most two eightbytes.
 public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: Tstruct;
+    return aggregatePlan(type).memory;
+}
+
+private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
+    import dmd.astenums:
+        Taarray, Tclass, Tfloat32, Tfloat64, Tpointer, Tvoid;
+    import dmd.typesem: size;
+    import std.algorithm: min;
+
+    ArgumentPlan plan;
+    if (type.ty == Tvoid)
+        return plan;
+
+    if (type.ty == Tpointer || type.ty == Tclass || type.ty == Taarray) {
+        plan.registers[0] = Register(Register.Kind.pointer, 8);
+        plan.count = 1;
+        return plan;
+    }
+
+    if (type.ty == Tfloat32 || type.ty == Tfloat64) {
+        plan.registers[0] = Register(
+            Register.Kind.sse,
+            cast(ubyte) type.size,
+        );
+        plan.count = 1;
+        return plan;
+    }
+
+    if (type.isIntegral) {
+        import snakebite.nativelayout: isIntegralSize;
+
+        const bytes = type.size;
+        if (bytes.isIntegralSize) {
+            plan.registers[0] = Register(
+                type.isUnsigned
+                    ? Register.Kind.unsigned
+                    : Register.Kind.signed,
+                cast(ubyte) bytes,
+            );
+            plan.count = 1;
+            return plan;
+        }
+    }
+
+    const bytes = type.size;
+    if (bytes == 0)
+        return plan;
+    const count = (bytes + 7) / 8;
+    if (count > 2) {
+        plan.memory = true;
+        return plan;
+    }
+
+    ArgumentPlan.ValueClass[2] classes = [
+        ArgumentPlan.ValueClass.none, ArgumentPlan.ValueClass.none,
+    ];
+    bool memory;
+    classify(type, 0, classes, memory);
+    if (memory) {
+        plan.memory = true;
+        return plan;
+    }
+
+    foreach (i; 0 .. count) {
+        final switch (classes[i]) with (ArgumentPlan.ValueClass) {
+            case none:
+                break;
+            case integer:
+                plan.registers[i] = Register(
+                    Register.Kind.integer,
+                    cast(ubyte) min(8, bytes - i * 8),
+                );
+                ++plan.count;
+                break;
+            case sse:
+                plan.registers[i] = Register(
+                    Register.Kind.sse,
+                    cast(ubyte) min(8, bytes - i * 8),
+                );
+                ++plan.count;
+                break;
+            case memory:
+                assert(false);
+        }
+    }
+    return plan;
+}
+
+private void classify(
+    imported!"dmd.mtype".Type type,
+    in size_t offset,
+    ref ArgumentPlan.ValueClass[2] classes,
+    ref bool memory,
+) {
+    import dmd.astenums:
+        Tarray, Tclass, Tcomplex32, Tcomplex64, Tdelegate, Tfloat32,
+        Tfloat64, Tpointer, Tsarray;
     import dmd.typesem: size;
 
-    return type.ty == Tstruct && type.size > 16;
+    if (memory)
+        return;
+
+    const bytes = type.size;
+    if (bytes == 0)
+        return;
+    if (offset + bytes > 16) {
+        memory = true;
+        return;
+    }
+
+    if (type.ty == Tfloat32 || type.ty == Tfloat64) {
+        merge(classes, offset, bytes, ArgumentPlan.ValueClass.sse, memory);
+        return;
+    }
+
+    if (type.ty == Tcomplex32 || type.ty == Tcomplex64) {
+        foreach (i; 0 .. (bytes + 7) / 8)
+            merge(classes, offset + i * 8, 8,
+                ArgumentPlan.ValueClass.sse, memory);
+        return;
+    }
+
+    if (type.ty == Tpointer || type.ty == Tclass || type.ty == Tdelegate) {
+        foreach (i; 0 .. (bytes + 7) / 8)
+            merge(classes, offset + i * 8, 8,
+                ArgumentPlan.ValueClass.integer, memory);
+        return;
+    }
+
+    if (type.ty == Tarray) {
+        merge(classes, offset, 8, ArgumentPlan.ValueClass.integer, memory);
+        merge(classes, offset + 8, 8,
+            ArgumentPlan.ValueClass.integer, memory);
+        return;
+    }
+
+    if (type.isIntegral) {
+        merge(classes, offset, bytes, ArgumentPlan.ValueClass.integer,
+            memory);
+        return;
+    }
+
+    if (auto array = type.isTypeSArray) {
+        const count = array.dim.toInteger;
+        foreach (i; 0 .. count)
+            classify(type.nextOf, offset + i * type.nextOf.size,
+                classes, memory);
+        return;
+    }
+
+    if (auto aggregate = type.isTypeStruct) {
+        foreach (field; aggregate.sym.fields) {
+            if (field.type is null)
+                continue;
+
+            const alignment = field.type.alignsize;
+            const fieldOffset = offset + field.offset;
+            if (alignment != 0 && fieldOffset % alignment != 0) {
+                memory = true;
+                return;
+            }
+            classify(field.type, fieldOffset, classes, memory);
+        }
+        return;
+    }
+
+    import std.conv: text;
+    throw new Exception(
+        text("ffi cannot classify a value of type `", type.toString, "`"),
+    );
 }
 
-// Widens the native bytes at `slot` to the one argument register that
-// carries them.
-public size_t word(in Register register, in void* slot) {
-    import std.conv: text;
+private void merge(
+    ref ArgumentPlan.ValueClass[2] classes,
+    in size_t offset,
+    in size_t bytes,
+    in ArgumentPlan.ValueClass incoming,
+    ref bool memory,
+) {
+    const first = offset / 8;
+    const last = (offset + bytes - 1) / 8;
+    if (last >= 2) {
+        memory = true;
+        return;
+    }
 
+    foreach (i; first .. last + 1) {
+        if (classes[i] == ArgumentPlan.ValueClass.none)
+            classes[i] = incoming;
+        else if (classes[i] != incoming)
+            classes[i] = ArgumentPlan.ValueClass.integer;
+    }
+}
+
+// Reads one eightbyte's native bytes and applies the scalar widening rule
+// when the value is a scalar. Aggregate eightbytes are copied unchanged.
+public size_t word(in Register register, in void* slot) {
     final switch (register.kind) with (Register.Kind) {
         case pointer:
             return cast(size_t) *cast(void**) slot;
@@ -196,12 +351,20 @@ public size_t word(in Register register, in void* slot) {
                 default: assert(false, "unsupported signed size");
             }
 
+        case integer:
+        case sse: {
+            size_t result;
+            import core.stdc.string: memcpy;
+            memcpy(&result, slot, register.size);
+            return result;
+        }
+
         case none:
             assert(false, "a `void` argument has nothing to pass");
     }
 }
 
-// Writes the return register back into `place`.
+// Writes one raw return eightbyte back into native storage.
 public void writeWord(
     in Register register,
     in size_t result,
@@ -210,50 +373,216 @@ public void writeWord(
     if (register.kind == Register.Kind.none)
         return;
 
-    import snakebite.nativelayout: storeIntegral;
+    if (register.kind == Register.Kind.signed
+            || register.kind == Register.Kind.unsigned
+            || register.kind == Register.Kind.pointer) {
+        import snakebite.nativelayout: storeIntegral;
+        storeIntegral(place, result, register.size);
+        return;
+    }
 
-    // The callee left the value in the low bits of the return register;
-    // anything above the type's own width is not part of it, which is
-    // exactly what storing at the type's own width keeps.
-    storeIntegral(place, result, register.size);
+    import core.stdc.string: memcpy;
+    memcpy(place, &result, register.size);
 }
 
-// Calls `address` with `words` in argument registers and hands back the
-// first two integer-class return registers, raw. A `void` callee leaves them
-// holding whatever it last used them for, so only a caller whose plan says
-// something is returned reads them.
-public ReturnWords invoke(void* address, scope const size_t[] words) {
-    import std.conv: text;
+private struct IntegerReturn {
+    size_t first;
+    size_t second;
+}
 
-    switch (words.length) {
-        static foreach (count; 0 .. maxArguments + 1) {
-            case count:
-                // The arity has to be in the function pointer's own type -
-                // one variadic type cannot stand in for all of them, since
-                // a variadic callee is passed differently.
-                mixin("return (cast(Native!count) address)(",
-                    argumentList(count), ");");
+private struct FloatingReturn {
+    double first;
+    double second;
+}
+
+private struct MixedReturn {
+    size_t integer;
+    double floating;
+}
+
+// Calls `address` with raw argument words. The class sequence is in the
+// callee's declaration order. With no stack words, integer and SSE words
+// can be grouped because SysV allocates the two register files separately.
+// The caller converts a mixed aggregate to one class when one register file
+// is full, so its two stack words stay together. A call where both register
+// files need stack words is still rejected because grouping would reorder it.
+public ReturnWords invoke(
+    void* address,
+    scope const size_t[] words,
+    scope const Register.Kind[] kinds,
+    in ArgumentPlan returnPlan,
+) {
+    assert(words.length == kinds.length);
+
+    size_t[maxArguments] integerWords;
+    size_t[maxArguments] floatingWords;
+    size_t integerCount;
+    size_t floatingCount;
+    bool hasInteger;
+    bool hasFloating;
+    foreach (i, kind; kinds) {
+        final switch (kind) with (Register.Kind) {
+            case signed:
+            case unsigned:
+            case pointer:
+            case integer:
+                integerWords[integerCount++] = words[i];
+                hasInteger = true;
+                break;
+            case sse:
+                floatingWords[floatingCount++] = words[i];
+                hasFloating = true;
+                break;
+            case none:
+                assert(false, "a `void` argument has no ABI class");
+        }
+    }
+
+    if (hasInteger && hasFloating
+            && integerCount > maxIntegerArguments
+            && floatingCount > maxFloatingArguments)
+        throw new Exception(
+            "ffi cannot call a mixed INTEGER/SSE shape with stack arguments",
+        );
+
+    const kind = returnKind(returnPlan);
+    switch (kind) {
+        static foreach (returnKind_; [
+            ReturnWords.ReturnKind.void_, ReturnWords.ReturnKind.integer,
+            ReturnWords.ReturnKind.integerPair, ReturnWords.ReturnKind.sse,
+            ReturnWords.ReturnKind.ssePair, ReturnWords.ReturnKind.mixed,
+        ]) {
+            case returnKind_:
+                return dispatch!(returnKind_)(address,
+                    integerWords[0 .. integerCount],
+                    floatingWords[0 .. floatingCount]);
         }
         default:
-            assert(false, "arity is checked when the plan is prepared");
+            assert(false);
     }
 }
 
-private template Native(size_t count) {
-    import std.meta: Repeat;
+private ReturnWords.ReturnKind returnKind(in ArgumentPlan plan) {
+    size_t integers;
+    size_t floating;
+    foreach (register; plan.registers[0 .. plan.count]) {
+        if (register.kind == Register.Kind.sse)
+            ++floating;
+        else
+            ++integers;
+    }
 
-    alias Native = extern(C) ReturnWords function(Repeat!(count, size_t));
+    if (integers == 0 && floating == 0)
+        return ReturnWords.ReturnKind.void_;
+    if (integers == 1 && floating == 0)
+        return ReturnWords.ReturnKind.integer;
+    if (integers == 2 && floating == 0)
+        return ReturnWords.ReturnKind.integerPair;
+    if (integers == 0 && floating == 1)
+        return ReturnWords.ReturnKind.sse;
+    if (integers == 0 && floating == 2)
+        return ReturnWords.ReturnKind.ssePair;
+    if (integers == 1 && floating == 1)
+        return ReturnWords.ReturnKind.mixed;
+    assert(false, "unsupported return class shape");
 }
 
-private string argumentList(in size_t count) {
+private ReturnWords dispatch(ReturnWords.ReturnKind kind)(
+    void* address,
+    scope const size_t[] integerWords,
+    scope const size_t[] floatingWords,
+) {
+    static foreach (integerCount; 0 .. maxArguments + 1) {
+        if (integerWords.length == integerCount) {
+            static foreach (floatingCount; 0 .. maxArguments + 1) {
+                if (floatingWords.length == floatingCount)
+                    return call!(kind, integerCount, floatingCount)(
+                        address, integerWords, floatingWords,
+                    );
+            }
+        }
+    }
+    assert(false, "arity is checked before dispatch");
+    return ReturnWords.init;
+}
+
+private ReturnWords call(ReturnWords.ReturnKind kind, size_t integerCount,
+    size_t floatingCount)(
+    void* address,
+    scope const size_t[] integerWords,
+    scope const size_t[] floatingWords,
+) {
+    double[maxArguments] floatingArguments;
+    foreach (i; 0 .. floatingCount)
+        *cast(size_t*) &floatingArguments[i] = floatingWords[i];
+
+    alias Native = NativeFunction!(kind, integerCount, floatingCount).Native;
+    ReturnWords result;
+    static if (kind == ReturnWords.ReturnKind.void_) {
+        mixin("(cast(Native) address)(" ~
+            argumentList(integerCount, floatingCount) ~ ");");
+    } else {
+        mixin("const nativeResult = (cast(Native) address)(" ~
+            argumentList(integerCount, floatingCount) ~ ");");
+        static if (kind == ReturnWords.ReturnKind.integer)
+            result.first = nativeResult;
+        else static if (kind == ReturnWords.ReturnKind.integerPair) {
+            result.first = nativeResult.first;
+            result.second = nativeResult.second;
+        } else static if (kind == ReturnWords.ReturnKind.sse)
+            result.floatingFirst = bits(nativeResult);
+        else static if (kind == ReturnWords.ReturnKind.ssePair) {
+            result.floatingFirst = bits(nativeResult.first);
+            result.floatingSecond = bits(nativeResult.second);
+        } else static if (kind == ReturnWords.ReturnKind.mixed) {
+            result.first = nativeResult.integer;
+            result.floatingFirst = bits(nativeResult.floating);
+        }
+    }
+    return result;
+}
+
+private template NativeFunction(ReturnWords.ReturnKind kind,
+    size_t integerCount,
+    size_t floatingCount) {
+    import std.meta: Repeat;
+
+    static if (kind == ReturnWords.ReturnKind.void_)
+        alias Return = void;
+    else static if (kind == ReturnWords.ReturnKind.integer)
+        alias Return = size_t;
+    else static if (kind == ReturnWords.ReturnKind.integerPair)
+        alias Return = IntegerReturn;
+    else static if (kind == ReturnWords.ReturnKind.sse)
+        alias Return = double;
+    else static if (kind == ReturnWords.ReturnKind.ssePair)
+        alias Return = FloatingReturn;
+    else
+        alias Return = MixedReturn;
+
+    alias Native = extern(C) Return function(
+        Repeat!(integerCount, size_t),
+        Repeat!(floatingCount, double),
+    );
+}
+
+private size_t bits(in double value) {
+    return *cast(const size_t*) &value;
+}
+
+private string argumentList(in size_t integerCount, in size_t floatingCount) {
     import std.conv: text;
 
     string list;
-    foreach (i; 0 .. count) {
-        if (i > 0)
+    foreach (i; 0 .. integerCount) {
+        if (list.length != 0)
             list ~= ", ";
-        list ~= text("words[", i, "]");
+        list ~= text("integerWords[", i, "]");
     }
-
+    foreach (i; 0 .. floatingCount) {
+        if (list.length != 0)
+            list ~= ", ";
+        list ~= text("floatingArguments[", i, "]");
+    }
     return list;
 }

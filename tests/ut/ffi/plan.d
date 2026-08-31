@@ -75,8 +75,67 @@ private struct ThreeWords {
     size_t third;
 }
 
+private struct Pair {
+    int first;
+    int second;
+}
+
+private struct FloatingPair {
+    double first;
+    double second;
+}
+
+private struct MixedPair {
+    int integer;
+    double floating;
+}
+
 private extern(C) ThreeWords snakebite_ut_three_words() {
     return ThreeWords(17, 31, 47);
+}
+
+private extern(C) Pair snakebite_ut_pair(Pair value) {
+    return Pair(value.first + 1, value.second + 2);
+}
+
+private extern(C) FloatingPair snakebite_ut_floating_pair(
+    FloatingPair value,
+) {
+    return FloatingPair(value.first * 2, value.second * 3);
+}
+
+private extern(C) MixedPair snakebite_ut_mixed_pair(MixedPair value) {
+    return MixedPair(value.integer + 4, value.floating * 5);
+}
+
+private extern(C) MixedPair snakebite_ut_mixed_after_six(
+    int a, int b, int c, int d, int e, int f, MixedPair value,
+) {
+    return MixedPair(
+        a + b + c + d + e + f + value.integer,
+        value.floating * 5,
+    );
+}
+
+private extern(C) MixedPair snakebite_ut_mixed_after_eight(
+    double a, double b, double c, double d,
+    double e, double f, double g, double h,
+    MixedPair value,
+) {
+    return MixedPair(
+        cast(int) (a + b + c + d + e + f + g + h) + value.integer,
+        value.floating * 5,
+    );
+}
+
+private extern(C) double snakebite_ut_scale(double value) {
+    return value * 2.5;
+}
+
+private extern(C) int snakebite_ut_seven(
+    int a, int b, int c, int d, int e, int f, int g,
+) {
+    return a + b + c + d + e + f + g;
 }
 
 
@@ -145,21 +204,180 @@ unittest {
 }
 
 
-@("refused.tooManyArguments")
+@("called.double")
 unittest {
     auto guestModule = parseSnippet(q{
-        extern(C) int seven(int a, int b, int c, int d, int e, int f, int g);
+        extern(C) double snakebite_ut_scale(double value);
     });
-    auto function_ = findFunction(guestModule, "seven");
-    assert(function_ !is null, "No function `seven` in the guest program");
+    auto function_ = findFunction(guestModule, "snakebite_ut_scale");
+    assert(function_ !is null, "No `snakebite_ut_scale` in the program");
 
     PlanCache cache;
+    double value = 1.5;
+    double result;
+    cache.of(function_).call(&result, [cast(const void*) &value]);
 
-    // Refused when the plan is prepared. The interpreter sizes its slot
-    // buffer by `maxArguments`, so a call that got past this would fill
-    // one slot past the end of that buffer - which is why preparing the
-    // plan has to happen before the buffer is filled, not alongside it.
-    cache.of(function_).shouldThrowWithMessage(
-        "ffi cannot call `seven`: it takes 7 arguments, and at most 6"
-        ~ " are passed in registers");
+    result.should == 3.75;
+}
+
+
+@("called.smallStruct")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct Pair {
+            int first;
+            int second;
+        }
+
+        extern(C) Pair snakebite_ut_pair(Pair value);
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_pair");
+    assert(function_ !is null, "No `snakebite_ut_pair` in the program");
+
+    PlanCache cache;
+    Pair value = Pair(39, 58);
+    Pair result;
+    cache.of(function_).call(&result, [cast(const void*) &value]);
+
+    result.should == Pair(40, 60);
+}
+
+
+@("called.smallFloatingStruct")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct FloatingPair {
+            double first;
+            double second;
+        }
+
+        extern(C) FloatingPair snakebite_ut_floating_pair(
+            FloatingPair value,
+        );
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_floating_pair");
+    assert(function_ !is null,
+        "No `snakebite_ut_floating_pair` in the guest program");
+
+    PlanCache cache;
+    FloatingPair value = FloatingPair(1.25, 2.5);
+    FloatingPair result;
+    cache.of(function_).call(&result, [cast(const void*) &value]);
+
+    result.should == FloatingPair(2.5, 7.5);
+}
+
+
+@("called.mixedSmallStruct")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct MixedPair {
+            int integer;
+            double floating;
+        }
+
+        extern(C) MixedPair snakebite_ut_mixed_pair(MixedPair value);
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_mixed_pair");
+    assert(function_ !is null,
+        "No `snakebite_ut_mixed_pair` in the guest program");
+
+    PlanCache cache;
+    MixedPair value = MixedPair(39, 1.5);
+    MixedPair result;
+    cache.of(function_).call(&result, [cast(const void*) &value]);
+
+    result.should == MixedPair(43, 7.5);
+}
+
+
+@("called.mixedStructOnStack")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct MixedPair {
+            int integer;
+            double floating;
+        }
+
+        extern(C) MixedPair snakebite_ut_mixed_after_six(
+            int a, int b, int c, int d, int e, int f, MixedPair value,
+        );
+    });
+    auto function_ = findFunction(guestModule,
+        "snakebite_ut_mixed_after_six");
+    assert(function_ !is null,
+        "No `snakebite_ut_mixed_after_six` in the program");
+
+    PlanCache cache;
+    int[6] integers = [1, 2, 3, 4, 5, 6];
+    MixedPair value = MixedPair(7, 1.5);
+    MixedPair result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &integers[0], cast(const void*) &integers[1],
+        cast(const void*) &integers[2], cast(const void*) &integers[3],
+        cast(const void*) &integers[4], cast(const void*) &integers[5],
+        cast(const void*) &value,
+    ]);
+
+    result.should == MixedPair(28, 7.5);
+}
+
+
+@("called.mixedStructAfterSSE")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct MixedPair {
+            int integer;
+            double floating;
+        }
+
+        extern(C) MixedPair snakebite_ut_mixed_after_eight(
+            double a, double b, double c, double d,
+            double e, double f, double g, double h,
+            MixedPair value,
+        );
+    });
+    auto function_ = findFunction(guestModule,
+        "snakebite_ut_mixed_after_eight");
+    assert(function_ !is null,
+        "No `snakebite_ut_mixed_after_eight` in the program");
+
+    PlanCache cache;
+    double[8] floating = [1, 1, 1, 1, 1, 1, 1, 1];
+    MixedPair value = MixedPair(7, 1.5);
+    MixedPair result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &floating[0], cast(const void*) &floating[1],
+        cast(const void*) &floating[2], cast(const void*) &floating[3],
+        cast(const void*) &floating[4], cast(const void*) &floating[5],
+        cast(const void*) &floating[6], cast(const void*) &floating[7],
+        cast(const void*) &value,
+    ]);
+
+    result.should == MixedPair(15, 7.5);
+}
+
+
+@("called.stackArgument")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(C) int snakebite_ut_seven(
+            int a, int b, int c, int d, int e, int f, int g,
+        );
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_seven");
+    assert(function_ !is null,
+        "No `snakebite_ut_seven` in the guest program");
+
+    PlanCache cache;
+    int[7] values = [1, 2, 3, 4, 5, 6, 7];
+    int result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &values[0], cast(const void*) &values[1],
+        cast(const void*) &values[2], cast(const void*) &values[3],
+        cast(const void*) &values[4], cast(const void*) &values[5],
+        cast(const void*) &values[6],
+    ]);
+
+    result.should == 28;
 }
