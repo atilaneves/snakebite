@@ -341,11 +341,15 @@ private final class FunctionCompiler {
 
         const offset = _layout.offsetOf(variable);
 
-        // No initialiser at all: `int ret;` blit-inits to zero.
-        if (variable._init is null) {
-            emit(&opConstant, offset, facts.size, addConstant(0));
-            return;
-        }
+        // dmd always installs an `ExpInitializer` holding the type's own
+        // default value for a function local with no initialiser written -
+        // `int ret;` and `int ret = 0;` reach here the same way. Zero is
+        // also the wrong default for some of the integral types this
+        // compiler accepts (`char.init`/`wchar.init` are `0xFF`/`0xFFFF`,
+        // not zero), so there is no "blit to zero" case of its own to
+        // handle here, only this invariant to assert.
+        assert(variable._init !is null,
+            "a local variable declaration with no initializer at all");
 
         auto expInitializer = variable._init.isExpInitializer;
         if (expInitializer is null)
