@@ -1,6 +1,9 @@
 module snakebite.ffi.plan;
 
 
+import snakebite.ffi.symbol: Resolver;
+
+
 private:
 
 
@@ -138,7 +141,19 @@ public struct CallPlan {
 // it, which is the caller's business and not this package's.
 public struct PlanCache {
     private CallPlan[imported!"dmd.func".FuncDeclaration] _plans;
+    private Resolver _resolver;
     private size_t _preparations;
+
+    // Resolves a linker name through the cache shared by this backend's
+    // plan preparation and its other FFI operations.
+    public void* resolve(in char[] name) {
+        return _resolver.resolve(name);
+    }
+
+    version(unittest)
+    public size_t symbolLookups() @safe @nogc nothrow pure const scope {
+        return _resolver.lookups;
+    }
 
     // How many plans this has had to prepare - the expensive work the
     // cache exists to avoid, counted so that it can be asserted on.
@@ -162,7 +177,7 @@ public struct PlanCache {
             return *cached;
 
         ++_preparations;
-        _plans[function_] = prepare(function_);
+        _plans[function_] = prepare(function_, _resolver);
         return _plans[function_];
     }
 }
@@ -173,12 +188,14 @@ public struct PlanCache {
 // supplies, so nothing here is specific to C. A signature the implemented
 // ABI does not cover throws, naming what it could not pass - here, when
 // the plan is prepared, rather than on every call that would use it.
-private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
+private CallPlan prepare(
+    imported!"dmd.func".FuncDeclaration function_,
+    ref Resolver resolver,
+) {
     import snakebite.ffi.abi:
         ArgumentPlan, Register, contextPrecedesHiddenReturnPointer,
         maxArguments, needsHiddenReturnPointer, reversedDParameters,
         supported;
-    import snakebite.ffi.symbol: symbolAddress;
     import dmd.astenums: LINK, STC, VarArg;
     import dmd.mangle: mangleExact;
     import std.conv: text;
@@ -283,7 +300,7 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
         }
 
         auto name = mangleExact(function_);
-        auto address = symbolAddress(name);
+        auto address = resolver.resolve(name.fromStringz);
         if (address is null)
             throw new Exception(
                 text("ffi cannot resolve the symbol `", name.fromStringz,

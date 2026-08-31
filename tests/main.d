@@ -40,6 +40,7 @@ int main(string[] args) {
         "ut.backends.program",
         "ut.ffi.plan",
         "ut.ffi.cost",
+        "ut.ffi.symbol",
         "ut.framestack",
     );
 }

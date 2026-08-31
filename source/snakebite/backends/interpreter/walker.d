@@ -45,6 +45,11 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     public size_t typeLookups() @safe @nogc nothrow pure const scope {
         return _evaluator.typeLookups();
     }
+
+    version(unittest)
+    public size_t symbolLookups() @safe @nogc nothrow pure const scope {
+        return _evaluator.symbolLookups();
+    }
 }
 
 import snakebite.exception: SnakebiteException;
@@ -138,10 +143,6 @@ extern(C++) private final class Evaluator: Visitor {
     // worked out on that function's first call and reused by every call
     // after it - the same cold-path-once shape as `_layouts`.
     private PlanCache _plans;
-    // Whether a synthesized template instance already has native code in
-    // this process. Guest-only instances do not; cache that answer so a
-    // loop does not ask the dynamic linker again on every call.
-    private Cache!(FuncDeclaration, bool) _nativeTemplateSymbols;
     // Every dmd `Type` this evaluator has ever asked dmd about, keyed by
     // the `Type` node itself: `Type.size`/`alignsize`/`isIntegral`/
     // `isUnsigned` are pure functions of the type, re-entering dmd's
@@ -279,8 +280,7 @@ extern(C++) private final class Evaluator: Visitor {
     // lives: a variable's storage, or how to reach a called function.
     version(unittest)
     extern(D) final size_t nameLookups() @safe @nogc nothrow pure const scope {
-        return _foreignNameLookups + _layouts.lookups + _statics.lookups
-            + _nativeTemplateSymbols.lookups;
+        return _foreignNameLookups + _layouts.lookups + _statics.lookups;
     }
 
     // Every hash lookup this evaluator has made to find out what a `Type`
@@ -293,21 +293,23 @@ extern(C++) private final class Evaluator: Visitor {
         return _typeFacts.lookups;
     }
 
+    version(unittest)
+    extern(D) final size_t symbolLookups()
+        @safe @nogc nothrow pure const scope
+    {
+        return _plans.symbolLookups;
+    }
+
     extern(D) private void countForeignNameLookup() @safe @nogc nothrow pure {
         version(unittest) ++_foreignNameLookups;
     }
 
     private bool hasNativeSymbol(FuncDeclaration function_) {
         import dmd.mangle: mangleExact;
-        import snakebite.ffi.symbol: symbolAddress;
-
-        if (auto cached = function_ in _nativeTemplateSymbols)
-            return *cached;
+        import std.string: fromStringz;
 
         countForeignNameLookup;
-        const found = symbolAddress(mangleExact(function_)) !is null;
-        _nativeTemplateSymbols[function_] = found;
-        return found;
+        return _plans.resolve(mangleExact(function_).fromStringz) !is null;
     }
 
     // `function_`'s frame layout, from the cache; computed on its first
@@ -2076,10 +2078,8 @@ extern(C++) private final class Evaluator: Visitor {
     // symbol compiled elsewhere: is it in this process.
     override void visit(TypeidExp expression) {
         import dmd.dtemplate: isType;
-        import snakebite.ffi.symbol: symbolAddress;
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
-        import std.string: toStringz;
 
         auto type = isType(expression.obj);
         if (type is null || type.vtinfo is null)
@@ -2090,7 +2090,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto name = type.vtinfo.ident.toString;
         countForeignNameLookup;
-        auto address = symbolAddress(name.toStringz);
+        auto address = _plans.resolve(name);
         if (address is null)
             throw new SnakebiteException(
                 text("interpreter cannot resolve the symbol `", name,
