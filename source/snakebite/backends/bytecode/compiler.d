@@ -3,6 +3,8 @@ module snakebite.backends.bytecode.compiler;
 
 private:
 
+import dmd.visitor: Visitor;
+
 
 public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
@@ -138,17 +140,14 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 // its way out, an operand of a nested expression - by growing
 // `_tempSize`/`_tempAlignment` past it; nothing about a temporary slot is
 // ever handed back through `FrameLayout` itself.
-private final class FunctionCompiler {
+extern(C++) private final class FunctionCompiler: Visitor {
     import dmd.declaration: VarDeclaration;
-    import dmd.expression:
-        AssignExp, BinAssignExp, BinExp, CallExp, CastExp, CmpExp, CondExp,
-        DeclarationExp, EqualExp, Expression, IntegerExp, LogicalExp, NotExp,
-        PostExp, UnaExp, VarExp;
+    import dmd.expression;
     import dmd.func: FuncDeclaration;
     import dmd.statement:
         CompoundStatement, ContinueStatement, ExpStatement, ForStatement,
-        IfStatement, ReturnStatement, ScopeStatement, Statement,
-        WhileStatement;
+        IfStatement, ImportStatement, ReturnStatement, ScopeStatement,
+        Statement, WhileStatement;
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
         Arg, CallSite, discardResult, Function, Instruction, opAdd, opBitAnd,
@@ -164,6 +163,10 @@ private final class FunctionCompiler {
     import snakebite.backends.layout: FrameLayout;
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout: alignUp, isIntegralSize, TypeFacts;
+
+    alias visit = Visitor.visit;
+
+    extern(D):
 
     private Bytecode _bytecode;
     private FuncDeclaration _function;
@@ -198,6 +201,8 @@ private final class FunctionCompiler {
         size_t[] pendingContinueJumps;
     }
     private LoopContext[] _loops;
+    private size_t _destination;
+    private size_t _width;
 
     public this(
         Bytecode bytecode,
@@ -309,58 +314,59 @@ private final class FunctionCompiler {
         if (_finished || statement is null)
             return;
 
-        if (auto compound = statement.isCompoundStatement) {
-            if (compound.statements !is null)
-                foreach (child; *compound.statements) {
-                    if (_finished)
-                        return;
+        statement.accept(this);
+    }
 
-                    compileStatement(child);
-                }
-            return;
-        }
+    extern(C++):
 
-        if (auto scope_ = statement.isScopeStatement) {
-            compileStatement(scope_.statement);
-            return;
-        }
-
-        if (statement.isImportStatement)
-            return;
-
-        if (auto ret = statement.isReturnStatement) {
-            compileReturn(ret);
-            return;
-        }
-
-        if (auto exp = statement.isExpStatement) {
-            if (exp.exp !is null)
-                compileEffect(exp.exp);
-            return;
-        }
-
-        if (auto if_ = statement.isIfStatement) {
-            compileIf(if_);
-            return;
-        }
-
-        if (auto while_ = statement.isWhileStatement) {
-            compileWhile(while_);
-            return;
-        }
-
-        if (auto for_ = statement.isForStatement) {
-            compileFor(for_);
-            return;
-        }
-
-        if (auto continue_ = statement.isContinueStatement) {
-            compileContinue(continue_);
-            return;
-        }
-
+    override void visit(Statement statement) {
         throw rejection(_function, statement.loc, statementText(statement));
     }
+
+    override void visit(CompoundStatement statement) {
+        if (statement.statements is null)
+            return;
+
+        foreach (child; *statement.statements) {
+            compileStatement(child);
+            if (_finished)
+                return;
+        }
+    }
+
+    override void visit(ScopeStatement statement) {
+        compileStatement(statement.statement);
+    }
+
+    override void visit(ImportStatement statement) {
+    }
+
+    override void visit(ReturnStatement statement) {
+        compileReturn(statement);
+    }
+
+    override void visit(ExpStatement statement) {
+        if (statement.exp !is null)
+            compileEffect(statement.exp);
+    }
+
+    override void visit(IfStatement statement) {
+        compileIf(statement);
+    }
+
+    override void visit(WhileStatement statement) {
+        compileWhile(statement);
+    }
+
+    override void visit(ForStatement statement) {
+        compileFor(statement);
+    }
+
+    override void visit(ContinueStatement statement) {
+        compileContinue(statement);
+    }
+
+    extern(D):
 
     private void compileReturn(ReturnStatement statement) {
         _finished = true;
@@ -549,70 +555,16 @@ private final class FunctionCompiler {
     // Runs `expression` for effect, at statement level: whatever value it
     // produces (a call's return, an assignment's own value) is never read.
     private void compileEffect(Expression expression) {
-        if (auto declaration = expression.isDeclarationExp) {
-            compileDeclaration(declaration);
-            return;
+        const destination = _destination;
+        const width = _width;
+        scope (exit) {
+            _destination = destination;
+            _width = width;
         }
 
-        if (auto call = expression.isCallExp) {
-            compileCall(call, discardResult);
-            return;
-        }
-
-        if (auto assign = assignLike(expression)) {
-            compileAssign(assign, discardResult);
-            return;
-        }
-
-        if (auto compound = expression.isBinAssignExp) {
-            compileCompoundAssign(compound, discardResult);
-            return;
-        }
-
-        if (auto post = expression.isPostExp) {
-            compilePost(post, discardResult);
-            return;
-        }
-
-        // dmd builds a comma expression when a `for`'s own initialiser is
-        // more than one expression - `for (i = 0, j = 10; ...)` - the same
-        // node it uses to sequence a scoped temporary's setup before an
-        // expression that needs it. Both operands run for their own
-        // effects alone here; a comma expression's *value* (its right
-        // side) is only ever needed when it is itself a nested operand,
-        // which `evalInto` handles.
-        if (auto comma = expression.isCommaExp) {
-            compileEffect(comma.e1);
-            compileEffect(comma.e2);
-            return;
-        }
-
-        throw rejection(_function, expression.loc, expressionText(expression));
-    }
-
-    // dmd represents `=`, and a local or field's own construction and
-    // default blit, as three different `AssignExp` subclasses distinguished
-    // only by `op` (`ConstructExp`/`BlitExp` narrow it after semantic
-    // analysis, the way `sum = 0` in `long sum = 0;`'s own initialiser
-    // arrives as a `ConstructExp`, not a bare `AssignExp`). All three write
-    // the same bytes the same way for an integral target - no destructor,
-    // no postblit, nothing construction and assignment specify
-    // differently - so this compiler treats them alike rather than
-    // refusing two thirds of them. `isConstructExp`/`isBlitExp` upcast to
-    // `AssignExp` implicitly, a safe conversion the compiler itself
-    // checks - unlike `cast(AssignExp) expression`, an unsound downcast
-    // dmd's `extern(C++)` nodes carry no `ClassInfo` to support.
-    private AssignExp assignLike(Expression expression) {
-        if (auto assign = expression.isAssignExp)
-            return assign;
-
-        if (auto construct = expression.isConstructExp)
-            return construct;
-
-        if (auto blit = expression.isBlitExp)
-            return blit;
-
-        return null;
+        _destination = discardResult;
+        _width = 0;
+        expression.accept(this);
     }
 
     // Runs a local's initialiser into the frame slot `_layout` already
@@ -783,165 +735,181 @@ private final class FunctionCompiler {
     private void evalInto(
         Expression expression, in size_t destOffset, in size_t width,
     ) {
-        if (auto integer = expression.isIntegerExp) {
-            emit(&opConstant, destOffset, addConstant(integer.toInteger), width);
-            return;
+        const destination = _destination;
+        const savedWidth = _width;
+        scope (exit) {
+            _destination = destination;
+            _width = savedWidth;
         }
 
-        if (auto varExp = expression.isVarExp) {
-            auto variable = varExp.var.isVarDeclaration;
-            if (variable is null || variable.isDataseg
-                    || _layout.isRef(variable))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+        _destination = destOffset;
+        _width = width;
+        expression.accept(this);
+    }
 
-            const srcOffset = _layout.offsetOf(variable);
-            if (srcOffset != destOffset)
-                emit(&opCopy, destOffset, srcOffset, width);
-            return;
-        }
+    extern(C++):
 
-        if (auto call = expression.isCallExp) {
-            compileCall(call, destOffset);
-            return;
-        }
-
-        if (auto assign = assignLike(expression)) {
-            compileAssign(assign, destOffset);
-            return;
-        }
-
-        if (auto compound = expression.isBinAssignExp) {
-            compileCompoundAssign(compound, destOffset);
-            return;
-        }
-
-        if (auto post = expression.isPostExp) {
-            compilePost(post, destOffset);
-            return;
-        }
-
-        if (auto comma = expression.isCommaExp) {
-            compileEffect(comma.e1);
-            evalInto(comma.e2, destOffset, width);
-            return;
-        }
-
-        if (auto cast_ = expression.isCastExp) {
-            compileCast(cast_, destOffset, width);
-            return;
-        }
-
-        if (auto not = expression.isNotExp) {
-            compileNot(not, destOffset);
-            return;
-        }
-
-        if (auto logical = expression.isLogicalExp) {
-            compileLogical(logical, destOffset, width);
-            return;
-        }
-
-        if (auto cond = expression.isCondExp) {
-            compileTernary(cond, destOffset, width);
-            return;
-        }
-
-        if (auto cmp = asCmpExp(expression)) {
-            compileComparison(cmp, destOffset);
-            return;
-        }
-
-        if (auto eq = expression.isEqualExp) {
-            compileComparison(eq, destOffset);
-            return;
-        }
-
-        if (auto neg = expression.isNegExp) {
-            compileUnary(neg, destOffset, width, &opNegate);
-            return;
-        }
-
-        if (auto com = expression.isComExp) {
-            compileUnary(com, destOffset, width, &opComplement);
-            return;
-        }
-
-        if (auto add = expression.isAddExp) {
-            compileBinary(add, destOffset, width, &opAdd);
-            return;
-        }
-
-        if (auto min = expression.isMinExp) {
-            compileBinary(min, destOffset, width, &opSubtract);
-            return;
-        }
-
-        if (auto mul = expression.isMulExp) {
-            compileBinary(mul, destOffset, width, &opMultiply);
-            return;
-        }
-
-        if (auto and_ = expression.isAndExp) {
-            compileBinary(and_, destOffset, width, &opBitAnd);
-            return;
-        }
-
-        if (auto or_ = expression.isOrExp) {
-            compileBinary(or_, destOffset, width, &opBitOr);
-            return;
-        }
-
-        if (auto xor_ = expression.isXorExp) {
-            compileBinary(xor_, destOffset, width, &opBitXor);
-            return;
-        }
-
-        if (auto shl = expression.isShlExp) {
-            compileBinary(shl, destOffset, width, &opShiftLeft);
-            return;
-        }
-
-        if (auto ushr = expression.isUshrExp) {
-            compileBinary(ushr, destOffset, width, &opShiftRightLogical);
-            return;
-        }
-
-        if (auto shr = expression.isShrExp) {
-            const unsigned = TypeFacts.of(shr.e1.type).isUnsigned;
-            compileBinary(shr, destOffset, width,
-                unsigned ? &opShiftRightLogical : &opShiftRightArithmetic);
-            return;
-        }
-
-        if (auto div = expression.isDivExp) {
-            const unsigned = TypeFacts.of(div.e1.type).isUnsigned;
-            compileBinary(div, destOffset, width,
-                unsigned ? &opDivideUnsigned : &opDivideSigned);
-            return;
-        }
-
-        if (auto mod = expression.isModExp) {
-            const unsigned = TypeFacts.of(mod.e1.type).isUnsigned;
-            compileBinary(mod, destOffset, width,
-                unsigned ? &opModuloUnsigned : &opModuloSigned);
-            return;
-        }
-
+    override void visit(Expression expression) {
         throw rejection(_function, expression.loc, expressionText(expression));
     }
 
-    // dmd has no generated `isCmpExp()` (see the commented-out entry in
-    // its own `Expression` class), unlike every other binary operator
-    // this compiler recognises by node kind - so this checks `op` and
-    // casts itself, the same test dmd's own generated methods make.
-    private CmpExp asCmpExp(Expression expression) {
-        with (EXP) switch (expression.op) {
-            case lessThan, lessOrEqual, greaterThan, greaterOrEqual:
-                return cast(CmpExp) expression;
-            default:
-                return null;
-        }
+    override void visit(DeclarationExp expression) {
+        if (_destination != discardResult)
+            return visit(cast(Expression) expression);
+
+        compileDeclaration(expression);
+    }
+
+    override void visit(IntegerExp expression) {
+        requireDestination(expression);
+        emit(&opConstant, _destination,
+            addConstant(expression.toInteger), _width);
+    }
+
+    override void visit(VarExp expression) {
+        requireDestination(expression);
+        auto variable = expression.var.isVarDeclaration;
+        if (variable is null || variable.isDataseg || _layout.isRef(variable))
+            return visit(cast(Expression) expression);
+
+        const source = _layout.offsetOf(variable);
+        if (source != _destination)
+            emit(&opCopy, _destination, source, _width);
+    }
+
+    override void visit(CallExp expression) {
+        compileCall(expression, _destination);
+    }
+
+    override void visit(AssignExp expression) {
+        compileAssign(expression, _destination);
+    }
+
+    override void visit(BinAssignExp expression) {
+        compileCompoundAssign(expression, _destination);
+    }
+
+    override void visit(PostExp expression) {
+        compilePost(expression, _destination);
+    }
+
+    override void visit(CommaExp expression) {
+        compileEffect(expression.e1);
+        if (_destination == discardResult)
+            compileEffect(expression.e2);
+        else
+            evalInto(expression.e2, _destination, _width);
+    }
+
+    override void visit(CastExp expression) {
+        requireDestination(expression);
+        compileCast(expression, _destination, _width);
+    }
+
+    override void visit(NotExp expression) {
+        requireDestination(expression);
+        compileNot(expression, _destination);
+    }
+
+    override void visit(LogicalExp expression) {
+        requireDestination(expression);
+        compileLogical(expression, _destination, _width);
+    }
+
+    override void visit(CondExp expression) {
+        requireDestination(expression);
+        compileTernary(expression, _destination, _width);
+    }
+
+    override void visit(CmpExp expression) {
+        requireDestination(expression);
+        compileComparison(expression, _destination);
+    }
+
+    override void visit(EqualExp expression) {
+        requireDestination(expression);
+        compileComparison(expression, _destination);
+    }
+
+    override void visit(NegExp expression) {
+        requireDestination(expression);
+        compileUnary(expression, _destination, _width, &opNegate);
+    }
+
+    override void visit(ComExp expression) {
+        requireDestination(expression);
+        compileUnary(expression, _destination, _width, &opComplement);
+    }
+
+    override void visit(AddExp expression) {
+        compileBinaryExpression(expression, &opAdd);
+    }
+
+    override void visit(MinExp expression) {
+        compileBinaryExpression(expression, &opSubtract);
+    }
+
+    override void visit(MulExp expression) {
+        compileBinaryExpression(expression, &opMultiply);
+    }
+
+    override void visit(AndExp expression) {
+        compileBinaryExpression(expression, &opBitAnd);
+    }
+
+    override void visit(OrExp expression) {
+        compileBinaryExpression(expression, &opBitOr);
+    }
+
+    override void visit(XorExp expression) {
+        compileBinaryExpression(expression, &opBitXor);
+    }
+
+    override void visit(ShlExp expression) {
+        compileBinaryExpression(expression, &opShiftLeft);
+    }
+
+    override void visit(UshrExp expression) {
+        compileBinaryExpression(expression, &opShiftRightLogical);
+    }
+
+    override void visit(ShrExp expression) {
+        compileSignedBinaryExpression(
+            expression, &opShiftRightArithmetic, &opShiftRightLogical);
+    }
+
+    override void visit(DivExp expression) {
+        compileSignedBinaryExpression(
+            expression, &opDivideSigned, &opDivideUnsigned);
+    }
+
+    override void visit(ModExp expression) {
+        compileSignedBinaryExpression(
+            expression, &opModuloSigned, &opModuloUnsigned);
+    }
+
+    extern(D):
+
+    private void requireDestination(Expression expression) {
+        if (_destination == discardResult)
+            visit(expression);
+    }
+
+    private void compileBinaryExpression(
+        BinExp expression, Instruction.Handler handler,
+    ) {
+        requireDestination(expression);
+        compileBinary(expression, _destination, _width, handler);
+    }
+
+    private void compileSignedBinaryExpression(
+        BinExp expression,
+        Instruction.Handler signedHandler,
+        Instruction.Handler unsignedHandler,
+    ) {
+        const handler = TypeFacts.of(expression.e1.type).isUnsigned
+            ? unsignedHandler : signedHandler;
+        compileBinaryExpression(expression, handler);
     }
 
     // `+`, `-`, `*`, `&`, `|`, `^`, `<<`, `>>`, `>>>`, `/`, `%`: both
