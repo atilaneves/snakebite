@@ -78,6 +78,7 @@ static foreach (backend; Matrix!(
 // requested element offset, so the cast, multiplication, and pointer
 // addition must all be evaluated by the backend.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("pointerCastAndAdditionCopiesAtOffset." ~ backend.stringof)
@@ -121,6 +122,7 @@ static foreach (backend; Matrix!(
 // Pointer arithmetic uses the pointee size, not byte addressing, for a
 // dynamic array whose elements are wider than one byte.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("pointerCastAndAdditionScalesByPointeeSize." ~ backend.stringof)
@@ -161,6 +163,7 @@ static foreach (backend; Matrix!(
 // Integral-plus-pointer addition uses the same native pointee addressing as
 // pointer-plus-integral addition.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("integralPlusPointerAdditionScalesByPointeeSize." ~ backend.stringof)
@@ -208,6 +211,7 @@ static foreach (backend; Matrix!(
 // Cerealising and decerealising nonzero bytes through the computed pointer
 // preserves the bytes at the nonzero old length.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("cerealiseDecerealiseRoundTripsAtOffset." ~ backend.stringof)
