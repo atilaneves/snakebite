@@ -20,6 +20,10 @@ configuration "unittest" {
     targetType "executable"
     targetName "ut"
     targetPath "bin"
+    // A non-root guest declaration runs as the native symbol the host
+    // already links, druntime template instantiations included, so the
+    // executable's own symbols must be visible to `dlsym`.
+    lflags "--export-dynamic" platform="linux"
 
     mainSourceFile "tests/main.d"
     sourcePaths "tests"

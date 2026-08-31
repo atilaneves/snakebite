@@ -2,6 +2,7 @@ module ut.backends.interpreter.cost;
 
 
 import ut;
+import snakebite.backends.backend: Program;
 import snakebite.backends.interpreter: Interpreter;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -122,8 +123,9 @@ private void shouldNotAllocate(
 ) {
     import core.memory: GC;
 
-    auto backend = new Interpreter;
-    auto function_ = guestFunction(parseSnippet(guest), functionName);
+    auto guestModule = parseSnippet(guest);
+    auto backend = new Interpreter(Program([guestModule]));
+    auto function_ = guestFunction(guestModule, functionName);
     long result;
 
     // One warm-up call, because exactly one call is cold. Measured per
@@ -207,7 +209,7 @@ private void shouldCostPerIteration(string kind)(
     in size_t line = __LINE__,
 ) {
     auto guestModule = parseSnippet(guest);
-    auto backend = new Interpreter;
+    auto backend = new Interpreter(Program([guestModule]));
     long result;
 
     auto few = guestFunction(guestModule, "few");

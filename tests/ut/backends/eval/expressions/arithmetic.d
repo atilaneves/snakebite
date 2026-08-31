@@ -178,6 +178,7 @@ static foreach (backend; Matrix!(
 @("float.intToFloatUsesFloatPrecision.Ctfe.diverges")
 @Tags("Ctfe")
 unittest {
+    import snakebite.backends.backend: Program;
     import snakebite.frontend.compiler: parseSnippet;
     import snakebite.frontend.dmd.functions: findFunction;
 
@@ -189,7 +190,8 @@ unittest {
         }
     });
 
-    (new Ctfe).eval(findFunction(module_, "__eval")).should == "16777217";
+    (new Ctfe(Program([module_])))
+        .eval(findFunction(module_, "__eval")).should == "16777217";
 }
 
 // With a literal on each side DMD folds the expression before any backend

@@ -56,45 +56,59 @@ unittest {
 }
 
 
-@("refused.refReturn")
-unittest {
-    auto guestModule = parseSnippet(q{
-        extern(C) ref int refReturner();
-    });
-    auto function_ = findFunction(guestModule, "refReturner");
-    assert(function_ !is null, "No function `refReturner` in the program");
+// The native side of the `ref` tests below: compiled functions in this
+// very test binary, reachable through the dynamic linker because the
+// binary exports its own symbols.
+private extern(C) void snakebite_ut_bump(ref int x) {
+    x += 3;
+}
 
-    PlanCache cache;
+private __gshared int _cell = 1234;
 
-    // A `ref` return hands back the address of the result, not the
-    // result. `nextOf` is the referred-to type either way, so classifying
-    // it describes a value that never travels, and writing the return
-    // register through that description stores the low bytes of an
-    // address as if they were the value - a wrong answer that looks
-    // right. Refused when the plan is prepared, before anything runs.
-    cache.of(function_).shouldThrowWithMessage(
-        "ffi cannot call `refReturner`: it returns by `ref`");
+private extern(C) ref int snakebite_ut_cell() {
+    return _cell;
 }
 
 
-@("refused.refParameter")
+@("called.refParameter")
 unittest {
     auto guestModule = parseSnippet(q{
-        extern(C) void bump(ref int x);
+        extern(C) void snakebite_ut_bump(ref int x);
     });
-    auto function_ = findFunction(guestModule, "bump");
-    assert(function_ !is null, "No function `bump` in the guest program");
+    auto function_ = findFunction(guestModule, "snakebite_ut_bump");
+    assert(function_ !is null, "No `snakebite_ut_bump` in the program");
 
     PlanCache cache;
 
-    // A `ref` parameter occupies a pointer slot in the caller's frame -
-    // the address of the argument's own storage, not a copy of its value.
-    // `parameterList[i].type` is the pointee type, so classifying by it
-    // describes a value that never travels: `Register.of(int)` for
-    // `ref int` reads 4 bytes of an address as though they were the
-    // value. Refused when the plan is prepared, before anything runs.
-    cache.of(function_).shouldThrowWithMessage(
-        "ffi cannot call `bump`: parameter 0 is `ref`");
+    // A `ref` parameter travels as the address of the argument's own
+    // storage, and the caller's slot for it already holds that address -
+    // so a callee writing through the reference must change this very
+    // variable.
+    int value = 39;
+    const int* slot = &value;
+    cache.of(function_).call(null, [cast(const void*) &slot]);
+
+    value.should == 42;
+}
+
+
+@("called.refReturn")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(C) ref int snakebite_ut_cell();
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_cell");
+    assert(function_ !is null, "No `snakebite_ut_cell` in the program");
+
+    PlanCache cache;
+
+    // A `ref` return hands back the address of the result in the return
+    // register, so what lands in the caller's return place is a pointer
+    // to the callee's own variable, whatever that variable holds.
+    int* address;
+    cache.of(function_).call(&address, []);
+
+    (*address).should == 1234;
 }
 
 

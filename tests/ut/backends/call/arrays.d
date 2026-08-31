@@ -215,7 +215,7 @@ unittest {
     auto function_ = findFunction(module_, "past");
 
     char result;
-    (new Interpreter).call(function_, &result, [])
+    interpreterOf(module_).call(function_, &result, [])
         .shouldThrow;
 }
 
@@ -238,7 +238,7 @@ unittest {
     auto function_ = findFunction(module_, "nothing");
 
     char result;
-    (new Interpreter).call(function_, &result, [])
+    interpreterOf(module_).call(function_, &result, [])
         .shouldThrow;
 }
 
@@ -392,7 +392,7 @@ unittest {
         }
     });
     auto function_ = findFunction(module_, "second");
-    auto interpreter = new Interpreter;
+    auto interpreter = interpreterOf(module_);
 
     int first;
     interpreter.call(function_, &first, []);
@@ -512,7 +512,7 @@ unittest {
         }
     });
     auto function_ = findFunction(module_, "accumulate");
-    auto interpreter = new Interpreter;
+    auto interpreter = interpreterOf(module_);
 
     int first;
     interpreter.call(function_, &first, []);
