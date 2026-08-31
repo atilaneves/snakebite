@@ -768,14 +768,16 @@ extern(C++) private final class Evaluator: Visitor {
         storeValue(_type, _facts, expression, _place);
     }
 
-    // A function literal as a value: two words for a delegate destination
-    // (a null context, then the function), one word for a function
-    // pointer. The function word is the declaration itself - this
-    // backend's form of a code address, read back by `calleeOf` when the
-    // value is called. A literal that reads an enclosing local needs the
-    // frame it read from as its context, which this interpreter does not
-    // represent, so it is refused here - where the value is made - rather
-    // than at some later call through it.
+    // A function literal as a value. The function word holds the
+    // declaration itself rather than a machine address, because this
+    // backend has no machine code for the literal - `calleeOf` reads it
+    // back when the value is called. The context word is what tells a
+    // delegate this interpreter can run from one it cannot: null is the
+    // only context a non-capturing literal ever needs, so `calleeOf`
+    // refuses anything else. A literal that reads an enclosing local
+    // needs the frame it read from as its context, which this
+    // interpreter does not represent, so it is refused here - where the
+    // value is made - rather than at some later call through it.
     override void visit(FuncExp expression) {
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, storeIntegral;
