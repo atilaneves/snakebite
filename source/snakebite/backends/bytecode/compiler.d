@@ -13,20 +13,19 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
     private Vm _vm;
     private Function[FuncDeclaration] _compiled;
-    private bool _prepared;
 
     public this(const Program program) {
         super(program);
         _vm = Vm(defaultFrameCapacity);
     }
 
-    // Eagerly compiles every execution root of `_program` and everything
-    // each root reaches, so a construct none of them can run is rejected
-    // before any of them executes. A snippet program with no roots at all
-    // (a bare function under test, called directly by `call`) has nothing
-    // to prepare here; `call` still compiles such a function on first use.
     public void compile(Program program) {
-        prepare;
+        if (program.main.func is null)
+            throw new SnakebiteException(
+                "bytecode compiler needs a program entry function",
+            );
+
+        compiled(program.main.func);
     }
 
     public override void call(
@@ -39,16 +38,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 "bytecode compiler does not support arguments yet",
             );
 
-        prepare;
-
-        if (auto found = function_ in _compiled) {
-            _vm.call(*found, returnPlace);
-            return;
-        }
-
-        auto executable = compileFunction(function_);
-        _compiled[function_] = executable;
-        _vm.call(executable, returnPlace);
+        _vm.call(compiled(function_), returnPlace);
     }
 
     public override string eval(FuncDeclaration function_) {
@@ -57,37 +47,15 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         );
     }
 
-    // The execution roots this program starts from: module constructors,
-    // then either its `main` or every one of its unittests, whichever
-    // `_program.main.kind` says this program's entry point actually is.
-    // Neither `main` nor a unittest is special-cased by name or shape here
-    // - `Program` already resolved which root set applies.
-    // `cast()`/`cast(FuncDeclaration[])`: `_program` is a const view, but
-    // `compileFunction` and `_compiled` both work in terms of dmd's own
-    // (not const-correct) AST types, and this only reads the declarations.
-    private FuncDeclaration[] roots() const {
-        import snakebite.frontend.dmd.functions: findUnittests;
+    // `function_`'s compiled form, compiling it - and, transitively,
+    // whatever it tail-calls - on first use. Reused on every later call to
+    // the same function, the way compiled code only ever compiles a
+    // function once.
+    private ref const(Function) compiled(FuncDeclaration function_) {
+        if (auto found = function_ in _compiled)
+            return *found;
 
-        auto found = cast(FuncDeclaration[]) _program.moduleConstructors;
-
-        if (_program.main.kind == Program.Main.Kind.dubTestRunner) {
-            foreach (module_; _program.rootModules)
-                found ~= findUnittests(cast() module_);
-        } else if (_program.main.func !is null)
-            found ~= cast() _program.main.func;
-
-        return found;
-    }
-
-    private void prepare() {
-        if (_prepared)
-            return;
-
-        foreach (root; roots)
-            if (root !in _compiled)
-                _compiled[root] = compileFunction(root);
-
-        _prepared = true;
+        return _compiled[function_] = compileFunction(function_);
     }
 }
 
