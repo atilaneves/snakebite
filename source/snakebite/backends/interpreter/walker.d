@@ -137,6 +137,10 @@ extern(C++) private final class Evaluator: Visitor {
     // worked out on that function's first call and reused by every call
     // after it - the same cold-path-once shape as `_layouts`.
     private PlanCache _plans;
+    // Whether a synthesized template instance already has native code in
+    // this process. Guest-only instances do not; cache that answer so a
+    // loop does not ask the dynamic linker again on every call.
+    private Cache!(FuncDeclaration, bool) _nativeTemplateSymbols;
     // Every dmd `Type` this evaluator has ever asked dmd about, keyed by
     // the `Type` node itself: `Type.size`/`alignsize`/`isIntegral`/
     // `isUnsigned` are pure functions of the type, re-entering dmd's
@@ -274,7 +278,8 @@ extern(C++) private final class Evaluator: Visitor {
     // lives: a variable's storage, or how to reach a called function.
     version(unittest)
     extern(D) final size_t nameLookups() @safe @nogc nothrow pure const scope {
-        return _foreignNameLookups + _layouts.lookups + _statics.lookups;
+        return _foreignNameLookups + _layouts.lookups + _statics.lookups
+            + _nativeTemplateSymbols.lookups;
     }
 
     // Every hash lookup this evaluator has made to find out what a `Type`
@@ -289,6 +294,19 @@ extern(C++) private final class Evaluator: Visitor {
 
     extern(D) private void countForeignNameLookup() @safe @nogc nothrow pure {
         version(unittest) ++_foreignNameLookups;
+    }
+
+    private bool hasNativeSymbol(FuncDeclaration function_) {
+        import dmd.mangle: mangleExact;
+        import snakebite.ffi.symbol: symbolAddress;
+
+        if (auto cached = function_ in _nativeTemplateSymbols)
+            return *cached;
+
+        countForeignNameLookup;
+        const found = symbolAddress(mangleExact(function_)) !is null;
+        _nativeTemplateSymbols[function_] = found;
+        return found;
     }
 
     // `function_`'s frame layout, from the cache; computed on its first
@@ -365,15 +383,17 @@ extern(C++) private final class Evaluator: Visitor {
     ) {
         import std.conv: text;
 
-        // The one decision for every call this backend makes: a callee the
-        // program owns is walked here, and any other callee already exists
-        // as machine code this process links - druntime is not
-        // reimplemented here, so calling that code is how such a
-        // declaration runs. The program's ownership answer is the whole
-        // decision: no name, linkage, package or body inspection gets a
-        // second vote. Make this branch first so an interpreter capability
-        // check cannot turn a non-root call into a backend-local refusal.
-        if (!_program.isInterpreted(function_)) {
+        // A template instance used only by interpreted guest code has no
+        // machine-code symbol for FFI to find. DMD has already synthesized
+        // and analyzed its exact body, so walk that body. This is semantic:
+        // no function name, package, or template argument gets a vote.
+        // Other non-root declarations still run as native code already
+        // linked into the process.
+        const isGuest = _program.isInterpreted(function_);
+        const interpretsTemplate = !isGuest
+            && function_.isInstantiated() !is null
+            && function_.fbody !is null && !hasNativeSymbol(function_);
+        if (!isGuest && !interpretsTemplate) {
             const(void)*[maxArguments] slots;
             countForeignNameLookup;
             _plans.of(function_).call(
@@ -916,7 +936,17 @@ extern(C++) private final class Evaluator: Visitor {
 
     override void visit(VarExp expression) {
         import core.stdc.string: memcpy;
+        import dmd.id: Id;
         import snakebite.nativelayout: storeIntegral;
+
+        // DMD creates this compiler variable during semantic analysis. Its
+        // own native code generator defines it as false at run time; true is
+        // reserved for DMD's CTFE engine. Compare the interned identifier,
+        // not source spelling that guest code could imitate.
+        if (expression.var.ident is Id.ctfe) {
+            storeIntegral(_place, 0, _facts.size);
+            return;
+        }
 
         if (expression.var is _dollar.var) {
             storeIntegral(_place, _dollar.length, _facts.size);

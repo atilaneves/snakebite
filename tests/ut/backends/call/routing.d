@@ -1,11 +1,10 @@
 module ut.backends.call.routing;
 
 
-// Whether a callee is interpreted or called natively is one decision,
-// `Program.isInterpreted`: a callee owned by a root module is interpreted,
-// any other callee runs as the native code this process links. These tests
-// pin that ownership is the whole decision - not the callee's name, not
-// its linkage, and not whether it has a body.
+// A root-owned callee is interpreted. A non-root declaration uses native
+// code when that code exists; a synthesized template instance with no native
+// symbol uses the exact body DMD produced for it. Names and packages do not
+// decide how a call runs.
 
 
 import ut.backends;
@@ -67,18 +66,12 @@ unittest {
 }
 
 
-// `arr ~= element` is lowered by dmd's own semantic pass to druntime's
-// `_d_arrayappendcTX`, the hook that resizes the array - a template
-// declared by `core.internal.array.appending`, never by the program, so
-// it is executed natively by ownership even though its name starts with
-// `_d_` and its body is available to walk. The element type here is
-// declared only by the guest, so no native instantiation of the hook
-// exists in this process and the call must fail at the FFI boundary,
-// naming the hook's symbol - walking its body instead would grow the
-// array and pass silently. (Growing an `int[]` the same way succeeds
-// through the native hook: `arrays.append.element.Interpreter` and its
-// siblings.)
-@("nonRootOwned.druntimeResizeHelper.Interpreter")
+// The guest-only element type means no native `_d_arrayappendcTX` instance
+// can exist. DMD did synthesize its body, so the interpreter enters it and
+// reaches the guest struct's TypeInfo. That TypeInfo has no native symbol
+// either. The later refusal proves the missing template did not fail at the
+// FFI boundary, without requiring this test to expand TypeInfo support.
+@("nonRootOwned.missingTemplateBodyIsWalked.Interpreter")
 @Tags("Interpreter")
 unittest {
     auto module_ = parseSnippet(q{
@@ -97,6 +90,7 @@ unittest {
         .call(function_, &result, [])
         .shouldThrow;
 
-    thrown.msg.startsWith("ffi cannot resolve the symbol").should == true;
-    thrown.msg.canFind("_d_arrayappendcTX").should == true;
+    thrown.msg.startsWith("interpreter cannot resolve the symbol").should
+        == true;
+    thrown.msg.canFind("TypeInfo_S").should == true;
 }
