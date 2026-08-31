@@ -420,13 +420,24 @@ private final class FunctionCompiler {
         }
 
         _finished = false;
-        const jumpIndex = _instructions.length;
-        emit(&opJump, 0, 0, 0);
+        // Skipped when the `if` branch already ended in a `return`/
+        // `continue`: nothing would ever reach this jump, so emitting it
+        // would leave a dead instruction whose target - one past the
+        // `else` branch's own last instruction - does not exist at all
+        // when the `else` branch also always ends its own path, since
+        // then nothing follows this whole `if` either and `build` never
+        // appends a trailing instruction for it to land on.
+        size_t jumpIndex = size_t.max;
+        if (!ifFinished) {
+            jumpIndex = _instructions.length;
+            emit(&opJump, 0, 0, 0);
+        }
         _instructions[branchIndex].source = _instructions.length;
 
         compileStatement(statement.elsebody);
         const elseFinished = _finished;
-        _instructions[jumpIndex].destination = _instructions.length;
+        if (jumpIndex != size_t.max)
+            _instructions[jumpIndex].destination = _instructions.length;
 
         _finished = ifFinished && elseFinished;
     }
@@ -919,15 +930,18 @@ private final class FunctionCompiler {
         }
     }
 
-    // `+`, `-`, `*`, `&`, `|`, `^`, `<<`, `>>`, `>>>`, `/`, `%`: evaluates
-    // the left operand directly into `destOffset` - already this
-    // expression's own destination, so no separate slot is needed for
-    // it - then the right operand into a temporary of its own, and
-    // combines the two in place with `handler`, already the right one
-    // for this operator and, where it matters, this expression's own
-    // signedness (decided by the caller, which knows which operator this
-    // is; this compiler has no per-operator table of its own to keep in
-    // step with the VM's opcodes).
+    // `+`, `-`, `*`, `&`, `|`, `^`, `<<`, `>>`, `>>>`, `/`, `%`: both
+    // operands are evaluated into temporaries of their own - never
+    // `destOffset` directly, which can already be a variable either
+    // operand itself reads (`x = y + x`; evaluating `y` straight into
+    // `x`'s own slot would clobber `x` before it is read for the right
+    // operand) - then combined in place with `handler`, already the
+    // right one for this operator and, where it matters, this
+    // expression's own signedness (decided by the caller, which knows
+    // which operator this is; this compiler has no per-operator table of
+    // its own to keep in step with the VM's opcodes). The answer is
+    // copied out to `destOffset` only when it differs from the left
+    // operand's own temporary.
     private void compileBinary(
         BinExp expression, in size_t destOffset, in size_t width,
         Instruction.Handler handler,

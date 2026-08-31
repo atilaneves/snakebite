@@ -277,3 +277,29 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+// Both branches return, so nothing follows the whole `if` - it is the
+// function's own last statement, with no trailing statement for a
+// compiler to fall through to on either path.
+static foreach (backend; Matrix!()) {
+    @("if.bothBranchesReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        10.shouldBeRetOf!(
+            backend,
+            q{
+                int one() {
+                    return 1;
+                }
+
+                int pick() {
+                    if (one() == 1)
+                        return 10;
+                    else
+                        return 20;
+                }
+            },
+            "pick",
+        );
+    }
+}
