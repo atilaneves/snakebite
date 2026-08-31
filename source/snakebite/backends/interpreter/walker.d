@@ -364,6 +364,22 @@ extern(C++) private final class Evaluator: Visitor {
     ) {
         import std.conv: text;
 
+        // The one decision for every call this backend makes: a callee the
+        // program owns is walked here, and any other callee already exists
+        // as machine code this process links - druntime is not
+        // reimplemented here, so calling that code is how such a
+        // declaration runs. The program's ownership answer is the whole
+        // decision: no name, linkage, package or body inspection gets a
+        // second vote. Make this branch first so an interpreter capability
+        // check cannot turn a non-root call into a backend-local refusal.
+        if (!_program.isInterpreted(function_)) {
+            const(void)*[maxArguments] slots;
+            countForeignNameLookup;
+            _plans.of(function_).call(
+                returnPlace, argumentSlots(slots, frameBase, layout));
+            return;
+        }
+
         // `function_` being resolved only means a declaration was found;
         // it does not mean this call is safe to run directly. Only a
         // struct method's hidden context is covered: `bindFrame` fills
@@ -394,21 +410,6 @@ extern(C++) private final class Evaluator: Visitor {
                     "`: it needs a static chain, which the ",
                     "interpreter does not provide"),
             );
-
-        // The one decision for every call this backend makes: a callee the
-        // program owns is walked here, and any other callee already exists
-        // as machine code this process links - druntime is not
-        // reimplemented here, so calling that code is how such a
-        // declaration runs. The program's ownership answer is the whole
-        // decision: no name, linkage, package or body inspection gets a
-        // second vote.
-        if (!_program.isInterpreted(function_)) {
-            const(void)*[maxArguments] slots;
-            countForeignNameLookup;
-            _plans.of(function_).call(
-                returnPlace, argumentSlots(slots, frameBase, layout));
-            return;
-        }
 
         // A root-owned declaration with no body has no code anywhere: the
         // program owns it, so no library can be expected to implement it.
