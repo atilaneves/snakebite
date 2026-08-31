@@ -81,8 +81,8 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.nativelayout:
         isIntegralSize, storeValue, TypeFacts;
     import dmd.astenums:
-        LINK, Tarray, Tbool, Tfloat32, Tfloat64, Tnoreturn, Tpointer,
-        Tsarray, Tuns32, Tvoid;
+        LINK, Tarray, Tbool, Tdelegate, Tfloat32, Tfloat64, Tnoreturn,
+        Tpointer, Tsarray, Tuns32, Tvoid;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
     import dmd.func: FuncDeclaration;
@@ -371,8 +371,13 @@ extern(C++) private final class Evaluator: Visitor {
         // A nested function's context is not covered either: its static
         // chain - the enclosing function's frame - has no representation
         // in this interpreter, so this throws loudly instead of running
-        // with missing context.
-        if (function_.isNested())
+        // with missing context. A nested function that reads no
+        // enclosing local (`outerVars`, filled by dmd's
+        // `checkNestedReference`, is empty) is the one exception: it
+        // gets a static chain in compiled D but never dereferences it -
+        // a non-capturing `delegate` literal is exactly this shape - so
+        // running it without one changes nothing it can observe.
+        if (function_.isNested() && function_.outerVars.length != 0)
             throw new SnakebiteException(
                 text("interpreter cannot call `", function_.toString,
                     "`: it needs a static chain, which the ",
@@ -845,6 +850,51 @@ extern(C++) private final class Evaluator: Visitor {
 
     override void visit(StringExp expression) {
         storeValue(_type, _facts, expression, _place);
+    }
+
+    // A function literal as a value. The function word holds the
+    // declaration itself rather than a machine address, because this
+    // backend has no machine code for the literal - `calleeOf` reads it
+    // back when the value is called. The context word is what tells a
+    // delegate this interpreter can run from one it cannot: null is the
+    // only context a non-capturing literal ever needs, so `calleeOf`
+    // refuses anything else. A literal that reads an enclosing local
+    // needs the frame it read from as its context, which this
+    // interpreter does not represent, so it is refused here - where the
+    // value is made - rather than at some later call through it.
+    override void visit(FuncExp expression) {
+        import snakebite.nativelayout:
+            delegateContextOffset, delegateFunctionOffset, storeIntegral;
+        import std.conv: text;
+
+        auto literal = expression.fd;
+        if (literal is null || literal.isThis() !is null
+                || literal.outerVars.length != 0)
+            throw new SnakebiteException(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: only a non-capturing function literal is supported"),
+            );
+
+        auto bytes = cast(ubyte*) _place;
+        const functionWord = cast(size_t) cast(void*) literal;
+
+        if (_type.ty == Tdelegate) {
+            storeIntegral(
+                bytes + delegateContextOffset, 0, size_t.sizeof);
+            storeIntegral(
+                bytes + delegateFunctionOffset, functionWord, size_t.sizeof);
+            return;
+        }
+
+        if (_type.ty == Tpointer) {
+            storeIntegral(bytes, functionWord, size_t.sizeof);
+            return;
+        }
+
+        throw new SnakebiteException(
+            text("interpreter cannot evaluate `", expression.toString,
+                "` as a `", _type.toString, "`"),
+        );
     }
 
     override void visit(VarExp expression) {
@@ -2232,10 +2282,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto function_ = expression.f;
         if (function_ is null)
-            throw new SnakebiteException(
-                text("interpreter cannot call an unresolved function: `",
-                    expression.toString, "`"),
-            );
+            function_ = calleeOf(expression);
 
         // Whether this call needs a `this` or a static chain it cannot
         // provide is `execute`'s check, not this one - it runs there for
@@ -2252,6 +2299,54 @@ extern(C++) private final class Evaluator: Visitor {
         }
 
         execute(function_, _place, frame.base, layout);
+    }
+
+    // The callee of a call dmd left unresolved: one reached through a
+    // value rather than a name, which for this interpreter means a
+    // delegate. The value's function word is the declaration
+    // `visit(FuncExp)` stored, read back here. A non-null context word
+    // means the delegate carries a captured frame this interpreter does
+    // not represent, so it is refused by name rather than run without
+    // the frame it needs.
+    private FuncDeclaration calleeOf(CallExp expression) {
+        import snakebite.nativelayout:
+            delegateContextOffset, delegateFunctionOffset, delegateValueSize,
+            loadIntegral;
+        import std.conv: text;
+
+        auto callee = expression.e1;
+        if (callee.type.ty != Tdelegate)
+            throw new SnakebiteException(
+                text("interpreter cannot call an unresolved function: `",
+                    expression.toString, "`"),
+            );
+
+        const facts = factsOf(callee.type);
+        assert(facts.size == delegateValueSize
+                && facts.alignment <= size_t.sizeof,
+            "a delegate is not two words on this target");
+
+        align(size_t.sizeof) ubyte[delegateValueSize] value = void;
+        evaluate(callee, callee.type, facts, value.ptr);
+
+        const context = loadIntegral(
+            value.ptr + delegateContextOffset, size_t.sizeof, false);
+        if (context != 0)
+            throw new SnakebiteException(
+                text("interpreter cannot call `", expression.toString,
+                    "`: the delegate's context is not null, and a captured ",
+                    "context is not supported"),
+            );
+
+        auto function_ = cast(FuncDeclaration) cast(void*) loadIntegral(
+            value.ptr + delegateFunctionOffset, size_t.sizeof, false);
+        if (function_ is null)
+            throw new SnakebiteException(
+                text("interpreter cannot call `", expression.toString,
+                    "`: the delegate is null"),
+            );
+
+        return function_;
     }
 
     // Reserves `function_`'s frame and binds every argument into it: a
@@ -2283,19 +2378,36 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto frame = _frames.push(layout.size, layout.alignment);
 
+        // `vthis` is dmd's one declaration for both hidden context
+        // kinds: a method's `this`, and a nested function's static
+        // chain. Which one this callee has is what `isThis` says.
         if (function_.vthis !is null) {
-            auto dot = expression.e1.isDotVarExp;
-            if (dot is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot call `", function_.toString,
-                        "`: its `this` receiver is not a struct lvalue"),
-                );
+            if (function_.isThis() !is null) {
+                auto dot = expression.e1.isDotVarExp;
+                if (dot is null)
+                    throw new SnakebiteException(
+                        text("interpreter cannot call `", function_.toString,
+                            "`: its `this` receiver is not a struct lvalue"),
+                    );
 
-            storeIntegral(
-                frame.base + layout.hiddenThis.parameter.offset,
-                cast(size_t) addressOf(dot.e1),
-                size_t.sizeof,
-            );
+                storeIntegral(
+                    frame.base + layout.hiddenThis.parameter.offset,
+                    cast(size_t) addressOf(dot.e1),
+                    size_t.sizeof,
+                );
+            } else {
+                // A nested callee that got past `execute`'s check reads
+                // no enclosing local, so the only context it can ever
+                // carry is the null one a non-capturing delegate holds -
+                // stored rather than left as whatever bytes the frame
+                // stack last held, so a read of the slot is
+                // deterministic.
+                storeIntegral(
+                    frame.base + layout.hiddenThis.parameter.offset,
+                    0,
+                    size_t.sizeof,
+                );
+            }
         }
 
         // Every argument is evaluated, even one the callee never reads,
