@@ -29,6 +29,7 @@ int main(string[] args) {
         "ut.backends.call.ref_",
         "ut.backends.call.wrap",
         "ut.backends.call.ffi",
+        "ut.backends.call.routing",
         "ut.backends.call.arrays",
         "ut.backends.call.control_flow",
         "ut.backends.call.exceptions",
