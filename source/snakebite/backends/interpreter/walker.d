@@ -31,7 +31,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     }
 
     public override string eval(FuncDeclaration function_) {
-        throw new Exception(
+        throw new SnakebiteException(
             "eval not implemented for the interpreter yet",
         );
     }
@@ -44,6 +44,21 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     version(unittest)
     public size_t typeLookups() @safe @nogc nothrow pure const scope {
         return _evaluator.typeLookups();
+    }
+}
+
+import snakebite.exception: SnakebiteException;
+
+// A guest throw must remain distinguishable from a refusal to interpret a
+// guest construct. The runner catches this wrapper, while interpreter
+// failures travel as `SnakebiteException` and continue through the host
+// unchanged.
+private final class GuestException: Exception {
+    private Throwable _guest;
+
+    public this(Throwable guest) {
+        super(guest.msg);
+        _guest = guest;
     }
 }
 
@@ -69,16 +84,17 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.nativelayout:
         isIntegralSize, storeValue, TypeFacts;
     import dmd.astenums:
-        Tarray, Tbool, Tnoreturn, Tpointer, Tsarray, Tuns32, Tvoid;
+        Tarray, Tbool, Tfloat32, Tfloat64, Tnoreturn, Tpointer,
+        Tsarray, Tuns32, Tvoid;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.mtype: Type;
     import dmd.statement:
-        CompoundStatement, ContinueStatement, ExpStatement, ForStatement,
-        IfStatement, ImportStatement, ReturnStatement, ScopeStatement,
-        Statement;
+        Catch, CompoundStatement, ContinueStatement, ExpStatement,
+        ForStatement, IfStatement, ImportStatement, ReturnStatement,
+        ScopeStatement, Statement, TryCatchStatement;
     import dmd.tokens: EXP;
 
     alias visit = Visitor.visit;
@@ -224,7 +240,7 @@ extern(C++) private final class Evaluator: Visitor {
         const parameterCount =
             function_.parameters is null ? 0 : function_.parameters.length;
         if (args.length != 0 || parameterCount != 0)
-            throw new Exception(
+            throw new SnakebiteException(
                 "host-to-guest arguments not yet supported by the " ~
                     "interpreter backend",
             );
@@ -240,7 +256,7 @@ extern(C++) private final class Evaluator: Visitor {
         // `ref` return for exactly this reason; this is the interpreter's
         // own entry point, so it gets the same refusal.
         if (typeFunctionOf(function_).isRef)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot call `", function_.toString,
                     "` from the host: it returns by `ref`"),
             );
@@ -349,21 +365,28 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         // `function_` being resolved only means a declaration was found;
-        // it does not mean this call is safe to run directly. For
-        // `obj.method(...)`, dmd sets the resolved declaration to the
-        // statically known method even though the call needs `this` -
-        // running it here would silently devirtualize it and drop the
-        // context, and a nested function's static chain is dropped the
-        // same way. A zero-parameter method or nested function has no
-        // parameter to give it away either, so this check cannot be
-        // folded into the parameter-count check below. Both are
-        // unsupported constructs this interpreter has no representation
-        // for, so this throws loudly instead of running with a missing
-        // context and returning a plausible-looking wrong answer.
-        if (function_.isThis() !is null || function_.isNested())
-            throw new Exception(
+        // it does not mean this call is safe to run directly. Only a
+        // struct method's hidden context is covered: `bindFrame` fills
+        // its `this` slot with the receiver lvalue's address. A class
+        // method is resolved by dmd to the statically known declaration
+        // even though the call is virtual, so running it here would
+        // silently devirtualize the call and answer from the wrong
+        // declaration.
+        auto aggregate = function_.isThis();
+        if (aggregate !is null && aggregate.isStructDeclaration is null)
+            throw new SnakebiteException(
                 text("interpreter cannot call `", function_.toString,
-                    "`: it needs a `this` or a static chain, which the ",
+                    "`: only a struct method's `this` is supported"),
+            );
+
+        // A nested function's context is not covered either: its static
+        // chain - the enclosing function's frame - has no representation
+        // in this interpreter, so this throws loudly instead of running
+        // with missing context.
+        if (function_.isNested())
+            throw new SnakebiteException(
+                text("interpreter cannot call `", function_.toString,
+                    "`: it needs a static chain, which the ",
                     "interpreter does not provide"),
             );
 
@@ -386,29 +409,12 @@ extern(C++) private final class Evaluator: Visitor {
         // program owns it, so no library can be expected to implement it.
         auto body_ = function_.fbody;
         if (body_ is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot call a function with no body: `",
                     function_.toString, "`"),
             );
 
-        auto savedType = _type;
-        auto savedFacts = _facts;
-        auto savedPlace = _place;
-        auto savedFrameBase = _frameBase;
-        auto savedLayout = _layout;
-        auto savedReturned = _returned;
-        auto savedContinued = _continued;
-        auto savedReturnsRef = _returnsRef;
-        scope(exit) {
-            _type = savedType;
-            _facts = savedFacts;
-            _place = savedPlace;
-            _frameBase = savedFrameBase;
-            _layout = savedLayout;
-            _returned = savedReturned;
-            _continued = savedContinued;
-            _returnsRef = savedReturnsRef;
-        }
+        const guard = CallStateGuard(this);
 
         _type = function_.type.nextOf;
         _facts = factsOf(_type);
@@ -419,6 +425,49 @@ extern(C++) private final class Evaluator: Visitor {
         _continued = false;
         _returnsRef = typeFunctionOf(function_).isRef;
         body_.accept(this);
+    }
+
+    // RAII restore of the per-call evaluator state `execute` repoints at
+    // the callee: constructed before the fields change, and the
+    // destructor puts every one back when the call unwinds, normally or
+    // by throw. One field list in one place, instead of a saved variable
+    // plus a `scope(exit)` line per field growing at the call site.
+    private static struct CallStateGuard {
+        private Evaluator _evaluator;
+        private Type _type;
+        private TypeFacts _facts;
+        private void* _place;
+        private ubyte* _frameBase;
+        private const(FrameLayout)* _layout;
+        private bool _returned;
+        private bool _continued;
+        private bool _returnsRef;
+
+        @disable this();
+        @disable this(this);
+
+        private this(Evaluator evaluator) {
+            _evaluator = evaluator;
+            _type = evaluator._type;
+            _facts = evaluator._facts;
+            _place = evaluator._place;
+            _frameBase = evaluator._frameBase;
+            _layout = evaluator._layout;
+            _returned = evaluator._returned;
+            _continued = evaluator._continued;
+            _returnsRef = evaluator._returnsRef;
+        }
+
+        ~this() {
+            _evaluator._type = _type;
+            _evaluator._facts = _facts;
+            _evaluator._place = _place;
+            _evaluator._frameBase = _frameBase;
+            _evaluator._layout = _layout;
+            _evaluator._returned = _returned;
+            _evaluator._continued = _continued;
+            _evaluator._returnsRef = _returnsRef;
+        }
     }
 
     // Where each parameter's bytes sit in the frame the caller just
@@ -453,7 +502,7 @@ extern(C++) private final class Evaluator: Visitor {
         // the message strips it to stay on one line.
         import std.string: strip;
 
-        throw new Exception(
+        throw new SnakebiteException(
             text("interpreter cannot execute a `", statement.stmt,
                 "` statement: `", toChars(statement).fromStringz.strip, "`"),
         );
@@ -464,6 +513,45 @@ extern(C++) private final class Evaluator: Visitor {
     // arrives with its callee resolved. Nothing is left to execute, so
     // this runs no code rather than refusing the statement.
     override void visit(ImportStatement statement) {
+    }
+
+    override void visit(TryCatchStatement statement) {
+        try {
+            statement._body.accept(this);
+        } catch (GuestException exception) {
+            foreach (catch_; *statement.catches) {
+                if (!matchesThrowable(catch_))
+                    continue;
+
+                bindCatchVariable(catch_, exception._guest);
+                catch_.handler.accept(this);
+                return;
+            }
+
+            throw exception;
+        }
+    }
+
+    // Matched by symbol identity against dmd's own record of
+    // `object.Throwable`, not by name, so a guest class that merely
+    // shares the name never matches. Any other catch type stays
+    // unmatched and the guest throw continues outward.
+    private bool matchesThrowable(Catch catch_) {
+        import dmd.dclass: ClassDeclaration;
+
+        auto typeClass = catch_.type.isTypeClass;
+        return typeClass !is null
+            && typeClass.sym is ClassDeclaration.throwable;
+    }
+
+    private void bindCatchVariable(Catch catch_, Throwable guest) {
+        if (catch_.var is null)
+            return;
+
+        import snakebite.nativelayout: storeIntegral;
+
+        auto slot = _frameBase + _layout.offsetOf(catch_.var);
+        storeIntegral(slot, cast(size_t) cast(void*) guest, size_t.sizeof);
     }
 
     override void visit(CompoundStatement statement) {
@@ -615,7 +703,7 @@ extern(C++) private final class Evaluator: Visitor {
 
     override void visit(ContinueStatement statement) {
         if (statement.ident !is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 "interpreter cannot execute a labelled `continue` statement",
             );
 
@@ -646,7 +734,7 @@ extern(C++) private final class Evaluator: Visitor {
         if (type.ty == Tpointer)
             return asPointer(expression) !is null;
 
-        throw new Exception(
+        throw new SnakebiteException(
             text("interpreter cannot evaluate `", expression.toString,
                 "` as a condition: its type is `", type.toString, "`"),
         );
@@ -671,7 +759,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto type = expression.type;
         if (type.ty != Tarray)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "` as a dynamic array: its type is `", type.toString,
                     "`"),
@@ -703,7 +791,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto type = expression.type;
         if (!facts.isIntegral)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "` as an integral: its type is `", type.toString, "`"),
             );
@@ -727,7 +815,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto type = expression.type;
         if (type.ty != Tpointer)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "` as a pointer: its type is `", type.toString, "`"),
             );
@@ -745,7 +833,7 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(Expression expression) {
         import std.conv: text;
 
-        throw new Exception(
+        throw new SnakebiteException(
             text("interpreter cannot evaluate a `", expression.op,
                 "` expression: `", expression.toString, "`"),
         );
@@ -806,7 +894,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto variable = declaration.isVarDeclaration;
         if (variable is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot reach `", original.toString,
                     "`: not a parameter or local in the current frame"),
             );
@@ -845,7 +933,7 @@ extern(C++) private final class Evaluator: Visitor {
         // here would be a second variable that only looks like it, so
         // this refuses rather than answering from a private copy.
         if (variable.storage_class & STC.extern_)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot reach `", variable.toString,
                     "`: it is `extern`, so its storage is not the ",
                     "interpreter's to make"),
@@ -860,7 +948,7 @@ extern(C++) private final class Evaluator: Visitor {
         else if (auto expInitializer = variable._init.isExpInitializer)
             value = initializerValueOf(expInitializer);
         else
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot initialize `", variable.toString,
                     "`: only a plain expression initializer is supported"),
             );
@@ -912,7 +1000,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto variable = expression.declaration.isVarDeclaration;
         if (variable is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot run declaration `",
                     expression.toString, "`: only a local variable is ",
                     "supported"),
@@ -928,7 +1016,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto expInitializer = variable._init.isExpInitializer;
         if (expInitializer is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot run the initializer for `",
                     expression.toString, "`: only a plain expression ",
                     "initializer is supported"),
@@ -974,15 +1062,17 @@ extern(C++) private final class Evaluator: Visitor {
         auto structType = _type.isTypeStruct;
         const isSupportedStruct = structType !is null
             && supportsStruct(_type);
+        const isSupportedArray = _type.ty == Tarray
+            && expression.e1.isDotVarExp !is null;
         if (structType !is null && !isSupportedStruct)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot assign unsupported struct `",
                     structType.toString, "`"),
             );
 
         if (expression.op != EXP.assign && !_facts.isIntegral
-                && !isSupportedStruct)
-            throw new Exception(
+                && !isSupportedStruct && !isSupportedArray)
+            throw new SnakebiteException(
                 text("interpreter cannot run a `", expression.op,
                     "` on `", expression.e1.toString, "`"),
             );
@@ -1029,6 +1119,17 @@ extern(C++) private final class Evaluator: Visitor {
                 continue;
             }
 
+            // A dynamic array field is a plain two-word slice - a
+            // length and a pointer, in whichever order the compiler's
+            // ABI puts them - with no copy hook of its own, so the
+            // bytewise copy this predicate guards handles it: the copy
+            // shares the same elements, exactly as compiled D
+            // assignment of a slice does. It is not integral, so
+            // without this the size/integrality check below would
+            // reject it.
+            if (field.type.ty == Tarray)
+                continue;
+
             const facts = factsOf(field.type);
             if (!facts.isIntegral || !isIntegralSize(facts.size))
                 return false;
@@ -1047,6 +1148,22 @@ extern(C++) private final class Evaluator: Visitor {
     // handful of node kinds on their own.
     private void* addressOf(Expression target) {
         import std.conv: text;
+
+        // dmd's semantic pass resolves a `this` the guest wrote to the
+        // enclosing method's own `vthis` declaration; a constructor's
+        // implicit `return this;` is synthesised with no `var`, and the
+        // layout knows which declaration owns the frame's `this` slot,
+        // so the reach is the same either way.
+        // `cast()`: `_layout` is a const view, but dmd's own AST
+        // accessors (`isVarDeclaration` among them) are not
+        // const-correct, and `slotOf` only reads the declaration.
+        if (auto thisExp = target.isThisExp)
+            return slotOf(
+                thisExp,
+                thisExp.var is null
+                    ? cast() _layout.hiddenThis.variable
+                    : thisExp.var,
+            );
 
         if (auto variable = target.isVarExp)
             return slotOf(variable);
@@ -1073,7 +1190,19 @@ extern(C++) private final class Evaluator: Visitor {
         if (auto index = target.isIndexExp)
             return indexAddressOf(index).ptr;
 
-        throw new Exception(
+        if (auto dot = target.isDotVarExp) {
+            auto field = dot.var.isVarDeclaration;
+            if (field is null || dot.e1.isThisExp is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot take the address of `",
+                        target.toString,
+                        "`: only a field of `this` is supported"),
+                );
+
+            return cast(ubyte*) addressOf(dot.e1) + field.offset;
+        }
+
+        throw new SnakebiteException(
             text("interpreter cannot take the address of `",
                 target.toString, "`: it is not an lvalue"),
         );
@@ -1100,7 +1229,7 @@ extern(C++) private final class Evaluator: Visitor {
         const index = indexOf(expression, value.length);
 
         if (index < 0 || cast(size_t) index >= value.length)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot index `", array.toString,
                     "` at ", index, ": the array is ", value.length,
                     " long"),
@@ -1168,7 +1297,7 @@ extern(C++) private final class Evaluator: Visitor {
         auto variable = expression.e1.isVarExp;
         const targetFacts = factsOf(expression.e1.type);
         if (variable is null || !targetFacts.isIntegral)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot assign to `",
                     expression.e1.toString, "`: `", expression.toString,
                     "`"),
@@ -1197,7 +1326,7 @@ extern(C++) private final class Evaluator: Visitor {
         auto variable = expression.e1.isVarExp;
         const facts = factsOf(expression.e1.type);
         if (variable is null || !facts.isIntegral)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: `", expression.e1.toString, "` is not an integral ",
                     "variable"),
@@ -1229,7 +1358,7 @@ extern(C++) private final class Evaluator: Visitor {
             case greaterThan: return storeCmpExp!">"(expression);
             case greaterOrEqual: return storeCmpExp!">="(expression);
             default:
-                throw new Exception(
+                throw new SnakebiteException(
                     text("interpreter cannot evaluate a `", expression.op,
                         "` expression: `", expression.toString, "`"),
                 );
@@ -1272,7 +1401,7 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         if (expression.op != EXP.equal && expression.op != EXP.notEqual)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate a `", expression.op,
                     "` expression: `", expression.toString, "`"),
             );
@@ -1293,7 +1422,7 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         if (expression.op != EXP.identity && expression.op != EXP.notIdentity)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate a `", expression.op,
                     "` expression: `", expression.toString, "`"),
             );
@@ -1306,7 +1435,7 @@ extern(C++) private final class Evaluator: Visitor {
             equal =
                 asIntegral(expression.e1) == asIntegral(expression.e2);
         else
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: its operands are of type `", type.toString, "`"),
             );
@@ -1380,8 +1509,31 @@ extern(C++) private final class Evaluator: Visitor {
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
+        // Every operator that can carry a floating type out of dmd's
+        // semantic pass: the bitwise and shift operators are rejected by
+        // the frontend on floating operands, so the `static if` only
+        // keeps their mixins compilable, it refuses nothing. Both
+        // operands already share the expression's own type - dmd's usual
+        // arithmetic conversions convert them before any backend runs -
+        // and a `float` read widened to `double` is exact, so narrowing
+        // each operand back to `float` recovers it exactly and the
+        // operation then rounds once, in the expression's own precision,
+        // the same single rounding compiled D performs.
+        static if (op == "+" || op == "-" || op == "*" || op == "/"
+                || op == "%")
+            if (_type.ty == Tfloat32 || _type.ty == Tfloat64) {
+                const a = asFloating(expression.e1);
+                const b = asFloating(expression.e2);
+                if (_type.ty == Tfloat32)
+                    *cast(float*) _place =
+                        mixin("cast(float) a " ~ op ~ " cast(float) b");
+                else
+                    *cast(double*) _place = mixin("a " ~ op ~ " b");
+                return;
+            }
+
         if (!_facts.isIntegral)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: its type is `", expression.type.toString, "`"),
             );
@@ -1395,6 +1547,30 @@ extern(C++) private final class Evaluator: Visitor {
             _place, combine!op(a, b, aFacts, bFacts, expression), _facts.size);
     }
 
+    // As `asIntegral`, for a floating operand. The value comes back as a
+    // `double` because a `float` widens to `double` exactly, so the one
+    // return type carries either width without loss; the caller narrows
+    // back when the operation itself is `float`-precision.
+    private double asFloating(Expression expression) {
+        import std.conv: text;
+
+        auto type = expression.type;
+        if (type.ty != Tfloat32 && type.ty != Tfloat64)
+            throw new SnakebiteException(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "` as floating point: its type is `", type.toString,
+                    "`"),
+            );
+
+        const facts = factsOf(type);
+        align(double.alignof) ubyte[double.sizeof] buffer = void;
+        evaluate(expression, type, facts, buffer.ptr);
+
+        return type.ty == Tfloat32
+            ? *cast(float*) buffer.ptr
+            : *cast(double*) buffer.ptr;
+    }
+
     // `-x` and `~x` leave the same low bits whether the operand was read as
     // signed or unsigned, so neither needs the operand's own facts.
     private extern(D) void storeUnaryExp(string op)(UnaExp expression) {
@@ -1402,7 +1578,7 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         if (!_facts.isIntegral)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: its type is `", expression.type.toString, "`"),
             );
@@ -1431,9 +1607,15 @@ extern(C++) private final class Evaluator: Visitor {
     // the length by the ratio of the two element sizes, not copying it
     // verbatim, and that scaling is what this does below. `arr.ptr` is
     // handled too, further down, since dmd lowers it into a `Tarray` to
-    // `Tpointer` cast over the array itself. Anything else this node
-    // could mean - floating point, a class downcast - is refused the
-    // same way an unhandled node already is.
+    // `Tpointer` cast over the array itself. An integral-to-floating
+    // cast rounds the operand's mathematical value to the destination's
+    // own precision, read as signed or unsigned per the operand's type -
+    // the host's own `cast(float)`/`cast(double)` is exactly that
+    // conversion, so it is applied per destination width rather than
+    // through a shared wider intermediate, which for `float` would round
+    // twice. Anything else this node could mean - a class downcast, a
+    // floating-to-integral cast - is refused the same way an unhandled
+    // node already is.
     override void visit(CastExp expression) {
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
@@ -1516,7 +1698,21 @@ extern(C++) private final class Evaluator: Visitor {
             return;
         }
 
-        throw new Exception(
+        if (sourceFacts.isIntegral
+                && (_type.ty == Tfloat32 || _type.ty == Tfloat64)) {
+            const value = asIntegral(expression.e1, sourceFacts);
+            if (_type.ty == Tfloat32)
+                *cast(float*) _place = sourceFacts.isUnsigned
+                    ? cast(float) cast(ulong) value
+                    : cast(float) value;
+            else
+                *cast(double*) _place = sourceFacts.isUnsigned
+                    ? cast(double) cast(ulong) value
+                    : cast(double) value;
+            return;
+        }
+
+        throw new SnakebiteException(
             text("interpreter cannot evaluate a `", expression.op,
                 "` expression: `", expression.toString, "`"),
         );
@@ -1578,7 +1774,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto field = expression.var.isVarDeclaration;
         if (field is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: only a struct field read is supported"),
             );
@@ -1589,7 +1785,7 @@ extern(C++) private final class Evaluator: Visitor {
         // whole bytes instead - refused rather than run to a wrong
         // answer, the same way an unhandled node already is.
         if (field.isBitFieldDeclaration !is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: reading a bitfield is not supported"),
             );
@@ -1619,7 +1815,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto type = isType(expression.obj);
         if (type is null || type.vtinfo is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: only `typeid` of a resolved type is supported"),
             );
@@ -1628,7 +1824,7 @@ extern(C++) private final class Evaluator: Visitor {
         countForeignNameLookup;
         auto address = symbolAddress(name.toStringz);
         if (address is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot resolve the symbol `", name,
                     "` for `", expression.toString,
                     "`: it is not in this process"),
@@ -1663,7 +1859,7 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         if (expression.type !is null && expression.type.ty == Tnoreturn)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot execute the halt `",
                     expression.toString, "`"),
             );
@@ -1671,14 +1867,18 @@ extern(C++) private final class Evaluator: Visitor {
         if (truthOf(expression.e1))
             return;
 
-        // What D does here is throw an `AssertError` the guest can catch,
-        // and the interpreter has no guest exceptions yet. Reporting the
-        // failure to the host is the honest half of that: the assertion
-        // is not passed over, and no guest-visible exception is faked.
-        throw new Exception(
+        import core.exception: AssertError;
+
+        // What D does here is throw an `AssertError` the guest can catch.
+        // Keep it inside an interpreter-owned wrapper so a guest catch does
+        // not also catch the interpreter's own unsupported-node failures.
+        auto guest = new AssertError(
             text("interpreter: assertion failed: `", expression.toString,
                 "`"),
+            __FILE__,
+            __LINE__,
         );
+        throw new GuestException(guest);
     }
 
     override void visit(ArrayLengthExp expression) {
@@ -1707,7 +1907,7 @@ extern(C++) private final class Evaluator: Visitor {
             const length = cast(size_t) array.type.isTypeSArray.dim.toInteger;
             const index = indexOf(expression, length);
             if (index < 0 || cast(size_t) index >= length)
-                throw new Exception(
+                throw new SnakebiteException(
                     text("interpreter cannot index `", array.toString,
                         "` at ", index, ": the array is ", length,
                         " long"),
@@ -1782,7 +1982,7 @@ extern(C++) private final class Evaluator: Visitor {
             sourceLength = value.length;
             knownLength = true;
         } else
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: only slicing a pointer or a dynamic array is ",
                     "supported"),
@@ -1793,7 +1993,7 @@ extern(C++) private final class Evaluator: Visitor {
         scope(exit) if (lengthVar !is null) _dollar = outerDollar;
         if (lengthVar !is null) {
             if (!knownLength)
-                throw new Exception(
+                throw new SnakebiteException(
                     text("interpreter cannot evaluate `",
                         expression.toString, "`: `$` has no meaning ",
                         "slicing a pointer"),
@@ -1808,7 +2008,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         if (lo < 0 || hi < lo
                 || (knownLength && cast(size_t) hi > sourceLength))
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot slice `", array.toString, "` [",
                     lo, " .. ", hi, "]"),
             );
@@ -1860,7 +2060,7 @@ extern(C++) private final class Evaluator: Visitor {
         }
 
         if (_type.ty != Tarray)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "` as a `", _type.toString, "`: only a dynamic array ",
                     "literal is supported"),
@@ -1895,7 +2095,7 @@ extern(C++) private final class Evaluator: Visitor {
         auto arguments = expression.arguments;
         if (expression.type.ty != Tarray || arguments is null
                 || arguments.length != 1)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate a `", expression.op,
                     "` expression: `", expression.toString, "`"),
             );
@@ -1904,14 +2104,14 @@ extern(C++) private final class Evaluator: Visitor {
         const elementFacts = factsOf(elementType);
         if (elementType.ty != Tbool && elementType.ty != Tuns32
                 && !supportsStruct(elementType))
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot allocate an array of unsupported `",
                     elementType.toString, "` elements"),
             );
 
         const length = cast(size_t) asIntegral((*arguments)[0]);
         if (elementFacts.size != 0 && length > size_t.max / elementFacts.size)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot allocate `", expression.toString,
                     "`: its byte size overflows `size_t`"),
             );
@@ -1931,7 +2131,7 @@ extern(C++) private final class Evaluator: Visitor {
         auto structType = _type.isTypeStruct;
         if (structType is null || structType.sym != expression.sd
                 || !supportsStruct(_type))
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: unsupported struct literal"),
             );
@@ -1941,7 +2141,7 @@ extern(C++) private final class Evaluator: Visitor {
             return;
 
         if (expression.elements.length > expression.sd.fields.length)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: its fields do not match the struct layout"),
             );
@@ -1977,7 +2177,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto element = expression[i];
         if (element is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate element ", i, " of `",
                     expression.toString, "`: it is sparse with no `basis` ",
                     "fill value"),
@@ -2003,7 +2203,7 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         if (expression.lowering is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate a `", expression.op,
                     "` expression: `", expression.toString, "`"),
             );
@@ -2040,7 +2240,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto function_ = expression.f;
         if (function_ is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot call an unresolved function: `",
                     expression.toString, "`"),
             );
@@ -2084,12 +2284,27 @@ extern(C++) private final class Evaluator: Visitor {
         auto arguments = expression.arguments;
         const argCount = arguments is null ? 0 : arguments.length;
         if (argCount != parameterList.length)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter: `", function_.toString, "` expects ",
                     parameterList.length, " argument(s), got ", argCount),
             );
 
         auto frame = _frames.push(layout.size, layout.alignment);
+
+        if (function_.vthis !is null) {
+            auto dot = expression.e1.isDotVarExp;
+            if (dot is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot call `", function_.toString,
+                        "`: its `this` receiver is not a struct lvalue"),
+                );
+
+            storeIntegral(
+                frame.base + layout.hiddenThis.parameter.offset,
+                cast(size_t) addressOf(dot.e1),
+                size_t.sizeof,
+            );
+        }
 
         // Every argument is evaluated, even one the callee never reads,
         // since evaluating an argument can have effects. The loop already
@@ -2142,13 +2357,13 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto function_ = expression.f;
         if (function_ is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot call an unresolved function: `",
                     expression.toString, "`"),
             );
 
         if (!typeFunctionOf(function_).isRef)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot take the address of `",
                     expression.toString, "`: it does not return `ref`"),
             );
@@ -2222,7 +2437,7 @@ private bool sharedSignedness(
     import std.conv: text;
 
     if (a.isUnsigned != b.isUnsigned)
-        throw new Exception(
+        throw new SnakebiteException(
             text("interpreter cannot evaluate `", expression.toString,
                 "`: its operands differ in signedness"),
         );
@@ -2244,7 +2459,7 @@ private ulong divided(string op)(
     import std.conv: text;
 
     if (b == 0)
-        throw new Exception(
+        throw new SnakebiteException(
             text("interpreter: division by zero in `",
                 expression.toString, "`"),
         );
@@ -2286,7 +2501,7 @@ private ulong shifted(string op)(
 
     const width = aFacts.size * 8;
     if (b < 0 || b >= width)
-        throw new Exception(
+        throw new SnakebiteException(
             text("interpreter cannot shift by ", b, " in `",
                 expression.toString, "`: the left operand has ", width,
                 " bits"),

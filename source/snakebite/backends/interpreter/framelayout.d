@@ -4,6 +4,8 @@ module snakebite.backends.interpreter.framelayout;
 private:
 
 
+import snakebite.exception: SnakebiteException;
+
 // One guest function's frame layout: each parameter's byte offset, and
 // the total size and alignment one activation of the function needs on
 // the frame stack. A pure function of the declaration, so it is computed
@@ -35,6 +37,24 @@ package struct FrameLayout {
     // hand, so it never pays an AA hash lookup for the hottest path.
     package Parameter[] parameters;
 
+    // A struct method's hidden `this`, together in one place: the slot
+    // and the declaration that owns it always exist - or not - as a
+    // pair. The hidden `this` is a `ref` parameter: its slot, before
+    // the explicit parameters as in the native calling layout, holds
+    // the receiver's address, the same shape every other `ref`
+    // parameter's slot has above.
+    package struct HiddenThis {
+        package Parameter parameter;
+
+        // dmd resolves a `this` the guest wrote to this same
+        // declaration, but a constructor's implicit `return this;` is a
+        // `ThisExp` dmd synthesises with no `var` at all, so the
+        // evaluator reaches the slot through this instead for that
+        // node. Null for a function with no `this`.
+        package VarDeclaration variable;
+    }
+    package HiddenThis hiddenThis;
+
     // Keyed by declaration instead of position: `visit(VarExp)` resolves
     // a parameter or local read from a `VarDeclaration` it found by name
     // lookup, not by position, so it still needs a hash lookup. A `ref`
@@ -52,6 +72,21 @@ package struct FrameLayout {
         import std.conv: text;
 
         FrameLayout layout;
+
+        if (function_.vthis !is null) {
+            const isRefThis = (function_.vthis.storage_class & STC.ref_) != 0;
+            auto slot = isRefThis
+                ? layout.reserveSlot(
+                    TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
+                : layout.reserveSlot(function_.vthis.type);
+
+            layout.hiddenThis = HiddenThis(
+                Parameter(slot.offset, slot.facts, isRefThis),
+                function_.vthis,
+            );
+            layout._slotOf[function_.vthis] =
+                VariableSlot(slot.offset, isRefThis);
+        }
 
         // The parameter *types* are part of the function's own type, and
         // are there whether or not it has a body. `parameters` - the
@@ -71,7 +106,7 @@ package struct FrameLayout {
             // is a delegate, not a pointer at all - neither has a frame
             // layout this interpreter builds yet, so both still throw.
             if (parameter.storageClass & (STC.out_ | STC.lazy_))
-                throw new Exception(
+                throw new SnakebiteException(
                     text("interpreter cannot pass `out`/`lazy` parameter ",
                         i, " of `", function_.toString, "` by value"),
                 );
@@ -147,7 +182,7 @@ package struct FrameLayout {
 
         auto slot = variable in _slotOf;
         if (slot is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot reach `", variable.toString,
                     "`: not a parameter or local in the current frame"),
             );
@@ -194,8 +229,9 @@ import dmd.visitor: Visitor;
 extern(C++) private final class LocalsCollector: Visitor {
     import dmd.expression: Expression;
     import dmd.statement:
-        CompoundStatement, ExpStatement, ForStatement, IfStatement,
-        ImportStatement, ReturnStatement, ScopeStatement, Statement;
+        Catch, CompoundStatement, ExpStatement, ForStatement, IfStatement,
+        ImportStatement, ReturnStatement, ScopeStatement, Statement,
+        TryCatchStatement;
 
     alias visit = Visitor.visit;
 
@@ -248,6 +284,30 @@ extern(C++) private final class LocalsCollector: Visitor {
 
         if (statement.elsebody !is null)
             statement.elsebody.accept(this);
+    }
+
+    // A catch variable is a local of its handler, so its slot is reserved
+    // here with every other local: the layout is computed once for the
+    // whole body, before any throw is known, the same reasoning as both
+    // branches of an `if`. `Evaluator` only stores the caught object into
+    // the already reserved slot at run time.
+    override void visit(TryCatchStatement statement) {
+        if (statement._body !is null)
+            statement._body.accept(this);
+
+        foreach (catch_; *statement.catches) {
+            if (catch_.var !is null)
+                collectCatchVariable(catch_);
+
+            if (catch_.handler !is null)
+                catch_.handler.accept(this);
+        }
+    }
+
+    private void collectCatchVariable(Catch catch_) {
+        const slot = _layout.reserveSlot(catch_.var.type);
+        _layout._slotOf[catch_.var] =
+            FrameLayout.VariableSlot(slot.offset, false);
     }
 
     override void visit(ExpStatement statement) {

@@ -207,6 +207,12 @@ public void storeValue(
         return;
     }
 
+    if (type.isTypeStruct !is null && value.isIntegerExp
+            && value.toInteger == 0) {
+        memset(place, 0, facts.size);
+        return;
+    }
+
     if (facts.isIntegral) {
         storeIntegral(place, value.toInteger, facts.size);
         return;
