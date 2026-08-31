@@ -490,10 +490,16 @@ extern(C++) private final class Evaluator: Visitor {
         }
     }
 
+    // Matched by symbol identity against dmd's own record of
+    // `object.Throwable`, not by name, so a guest class that merely
+    // shares the name never matches. Any other catch type stays
+    // unmatched and the guest throw continues outward.
     private bool matchesThrowable(Catch catch_) {
+        import dmd.dclass: ClassDeclaration;
+
         auto typeClass = catch_.type.isTypeClass;
         return typeClass !is null
-            && typeClass.sym.ident.toString == "Throwable";
+            && typeClass.sym is ClassDeclaration.throwable;
     }
 
     private void bindCatchVariable(Catch catch_, Throwable guest) {
