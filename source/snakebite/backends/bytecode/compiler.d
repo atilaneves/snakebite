@@ -166,7 +166,12 @@ private bool isVoidCompatible(imported!"dmd.statement".Statement statement) {
 private imported!"snakebite.backends.bytecode.vm".Function voidReturn() {
     import snakebite.backends.bytecode.vm: Function, Instruction, opReturnVoid;
 
-    return Function([Instruction(&opReturnVoid, 0)], [], 0, 1);
+    auto instructions = [Instruction(&opReturnVoid, 0)];
+    int[] constants = [];
+    enum frameSize = 0;
+    enum frameAlignment = 1;
+
+    return Function(instructions, constants, frameSize, frameAlignment);
 }
 
 // Renders `statement` back to source text for a rejection message, on one
