@@ -90,6 +90,7 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.expression;
     import dmd.func: FuncDeclaration;
     import dmd.init: ExpInitializer;
+    import dmd.location: Loc;
     import dmd.mtype: Type;
     import dmd.statement:
         Catch, CompoundStatement, ContinueStatement, ExpStatement,
@@ -980,7 +981,6 @@ extern(C++) private final class Evaluator: Visitor {
     // no guest code can observe the difference.
     extern(D) private ubyte* staticSlotOf(VarDeclaration variable) {
         import dmd.astenums: STC;
-        import dmd.typesem: defaultInit;
         import std.conv: text;
 
         if (auto existing = variable in _statics)
@@ -997,19 +997,15 @@ extern(C++) private final class Evaluator: Visitor {
                     "interpreter's to make"),
             );
 
-        // No initializer at all means the declaration left the variable at
-        // its type's `.init`, which dmd renders as an expression like any
-        // other - so both spellings reach `evaluate` the same way.
-        Expression value;
-        if (variable._init is null)
-            value = defaultInit(variable.type, variable.loc);
-        else if (auto expInitializer = variable._init.isExpInitializer)
-            value = initializerValueOf(expInitializer);
-        else
-            throw new SnakebiteException(
-                text("interpreter cannot initialize `", variable.toString,
-                    "`: only a plain expression initializer is supported"),
-            );
+        ExpInitializer expInitializer;
+        if (variable._init !is null) {
+            expInitializer = variable._init.isExpInitializer;
+            if (expInitializer is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot initialize `", variable.toString,
+                        "`: only a plain expression initializer is supported"),
+                );
+        }
 
         // Over-allocated so the slot can start on the type's own
         // alignment: the guest reads and writes it in native layout, and
@@ -1025,7 +1021,20 @@ extern(C++) private final class Evaluator: Visitor {
         // Registered only once the initialiser has run: a slot in
         // `_statics` means initialised, so a failed initialiser must not
         // leave one behind for a later reach to read as a value.
-        evaluate(value, variable.type, facts, slot.ptr);
+        if (variable._init is null)
+            initializeDefault(
+                variable.type,
+                facts,
+                cast(ubyte*) slot.ptr,
+                variable.loc,
+            );
+        else
+            evaluate(
+                initializerValueOf(expInitializer),
+                variable.type,
+                facts,
+                slot.ptr,
+            );
         _statics[variable] = slot;
 
         return cast(ubyte*) slot.ptr;
@@ -2250,26 +2259,77 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto elementType = expression.type.nextOf;
         const elementFacts = factsOf(elementType);
-        if (elementType.ty != Tbool && elementType.ty != Tuns32
-                && !supportsStruct(elementType))
-            throw new SnakebiteException(
-                text("interpreter cannot allocate an array of unsupported `",
-                    elementType.toString, "` elements"),
-            );
 
         const length = cast(size_t) asIntegral((*arguments)[0]);
         if (elementFacts.size != 0 && length > size_t.max / elementFacts.size)
             throw new SnakebiteException(
                 text("interpreter cannot allocate `", expression.toString,
-                    "`: its byte size overflows `size_t`"),
+                "`: its byte size overflows `size_t`"),
             );
 
-        auto elements = new ubyte[](length * elementFacts.size);
-        _allocations ~= elements;
+        const dataSize = length * elementFacts.size;
+        const padding = elementFacts.alignment - 1;
+        if (dataSize > size_t.max - padding)
+            throw new SnakebiteException(
+                text("interpreter cannot allocate `", expression.toString,
+                    "`: its alignment padding overflows `size_t`"),
+            );
+
+        ubyte* elements;
+        if (dataSize != 0) {
+            auto allocation = new ubyte[](dataSize + padding);
+            _allocations ~= allocation;
+
+            const start = -cast(size_t) allocation.ptr
+                & (elementFacts.alignment - 1);
+            elements = cast(ubyte*) allocation.ptr + start;
+
+            foreach (i; 0 .. length) {
+                try
+                    initializeDefault(
+                        elementType,
+                        elementFacts,
+                        elements + i * elementFacts.size,
+                        expression.loc,
+                    );
+                catch (SnakebiteException exception)
+                    throw new SnakebiteException(
+                        text("interpreter cannot initialize an array of `",
+                            elementType.toString, "` from its `.init`: ",
+                            exception.msg),
+                    );
+            }
+        }
 
         auto bytes = cast(ubyte*) _place;
         storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
-        *cast(ubyte**) (bytes + arrayPointerOffset) = elements.ptr;
+        *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
+    }
+
+    private void initializeDefault(
+        Type type,
+        in TypeFacts facts,
+        ubyte* place,
+        in Loc loc,
+    ) {
+        import core.stdc.string: memset;
+        import dmd.typesem: defaultInit;
+        import std.conv: text;
+
+        auto structType = type.isTypeStruct;
+        if (structType !is null && structType.sym.zeroInit) {
+            memset(place, 0, facts.size);
+            return;
+        }
+
+        auto initializer = defaultInit(type, loc);
+        if (initializer is null)
+            throw new SnakebiteException(
+                text("interpreter cannot initialize `", type.toString,
+                    "`: its `.init` has no expression"),
+            );
+
+        evaluate(initializer, type, facts, place);
     }
 
     override void visit(StructLiteralExp expression) {

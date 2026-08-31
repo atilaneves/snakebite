@@ -375,6 +375,68 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("arrays.new.scalar.nativeLayouts.initialiseAndWrite." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ubyte[] bytes = new ubyte[2];
+                ushort[] words = new ushort[2];
+                int[] ints = new int[2];
+                long[] longs = new long[2];
+                float[] floats = new float[2];
+                double[] doubles = new double[2];
+
+                assert(bytes[0] == ubyte.init);
+                assert(words[0] == ushort.init);
+                assert(ints[0] == int.init);
+                assert(longs[0] == long.init);
+                assert(floats[0] != floats[0]);
+                assert(doubles[0] != doubles[0]);
+
+                bytes[1] = 17;
+                words[1] = 1_031;
+                ints[1] = -32_047;
+                longs[1] = 1_000_000_000_007L;
+                floats[1] = 1.25F;
+                doubles[1] = -2.5;
+
+                assert(bytes[1] == 17);
+                assert(words[1] == 1_031);
+                assert(ints[1] == -32_047);
+                assert(longs[1] == 1_000_000_000_007L);
+                assert(floats[1] == 1.25F);
+                assert(doubles[1] == -2.5);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("arrays.new.nestedStruct.zeroInitialises." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                struct Point {
+                    int x;
+                    long y;
+                }
+
+                auto points = new Point[](2);
+                assert(points[0].x == 0);
+                assert(points[0].y == 0);
+
+                points[1] = Point(3, 4);
+                assert(points[1].x == 3);
+                assert(points[1].y == 4);
+            }
+        });
+    }
+}
+
 // A literal assigned to a `static` slice is built once, on whichever call
 // first reaches it - its elements must still be readable on a later call
 // to the same function, after the frame that built them has long since
