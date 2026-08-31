@@ -1,4 +1,5 @@
 bin
+coverage
 *.so
 *.a
 .ninja*
