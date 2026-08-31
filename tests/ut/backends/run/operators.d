@@ -73,6 +73,191 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A byte copy through the post-semantic pointer expression writes at the
+// requested element offset, so the cast, multiplication, and pointer
+// addition must all be evaluated by the backend.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("pointerCastAndAdditionCopiesAtOffset." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.string: memcpy;
+
+            struct Writer {
+                private ubyte[] _bytes;
+
+                size_t offset() {
+                    return 2;
+                }
+
+                void copyAtOffset() {
+                    const oldLength = offset;
+                    const ubyte[] value = [9, 8];
+
+                    memcpy(
+                        cast(ubyte*)this._bytes + cast(long)oldLength,
+                        value.ptr,
+                        value.length,
+                    );
+                }
+            }
+
+            void main() {
+                auto writer = Writer([1, 2, 3, 4]);
+                writer.copyAtOffset;
+
+                assert(writer._bytes[0] == 1);
+                assert(writer._bytes[1] == 2);
+                assert(writer._bytes[2] == 9);
+                assert(writer._bytes[3] == 8);
+            }
+        });
+    }
+}
+
+// Pointer arithmetic uses the pointee size, not byte addressing, for a
+// dynamic array whose elements are wider than one byte.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("pointerCastAndAdditionScalesByPointeeSize." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.string: memcpy;
+
+            struct Writer {
+                private uint[] _values;
+
+                void copyAtOffset() {
+                    const oldLength = 1;
+                    const uint[] value = [cast(uint) 0xaabbccdd];
+
+                    memcpy(
+                        cast(uint*)this._values + cast(long)oldLength * 1L,
+                        value.ptr,
+                        value.length * uint.sizeof,
+                    );
+                }
+            }
+
+            void main() {
+                auto writer = Writer([
+                    cast(uint) 0x11111111,
+                    cast(uint) 0x22222222,
+                ]);
+                writer.copyAtOffset;
+
+                assert(writer._values[0] == cast(uint) 0x11111111);
+                assert(writer._values[1] == cast(uint) 0xaabbccdd);
+            }
+        });
+    }
+}
+
+// Integral-plus-pointer addition uses the same native pointee addressing as
+// pointer-plus-integral addition.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("integralPlusPointerAdditionScalesByPointeeSize." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.string: memcpy;
+
+            struct Writer {
+                private uint[] _values;
+
+                long offset() {
+                    return 1;
+                }
+
+                uint* base() {
+                    return _values.ptr;
+                }
+
+                void copyAtOffset() {
+                    const uint[] value = [cast(uint) 0xaabbccdd];
+
+                    memcpy(
+                        cast(long)offset * 1L + base,
+                        value.ptr,
+                        value.length * uint.sizeof,
+                    );
+                }
+            }
+
+            void main() {
+                auto writer = Writer([
+                    cast(uint) 0x11111111,
+                    cast(uint) 0x22222222,
+                ]);
+                writer.copyAtOffset;
+
+                assert(writer._values[0] == cast(uint) 0x11111111);
+                assert(writer._values[1] == cast(uint) 0xaabbccdd);
+            }
+        });
+    }
+}
+
+// Cerealising and decerealising nonzero bytes through the computed pointer
+// preserves the bytes at the nonzero old length.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("cerealiseDecerealiseRoundTripsAtOffset." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.string: memcpy;
+
+            struct Cerealiser {
+                private ubyte[] _bytes;
+
+                size_t offset() {
+                    return 2;
+                }
+
+                void cerealise(in ubyte[] value) {
+                    const oldLength = offset;
+
+                    memcpy(
+                        cast(ubyte*)this._bytes + cast(long)oldLength,
+                        value.ptr,
+                        value.length,
+                    );
+                }
+
+                void decerealise(ubyte[] value) {
+                    const oldLength = offset;
+
+                    memcpy(
+                        value.ptr,
+                        cast(ubyte*)this._bytes + cast(long)oldLength,
+                        value.length,
+                    );
+                }
+            }
+
+            void main() {
+                auto cerealiser = Cerealiser([0, 0, 0, 0]);
+                const original = [cast(ubyte) 7, cast(ubyte) 11];
+                cerealiser.cerealise(original);
+
+                auto decoded = [cast(ubyte) 0, cast(ubyte) 0];
+                cerealiser.decerealise(decoded);
+
+                assert(decoded[0] == original[0]);
+                assert(decoded[1] == original[1]);
+            }
+        });
+    }
+}
+
 // A pointer of another type to the same storage reads and writes those
 // bytes, so a write through it is visible through the original.
 static foreach (backend; Matrix!(
@@ -124,4 +309,3 @@ static foreach (backend; Matrix!(
         });
     }
 }
-

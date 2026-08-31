@@ -85,7 +85,7 @@ extern(C++) private final class Evaluator: Visitor {
         isIntegralSize, storeValue, TypeFacts;
     import dmd.astenums:
         Tarray, Tbool, Tdelegate, Tfloat32, Tfloat64, Tnoreturn,
-        Tpointer, Tsarray, Tuns32, Tvoid;
+        Tint64, Tpointer, Tsarray, Tuns32, Tuns8, Tvoid;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
     import dmd.func: FuncDeclaration;
@@ -902,7 +902,7 @@ extern(C++) private final class Evaluator: Visitor {
             return;
         }
 
-        if (_type.ty == Tpointer) {
+        if (expression.type.ty == Tpointer) {
             storeIntegral(bytes, functionWord, size_t.sizeof);
             return;
         }
@@ -1531,6 +1531,28 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(AddExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+
+        const lhsPointer = expression.e1.type.ty == Tpointer;
+        const rhsPointer = expression.e2.type.ty == Tpointer;
+        if (expression.type.ty == Tpointer
+                && ((lhsPointer && factsOf(expression.e2.type).isIntegral)
+                    || (rhsPointer && factsOf(expression.e1.type).isIntegral))) {
+            void* pointer;
+            long offset;
+            if (lhsPointer) {
+                pointer = asPointer(expression.e1);
+                offset = asIntegral(expression.e2);
+            } else {
+                offset = asIntegral(expression.e1);
+                pointer = asPointer(expression.e2);
+            }
+            const result = cast(ubyte*) pointer + cast(long) offset;
+
+            storeIntegral(_place, cast(size_t) result, _facts.size);
+            return;
+        }
+
         storeBinaryExp!"+"(expression);
     }
 
@@ -1752,10 +1774,12 @@ extern(C++) private final class Evaluator: Visitor {
         // `_d_arrayappendcTX_`, on the `~=` lowering's own chain, reads
         // `px.ptr` this way to ask the GC what it already knows about the
         // block backing the array being grown.
-        if (sourceType.ty == Tarray && _type.ty == Tpointer) {
-            const value = evaluateArray(expression.e1, factsOf(sourceType));
+        if (sourceType.ty == Tarray && _type.ty == Tpointer
+                && sourceType.nextOf.equals(_type.nextOf)) {
+            const bytes = cast(ubyte*) addressOf(expression.e1);
+            const value = *cast(void**) (bytes + arrayPointerOffset);
             storeIntegral(
-                _place, cast(size_t) value.elements, _facts.size);
+                _place, cast(size_t) value, _facts.size);
             return;
         }
 
