@@ -4,6 +4,23 @@ module ut.backends.call.locals;
 import ut.backends;
 
 
+@("locals.voidInitializerPerformsNoValueEvaluation.Interpreter")
+@Tags("Interpreter")
+unittest {
+    43.shouldBeRetOf!(
+        Interpreter,
+        q{
+            int result() {
+                int value = void;
+                value = 43;
+                return value;
+            }
+        },
+        "result",
+    );
+}
+
+
 static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("locals.literalInit." ~ backend.stringof)
     @Tags(backend.stringof)

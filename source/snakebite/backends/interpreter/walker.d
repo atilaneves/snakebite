@@ -1142,6 +1142,12 @@ extern(C++) private final class Evaluator: Visitor {
         countForeignNameLookup;
         const offset = _layout.offsetOf(variable);
 
+        // `T value = void` requests storage without initialization. The
+        // frame slot already exists, so executing this declaration performs
+        // no write. Code must assign any bytes it reads, as in compiled D.
+        if (variable._init.isVoidInitializer !is null)
+            return;
+
         auto expInitializer = variable._init.isExpInitializer;
         if (expInitializer is null)
             throw new SnakebiteException(
