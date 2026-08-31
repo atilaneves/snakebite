@@ -5,16 +5,21 @@ import ut.backends;
 import snakebite.backends.backend: Program, run;
 import snakebite.frontend.compiler: parseSnippet;
 import std.algorithm.searching: canFind;
+import std.regex: matchFirst;
 
 
-// `dub_test_root` is dub's name for the generated test root, so `Program`
-// resolves this module's `main` (there isn't one) to
-// `Program.Main.Kind.dubTestRunner` and its execution roots become every
-// unittest in the module, not a single `main`.
+// `dub_test_root` is dub's name for the generated test root, and dub
+// always gives it a `void main() {}` alongside the generated call into
+// druntime's unittest runner. With both present, `Program` resolves this
+// module's kind to `Program.Main.Kind.dubTestRunner`, so its execution
+// roots become every unittest in the module, not `main`.
 @("Bytecode.roots.everyUnittestRuns")
 unittest {
     auto module_ = parseSnippet(q{
         module dub_test_root;
+
+        void main() {
+        }
 
         unittest {
         }
@@ -69,5 +74,5 @@ unittest {
     const thrown = backend.compile(program).shouldThrow;
 
     thrown.msg.canFind("int x = 1").should == true;
-    thrown.msg.canFind("(").should == true;
+    thrown.msg.matchFirst(`\.d\(\d+\)`).empty.should == false;
 }

@@ -68,7 +68,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private FuncDeclaration[] roots() const {
         import snakebite.frontend.dmd.functions: findUnittests;
 
-        FuncDeclaration[] found = cast(FuncDeclaration[]) _program.moduleConstructors;
+        auto found = cast(FuncDeclaration[]) _program.moduleConstructors;
 
         if (_program.main.kind == Program.Main.Kind.dubTestRunner) {
             foreach (module_; _program.rootModules)
@@ -195,8 +195,6 @@ private bool isVoidCompatible(imported!"dmd.statement".Statement statement) {
     return true;
 }
 
-// The one-instruction body every supported `void` function compiles to,
-// whether it is written with no statements or with a bare `return;`.
 private imported!"snakebite.backends.bytecode.vm".Function voidReturn() {
     import snakebite.backends.bytecode.vm: Function, Instruction, opReturnVoid;
 
