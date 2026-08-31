@@ -8,6 +8,7 @@ public import std.meta: AliasSeq;
 import core.sync.mutex: Mutex;
 import dmd.dmodule: Module;
 import dmd.func: FuncDeclaration;
+import snakebite.backends.backend: Program, run;
 import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction, findStruct;
 import std.conv: text;
@@ -85,8 +86,6 @@ public template Matrix(specs...) {
 // call one parsed guest function directly rather than running a whole
 // program.
 public Interpreter interpreterOf(Module module_) {
-    import snakebite.backends.backend: Program;
-
     return new Interpreter(Program([module_]));
 }
 
@@ -140,8 +139,6 @@ public void shouldBeStatusOf(
     in string file = __FILE__,
     in size_t line = __LINE__,
 ) {
-    import snakebite.backends.backend: Program, run;
-
     static if (is(BackendType == Native))
         nativeMainStatus!code.shouldEqual(expected, file, line);
     else {
@@ -201,7 +198,6 @@ public void shouldBeRetOf(
     in size_t line = __LINE__,
 ) {
     import dmd.typesem: size;
-    import snakebite.backends.backend: Program;
 
     static if (is(BackendType == Native)) {
         const native = () {
@@ -287,8 +283,6 @@ private string evaluate(
         mixin(declarations);
         return text(mixin(code));
     } else {
-        import snakebite.backends.backend: Program;
-
         auto function_ = parsedFunction(snippet);
         auto program = Program([function_.getModule]);
         return asTestFailure(
