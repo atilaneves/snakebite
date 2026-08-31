@@ -29,7 +29,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     }
 
     public override string eval(FuncDeclaration function_) {
-        throw new Exception(
+        throw new SnakebiteException(
             "eval not implemented for the interpreter yet",
         );
     }
@@ -45,15 +45,18 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     }
 }
 
+import snakebite.exception: SnakebiteException;
+
 // A guest throw must remain distinguishable from a refusal to interpret a
 // guest construct. The runner catches this wrapper, while interpreter
-// failures continue through the host unchanged.
+// failures travel as `SnakebiteException` and continue through the host
+// unchanged.
 private final class GuestException: Exception {
-    public Throwable guest;
+    private Throwable _guest;
 
     public this(Throwable guest) {
         super(guest.msg);
-        this.guest = guest;
+        _guest = guest;
     }
 }
 
@@ -225,7 +228,7 @@ extern(C++) private final class Evaluator: Visitor {
         const parameterCount =
             function_.parameters is null ? 0 : function_.parameters.length;
         if (args.length != 0 || parameterCount != 0)
-            throw new Exception(
+            throw new SnakebiteException(
                 "host-to-guest arguments not yet supported by the " ~
                     "interpreter backend",
             );
@@ -241,7 +244,7 @@ extern(C++) private final class Evaluator: Visitor {
         // `ref` return for exactly this reason; this is the interpreter's
         // own entry point, so it gets the same refusal.
         if (typeFunctionOf(function_).isRef)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot call `", function_.toString,
                     "` from the host: it returns by `ref`"),
             );
@@ -362,7 +365,7 @@ extern(C++) private final class Evaluator: Visitor {
         // for, so this throws loudly instead of running with a missing
         // context and returning a plausible-looking wrong answer.
         if (function_.isThis() !is null || function_.isNested())
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot call `", function_.toString,
                     "`: it needs a `this` or a static chain, which the ",
                     "interpreter does not provide"),
@@ -389,7 +392,7 @@ extern(C++) private final class Evaluator: Visitor {
                 return;
             }
 
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot call a function with no body: `",
                     function_.toString, "`"),
             );
@@ -457,7 +460,7 @@ extern(C++) private final class Evaluator: Visitor {
         // the message strips it to stay on one line.
         import std.string: strip;
 
-        throw new Exception(
+        throw new SnakebiteException(
             text("interpreter cannot execute a `", statement.stmt,
                 "` statement: `", toChars(statement).fromStringz.strip, "`"),
         );
@@ -478,7 +481,7 @@ extern(C++) private final class Evaluator: Visitor {
                 if (!matchesThrowable(catch_))
                     continue;
 
-                bindCatchVariable(catch_, exception.guest);
+                bindCatchVariable(catch_, exception._guest);
                 catch_.handler.accept(this);
                 return;
             }
@@ -652,7 +655,7 @@ extern(C++) private final class Evaluator: Visitor {
 
     override void visit(ContinueStatement statement) {
         if (statement.ident !is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 "interpreter cannot execute a labelled `continue` statement",
             );
 
@@ -683,7 +686,7 @@ extern(C++) private final class Evaluator: Visitor {
         if (type.ty == Tpointer)
             return asPointer(expression) !is null;
 
-        throw new Exception(
+        throw new SnakebiteException(
             text("interpreter cannot evaluate `", expression.toString,
                 "` as a condition: its type is `", type.toString, "`"),
         );
@@ -708,7 +711,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto type = expression.type;
         if (type.ty != Tarray)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "` as a dynamic array: its type is `", type.toString,
                     "`"),
@@ -740,7 +743,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto type = expression.type;
         if (!facts.isIntegral)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "` as an integral: its type is `", type.toString, "`"),
             );
@@ -764,7 +767,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto type = expression.type;
         if (type.ty != Tpointer)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "` as a pointer: its type is `", type.toString, "`"),
             );
@@ -782,7 +785,7 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(Expression expression) {
         import std.conv: text;
 
-        throw new Exception(
+        throw new SnakebiteException(
             text("interpreter cannot evaluate a `", expression.op,
                 "` expression: `", expression.toString, "`"),
         );
@@ -843,7 +846,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto variable = declaration.isVarDeclaration;
         if (variable is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot reach `", original.toString,
                     "`: not a parameter or local in the current frame"),
             );
@@ -882,7 +885,7 @@ extern(C++) private final class Evaluator: Visitor {
         // here would be a second variable that only looks like it, so
         // this refuses rather than answering from a private copy.
         if (variable.storage_class & STC.extern_)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot reach `", variable.toString,
                     "`: it is `extern`, so its storage is not the ",
                     "interpreter's to make"),
@@ -897,7 +900,7 @@ extern(C++) private final class Evaluator: Visitor {
         else if (auto expInitializer = variable._init.isExpInitializer)
             value = initializerValueOf(expInitializer);
         else
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot initialize `", variable.toString,
                     "`: only a plain expression initializer is supported"),
             );
@@ -949,7 +952,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto variable = expression.declaration.isVarDeclaration;
         if (variable is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot run declaration `",
                     expression.toString, "`: only a local variable is ",
                     "supported"),
@@ -965,7 +968,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto expInitializer = variable._init.isExpInitializer;
         if (expInitializer is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot run the initializer for `",
                     expression.toString, "`: only a plain expression ",
                     "initializer is supported"),
@@ -1012,14 +1015,14 @@ extern(C++) private final class Evaluator: Visitor {
         const isSupportedStruct = structType !is null
             && supportsStruct(_type);
         if (structType !is null && !isSupportedStruct)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot assign unsupported struct `",
                     structType.toString, "`"),
             );
 
         if (expression.op != EXP.assign && !_facts.isIntegral
                 && !isSupportedStruct)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot run a `", expression.op,
                     "` on `", expression.e1.toString, "`"),
             );
@@ -1110,7 +1113,7 @@ extern(C++) private final class Evaluator: Visitor {
         if (auto index = target.isIndexExp)
             return indexAddressOf(index).ptr;
 
-        throw new Exception(
+        throw new SnakebiteException(
             text("interpreter cannot take the address of `",
                 target.toString, "`: it is not an lvalue"),
         );
@@ -1137,7 +1140,7 @@ extern(C++) private final class Evaluator: Visitor {
         const index = indexOf(expression, value.length);
 
         if (index < 0 || cast(size_t) index >= value.length)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot index `", array.toString,
                     "` at ", index, ": the array is ", value.length,
                     " long"),
@@ -1205,7 +1208,7 @@ extern(C++) private final class Evaluator: Visitor {
         auto variable = expression.e1.isVarExp;
         const targetFacts = factsOf(expression.e1.type);
         if (variable is null || !targetFacts.isIntegral)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot assign to `",
                     expression.e1.toString, "`: `", expression.toString,
                     "`"),
@@ -1234,7 +1237,7 @@ extern(C++) private final class Evaluator: Visitor {
         auto variable = expression.e1.isVarExp;
         const facts = factsOf(expression.e1.type);
         if (variable is null || !facts.isIntegral)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: `", expression.e1.toString, "` is not an integral ",
                     "variable"),
@@ -1266,7 +1269,7 @@ extern(C++) private final class Evaluator: Visitor {
             case greaterThan: return storeCmpExp!">"(expression);
             case greaterOrEqual: return storeCmpExp!">="(expression);
             default:
-                throw new Exception(
+                throw new SnakebiteException(
                     text("interpreter cannot evaluate a `", expression.op,
                         "` expression: `", expression.toString, "`"),
                 );
@@ -1309,7 +1312,7 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         if (expression.op != EXP.equal && expression.op != EXP.notEqual)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate a `", expression.op,
                     "` expression: `", expression.toString, "`"),
             );
@@ -1330,7 +1333,7 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         if (expression.op != EXP.identity && expression.op != EXP.notIdentity)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate a `", expression.op,
                     "` expression: `", expression.toString, "`"),
             );
@@ -1343,7 +1346,7 @@ extern(C++) private final class Evaluator: Visitor {
             equal =
                 asIntegral(expression.e1) == asIntegral(expression.e2);
         else
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: its operands are of type `", type.toString, "`"),
             );
@@ -1418,7 +1421,7 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         if (!_facts.isIntegral)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: its type is `", expression.type.toString, "`"),
             );
@@ -1439,7 +1442,7 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         if (!_facts.isIntegral)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: its type is `", expression.type.toString, "`"),
             );
@@ -1553,7 +1556,7 @@ extern(C++) private final class Evaluator: Visitor {
             return;
         }
 
-        throw new Exception(
+        throw new SnakebiteException(
             text("interpreter cannot evaluate a `", expression.op,
                 "` expression: `", expression.toString, "`"),
         );
@@ -1615,7 +1618,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto field = expression.var.isVarDeclaration;
         if (field is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: only a struct field read is supported"),
             );
@@ -1626,7 +1629,7 @@ extern(C++) private final class Evaluator: Visitor {
         // whole bytes instead - refused rather than run to a wrong
         // answer, the same way an unhandled node already is.
         if (field.isBitFieldDeclaration !is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: reading a bitfield is not supported"),
             );
@@ -1656,7 +1659,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto type = isType(expression.obj);
         if (type is null || type.vtinfo is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: only `typeid` of a resolved type is supported"),
             );
@@ -1665,7 +1668,7 @@ extern(C++) private final class Evaluator: Visitor {
         countForeignNameLookup;
         auto address = symbolAddress(name.toStringz);
         if (address is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot resolve the symbol `", name,
                     "` for `", expression.toString,
                     "`: it is not in this process"),
@@ -1700,7 +1703,7 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         if (expression.type !is null && expression.type.ty == Tnoreturn)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot execute the halt `",
                     expression.toString, "`"),
             );
@@ -1748,7 +1751,7 @@ extern(C++) private final class Evaluator: Visitor {
             const length = cast(size_t) array.type.isTypeSArray.dim.toInteger;
             const index = indexOf(expression, length);
             if (index < 0 || cast(size_t) index >= length)
-                throw new Exception(
+                throw new SnakebiteException(
                     text("interpreter cannot index `", array.toString,
                         "` at ", index, ": the array is ", length,
                         " long"),
@@ -1823,7 +1826,7 @@ extern(C++) private final class Evaluator: Visitor {
             sourceLength = value.length;
             knownLength = true;
         } else
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: only slicing a pointer or a dynamic array is ",
                     "supported"),
@@ -1834,7 +1837,7 @@ extern(C++) private final class Evaluator: Visitor {
         scope(exit) if (lengthVar !is null) _dollar = outerDollar;
         if (lengthVar !is null) {
             if (!knownLength)
-                throw new Exception(
+                throw new SnakebiteException(
                     text("interpreter cannot evaluate `",
                         expression.toString, "`: `$` has no meaning ",
                         "slicing a pointer"),
@@ -1849,7 +1852,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         if (lo < 0 || hi < lo
                 || (knownLength && cast(size_t) hi > sourceLength))
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot slice `", array.toString, "` [",
                     lo, " .. ", hi, "]"),
             );
@@ -1901,7 +1904,7 @@ extern(C++) private final class Evaluator: Visitor {
         }
 
         if (_type.ty != Tarray)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "` as a `", _type.toString, "`: only a dynamic array ",
                     "literal is supported"),
@@ -1936,7 +1939,7 @@ extern(C++) private final class Evaluator: Visitor {
         auto arguments = expression.arguments;
         if (expression.type.ty != Tarray || arguments is null
                 || arguments.length != 1)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate a `", expression.op,
                     "` expression: `", expression.toString, "`"),
             );
@@ -1945,14 +1948,14 @@ extern(C++) private final class Evaluator: Visitor {
         const elementFacts = factsOf(elementType);
         if (elementType.ty != Tbool && elementType.ty != Tuns32
                 && !supportsStruct(elementType))
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot allocate an array of unsupported `",
                     elementType.toString, "` elements"),
             );
 
         const length = cast(size_t) asIntegral((*arguments)[0]);
         if (elementFacts.size != 0 && length > size_t.max / elementFacts.size)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot allocate `", expression.toString,
                     "`: its byte size overflows `size_t`"),
             );
@@ -1972,7 +1975,7 @@ extern(C++) private final class Evaluator: Visitor {
         auto structType = _type.isTypeStruct;
         if (structType is null || structType.sym != expression.sd
                 || !supportsStruct(_type))
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: unsupported struct literal"),
             );
@@ -1982,7 +1985,7 @@ extern(C++) private final class Evaluator: Visitor {
             return;
 
         if (expression.elements.length > expression.sd.fields.length)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: its fields do not match the struct layout"),
             );
@@ -2018,7 +2021,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto element = expression[i];
         if (element is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate element ", i, " of `",
                     expression.toString, "`: it is sparse with no `basis` ",
                     "fill value"),
@@ -2044,7 +2047,7 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         if (expression.lowering is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot evaluate a `", expression.op,
                     "` expression: `", expression.toString, "`"),
             );
@@ -2081,7 +2084,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto function_ = expression.f;
         if (function_ is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot call an unresolved function: `",
                     expression.toString, "`"),
             );
@@ -2125,7 +2128,7 @@ extern(C++) private final class Evaluator: Visitor {
         auto arguments = expression.arguments;
         const argCount = arguments is null ? 0 : arguments.length;
         if (argCount != parameterList.length)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter: `", function_.toString, "` expects ",
                     parameterList.length, " argument(s), got ", argCount),
             );
@@ -2183,13 +2186,13 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto function_ = expression.f;
         if (function_ is null)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot call an unresolved function: `",
                     expression.toString, "`"),
             );
 
         if (!typeFunctionOf(function_).isRef)
-            throw new Exception(
+            throw new SnakebiteException(
                 text("interpreter cannot take the address of `",
                     expression.toString, "`: it does not return `ref`"),
             );
@@ -2263,7 +2266,7 @@ private bool sharedSignedness(
     import std.conv: text;
 
     if (a.isUnsigned != b.isUnsigned)
-        throw new Exception(
+        throw new SnakebiteException(
             text("interpreter cannot evaluate `", expression.toString,
                 "`: its operands differ in signedness"),
         );
@@ -2285,7 +2288,7 @@ private ulong divided(string op)(
     import std.conv: text;
 
     if (b == 0)
-        throw new Exception(
+        throw new SnakebiteException(
             text("interpreter: division by zero in `",
                 expression.toString, "`"),
         );
@@ -2327,7 +2330,7 @@ private ulong shifted(string op)(
 
     const width = aFacts.size * 8;
     if (b < 0 || b >= width)
-        throw new Exception(
+        throw new SnakebiteException(
             text("interpreter cannot shift by ", b, " in `",
                 expression.toString, "`: the left operand has ", width,
                 " bits"),

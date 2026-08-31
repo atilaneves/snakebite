@@ -73,51 +73,62 @@ static foreach (backend; Matrix!(
     }
 }
 
-@("tryCatchThrowable.passingTrySkipsCatch.Interpreter")
-@Tags("Interpreter")
-unittest {
-    1.shouldBeRetOf!(
-        Interpreter,
-        q{
-            int result() {
-                int value;
-                try {
-                    value = 1;
-                } catch(Throwable caught) {
-                    value = 2;
+static foreach (backend; Matrix!()) {
+    @("tryCatchThrowable.passingTrySkipsCatch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int value;
+                    try {
+                        value = 1;
+                    } catch(Throwable caught) {
+                        value = 2;
+                    }
+                    return value;
                 }
-                return value;
-            }
-        },
-        "result",
-    );
+            },
+            "result",
+        );
+    }
 }
 
-@("tryCatchThrowable.catchesGuestAssertion.Interpreter")
-@Tags("Interpreter")
-unittest {
-    2.shouldBeRetOf!(
-        Interpreter,
-        q{
-            bool fail() {
-                return false;
-            }
-
-            int result() {
-                int value;
-                try {
-                    assert(fail());
-                    value = 1;
-                } catch(Throwable caught) {
-                    value = 2;
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a failing assertion into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("tryCatchThrowable.catchesGuestAssertion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(
+            backend,
+            q{
+                bool fail() {
+                    return false;
                 }
-                return value;
-            }
-        },
-        "result",
-    );
+
+                int result() {
+                    int value;
+                    try {
+                        assert(fail());
+                        value = 1;
+                    } catch(Throwable caught) {
+                        value = 2;
+                    }
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
 }
 
+// Interpreter-only by nature: the behaviour under test is the interpreter's
+// own refusal of a construct it does not support, which no other backend
+// has. The `switch` runs fine everywhere else.
 @("tryCatchThrowable.doesNotCatchInterpreterFailure.Interpreter")
 @Tags("Interpreter")
 unittest {
