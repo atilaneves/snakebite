@@ -244,7 +244,7 @@ private BackendReport[] benchmarkAll(Project project, in Options options) {
     BackendReport[] reports;
     static foreach (BackendType; imported!"snakebite.backends".Backends)
         if (selected(options, backendName!BackendType)) {
-            auto backend = new BackendType;
+            auto backend = new BackendType(project.program);
 
             // Not every backend has a compile step (`Backend` doesn't
             // declare one - CTFE, say, interprets directly from the parsed
