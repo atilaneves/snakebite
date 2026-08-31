@@ -2824,21 +2824,34 @@ extern(C++) private final class Evaluator: Visitor {
                 // `frameOf` from wherever this call itself is running,
                 // which is that frame when the callee is nested directly
                 // inside the caller, and reached by hopping further up
-                // the chain when it is nested deeper than that.
-                auto enclosing = function_.toParent2() is null
-                    ? null : function_.toParent2().isFuncDeclaration;
-                if (enclosing is null)
-                    throw new SnakebiteException(
-                        text("interpreter cannot call `",
-                            function_.toString, "`: its enclosing ",
-                            "function could not be determined"),
+                // the chain when it is nested deeper than that. A callee
+                // that captures no outer variable never dereferences
+                // this link, so it is passed as 0 without walking the
+                // chain to find it - the walk can fail when the caller
+                // is not itself on the callee's enclosing function's
+                // static chain, which is fine for a link nothing reads.
+                if (function_.outerVars.length == 0) {
+                    storeIntegral(
+                        frame.base + layout.hiddenThis.parameter.offset,
+                        0,
+                        size_t.sizeof,
                     );
+                } else {
+                    auto enclosing = function_.toParent2() is null
+                        ? null : function_.toParent2().isFuncDeclaration;
+                    if (enclosing is null)
+                        throw new SnakebiteException(
+                            text("interpreter cannot call `",
+                                function_.toString, "`: its enclosing ",
+                                "function could not be determined"),
+                        );
 
-                storeIntegral(
-                    frame.base + layout.hiddenThis.parameter.offset,
-                    cast(size_t) frameOf(enclosing),
-                    size_t.sizeof,
-                );
+                    storeIntegral(
+                        frame.base + layout.hiddenThis.parameter.offset,
+                        cast(size_t) frameOf(enclosing),
+                        size_t.sizeof,
+                    );
+                }
             }
         }
 

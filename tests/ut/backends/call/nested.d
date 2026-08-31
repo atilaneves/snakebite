@@ -6,9 +6,8 @@ import ut.backends;
 
 // The non-escaping case: `bump` is called while `main`'s own frame is
 // still on the interpreter's frame stack, so reading and then writing
-// `counter` through the static chain `bindFrame` set up reaches the same
-// storage a compiled `bump` would - both directions go through the one
-// `slotOf` path this exercises.
+// `counter` through the static chain reaches the same storage a compiled
+// `bump` would.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
 )) {
@@ -30,14 +29,35 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A delegate that captures nothing never reads its context word, so
+// `call`, a function with no static chain of its own to `main`, must
+// still be able to run it - the delegate's own body needs nothing from
+// `call`'s frame, or from any frame at all.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+)) {
+    @("nested.staticChain.nonCapturingDelegateNeedsNoLink." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int call(int delegate(int) dg) { return dg(41); }
+            int main() {
+                int delegate(int) inc = (int v) => v + 1;
+                return call(inc) == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
 // `middle`'s own nested function, `captureIt`, has its address taken and
 // handed to a delegate variable - dmd's conservative `needsClosure()`
 // rule (`FuncDeclaration.tookAddressOf`) marks `middle` as needing to
 // heap-allocate its own frame for exactly this reason, regardless of
-// `dg` never leaving `middle`'s own scope. The interpreter's frame stack
-// has no such allocation, so calling `middle` refuses loudly rather than
-// handing `captureIt` a static link into a frame this interpreter cannot
-// keep alive the way a real closure would.
+// `dg` never leaving `middle`'s own scope. A heap-allocated frame can
+// outlive the call that made it, which calling `middle` here cannot
+// provide, so it refuses loudly rather than handing `captureIt` a static
+// link into storage that would not outlive it the way a real closure's
+// would.
 @("nested.staticChain.escapingCaptureIsRefused.Interpreter")
 @Tags("Interpreter")
 unittest {
