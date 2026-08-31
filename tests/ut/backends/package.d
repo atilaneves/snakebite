@@ -85,7 +85,7 @@ public template Matrix(specs...) {
 // An `Interpreter` whose program owns exactly `module_`, for tests that
 // call one parsed guest function directly rather than running a whole
 // program.
-public Interpreter interpreterOf(Module module_) {
+public Interpreter interpreter(Module module_) {
     return new Interpreter(Program([module_]));
 }
 

@@ -93,7 +93,7 @@ unittest {
     auto function_ = findFunction(module_, "grown");
 
     size_t result;
-    const thrown = interpreterOf(module_)
+    const thrown = interpreter(module_)
         .call(function_, &result, [])
         .shouldThrow;
 
