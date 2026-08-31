@@ -1,7 +1,7 @@
-module ut.ffi.cost;
+module at.ffi.cost;
 
 
-import ut;
+import unit_threaded;
 import snakebite.ffi: PlanCache;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -26,10 +26,9 @@ private alias Native = extern(C) int function(int);
 // The plan is prepared before the measured loops. This keeps the timing
 // gate focused on the steady-state call and removes the cold-path lookup.
 //
-// `bin/ut` is built unoptimised, so neither number is a release figure.
+// `bin/at` is built unoptimised, so neither number is a release figure.
 // The ratio is what this asserts on, and it is meaningful either way.
 @("barrier.overhead")
-@Serial
 @Flaky(5)
 @Tags("timing")
 unittest {
