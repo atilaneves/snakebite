@@ -66,6 +66,7 @@ public struct CallPlan {
             );
 
         size_t[maxArguments] words;
+        Register.Kind[maxArguments] kinds;
         size_t slot;
 
         void loadHiddenReturnPointer() {
@@ -78,7 +79,8 @@ public struct CallPlan {
                         "register, and needs somewhere to write it",
                 );
 
-            words[slot++] = cast(size_t) returnPlace;
+            words[slot] = cast(size_t) returnPlace;
+            kinds[slot++] = Register.Kind.pointer;
         }
 
         // A parameter's own eightbytes keep their order either way; what
@@ -86,9 +88,11 @@ public struct CallPlan {
         void load(in size_t i) {
             const plan = _arguments[i];
             auto bytes = cast(ubyte*) arguments[i];
-            foreach (j; 0 .. plan.count)
-                words[slot++] =
+            foreach (j; 0 .. plan.count) {
+                words[slot] =
                     word(plan.registers[j], bytes + j * size_t.sizeof);
+                kinds[slot++] = plan.registers[j].kind;
+            }
         }
 
         size_t firstExplicit;
@@ -110,7 +114,8 @@ public struct CallPlan {
             foreach (i; firstExplicit .. arguments.length)
                 load(i);
 
-        const result = invoke(cast(void*) _address, words[0 .. slot]);
+        const result = invoke(cast(void*) _address,
+            words[0 .. slot], kinds[0 .. slot], _return);
 
         // A hidden-pointer return already left its bytes at `returnPlace`
         // through that pointer, not in the return registers - which the
@@ -121,11 +126,17 @@ public struct CallPlan {
         if (!_hiddenReturnPointer && returnPlace !is null) {
             const size_t[2] resultWords = [result.first, result.second];
             auto bytes = cast(ubyte*) returnPlace;
-            foreach (i; 0 .. _return.count)
-                writeWord(
-                    _return.registers[i], resultWords[i],
-                    bytes + i * size_t.sizeof,
-                );
+            size_t integerIndex;
+            size_t floatingIndex;
+            foreach (i; 0 .. _return.count) {
+                const resultWord = _return.registers[i].kind
+                    == Register.Kind.sse
+                    ? (floatingIndex++ == 0
+                        ? result.floatingFirst : result.floatingSecond)
+                    : resultWords[integerIndex++];
+                writeWord(_return.registers[i], resultWord,
+                    bytes + i * size_t.sizeof);
+            }
         }
     }
 }
@@ -234,7 +245,7 @@ private CallPlan prepare(
                         ? " arguments including hidden context, "
                         : " arguments, ",
                     "and at most ", maxArguments,
-                    " are passed in registers"),
+                    " argument slots are available"),
             );
 
         CallPlan plan;
@@ -260,17 +271,18 @@ private CallPlan prepare(
         plan._reversedArguments = reversedDParameters
             && (linkage == LINK.d || linkage == LINK.default_);
 
-        size_t registers;
+        size_t words;
         if (plan._hiddenReturnPointer)
-            registers = 1;
+            words = 1;
 
         size_t argumentIndex;
         if (hasContext) {
             plan._hiddenContext = true;
             plan._arguments[argumentIndex++] = ArgumentPlan(
                 [Register(Register.Kind.pointer, 8), Register.init], 1,
+                false,
             );
-            ++registers;
+            ++words;
         }
 
         foreach (i; 0 .. count) {
@@ -286,14 +298,15 @@ private CallPlan prepare(
             const argument = isRef
                 ? ArgumentPlan(
                     [Register(Register.Kind.pointer, 8), Register.init], 1,
+                    false,
                 )
                 : ArgumentPlan.of(type.parameterList[i].type);
-            registers += argument.count;
-            if (registers > maxArguments)
+            words += argument.count;
+            if (words > maxArguments)
                 throw new Exception(
                     text("ffi cannot call `", function_.toString,
                         "`: its arguments need more than ", maxArguments,
-                        " registers"),
+                        " ABI words"),
                 );
 
             plan._arguments[argumentIndex++] = argument;
@@ -313,6 +326,7 @@ private CallPlan prepare(
         if (returnsRef) {
             plan._return = ArgumentPlan(
                 [Register(Register.Kind.pointer, 8), Register.init], 1,
+                false,
             );
         } else if (!plan._hiddenReturnPointer)
             plan._return = ArgumentPlan.of(type.nextOf);
