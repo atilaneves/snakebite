@@ -37,6 +37,24 @@ package struct FrameLayout {
     // hand, so it never pays an AA hash lookup for the hottest path.
     package Parameter[] parameters;
 
+    // A struct method's hidden `this`, together in one place: the slot
+    // and the declaration that owns it always exist - or not - as a
+    // pair. The hidden `this` is a `ref` parameter: its slot, before
+    // the explicit parameters as in the native calling layout, holds
+    // the receiver's address, the same shape every other `ref`
+    // parameter's slot has above.
+    package struct HiddenThis {
+        package Parameter parameter;
+
+        // dmd resolves a `this` the guest wrote to this same
+        // declaration, but a constructor's implicit `return this;` is a
+        // `ThisExp` dmd synthesises with no `var` at all, so the
+        // evaluator reaches the slot through this instead for that
+        // node. Null for a function with no `this`.
+        package VarDeclaration variable;
+    }
+    package HiddenThis hiddenThis;
+
     // Keyed by declaration instead of position: `visit(VarExp)` resolves
     // a parameter or local read from a `VarDeclaration` it found by name
     // lookup, not by position, so it still needs a hash lookup. A `ref`
@@ -54,6 +72,21 @@ package struct FrameLayout {
         import std.conv: text;
 
         FrameLayout layout;
+
+        if (function_.vthis !is null) {
+            const isRefThis = (function_.vthis.storage_class & STC.ref_) != 0;
+            auto slot = isRefThis
+                ? layout.reserveSlot(
+                    TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
+                : layout.reserveSlot(function_.vthis.type);
+
+            layout.hiddenThis = HiddenThis(
+                Parameter(slot.offset, slot.facts, isRefThis),
+                function_.vthis,
+            );
+            layout._slotOf[function_.vthis] =
+                VariableSlot(slot.offset, isRefThis);
+        }
 
         // The parameter *types* are part of the function's own type, and
         // are there whether or not it has a body. `parameters` - the

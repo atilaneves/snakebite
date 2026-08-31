@@ -353,21 +353,28 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         // `function_` being resolved only means a declaration was found;
-        // it does not mean this call is safe to run directly. For
-        // `obj.method(...)`, dmd sets the resolved declaration to the
-        // statically known method even though the call needs `this` -
-        // running it here would silently devirtualize it and drop the
-        // context, and a nested function's static chain is dropped the
-        // same way. A zero-parameter method or nested function has no
-        // parameter to give it away either, so this check cannot be
-        // folded into the parameter-count check below. Both are
-        // unsupported constructs this interpreter has no representation
-        // for, so this throws loudly instead of running with a missing
-        // context and returning a plausible-looking wrong answer.
-        if (function_.isThis() !is null || function_.isNested())
+        // it does not mean this call is safe to run directly. Only a
+        // struct method's hidden context is covered: `bindFrame` fills
+        // its `this` slot with the receiver lvalue's address. A class
+        // method is resolved by dmd to the statically known declaration
+        // even though the call is virtual, so running it here would
+        // silently devirtualize the call and answer from the wrong
+        // declaration.
+        auto aggregate = function_.isThis();
+        if (aggregate !is null && aggregate.isStructDeclaration is null)
             throw new SnakebiteException(
                 text("interpreter cannot call `", function_.toString,
-                    "`: it needs a `this` or a static chain, which the ",
+                    "`: only a struct method's `this` is supported"),
+            );
+
+        // A nested function's context is not covered either: its static
+        // chain - the enclosing function's frame - has no representation
+        // in this interpreter, so this throws loudly instead of running
+        // with missing context.
+        if (function_.isNested())
+            throw new SnakebiteException(
+                text("interpreter cannot call `", function_.toString,
+                    "`: it needs a static chain, which the ",
                     "interpreter does not provide"),
             );
 
@@ -398,24 +405,7 @@ extern(C++) private final class Evaluator: Visitor {
             );
         }
 
-        auto savedType = _type;
-        auto savedFacts = _facts;
-        auto savedPlace = _place;
-        auto savedFrameBase = _frameBase;
-        auto savedLayout = _layout;
-        auto savedReturned = _returned;
-        auto savedContinued = _continued;
-        auto savedReturnsRef = _returnsRef;
-        scope(exit) {
-            _type = savedType;
-            _facts = savedFacts;
-            _place = savedPlace;
-            _frameBase = savedFrameBase;
-            _layout = savedLayout;
-            _returned = savedReturned;
-            _continued = savedContinued;
-            _returnsRef = savedReturnsRef;
-        }
+        const guard = CallStateGuard(this);
 
         _type = function_.type.nextOf;
         _facts = factsOf(_type);
@@ -426,6 +416,49 @@ extern(C++) private final class Evaluator: Visitor {
         _continued = false;
         _returnsRef = typeFunctionOf(function_).isRef;
         body_.accept(this);
+    }
+
+    // RAII restore of the per-call evaluator state `execute` repoints at
+    // the callee: constructed before the fields change, and the
+    // destructor puts every one back when the call unwinds, normally or
+    // by throw. One field list in one place, instead of a saved variable
+    // plus a `scope(exit)` line per field growing at the call site.
+    private static struct CallStateGuard {
+        private Evaluator _evaluator;
+        private Type _type;
+        private TypeFacts _facts;
+        private void* _place;
+        private ubyte* _frameBase;
+        private const(FrameLayout)* _layout;
+        private bool _returned;
+        private bool _continued;
+        private bool _returnsRef;
+
+        @disable this();
+        @disable this(this);
+
+        private this(Evaluator evaluator) {
+            _evaluator = evaluator;
+            _type = evaluator._type;
+            _facts = evaluator._facts;
+            _place = evaluator._place;
+            _frameBase = evaluator._frameBase;
+            _layout = evaluator._layout;
+            _returned = evaluator._returned;
+            _continued = evaluator._continued;
+            _returnsRef = evaluator._returnsRef;
+        }
+
+        ~this() {
+            _evaluator._type = _type;
+            _evaluator._facts = _facts;
+            _evaluator._place = _place;
+            _evaluator._frameBase = _frameBase;
+            _evaluator._layout = _layout;
+            _evaluator._returned = _returned;
+            _evaluator._continued = _continued;
+            _evaluator._returnsRef = _returnsRef;
+        }
     }
 
     // Where each parameter's bytes sit in the frame the caller just
@@ -1020,6 +1053,8 @@ extern(C++) private final class Evaluator: Visitor {
         auto structType = _type.isTypeStruct;
         const isSupportedStruct = structType !is null
             && supportsStruct(_type);
+        const isSupportedArray = _type.ty == Tarray
+            && expression.e1.isDotVarExp !is null;
         if (structType !is null && !isSupportedStruct)
             throw new SnakebiteException(
                 text("interpreter cannot assign unsupported struct `",
@@ -1027,7 +1062,7 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         if (expression.op != EXP.assign && !_facts.isIntegral
-                && !isSupportedStruct)
+                && !isSupportedStruct && !isSupportedArray)
             throw new SnakebiteException(
                 text("interpreter cannot run a `", expression.op,
                     "` on `", expression.e1.toString, "`"),
@@ -1075,6 +1110,17 @@ extern(C++) private final class Evaluator: Visitor {
                 continue;
             }
 
+            // A dynamic array field is a plain two-word slice - a
+            // length and a pointer, in whichever order the compiler's
+            // ABI puts them - with no copy hook of its own, so the
+            // bytewise copy this predicate guards handles it: the copy
+            // shares the same elements, exactly as compiled D
+            // assignment of a slice does. It is not integral, so
+            // without this the size/integrality check below would
+            // reject it.
+            if (field.type.ty == Tarray)
+                continue;
+
             const facts = factsOf(field.type);
             if (!facts.isIntegral || !isIntegralSize(facts.size))
                 return false;
@@ -1093,6 +1139,22 @@ extern(C++) private final class Evaluator: Visitor {
     // handful of node kinds on their own.
     private void* addressOf(Expression target) {
         import std.conv: text;
+
+        // dmd's semantic pass resolves a `this` the guest wrote to the
+        // enclosing method's own `vthis` declaration; a constructor's
+        // implicit `return this;` is synthesised with no `var`, and the
+        // layout knows which declaration owns the frame's `this` slot,
+        // so the reach is the same either way.
+        // `cast()`: `_layout` is a const view, but dmd's own AST
+        // accessors (`isVarDeclaration` among them) are not
+        // const-correct, and `slotOf` only reads the declaration.
+        if (auto thisExp = target.isThisExp)
+            return slotOf(
+                thisExp,
+                thisExp.var is null
+                    ? cast() _layout.hiddenThis.variable
+                    : thisExp.var,
+            );
 
         if (auto variable = target.isVarExp)
             return slotOf(variable);
@@ -1118,6 +1180,18 @@ extern(C++) private final class Evaluator: Visitor {
         // room for this way.
         if (auto index = target.isIndexExp)
             return indexAddressOf(index).ptr;
+
+        if (auto dot = target.isDotVarExp) {
+            auto field = dot.var.isVarDeclaration;
+            if (field is null || dot.e1.isThisExp is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot take the address of `",
+                        target.toString,
+                        "`: only a field of `this` is supported"),
+                );
+
+            return cast(ubyte*) addressOf(dot.e1) + field.offset;
+        }
 
         throw new SnakebiteException(
             text("interpreter cannot take the address of `",
@@ -2140,6 +2214,21 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         auto frame = _frames.push(layout.size, layout.alignment);
+
+        if (function_.vthis !is null) {
+            auto dot = expression.e1.isDotVarExp;
+            if (dot is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot call `", function_.toString,
+                        "`: its `this` receiver is not a struct lvalue"),
+                );
+
+            storeIntegral(
+                frame.base + layout.hiddenThis.parameter.offset,
+                cast(size_t) addressOf(dot.e1),
+                size_t.sizeof,
+            );
+        }
 
         // Every argument is evaluated, even one the callee never reads,
         // since evaluating an argument can have effects. The loop already
