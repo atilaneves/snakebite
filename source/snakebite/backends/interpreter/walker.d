@@ -82,7 +82,7 @@ import dmd.visitor: Visitor;
 // `Interpreter`-side cache to hold.
 extern(C++) private final class Evaluator: Visitor {
     import snakebite.backends.backend: Program;
-    import snakebite.backends.interpreter.framelayout: FrameLayout;
+    import snakebite.backends.layout: FrameLayout;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
     import snakebite.ffi: PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
