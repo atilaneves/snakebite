@@ -35,6 +35,7 @@ public struct Program {
     }
 
     imported!"dmd.dmodule".Module[] rootModules;
+    imported!"dmd.func".FuncDeclaration[] moduleConstructors;
     Main main;
 
     // The entry point is found the way a compiled build finds it: the first
@@ -43,9 +44,13 @@ public struct Program {
     // `dub_test_root`, and nothing else may claim that name, since dub owns
     // it in every project it generates one for.
     this(imported!"dmd.dmodule".Module[] rootModules) {
-        import snakebite.frontend.dmd.functions: findFunction;
+        import snakebite.frontend.dmd.functions:
+            findFunction,
+            findModuleConstructors;
 
         this.rootModules = rootModules;
+        foreach (module_; rootModules)
+            moduleConstructors ~= findModuleConstructors(module_);
 
         foreach (module_; rootModules) {
             auto found = findFunction(module_, "main");
@@ -127,12 +132,50 @@ public abstract class Backend {
 public int run(Backend backend, Program program) {
     alias Kind = Program.Main.Kind;
 
+    if (runModuleConstructors(backend, program.moduleConstructors))
+        return 1;
+
     final switch (program.main.kind) {
         case Kind.program:
             return runMain(backend, program.main.func);
         case Kind.dubTestRunner:
             return runUnittests(backend, program.rootModules);
     }
+}
+
+// Constructors that require code from a dependency image cannot run in the
+// interpreter until that image exists. Keep running the program, but report
+// every skipped constructor loudly so it cannot look like successful startup.
+private int runModuleConstructors(
+    Backend backend,
+    imported!"dmd.func".FuncDeclaration[] constructors,
+) {
+    import snakebite.exception: SnakebiteException;
+    import std.stdio: stderr;
+
+    foreach (constructor; constructors) {
+        try
+            backend.call(constructor, null, []);
+        catch (SnakebiteException exception) {
+            stderr.writeln(
+                "snakebite: skipping module constructor `",
+                constructor.toString,
+                "`: ",
+                exception.msg,
+            );
+        }
+        catch (Throwable throwable) {
+            stderr.writeln(
+                "snakebite: module constructor `",
+                constructor.toString,
+                "` failed: ",
+                throwable.msg,
+            );
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 // The program's own `main`. `void main` maps to exit status 0, and no `main`
