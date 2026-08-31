@@ -1,4 +1,4 @@
-module snakebite.backends.interpreter.framelayout;
+module snakebite.backends.layout;
 
 
 private:
@@ -6,10 +6,19 @@ private:
 
 import snakebite.exception: SnakebiteException;
 
-// One guest function's frame layout: each parameter's byte offset, and
-// the total size and alignment one activation of the function needs on
-// the frame stack. A pure function of the declaration, so it is computed
-// once per function and cached, never per call.
+// One guest function's declared-storage layout: each parameter's byte
+// offset, each local's byte offset, and the total size and alignment one
+// activation of the function needs on a frame. A pure function of the
+// declaration, so it is computed once per function and cached, never per
+// call.
+//
+// Shared between backends (`package` here reaches every module under
+// `snakebite.backends`, not just this one): a tree-walking interpreter and
+// a bytecode compiler both need the same answer to "where does this
+// parameter or local live in the frame" for a given declaration. What
+// differs between them - the bytecode compiler's own temporary slots, for
+// instance - is not this type's concern; a caller that needs those grows
+// its own frame past `size` on top of what this type already reserved.
 package struct FrameLayout {
     import snakebite.nativelayout: alignUp, TypeFacts;
     import dmd.declaration: VarDeclaration;

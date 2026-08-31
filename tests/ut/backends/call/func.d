@@ -236,7 +236,128 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+// Every D integral width, both signednesses, `bool` and a character type,
+// all in one parameter list - a backend that got any one parameter's
+// offset, width or signedness wrong reads back a different value for it.
+// A separate reader per parameter, the same shape `call.alignment` above
+// pins alignment with, since there is no arithmetic here to combine them
+// into one answer.
+static foreach (backend; Matrix!()) {
+    @("call.parameters.everyIntegralWidth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum code = q{
+            byte readA(byte a, ubyte b, short c, ushort d, int e, uint f,
+                    long g, ulong h, bool i, char j) {
+                return a;
+            }
+            ubyte readB(byte a, ubyte b, short c, ushort d, int e, uint f,
+                    long g, ulong h, bool i, char j) {
+                return b;
+            }
+            short readC(byte a, ubyte b, short c, ushort d, int e, uint f,
+                    long g, ulong h, bool i, char j) {
+                return c;
+            }
+            ushort readD(byte a, ubyte b, short c, ushort d, int e, uint f,
+                    long g, ulong h, bool i, char j) {
+                return d;
+            }
+            int readE(byte a, ubyte b, short c, ushort d, int e, uint f,
+                    long g, ulong h, bool i, char j) {
+                return e;
+            }
+            uint readF(byte a, ubyte b, short c, ushort d, int e, uint f,
+                    long g, ulong h, bool i, char j) {
+                return f;
+            }
+            long readG(byte a, ubyte b, short c, ushort d, int e, uint f,
+                    long g, ulong h, bool i, char j) {
+                return g;
+            }
+            ulong readH(byte a, ubyte b, short c, ushort d, int e, uint f,
+                    long g, ulong h, bool i, char j) {
+                return h;
+            }
+            bool readI(byte a, ubyte b, short c, ushort d, int e, uint f,
+                    long g, ulong h, bool i, char j) {
+                return i;
+            }
+            char readJ(byte a, ubyte b, short c, ushort d, int e, uint f,
+                    long g, ulong h, bool i, char j) {
+                return j;
+            }
+
+            byte driveA() {
+                return readA(-1, 2, -3, 4, -5, 6, -7, 8, true, 'z');
+            }
+            ubyte driveB() {
+                return readB(-1, 2, -3, 4, -5, 6, -7, 8, true, 'z');
+            }
+            short driveC() {
+                return readC(-1, 2, -3, 4, -5, 6, -7, 8, true, 'z');
+            }
+            ushort driveD() {
+                return readD(-1, 2, -3, 4, -5, 6, -7, 8, true, 'z');
+            }
+            int driveE() {
+                return readE(-1, 2, -3, 4, -5, 6, -7, 8, true, 'z');
+            }
+            uint driveF() {
+                return readF(-1, 2, -3, 4, -5, 6, -7, 8, true, 'z');
+            }
+            long driveG() {
+                return readG(-1, 2, -3, 4, -5, 6, -7, 8, true, 'z');
+            }
+            ulong driveH() {
+                return readH(-1, 2, -3, 4, -5, 6, -7, 8, true, 'z');
+            }
+            bool driveI() {
+                return readI(-1, 2, -3, 4, -5, 6, -7, 8, true, 'z');
+            }
+            char driveJ() {
+                return readJ(-1, 2, -3, 4, -5, 6, -7, 8, true, 'z');
+            }
+        };
+
+        (cast(byte) -1).shouldBeRetOf!(backend, code, "driveA");
+        (cast(ubyte) 2).shouldBeRetOf!(backend, code, "driveB");
+        (cast(short) -3).shouldBeRetOf!(backend, code, "driveC");
+        (cast(ushort) 4).shouldBeRetOf!(backend, code, "driveD");
+        (-5).shouldBeRetOf!(backend, code, "driveE");
+        (6u).shouldBeRetOf!(backend, code, "driveF");
+        (-7L).shouldBeRetOf!(backend, code, "driveG");
+        (8UL).shouldBeRetOf!(backend, code, "driveH");
+        true.shouldBeRetOf!(backend, code, "driveI");
+        ('z').shouldBeRetOf!(backend, code, "driveJ");
+    }
+}
+
+// `size_t`/`ptrdiff_t` are pointer-sized integral aliases, not their own
+// native layout - a parameter and a local of one both round-trip through
+// exactly the width/signedness rules an `ulong`/`long` already does.
+static foreach (backend; Matrix!()) {
+    @("call.parameters.pointerSized." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(7).shouldBeRetOf!(
+            backend,
+            q{
+                size_t identity(size_t n) {
+                    size_t copy = n;
+                    return copy;
+                }
+
+                size_t seven() {
+                    return identity(7);
+                }
+            },
+            "seven",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
     @("call.fallthrough." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -258,7 +379,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("call.unreachableAfterReturn." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -283,7 +404,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("call.void." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

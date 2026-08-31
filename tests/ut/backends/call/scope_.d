@@ -4,7 +4,7 @@ module ut.backends.call.scope_;
 import ut.backends;
 
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("scope.nestedLocal." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

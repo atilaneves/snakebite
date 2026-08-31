@@ -1,4 +1,4 @@
-module ut.backends.interpreter.framelayout;
+module ut.backends.layout;
 
 import ut;
 import snakebite.frontend.compiler: parseSnippet;
