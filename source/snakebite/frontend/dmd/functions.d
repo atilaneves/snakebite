@@ -67,6 +67,58 @@ public imported!"dmd.func".FuncDeclaration[] findUnittests(
     return unittests;
 }
 
+// Every module constructor in `module_` that belongs to the root package.
+// Constructors in instantiated templates are members of the template
+// instance, not the module, so the search descends into those instances. An
+// uninstantiated template is not part of the build and is not visited.
+// Shared constructors run before ordinary constructors, as druntime does.
+public imported!"dmd.func".FuncDeclaration[] findModuleConstructors(
+    imported!"dmd.dmodule".Module module_,
+) {
+    imported!"dmd.func".FuncDeclaration[] sharedCtors;
+    imported!"dmd.func".FuncDeclaration[] ordinary;
+    appendModuleConstructors(module_.members, sharedCtors, ordinary);
+    return sharedCtors ~ ordinary;
+}
+
+private void appendModuleConstructors(
+    imported!"dmd.arraytypes".Dsymbols* symbols,
+    ref imported!"dmd.func".FuncDeclaration[] sharedCtors,
+    ref imported!"dmd.func".FuncDeclaration[] ordinary,
+) {
+    if (symbols is null)
+        return;
+
+    foreach (member; *symbols) {
+        if (auto constructor = member.isSharedStaticCtorDeclaration()) {
+            sharedCtors ~= constructor;
+            continue;
+        }
+
+        if (auto constructor = member.isStaticCtorDeclaration()) {
+            ordinary ~= constructor;
+            continue;
+        }
+
+        // `.decl` is the syntactic "then" branch even when the condition
+        // resolved otherwise; `include` gives the branch a real build
+        // compiles in.
+        if (auto attributes = member.isAttribDeclaration()) {
+            import dmd.dsymbolsem: include;
+
+            appendModuleConstructors(
+                include(attributes, null), sharedCtors, ordinary);
+            continue;
+        }
+
+        // Only instantiated templates contribute declarations to this root
+        // package. Aggregate constructors are type constructors, not module
+        // constructors, so do not descend into arbitrary scope symbols.
+        if (auto instance = member.isTemplateInstance())
+            appendModuleConstructors(instance.members, sharedCtors, ordinary);
+    }
+}
+
 private void appendUnittests(
     imported!"dmd.arraytypes".Dsymbols* symbols,
     ref imported!"dmd.func".FuncDeclaration[] unittests,

@@ -13,7 +13,6 @@ import ut.backends;
 // runs in declaration order.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("sharedStaticCtorsRunFirst." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -35,6 +34,35 @@ static foreach (backend; Matrix!(
 
             void main() {
                 assert(trace == 123);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("rootTemplateStaticCtorRunsBeforeMain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int trace;
+
+            template constructors() {
+                shared static this() {
+                    trace = trace * 10 + 1;
+                }
+
+                static this() {
+                    trace = trace * 10 + 3;
+                }
+            }
+
+            mixin constructors!();
+
+            void main() {
+                assert(trace == 13);
             }
         });
     }
@@ -64,4 +92,3 @@ static foreach (backend; Matrix!(
         });
     }
 }
-

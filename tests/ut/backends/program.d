@@ -3,7 +3,9 @@ module ut.backends.program;
 
 import snakebite.backends.backend: Program;
 import snakebite.frontend.compiler: parseSnippets;
-import snakebite.frontend.dmd.functions: findFunction;
+import snakebite.frontend.dmd.functions:
+    findFunction,
+    findModuleConstructors;
 
 
 @("isInterpreted.rootModule")
@@ -21,6 +23,24 @@ unittest {
     auto program = Program([modules[0]]);
 
     assert(program.isInterpreted(findFunction(modules[0], "rootFunction")));
+}
+
+
+@("findModuleConstructors.rootModule")
+unittest {
+    auto module_ = parseSnippets([
+        q{
+            module constructorsRootModule;
+            __gshared int trace;
+
+            static this() { trace = trace * 10 + 3; }
+            shared static this() { trace = trace * 10 + 1; }
+            shared static this() { trace = trace * 10 + 2; }
+        },
+    ])[0];
+
+    auto constructors = findModuleConstructors(module_);
+    assert(constructors.length == 3);
 }
 
 
