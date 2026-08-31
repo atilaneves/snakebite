@@ -500,6 +500,72 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
+// Positive and negative zero have different bit patterns but compare equal.
+// Calls supply every operand so the frontend cannot fold the comparisons.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("compare.floatingEquality." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                float positiveFloatZero() {
+                    return 0.0f;
+                }
+
+                float negativeFloatZero() {
+                    return -0.0f;
+                }
+
+                double oneAndAHalf() {
+                    return 1.5;
+                }
+
+                double twoAndAHalf() {
+                    return 2.5;
+                }
+
+                bool compareFloating() {
+                    return positiveFloatZero() == negativeFloatZero()
+                        && oneAndAHalf() != twoAndAHalf();
+                }
+            },
+            "compareFloating",
+        );
+    }
+}
+
+// Equal contents in distinct allocations prevent pointer equality from
+// standing in for D's element equality. The third array differs only in its
+// last element, so a length-only comparison also fails.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("compare.dynamicArrayEquality." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                ubyte[] first() {
+                    return [17, 31, 47];
+                }
+
+                ubyte[] same() {
+                    return [17, 31, 47];
+                }
+
+                ubyte[] different() {
+                    return [17, 31, 48];
+                }
+
+                bool compareArrays() {
+                    return first() == same() && first() != different();
+                }
+            },
+            "compareArrays",
+        );
+    }
+}
+
 
 static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("logical.and.true." ~ backend.stringof)

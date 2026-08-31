@@ -1478,10 +1478,12 @@ extern(C++) private final class Evaluator: Visitor {
         storeIntegral(_place, answer ? 1 : 0, _facts.size);
     }
 
-    // Signedness does not change the answer here the way it does for `<`:
-    // dmd's usual arithmetic conversions give both operands the same type,
-    // so equal values have equal bit patterns either way.
+    // dmd's usual arithmetic conversions give both operands the same type.
+    // Integral equality can therefore compare the common representation,
+    // while floating equality must compare values: positive and negative
+    // zero have different representations but compare equal in D.
     override void visit(EqualExp expression) {
+        import core.stdc.string: memcmp;
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
@@ -1491,9 +1493,46 @@ extern(C++) private final class Evaluator: Visitor {
                     "` expression: `", expression.toString, "`"),
             );
 
-        const a = asIntegral(expression.e1);
-        const b = asIntegral(expression.e2);
-        const answer = expression.op == EXP.equal ? a == b : a != b;
+        // DMD's `Type.nextOf` is not const-correct, so this cannot be const.
+        auto type = expression.e1.type;
+        if (type.ty == Tarray) {
+            // DMD lowers arrays whose elements need semantic equality to a
+            // call that performs it. A missing lowering is DMD's proof that
+            // these element types are trivially byte-comparable.
+            if (expression.lowering !is null) {
+                evaluate(
+                    expression.lowering,
+                    expression.lowering.type,
+                    factsOf(expression.lowering.type),
+                    _place,
+                );
+                return;
+            }
+
+            const a = evaluateArray(expression.e1, factsOf(type));
+            const b = evaluateArray(
+                expression.e2, factsOf(expression.e2.type));
+            const bytes = a.length * factsOf(type.nextOf).size;
+            const equal = a.length == b.length
+                && (bytes == 0 || memcmp(a.elements, b.elements, bytes) == 0);
+            const answer = expression.op == EXP.equal ? equal : !equal;
+
+            storeIntegral(_place, answer ? 1 : 0, _facts.size);
+            return;
+        }
+
+        bool equal;
+        if (type.ty == Tfloat32 || type.ty == Tfloat64)
+            equal = asFloating(expression.e1) == asFloating(expression.e2);
+        else if (factsOf(type).isIntegral)
+            equal = asIntegral(expression.e1) == asIntegral(expression.e2);
+        else
+            throw new SnakebiteException(
+                text("interpreter cannot compare `", expression.toString,
+                    "`: its operands are of type `", type.toString, "`"),
+            );
+
+        const answer = expression.op == EXP.equal ? equal : !equal;
 
         storeIntegral(_place, answer ? 1 : 0, _facts.size);
     }
