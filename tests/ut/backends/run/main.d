@@ -4,7 +4,7 @@ module ut.backends.run.main;
 import ut.backends;
 
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("ret.int.42." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -19,7 +19,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("ret.int.77." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -34,7 +34,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("ret.void." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -53,7 +53,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // generated `dub_test_root.d` (its D_BetterC branch is dead code here). This
 // pins that `findFunction` resolves the condition instead of always
 // descending into a version declaration's syntactic first branch.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("ret.int.betterCBranchNotTaken." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -93,7 +93,7 @@ static foreach (backend; Matrix!(
 }
 
 // No `main` at all is not an error: the status is 0.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("noMain." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
