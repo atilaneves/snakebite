@@ -7,7 +7,7 @@ import ut.backends;
 // Every operand is a call so dmd cannot fold the arithmetic away before a
 // backend ever runs it. The operands differ from each other and from the
 // answer, so an implementation that returns one of them fails.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.add." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -31,7 +31,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.subtract." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -55,7 +55,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.multiply." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -81,7 +81,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 
 // `uint` arithmetic wraps at its own width instead of answering with the
 // wider value the host computed it in.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.multiplyWrapsAtTargetWidth." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -107,7 +107,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 
 // Both answers of the condition are here: a ternary that always takes the
 // same branch fails one of them.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.ternary.true." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -135,7 +135,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.ternary.false." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -166,7 +166,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 
 // `-7 / 2` is -3: D truncates toward zero rather than toward minus
 // infinity, so an implementation that floors answers -4.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.divide.signed." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -192,7 +192,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 
 // `uint.max / 2u` is 2147483647. Read as two's complement the same bits are
 // -1, and -1 / 2 is 0.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.divide.unsigned." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -217,7 +217,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 }
 
 // `-7 % 2` is -1: D's remainder takes the sign of the dividend.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.modulo.signed." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -243,7 +243,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 
 // `uint.max % 7u` is 3. Read as two's complement the same bits are -1, and
 // -1 % 7 is -1.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.modulo.unsigned." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -377,7 +377,7 @@ unittest {
     remainder.shouldEqual(0);
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.bitwiseAnd." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -401,7 +401,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.bitwiseOr." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -425,7 +425,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.bitwiseXor." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -449,7 +449,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.negate." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -470,7 +470,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 }
 
 // `~3` is -4: every bit flips, not just the sign.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.complement." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -490,7 +490,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.leftShift." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -517,7 +517,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // `<<` keeps only the bits the destination holds: `uint`'s top bit shifted
 // left leaves nothing behind, rather than the 33-bit value a wider
 // intermediate would hold.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.leftShiftWrapsAtTargetWidth." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -543,7 +543,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 
 // `>>` on a signed operand copies the sign bit down, so `-8 >> 1` is -4. A
 // logical shift of the same bits answers 2147483644.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.rightShift.signed." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -570,7 +570,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // `>>` on an unsigned operand fills with zeros, so `uint.max >> 1` is
 // 2147483647 rather than the `uint.max` an arithmetic shift of the same
 // bits would leave.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.rightShift.unsigned." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -597,7 +597,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // `>>>` fills with zeros within the operand's own 32 bits even when the
 // operand is signed, so `-8 >>> 1` is 2147483644. Filling from a
 // sign-extended 64-bit intermediate would answer -4.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.unsignedRightShift.signed." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -669,7 +669,7 @@ unittest {
 // combined value back. The starting value and the operand differ from each
 // other and from the answer, so an implementation that drops either side
 // fails.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.subtractAssign." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -695,7 +695,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.multiplyAssign." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -721,7 +721,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.divideAssign." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -747,7 +747,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.moduloAssign." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -773,7 +773,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.andAssign." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -799,7 +799,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.orAssign." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -825,7 +825,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.xorAssign." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -851,7 +851,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.leftShiftAssign." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -879,7 +879,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 
 // `>>=` on a signed target keeps the sign, and `>>>=` on the same bits does
 // not, so the pair distinguishes the two.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.rightShiftAssign." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -905,7 +905,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.unsignedRightShiftAssign." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -962,7 +962,7 @@ unittest {
 // dmd's semantic pass rewrites `--x` into `x -= 1`, so this pins the
 // language behaviour rather than a node kind: the variable is one lower
 // afterwards.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.predecrement." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -988,7 +988,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // held before the change - so the returned expression value and the
 // variable's later value differ, and an implementation that yields the new
 // value fails.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.postdecrement.yieldsOldValue." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1010,7 +1010,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.postdecrement.changesVariable." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1032,7 +1032,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.postincrement.yieldsOldValue." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1054,7 +1054,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.postincrement.changesVariable." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1076,13 +1076,96 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
+// The postfix expression yields the old value, even when its assignment
+// target is the same variable that the postfix expression modifies.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.postincrement.assignsOldValueWhenAliased."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(
+            backend,
+            q{
+                int aliased() {
+                    int value = 7;
+                    value = value++;
+                    return value;
+                }
+            },
+            "aliased",
+        );
+    }
+}
+
+// `x = y + x`: the right operand reads `x` after the left one, `y`, has
+// been evaluated - so a compiler that evaluates `y` straight into `x`'s
+// own storage (to avoid a temporary of its own) clobbers `x` before the
+// right operand ever reads it, answering `y + y` instead of `y + x`.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.rhsReadsAssignTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        5.shouldBeRetOf!(
+            backend,
+            q{
+                int two() {
+                    return 2;
+                }
+
+                int three() {
+                    return 3;
+                }
+
+                int sum() {
+                    int x = two();
+                    int y = three();
+                    x = y + x;
+                    return x;
+                }
+            },
+            "sum",
+        );
+    }
+}
+
+// A shift's right operand keeps its own type - dmd does not promote it to
+// match the left operand the way it does for every other binary
+// operator - so it can be narrower than the left operand it is shifting.
+// Evaluating it as though it already had the left operand's own width
+// would read past its own, narrower storage.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.leftShift.narrowerCount." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        4.shouldBeRetOf!(
+            backend,
+            q{
+                int one() {
+                    return 1;
+                }
+
+                byte two() {
+                    return 2;
+                }
+
+                int shifted() {
+                    return one() << two();
+                }
+            },
+            "shifted",
+        );
+    }
+}
+
 // The floating operators the conversion tests elsewhere do not cover:
 // `+`, `*`, and `%`, which D defines over floating operands (`%` as the
 // remainder of truncated division, like `fmod`). Every operand comes
 // from a call so dmd cannot fold the arithmetic away, and every
 // intermediate value - `7.5`, `3.5`, `6.5` - is exact in binary, so the
 // expectation does not depend on rounding.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+)) {
     @("arithmetic.floating." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
