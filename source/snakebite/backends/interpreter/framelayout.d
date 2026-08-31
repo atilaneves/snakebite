@@ -177,6 +177,15 @@ package struct FrameLayout {
     // naming `variable`, if this layout never reserved it a slot: the one
     // fault the evaluator can hit here, whether it is reading the
     // variable or running its declaration, so it gets the one message.
+    // Whether `variable` has a slot in this layout at all - checked before
+    // `offsetOf`/`isRef` by a reach that must tell "not here, try the
+    // static chain" apart from "not here, and nowhere else either", which
+    // `offsetOf`'s own throw cannot do without exceptions doing double
+    // duty as control flow.
+    package bool hasSlot(VarDeclaration variable) const {
+        return (variable in _slotOf) !is null;
+    }
+
     package size_t offsetOf(VarDeclaration variable) const {
         import std.conv: text;
 
@@ -208,9 +217,13 @@ import dmd.visitor: Visitor;
 // function body is built from: `CompoundStatement` and `ScopeStatement`
 // because they only introduce scope, `ForStatement` and `IfStatement`
 // because their branches run like any other statement, and `ExpStatement`
-// is where a `long sum = 0;` local declaration itself is found. `ReturnStatement` and `ImportStatement` can
-// never contain a nested declaration of their own, so they are recognised
-// and skipped rather than walked into.
+// is where a `long sum = 0;` local declaration itself is found.
+// `ReturnStatement` is walked the same way `ExpStatement` is: dmd's own
+// rvalue-AA-index lowering (`return aa[key];`) can leave a compiler
+// temporary (`__aaget`, a `DeclarationExp` inside the returned
+// expression's own `CommaExp`) there, the same shape `~=`'s lowering
+// leaves inside an `ExpStatement`. `ImportStatement` still needs no walk:
+// an `import` binds a name, never a nested declaration of its own.
 //
 // `visit(Statement)` is the fallback for any other kind, and it skips
 // silently rather than throwing: this layout is computed once, eagerly,
@@ -248,6 +261,8 @@ extern(C++) private final class LocalsCollector: Visitor {
     }
 
     override void visit(ReturnStatement statement) {
+        if (statement.exp !is null)
+            collectDeclarations(statement.exp);
     }
 
     override void visit(CompoundStatement statement) {
@@ -402,6 +417,20 @@ extern(C++) private final class LocalsCollector: Visitor {
 
         if (auto dot = expression.isDotVarExp) {
             collectDeclarations(dot.e1);
+            return;
+        }
+
+        // dmd's rvalue-AA-index lowering (`lowerAAIndexRead` in
+        // `expressionsem.d`) replaces `aa[key]` itself with
+        // `IndexExp(CommaExp(__aaget declaration, ...), 0)` - the
+        // `CommaExp` this recurses into through `e1` is where the
+        // compiler temporary actually is; `e2` is a plain literal `0`
+        // for that lowering, but a guest-written `arr[f()]` can put a
+        // declaration in its own index expression too, so both sides are
+        // walked the same way `~=`'s lowering chain already is above.
+        if (auto index = expression.isIndexExp) {
+            collectDeclarations(index.e1);
+            collectDeclarations(index.e2);
             return;
         }
 
