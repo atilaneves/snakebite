@@ -81,8 +81,8 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.nativelayout:
         isIntegralSize, storeValue, TypeFacts;
     import dmd.astenums:
-        LINK, Tarray, Tbool, Tdelegate, Tnoreturn, Tpointer, Tsarray, Tuns32,
-        Tvoid;
+        LINK, Tarray, Tbool, Tdelegate, Tfloat32, Tfloat64, Tnoreturn,
+        Tpointer, Tsarray, Tuns32, Tvoid;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
     import dmd.func: FuncDeclaration;
@@ -354,29 +354,33 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         // `function_` being resolved only means a declaration was found;
-        // it does not mean this call is safe to run directly. For
-        // `obj.method(...)`, dmd sets the resolved declaration to the
-        // statically known method even though the call needs `this` -
-        // running it here would silently devirtualize it and drop the
-        // context, and a nested function's static chain is dropped the
-        // same way. A zero-parameter method or nested function has no
-        // parameter to give it away either, so this check cannot be
-        // folded into the parameter-count check below. Both are
-        // unsupported constructs this interpreter has no representation
-        // for, so this throws loudly instead of running with a missing
-        // context and returning a plausible-looking wrong answer.
-        //
-        // A nested function that reads no enclosing local (`outerVars`,
-        // filled by dmd's `checkNestedReference`, is empty) is the one
-        // exception: it gets a static chain in compiled D but never
-        // dereferences it - a non-capturing `delegate` literal is exactly
-        // this shape - so running it without one changes nothing it can
-        // observe.
-        if (function_.isThis() !is null
-                || (function_.isNested() && function_.outerVars.length != 0))
+        // it does not mean this call is safe to run directly. Only a
+        // struct method's hidden context is covered: `bindFrame` fills
+        // its `this` slot with the receiver lvalue's address. A class
+        // method is resolved by dmd to the statically known declaration
+        // even though the call is virtual, so running it here would
+        // silently devirtualize the call and answer from the wrong
+        // declaration.
+        auto aggregate = function_.isThis();
+        if (aggregate !is null && aggregate.isStructDeclaration is null)
             throw new SnakebiteException(
                 text("interpreter cannot call `", function_.toString,
-                    "`: it needs a `this` or a static chain, which the ",
+                    "`: only a struct method's `this` is supported"),
+            );
+
+        // A nested function's context is not covered either: its static
+        // chain - the enclosing function's frame - has no representation
+        // in this interpreter, so this throws loudly instead of running
+        // with missing context. A nested function that reads no
+        // enclosing local (`outerVars`, filled by dmd's
+        // `checkNestedReference`, is empty) is the one exception: it
+        // gets a static chain in compiled D but never dereferences it -
+        // a non-capturing `delegate` literal is exactly this shape - so
+        // running it without one changes nothing it can observe.
+        if (function_.isNested() && function_.outerVars.length != 0)
+            throw new SnakebiteException(
+                text("interpreter cannot call `", function_.toString,
+                    "`: it needs a static chain, which the ",
                     "interpreter does not provide"),
             );
 
@@ -407,24 +411,7 @@ extern(C++) private final class Evaluator: Visitor {
             );
         }
 
-        auto savedType = _type;
-        auto savedFacts = _facts;
-        auto savedPlace = _place;
-        auto savedFrameBase = _frameBase;
-        auto savedLayout = _layout;
-        auto savedReturned = _returned;
-        auto savedContinued = _continued;
-        auto savedReturnsRef = _returnsRef;
-        scope(exit) {
-            _type = savedType;
-            _facts = savedFacts;
-            _place = savedPlace;
-            _frameBase = savedFrameBase;
-            _layout = savedLayout;
-            _returned = savedReturned;
-            _continued = savedContinued;
-            _returnsRef = savedReturnsRef;
-        }
+        const guard = CallStateGuard(this);
 
         _type = function_.type.nextOf;
         _facts = factsOf(_type);
@@ -435,6 +422,49 @@ extern(C++) private final class Evaluator: Visitor {
         _continued = false;
         _returnsRef = typeFunctionOf(function_).isRef;
         body_.accept(this);
+    }
+
+    // RAII restore of the per-call evaluator state `execute` repoints at
+    // the callee: constructed before the fields change, and the
+    // destructor puts every one back when the call unwinds, normally or
+    // by throw. One field list in one place, instead of a saved variable
+    // plus a `scope(exit)` line per field growing at the call site.
+    private static struct CallStateGuard {
+        private Evaluator _evaluator;
+        private Type _type;
+        private TypeFacts _facts;
+        private void* _place;
+        private ubyte* _frameBase;
+        private const(FrameLayout)* _layout;
+        private bool _returned;
+        private bool _continued;
+        private bool _returnsRef;
+
+        @disable this();
+        @disable this(this);
+
+        private this(Evaluator evaluator) {
+            _evaluator = evaluator;
+            _type = evaluator._type;
+            _facts = evaluator._facts;
+            _place = evaluator._place;
+            _frameBase = evaluator._frameBase;
+            _layout = evaluator._layout;
+            _returned = evaluator._returned;
+            _continued = evaluator._continued;
+            _returnsRef = evaluator._returnsRef;
+        }
+
+        ~this() {
+            _evaluator._type = _type;
+            _evaluator._facts = _facts;
+            _evaluator._place = _place;
+            _evaluator._frameBase = _frameBase;
+            _evaluator._layout = _layout;
+            _evaluator._returned = _returned;
+            _evaluator._continued = _continued;
+            _evaluator._returnsRef = _returnsRef;
+        }
     }
 
     // Where each parameter's bytes sit in the frame the caller just
@@ -1074,6 +1104,8 @@ extern(C++) private final class Evaluator: Visitor {
         auto structType = _type.isTypeStruct;
         const isSupportedStruct = structType !is null
             && supportsStruct(_type);
+        const isSupportedArray = _type.ty == Tarray
+            && expression.e1.isDotVarExp !is null;
         if (structType !is null && !isSupportedStruct)
             throw new SnakebiteException(
                 text("interpreter cannot assign unsupported struct `",
@@ -1081,7 +1113,7 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         if (expression.op != EXP.assign && !_facts.isIntegral
-                && !isSupportedStruct)
+                && !isSupportedStruct && !isSupportedArray)
             throw new SnakebiteException(
                 text("interpreter cannot run a `", expression.op,
                     "` on `", expression.e1.toString, "`"),
@@ -1129,6 +1161,17 @@ extern(C++) private final class Evaluator: Visitor {
                 continue;
             }
 
+            // A dynamic array field is a plain two-word slice - a
+            // length and a pointer, in whichever order the compiler's
+            // ABI puts them - with no copy hook of its own, so the
+            // bytewise copy this predicate guards handles it: the copy
+            // shares the same elements, exactly as compiled D
+            // assignment of a slice does. It is not integral, so
+            // without this the size/integrality check below would
+            // reject it.
+            if (field.type.ty == Tarray)
+                continue;
+
             const facts = factsOf(field.type);
             if (!facts.isIntegral || !isIntegralSize(facts.size))
                 return false;
@@ -1147,6 +1190,22 @@ extern(C++) private final class Evaluator: Visitor {
     // handful of node kinds on their own.
     private void* addressOf(Expression target) {
         import std.conv: text;
+
+        // dmd's semantic pass resolves a `this` the guest wrote to the
+        // enclosing method's own `vthis` declaration; a constructor's
+        // implicit `return this;` is synthesised with no `var`, and the
+        // layout knows which declaration owns the frame's `this` slot,
+        // so the reach is the same either way.
+        // `cast()`: `_layout` is a const view, but dmd's own AST
+        // accessors (`isVarDeclaration` among them) are not
+        // const-correct, and `slotOf` only reads the declaration.
+        if (auto thisExp = target.isThisExp)
+            return slotOf(
+                thisExp,
+                thisExp.var is null
+                    ? cast() _layout.hiddenThis.variable
+                    : thisExp.var,
+            );
 
         if (auto variable = target.isVarExp)
             return slotOf(variable);
@@ -1172,6 +1231,18 @@ extern(C++) private final class Evaluator: Visitor {
         // room for this way.
         if (auto index = target.isIndexExp)
             return indexAddressOf(index).ptr;
+
+        if (auto dot = target.isDotVarExp) {
+            auto field = dot.var.isVarDeclaration;
+            if (field is null || dot.e1.isThisExp is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot take the address of `",
+                        target.toString,
+                        "`: only a field of `this` is supported"),
+                );
+
+            return cast(ubyte*) addressOf(dot.e1) + field.offset;
+        }
 
         throw new SnakebiteException(
             text("interpreter cannot take the address of `",
@@ -1480,6 +1551,29 @@ extern(C++) private final class Evaluator: Visitor {
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
+        // Every operator that can carry a floating type out of dmd's
+        // semantic pass: the bitwise and shift operators are rejected by
+        // the frontend on floating operands, so the `static if` only
+        // keeps their mixins compilable, it refuses nothing. Both
+        // operands already share the expression's own type - dmd's usual
+        // arithmetic conversions convert them before any backend runs -
+        // and a `float` read widened to `double` is exact, so narrowing
+        // each operand back to `float` recovers it exactly and the
+        // operation then rounds once, in the expression's own precision,
+        // the same single rounding compiled D performs.
+        static if (op == "+" || op == "-" || op == "*" || op == "/"
+                || op == "%")
+            if (_type.ty == Tfloat32 || _type.ty == Tfloat64) {
+                const a = asFloating(expression.e1);
+                const b = asFloating(expression.e2);
+                if (_type.ty == Tfloat32)
+                    *cast(float*) _place =
+                        mixin("cast(float) a " ~ op ~ " cast(float) b");
+                else
+                    *cast(double*) _place = mixin("a " ~ op ~ " b");
+                return;
+            }
+
         if (!_facts.isIntegral)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
@@ -1493,6 +1587,30 @@ extern(C++) private final class Evaluator: Visitor {
 
         storeIntegral(
             _place, combine!op(a, b, aFacts, bFacts, expression), _facts.size);
+    }
+
+    // As `asIntegral`, for a floating operand. The value comes back as a
+    // `double` because a `float` widens to `double` exactly, so the one
+    // return type carries either width without loss; the caller narrows
+    // back when the operation itself is `float`-precision.
+    private double asFloating(Expression expression) {
+        import std.conv: text;
+
+        auto type = expression.type;
+        if (type.ty != Tfloat32 && type.ty != Tfloat64)
+            throw new SnakebiteException(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "` as floating point: its type is `", type.toString,
+                    "`"),
+            );
+
+        const facts = factsOf(type);
+        align(double.alignof) ubyte[double.sizeof] buffer = void;
+        evaluate(expression, type, facts, buffer.ptr);
+
+        return type.ty == Tfloat32
+            ? *cast(float*) buffer.ptr
+            : *cast(double*) buffer.ptr;
     }
 
     // `-x` and `~x` leave the same low bits whether the operand was read as
@@ -1531,9 +1649,15 @@ extern(C++) private final class Evaluator: Visitor {
     // the length by the ratio of the two element sizes, not copying it
     // verbatim, and that scaling is what this does below. `arr.ptr` is
     // handled too, further down, since dmd lowers it into a `Tarray` to
-    // `Tpointer` cast over the array itself. Anything else this node
-    // could mean - floating point, a class downcast - is refused the
-    // same way an unhandled node already is.
+    // `Tpointer` cast over the array itself. An integral-to-floating
+    // cast rounds the operand's mathematical value to the destination's
+    // own precision, read as signed or unsigned per the operand's type -
+    // the host's own `cast(float)`/`cast(double)` is exactly that
+    // conversion, so it is applied per destination width rather than
+    // through a shared wider intermediate, which for `float` would round
+    // twice. Anything else this node could mean - a class downcast, a
+    // floating-to-integral cast - is refused the same way an unhandled
+    // node already is.
     override void visit(CastExp expression) {
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
@@ -1613,6 +1737,20 @@ extern(C++) private final class Evaluator: Visitor {
                 asIntegral(expression.e1, sourceFacts),
                 _facts.size,
             );
+            return;
+        }
+
+        if (sourceFacts.isIntegral
+                && (_type.ty == Tfloat32 || _type.ty == Tfloat64)) {
+            const value = asIntegral(expression.e1, sourceFacts);
+            if (_type.ty == Tfloat32)
+                *cast(float*) _place = sourceFacts.isUnsigned
+                    ? cast(float) cast(ulong) value
+                    : cast(float) value;
+            else
+                *cast(double*) _place = sourceFacts.isUnsigned
+                    ? cast(double) cast(ulong) value
+                    : cast(double) value;
             return;
         }
 
@@ -2239,6 +2377,38 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         auto frame = _frames.push(layout.size, layout.alignment);
+
+        // `vthis` is dmd's one declaration for both hidden context
+        // kinds: a method's `this`, and a nested function's static
+        // chain. Which one this callee has is what `isThis` says.
+        if (function_.vthis !is null) {
+            if (function_.isThis() !is null) {
+                auto dot = expression.e1.isDotVarExp;
+                if (dot is null)
+                    throw new SnakebiteException(
+                        text("interpreter cannot call `", function_.toString,
+                            "`: its `this` receiver is not a struct lvalue"),
+                    );
+
+                storeIntegral(
+                    frame.base + layout.hiddenThis.parameter.offset,
+                    cast(size_t) addressOf(dot.e1),
+                    size_t.sizeof,
+                );
+            } else {
+                // A nested callee that got past `execute`'s check reads
+                // no enclosing local, so the only context it can ever
+                // carry is the null one a non-capturing delegate holds -
+                // stored rather than left as whatever bytes the frame
+                // stack last held, so a read of the slot is
+                // deterministic.
+                storeIntegral(
+                    frame.base + layout.hiddenThis.parameter.offset,
+                    0,
+                    size_t.sizeof,
+                );
+            }
+        }
 
         // Every argument is evaluated, even one the callee never reads,
         // since evaluating an argument can have effects. The loop already
