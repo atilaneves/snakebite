@@ -34,6 +34,20 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("ret.void." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(
+             backend,
+             q{
+                 void main() {
+                 }
+             }
+        );
+    }
+}
+
 // `version (D_BetterC)` is not predefined by the frontend, so a real build
 // picks the `else` branch's `main`, same as `dmd -unittest` would for dub's
 // generated `dub_test_root.d` (its D_BetterC branch is dead code here). This
