@@ -94,3 +94,34 @@ unittest {
         == true;
     thrown.msg.canFind("TypeInfo_S").should == true;
 }
+
+
+// Plan preparation, native-template detection, and `typeid` all ask the
+// same resolver during this call. The final missing TypeInfo is expected;
+// the second call must reuse every address and every missing-symbol result.
+@("nonRootOwned.allSymbolPathsShareResolver.Interpreter")
+@Tags("Interpreter")
+unittest {
+    auto module_ = parseSnippet(q{
+        struct OnlyInTheGuest { int value; }
+
+        size_t grown() {
+            import core.stdc.stdlib: abs;
+            OnlyInTheGuest[] a;
+            a ~= OnlyInTheGuest(abs(-42));
+            return a.length;
+        }
+    });
+    auto function_ = findFunction(module_, "grown");
+    auto backend = interpreter(module_);
+
+    size_t result;
+    const thrown = backend.call(function_, &result, []).shouldThrow;
+
+    thrown.msg.startsWith("interpreter cannot resolve the symbol").should
+        == true;
+    const lookups = backend.symbolLookups;
+    backend.call(function_, &result, []).shouldThrow;
+    backend.symbolLookups.should == lookups;
+    assert(lookups >= 3);
+}
