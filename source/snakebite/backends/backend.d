@@ -151,26 +151,25 @@ private int runModuleConstructors(
     imported!"dmd.func".FuncDeclaration[] constructors,
 ) {
     import snakebite.exception: SnakebiteException;
-    import core.stdc.stdio: fprintf, stderr;
-    import std.string: toStringz;
+    import std.stdio: stderr;
 
     foreach (constructor; constructors) {
         try
             backend.call(constructor, null, []);
         catch (SnakebiteException exception) {
-            fprintf(
-                stderr,
-                "snakebite: skipping module constructor `%s`: %s\n",
-                constructor.toString.toStringz,
-                exception.msg.toStringz,
+            stderr.writeln(
+                "snakebite: skipping module constructor `",
+                constructor.toString,
+                "`: ",
+                exception.msg,
             );
         }
         catch (Throwable throwable) {
-            fprintf(
-                stderr,
-                "snakebite: module constructor `%s` failed: %s\n",
-                constructor.toString.toStringz,
-                throwable.msg.toStringz,
+            stderr.writeln(
+                "snakebite: module constructor `",
+                constructor.toString,
+                "` failed: ",
+                throwable.msg,
             );
             return 1;
         }
