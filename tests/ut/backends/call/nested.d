@@ -49,6 +49,28 @@ static foreach (backend; Matrix!(
     }
 }
 
+// `callInner` never reads an outer variable itself, but the static link
+// it is handed still has to be the real one, not a stand-in: `inner`,
+// which `callInner` calls, does read one, and it reaches it by walking
+// the same link back up from wherever it was called through - here, that
+// is `callInner`'s frame, not `main`'s directly.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+)) {
+    @("nested.staticChain.transitiveLinkThroughNonCapturingCaller." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int x = 41;
+                int inner() { return x + 1; }
+                int callInner() { return inner(); }
+                return callInner() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
 // `middle`'s own nested function, `captureIt`, has its address taken and
 // handed to a delegate variable - dmd's conservative `needsClosure()`
 // rule (`FuncDeclaration.tookAddressOf`) marks `middle` as needing to

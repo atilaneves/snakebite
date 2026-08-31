@@ -1027,29 +1027,46 @@ extern(C++) private final class Evaluator: Visitor {
     // exactly as compiled D follows the same chain to reach the same
     // frame. Both a direct call to a nested function (`bindFrame`, to
     // learn what context to pass its callee) and an outer-variable read
-    // (`slotOf`, to learn where the variable actually lives) need this.
+    // (`slotOf`, to learn where the variable actually lives) need this;
+    // the former is content with "unreachable" as an answer (nothing on
+    // that path ever dereferences a link that was never asked for), the
+    // latter is not, so it refuses through this wrapper instead.
     private ubyte* frameOf(FuncDeclaration owner) {
-        import snakebite.nativelayout: loadIntegral;
         import std.conv: text;
+
+        auto base = tryFrameOf(owner);
+        if (base is null)
+            throw new SnakebiteException(
+                text("interpreter cannot reach `", owner.toString,
+                    "`'s frame: it is not on the current static chain"),
+            );
+
+        return base;
+    }
+
+    // As `frameOf`, but `null` rather than a thrown exception when
+    // `owner`'s frame is not reachable from here - a caller nested
+    // several levels above `owner` on the chain relays `owner`'s frame on
+    // to a callee nested inside it without ever reading from it itself,
+    // exactly as compiled D's own relayed static link does, and that
+    // relay must succeed even when the function doing the relaying
+    // happens not to be on `owner`'s chain at all (a non-capturing
+    // callee's link is never dereferenced, so an unreachable answer is a
+    // fine one to pass on).
+    private ubyte* tryFrameOf(FuncDeclaration owner) {
+        import snakebite.nativelayout: loadIntegral;
 
         auto fn = _function;
         auto base = _frameBase;
         while (fn !is owner) {
             auto layout = layoutOf(fn);
             if (layout.hiddenThis.variable is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot reach `", owner.toString,
-                        "`'s frame from `", fn.toString,
-                        "`: it has no static chain of its own"),
-                );
+                return null;
 
             auto parent = fn.toParent2();
             fn = parent is null ? null : parent.isFuncDeclaration;
             if (fn is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot reach `", owner.toString,
-                        "`'s frame: it is not on the current static chain"),
-                );
+                return null;
 
             base = cast(ubyte*) loadIntegral(
                 base + layout.hiddenThis.parameter.offset, size_t.sizeof,
@@ -2820,38 +2837,33 @@ extern(C++) private final class Evaluator: Visitor {
             } else {
                 // A nested callee's `vthis` is the static link: the
                 // address of the frame it is lexically nested inside,
-                // exactly as compiled D passes it - found by
-                // `frameOf` from wherever this call itself is running,
-                // which is that frame when the callee is nested directly
-                // inside the caller, and reached by hopping further up
-                // the chain when it is nested deeper than that. A callee
-                // that captures no outer variable never dereferences
-                // this link, so it is passed as 0 without walking the
-                // chain to find it - the walk can fail when the caller
-                // is not itself on the callee's enclosing function's
-                // static chain, which is fine for a link nothing reads.
-                if (function_.outerVars.length == 0) {
-                    storeIntegral(
-                        frame.base + layout.hiddenThis.parameter.offset,
-                        0,
-                        size_t.sizeof,
+                // exactly as compiled D passes it - found by `tryFrameOf`
+                // from wherever this call itself is running, which is
+                // that frame when the callee is nested directly inside
+                // the caller, and reached by hopping further up the chain
+                // when it is nested deeper than that. Whether the callee
+                // itself reads an outer variable is not enough to decide
+                // this: it may relay the link on unread to a nested call
+                // of its own instead, exactly as compiled D's own relayed
+                // static link does, so the walk is always attempted. It
+                // can still fail to reach the enclosing frame - when the
+                // caller is not itself on that static chain at all - and
+                // 0 is passed in that case, which is fine for a link
+                // nothing along this callee's own nested calls reads.
+                auto enclosing = function_.toParent2() is null
+                    ? null : function_.toParent2().isFuncDeclaration;
+                if (enclosing is null)
+                    throw new SnakebiteException(
+                        text("interpreter cannot call `",
+                            function_.toString, "`: its enclosing ",
+                            "function could not be determined"),
                     );
-                } else {
-                    auto enclosing = function_.toParent2() is null
-                        ? null : function_.toParent2().isFuncDeclaration;
-                    if (enclosing is null)
-                        throw new SnakebiteException(
-                            text("interpreter cannot call `",
-                                function_.toString, "`: its enclosing ",
-                                "function could not be determined"),
-                        );
 
-                    storeIntegral(
-                        frame.base + layout.hiddenThis.parameter.offset,
-                        cast(size_t) frameOf(enclosing),
-                        size_t.sizeof,
-                    );
-                }
+                storeIntegral(
+                    frame.base + layout.hiddenThis.parameter.offset,
+                    cast(size_t) tryFrameOf(enclosing),
+                    size_t.sizeof,
+                );
             }
         }
 
