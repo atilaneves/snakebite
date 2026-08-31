@@ -1533,33 +1533,13 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(AddExp expression) {
         import snakebite.nativelayout: storeIntegral;
 
-        const pointerCast = expression.e1.isCastExp;
-        const scaledOffset = expression.e2.isMulExp;
-        CastExp offsetCast;
-        IntegerExp scale;
-        if (scaledOffset !is null) {
-        offsetCast = cast() scaledOffset.e1.isCastExp;
-        scale = cast() scaledOffset.e2.isIntegerExp;
-        }
-
-        if (expression.type.ty == Tpointer
-                && pointerCast !is null
-                && pointerCast.type.ty == Tpointer
-            && (cast() pointerCast).type.nextOf.ty == Tuns8
-                && pointerCast.e1.type.ty == Tarray
-            && (cast() pointerCast.e1.type).nextOf.ty == Tuns8
-                && scaledOffset !is null
-                && scaledOffset.type.ty == Tint64
-                && offsetCast !is null
-                && offsetCast.type.ty == Tint64
-                && offsetCast.e1.type.ty == Type.tsize_t.ty
-                && scale !is null
-                && scale.type.ty == Tint64
-                && scale.toInteger == 1) {
-        const offsetFacts = factsOf(cast() scaledOffset.type);
-        const offset = asIntegral(cast() scaledOffset, offsetFacts);
-        const stride = factsOf((cast() pointerCast).type.nextOf).size;
-        const result = cast(ubyte*) asPointer(cast() pointerCast)
+        if (isByteArrayPointerAddition(expression)) {
+            const pointerCast = cast() expression.e1.isCastExp;
+            const scaledOffset = cast() expression.e2.isMulExp;
+            const offsetFacts = factsOf(cast() scaledOffset.type);
+            const offset = asIntegral(cast() scaledOffset, offsetFacts);
+            const stride = factsOf((cast() pointerCast).type.nextOf).size;
+            const result = cast(ubyte*) asPointer(cast() pointerCast)
                 + cast(long) offset * cast(long) stride;
 
             storeIntegral(_place, cast(size_t) result, _facts.size);
@@ -1567,6 +1547,33 @@ extern(C++) private final class Evaluator: Visitor {
         }
 
         storeBinaryExp!"+"(expression);
+    }
+
+    private bool isByteArrayPointerAddition(AddExp expression) const {
+        if (expression.type.ty != Tpointer)
+            return false;
+
+        auto pointerCast = expression.e1.isCastExp;
+        if (pointerCast is null || pointerCast.type.ty != Tpointer)
+            return false;
+
+        if ((cast() pointerCast).type.nextOf.ty != Tuns8
+                || pointerCast.e1.type.ty != Tarray
+                || (cast() pointerCast.e1.type).nextOf.ty != Tuns8)
+            return false;
+
+        auto scaledOffset = expression.e2.isMulExp;
+        if (scaledOffset is null || scaledOffset.type.ty != Tint64)
+            return false;
+
+        auto offsetCast = cast() scaledOffset.e1.isCastExp;
+        auto scale = cast() scaledOffset.e2.isIntegerExp;
+        return offsetCast !is null
+            && offsetCast.type.ty == Tint64
+            && offsetCast.e1.type.ty == Type.tsize_t.ty
+            && scale !is null
+            && scale.type.ty == Tint64
+            && scale.toInteger == 1;
     }
 
     override void visit(MinExp expression) {
