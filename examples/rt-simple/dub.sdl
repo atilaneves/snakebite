@@ -1,6 +1,8 @@
 name "rt-simple"
 targetType "library"
 targetPath "bin"
+dflags "-checkaction=context"
+
 
 configuration "unittest" {
     targetType "executable"
