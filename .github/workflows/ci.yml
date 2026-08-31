@@ -76,3 +76,5 @@ jobs:
 
       - if: matrix.os == 'ubuntu-24.04'
         uses: codecov/codecov-action@v5.1.2
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
