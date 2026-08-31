@@ -59,6 +59,33 @@ static foreach (backend; Matrix!(
 }
 
 
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("callSite.cacheSurvivesPlanCacheGrowth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                int repeat() {
+                    import core.stdc.stdlib: abs, free;
+                    int result;
+                    for (int i = 0; i < 2; ++i) {
+                        result = abs(-42);
+                        if (i == 0)
+                            free(null);
+                    }
+                    return result;
+                }
+            },
+            "repeat",
+        );
+    }
+}
+
+
 @("dynamicArrayReturn.nativeFFI.Interpreter")
 @Tags("Interpreter")
 unittest {

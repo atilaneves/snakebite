@@ -50,6 +50,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     public size_t symbolLookups() @safe @nogc nothrow pure const scope {
         return _evaluator.symbolLookups();
     }
+
 }
 
 import snakebite.exception: SnakebiteException;
@@ -84,7 +85,7 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.backends.backend: Program;
     import snakebite.backends.layout: FrameLayout;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
-    import snakebite.ffi: PlanCache, maxArguments;
+    import snakebite.ffi: CallPlan, PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
         isIntegralSize, storeValue, TypeFacts;
@@ -143,6 +144,17 @@ extern(C++) private final class Evaluator: Visitor {
     // worked out on that function's first call and reused by every call
     // after it - the same cold-path-once shape as `_layouts`.
     private PlanCache _plans;
+    // A call expression is one call site, even when a loop visits it many
+    // times. The plan cache remains the cold path; this side cache keeps
+    // the prepared plan with the AST call site that uses it.
+    private struct CallSitePlan {
+        private CallExp _callSite;
+        private FuncDeclaration _function;
+        private const(CallPlan)* _plan;
+    }
+
+    private CallSitePlan[] _callPlans;
+    private CallSitePlan _lastCallSitePlan;
     // Every dmd `Type` this evaluator has ever asked dmd about, keyed by
     // the `Type` node itself: `Type.size`/`alignsize`/`isIntegral`/
     // `isUnsigned` are pure functions of the type, re-entering dmd's
@@ -165,6 +177,10 @@ extern(C++) private final class Evaluator: Visitor {
     // one query, one lookup. Whatever the callee does inside to answer is
     // its own, and is not counted here.
     version(unittest) private size_t _foreignNameLookups;
+    // Whether an instantiated function has a native symbol. This decision
+    // is separate from the plan cache because a missing symbol means the
+    // evaluator must walk the function body instead of calling through FFI.
+    private bool[FuncDeclaration] _nativeSymbols;
 
     // The destination: while walking statements, the enclosing function's
     // return type and return place; `evaluate` narrows it to each
@@ -313,8 +329,14 @@ extern(C++) private final class Evaluator: Visitor {
         import dmd.mangle: mangleExact;
         import std.string: fromStringz;
 
+        if (auto cached = function_ in _nativeSymbols)
+            return *cached;
+
         countForeignNameLookup;
-        return _plans.resolve(mangleExact(function_).fromStringz) !is null;
+        const found = _plans.resolve(mangleExact(function_).fromStringz)
+            !is null;
+        _nativeSymbols[function_] = found;
+        return found;
     }
 
     // `function_`'s frame layout, from the cache; computed on its first
@@ -388,6 +410,7 @@ extern(C++) private final class Evaluator: Visitor {
         void* returnPlace,
         ubyte* frameBase,
         const(FrameLayout)* layout,
+        CallExp callSite = null,
     ) {
         import std.conv: text;
 
@@ -403,8 +426,10 @@ extern(C++) private final class Evaluator: Visitor {
             && function_.fbody !is null && !hasNativeSymbol(function_);
         if (!isGuest && !interpretsTemplate) {
             const(void)*[maxArguments] slots;
-            countForeignNameLookup;
-            _plans.of(function_).call(
+            const plan = callSite is null
+                ? &_plans.of(function_)
+                : callPlanOf(callSite, function_);
+            plan.call(
                 returnPlace, argumentSlots(slots, frameBase, layout),
             );
             return;
@@ -468,6 +493,30 @@ extern(C++) private final class Evaluator: Visitor {
         _continued = false;
         _returnsRef = typeFunctionOf(function_).isRef;
         body_.accept(this);
+    }
+
+    private const(CallPlan)* callPlanOf(
+        CallExp callSite,
+        FuncDeclaration function_,
+    ) {
+        if (_lastCallSitePlan._callSite is callSite
+                && _lastCallSitePlan._function is function_)
+            return _lastCallSitePlan._plan;
+
+        foreach (i; 0 .. _callPlans.length) {
+            CallSitePlan* cached = &_callPlans[i];
+            if (cached._callSite is callSite
+                && cached._function is function_) {
+                _lastCallSitePlan = *cached;
+                return _lastCallSitePlan._plan;
+            }
+        }
+
+        countForeignNameLookup;
+        const plan = &_plans.of(function_);
+        _callPlans ~= CallSitePlan(callSite, function_, plan);
+        _lastCallSitePlan = _callPlans[$ - 1];
+        return plan;
     }
 
     // RAII restore of the per-call evaluator state `execute` repoints at
@@ -2755,12 +2804,13 @@ extern(C++) private final class Evaluator: Visitor {
 
         if (typeFunctionOf(function_).isRef) {
             memcpy(
-                _place, resolvedRefAddress(function_, frame.base, layout),
+                _place,
+                resolvedRefAddress(function_, frame.base, layout, expression),
                 _facts.size);
             return;
         }
 
-        execute(function_, _place, frame.base, layout);
+        execute(function_, _place, frame.base, layout, expression);
     }
 
     // The callee of a call dmd left unresolved: one reached through a
@@ -2921,11 +2971,12 @@ extern(C++) private final class Evaluator: Visitor {
         FuncDeclaration function_,
         ubyte* frameBase,
         const(FrameLayout)* layout,
+        CallExp callSite = null,
     ) {
         import snakebite.nativelayout: loadIntegral;
 
         align(size_t.sizeof) ubyte[size_t.sizeof] resultAddress = void;
-        execute(function_, resultAddress.ptr, frameBase, layout);
+        execute(function_, resultAddress.ptr, frameBase, layout, callSite);
         return cast(void*)
             loadIntegral(resultAddress.ptr, size_t.sizeof, false);
     }
@@ -2954,7 +3005,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto layout = layoutOf(function_);
         auto frame = bindFrame(expression, function_, layout);
-        return resolvedRefAddress(function_, frame.base, layout);
+        return resolvedRefAddress(function_, frame.base, layout, expression);
     }
 
     // Evaluates `expression` into `type.size` bytes at `place`, then

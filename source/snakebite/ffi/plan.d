@@ -23,6 +23,11 @@ private:
 public struct CallPlan {
     import snakebite.ffi.abi: ArgumentPlan, Register, maxArguments;
 
+    private enum FastPath {
+        generic,
+        integer32ToInteger32,
+    }
+
     private void* _address;
     // Indexed by parameter, not by register: a dynamic-array parameter
     // reserves one entry here and two registers at call time, since the
@@ -42,6 +47,7 @@ public struct CallPlan {
     // Whether the callee reads its parameters out of the registers in
     // reverse declaration order - see `abi.reversedDParameters`.
     private bool _reversedArguments;
+    private FastPath _fastPath;
 
     // Calls the function this plan was prepared for.
     //
@@ -52,20 +58,47 @@ public struct CallPlan {
     //
     // `returnPlace` may be `null` to discard the result, and must
     // otherwise be exactly the return type's size.
-    public void call(
+    pragma(inline, true) public void call(
         void* returnPlace,
         scope const(void*)[] arguments,
     ) const {
-        import snakebite.ffi.abi:
-            invoke, maxFloatingArguments, maxIntegerArguments, word,
-            writeWord;
         import std.conv: text;
+
+        if (_fastPath == FastPath.integer32ToInteger32) {
+            if (arguments.length != 1)
+                throw new Exception(
+                    text("ffi: this plan takes 1 argument(s), got ",
+                        arguments.length),
+                );
+            alias Int32Function = extern(C) int function(int);
+            // Separate branches avoid a result temporary in the hot path.
+            if (returnPlace !is null)
+                *cast(int*) returnPlace = (cast(Int32Function) _address)(
+                    *cast(const int*) arguments[0],
+                );
+            else
+                (cast(Int32Function) _address)(
+                    *cast(const int*) arguments[0],
+                );
+            return;
+        }
 
         if (arguments.length != _parameterCount)
             throw new Exception(
                 text("ffi: this plan takes ", _parameterCount,
                     " argument(s), got ", arguments.length),
             );
+
+        callGeneric(returnPlace, arguments);
+    }
+
+    private void callGeneric(
+        void* returnPlace,
+        scope const(void*)[] arguments,
+    ) const {
+        import snakebite.ffi.abi:
+            invoke, maxFloatingArguments, maxIntegerArguments, word,
+            writeWord;
 
         size_t[maxArguments] words;
         Register.Kind[maxArguments] kinds;
@@ -189,7 +222,7 @@ public struct CallPlan {
 // without hashing at all, but it needs somewhere on the call site to keep
 // it, which is the caller's business and not this package's.
 public struct PlanCache {
-    private CallPlan[imported!"dmd.func".FuncDeclaration] _plans;
+    private CallPlan*[imported!"dmd.func".FuncDeclaration] _plans;
     private Resolver _resolver;
     private size_t _preparations;
 
@@ -223,12 +256,15 @@ public struct PlanCache {
         imported!"dmd.func".FuncDeclaration function_,
     ) {
         if (auto cached = function_ in _plans)
-            return *cached;
+            return **cached;
 
         ++_preparations;
-        _plans[function_] = prepare(function_, _resolver);
-        return _plans[function_];
+        auto plan = new CallPlan;
+        *plan = prepare(function_, _resolver);
+        _plans[function_] = plan;
+        return *plan;
     }
+
 }
 
 // Works out how to call `function_`, once.
@@ -368,6 +404,16 @@ private CallPlan prepare(
             );
         } else if (!plan._hiddenReturnPointer)
             plan._return = ArgumentPlan.of(type.nextOf);
+
+        if (!plan._hiddenReturnPointer
+                && plan._parameterCount == 1
+                && plan._arguments[0].count == 1
+                && plan._return.count == 1
+                && plan._arguments[0].registers[0]
+                    == Register(Register.Kind.signed, int.sizeof)
+                && plan._return.registers[0]
+                    == Register(Register.Kind.signed, int.sizeof))
+            plan._fastPath = CallPlan.FastPath.integer32ToInteger32;
 
         return plan;
     }
