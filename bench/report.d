@@ -76,8 +76,8 @@ void printTable(in BackendReport[] reports) {
 
     string[][] rows = [
         [
-            "backend", "pass", "run min", "run median", "run σ",
-            "compile min", "compile median", "compile σ", "RAM max",
+            "backend", "pass", "run min", "run med", "run σ",
+            "cmp min", "cmp med", "cmp σ", "RAM",
         ],
     ];
     foreach (report; reports) {
