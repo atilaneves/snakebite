@@ -63,6 +63,33 @@ static foreach (backend; Matrix!(
     }
 }
 
+@("classConstructionBindsThisForDependentFieldAssignments.Interpreter")
+@Tags(Interpreter.stringof)
+unittest {
+    0.shouldBeStatusOf!(Interpreter, q{
+        class Base {
+            int first = 7;
+        }
+
+        class Values : Base {
+            int second;
+            int third;
+
+            this() {
+                this.second = this.first + 1;
+                third = second + 1;
+            }
+        }
+
+        void main() {
+            auto values = new Values;
+            assert(values.first == 7);
+            assert(values.second == 8);
+            assert(values.third == 9);
+        }
+    });
+}
+
 // A call through an interface reference finds the class's override, which
 // needs the interface's own offset rather than the class vtable.
 static foreach (backend; Matrix!(
