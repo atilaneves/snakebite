@@ -1199,16 +1199,24 @@ extern(C++) private final class Evaluator: Visitor {
         auto structType = _type.isTypeStruct;
         const isSupportedStruct = structType !is null
             && supportsStruct(_type);
+        // DMD represents the raw copy that precedes its explicit
+        // `__aggrPostblit` call as `BlitExp`. It is not ordinary D
+        // assignment: the following AST node applies the lifecycle hook,
+        // so this node must copy the native bytes even when the struct has
+        // a postblit.
+        const isStructBlit = structType !is null
+            && expression.isBlitExp !is null;
         const isSupportedArray = _type.ty == Tarray
             && expression.e1.isDotVarExp !is null;
-        if (structType !is null && !isSupportedStruct)
+        if (structType !is null && !isSupportedStruct && !isStructBlit)
             throw new SnakebiteException(
                 text("interpreter cannot assign unsupported struct `",
                     structType.toString, "`"),
             );
 
         if (expression.op != EXP.assign && !_facts.isIntegral
-                && !isSupportedStruct && !isSupportedArray)
+                && !isSupportedStruct && !isStructBlit
+                && !isSupportedArray)
             throw new SnakebiteException(
                 text("interpreter cannot run a `", expression.op,
                     "` on `", expression.e1.toString, "`"),
@@ -1217,7 +1225,7 @@ extern(C++) private final class Evaluator: Visitor {
         // Naming `e1` rather than the whole expression: dmd lowers
         // `s.length = n` into a node whose `toString` is a bare `=`.
         auto target = addressOf(expression.e1);
-        if (isSupportedStruct) {
+        if (isSupportedStruct || isStructBlit) {
             auto scratch = _frames.push(_facts.size, _facts.alignment);
             evaluate(expression.e2, _type, _facts, scratch.base);
             memcpy(target, scratch.base, _facts.size);
