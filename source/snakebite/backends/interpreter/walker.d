@@ -1239,6 +1239,19 @@ extern(C++) private final class Evaluator: Visitor {
         if (auto call = target.isCallExp)
             return refCallAddress(call);
 
+        if (auto length = target.isArrayLengthExp) {
+            import snakebite.nativelayout: arrayLengthOffset;
+
+            if (length.e1.type.ty != Tarray)
+                throw new SnakebiteException(
+                    text("interpreter cannot take the address of `",
+                        target.toString,
+                        "`: only a dynamic-array length is supported"),
+                );
+
+            return cast(ubyte*) addressOf(length.e1) + arrayLengthOffset;
+        }
+
         // `a[i] = x`: the address is the array's own element storage,
         // found the same way a read (`visit(IndexExp)`) finds it - bounds
         // checked the same way too, since writing past the array is the
@@ -1250,11 +1263,11 @@ extern(C++) private final class Evaluator: Visitor {
 
         if (auto dot = target.isDotVarExp) {
             auto field = dot.var.isVarDeclaration;
-            if (field is null || dot.e1.isThisExp is null)
+            if (field is null)
                 throw new SnakebiteException(
                     text("interpreter cannot take the address of `",
                         target.toString,
-                        "`: only a field of `this` is supported"),
+                        "`: only a struct field is supported"),
                 );
 
             return cast(ubyte*) addressOf(dot.e1) + field.offset;
@@ -1352,16 +1365,15 @@ extern(C++) private final class Evaluator: Visitor {
         import snakebite.nativelayout: loadIntegral, storeIntegral;
         import std.conv: text;
 
-        auto variable = expression.e1.isVarExp;
         const targetFacts = factsOf(expression.e1.type);
-        if (variable is null || !targetFacts.isIntegral)
+        if (!targetFacts.isIntegral)
             throw new SnakebiteException(
                 text("interpreter cannot assign to `",
                     expression.e1.toString, "`: `", expression.toString,
                     "`"),
             );
 
-        auto target = slotOf(variable);
+        auto target = addressOf(expression.e1);
         const stepFacts = factsOf(expression.e2.type);
         const step = asIntegral(expression.e2, stepFacts);
         const current =
@@ -1381,16 +1393,15 @@ extern(C++) private final class Evaluator: Visitor {
         import snakebite.nativelayout: loadIntegral, storeIntegral;
         import std.conv: text;
 
-        auto variable = expression.e1.isVarExp;
         const facts = factsOf(expression.e1.type);
-        if (variable is null || !facts.isIntegral)
+        if (!facts.isIntegral)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
-                    "`: `", expression.e1.toString, "` is not an integral ",
-                    "variable"),
+                    "`: `", expression.e1.toString,
+                    "` is not an integral lvalue"),
             );
 
-        auto target = slotOf(variable);
+        auto target = addressOf(expression.e1);
         const step = asIntegral(expression.e2);
         const current = loadIntegral(target, facts.size, !facts.isUnsigned);
         const changed = expression.op == EXP.plusPlus
