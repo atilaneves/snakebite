@@ -1533,47 +1533,18 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(AddExp expression) {
         import snakebite.nativelayout: storeIntegral;
 
-        if (isByteArrayPointerAddition(expression)) {
-            const pointerCast = cast() expression.e1.isCastExp;
-            const scaledOffset = cast() expression.e2.isMulExp;
-            const offsetFacts = factsOf(cast() scaledOffset.type);
-            const offset = asIntegral(cast() scaledOffset, offsetFacts);
-            const stride = factsOf((cast() pointerCast).type.nextOf).size;
-            const result = cast(ubyte*) asPointer(cast() pointerCast)
-                + cast(long) offset * cast(long) stride;
+        if (expression.type.ty == Tpointer
+                && expression.e1.type.ty == Tpointer
+                && factsOf(expression.e2.type).isIntegral) {
+        const offset = asIntegral(expression.e2);
+            const result = cast(ubyte*) asPointer(expression.e1)
+                + cast(long) offset;
 
             storeIntegral(_place, cast(size_t) result, _facts.size);
             return;
         }
 
         storeBinaryExp!"+"(expression);
-    }
-
-    private bool isByteArrayPointerAddition(AddExp expression) const {
-        if (expression.type.ty != Tpointer)
-            return false;
-
-        auto pointerCast = expression.e1.isCastExp;
-        if (pointerCast is null || pointerCast.type.ty != Tpointer)
-            return false;
-
-        if ((cast() pointerCast).type.nextOf.ty != Tuns8
-                || pointerCast.e1.type.ty != Tarray
-                || (cast() pointerCast.e1.type).nextOf.ty != Tuns8)
-            return false;
-
-        auto scaledOffset = expression.e2.isMulExp;
-        if (scaledOffset is null || scaledOffset.type.ty != Tint64)
-            return false;
-
-        auto offsetCast = cast() scaledOffset.e1.isCastExp;
-        auto scale = cast() scaledOffset.e2.isIntegerExp;
-        return offsetCast !is null
-            && offsetCast.type.ty == Tint64
-            && offsetCast.e1.type.ty == Type.tsize_t.ty
-            && scale !is null
-            && scale.type.ty == Tint64
-            && scale.toInteger == 1;
     }
 
     override void visit(MinExp expression) {
@@ -1794,7 +1765,8 @@ extern(C++) private final class Evaluator: Visitor {
         // `_d_arrayappendcTX_`, on the `~=` lowering's own chain, reads
         // `px.ptr` this way to ask the GC what it already knows about the
         // block backing the array being grown.
-        if (sourceType.ty == Tarray && _type.ty == Tpointer) {
+        if (sourceType.ty == Tarray && _type.ty == Tpointer
+                && sourceType.nextOf.equals(_type.nextOf)) {
             const bytes = cast(ubyte*) addressOf(expression.e1);
             const value = *cast(void**) (bytes + arrayPointerOffset);
             storeIntegral(

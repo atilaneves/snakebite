@@ -117,6 +117,46 @@ static foreach (backend; Matrix!(
     }
 }
 
+// Pointer arithmetic uses the pointee size, not byte addressing, for a
+// dynamic array whose elements are wider than one byte.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("pointerCastAndAdditionScalesByPointeeSize." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.string: memcpy;
+
+            struct Writer {
+                private uint[] _values;
+
+                void copyAtOffset() {
+                    const oldLength = 1;
+                    const uint[] value = [cast(uint) 0xaabbccdd];
+
+                    memcpy(
+                        cast(uint*)this._values + cast(long)oldLength * 1L,
+                        value.ptr,
+                        value.length * uint.sizeof,
+                    );
+                }
+            }
+
+            void main() {
+                auto writer = Writer([
+                    cast(uint) 0x11111111,
+                    cast(uint) 0x22222222,
+                ]);
+                writer.copyAtOffset;
+
+                assert(writer._values[0] == cast(uint) 0x11111111);
+                assert(writer._values[1] == cast(uint) 0xaabbccdd);
+            }
+        });
+    }
+}
+
 // Cerealising and decerealising nonzero bytes through the computed pointer
 // preserves the bytes at the nonzero old length.
 static foreach (backend; Matrix!(
