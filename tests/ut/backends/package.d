@@ -183,56 +183,83 @@ private int nativeMainStatus(string code)() {
 
 // UFCS assertion: `42.shouldBeRetOf!(backend, code, "answer")` invokes one
 // guest function through the backend's `call` and checks its result against
-// `expected`, whose type states the guest function's return type. The
-// guest's actual return type must match it in size, so a lying test fails
-// loudly instead of reading garbage bytes.
+// `expected`, whose type states the guest function's return type. Further
+// template arguments are passed to that guest function. The guest's actual
+// return type must match it in size, so a lying test fails loudly instead of
+// reading garbage bytes.
 //
 // `code` is registered and batch-parsed the same way `shouldBeStatusOf`'s
 // is; see there.
-public void shouldBeRetOf(
-    BackendType, string code, string functionName, T,
-    string module_ = __MODULE__,
-)(
-    in T expected,
-    in string file = __FILE__,
-    in size_t line = __LINE__,
+public template shouldBeRetOf(
+    BackendType, string code, string functionName, Args...,
 ) {
-    import dmd.typesem: size;
+    public void shouldBeRetOf(T)(
+        in T expected,
+        in string file = __FILE__,
+        in size_t line = __LINE__,
+    ) {
+        import dmd.typesem: size;
 
-    static if (is(BackendType == Native)) {
-        const native = () {
-            mixin(code);
-            return mixin(functionName ~ "()");
-        }();
-        native.shouldEqual(expected, file, line);
-    } else {
-        enum program_ = RegisterProgram!(module_, code).program;
-        auto program = Program([parsedProgram(program_)]);
-        auto function_ = findFunction(program.rootModules[0], functionName);
-        if (function_ is null)
-            throw new UnitTestException(
-                text("No function `", functionName, "` in the guest program"),
+        enum call = callExpression!(functionName, Args);
+
+        static if (is(BackendType == Native)) {
+            const native = () {
+                mixin(code);
+                return mixin(call);
+            }();
+            native.shouldEqual(expected, file, line);
+        } else {
+            enum entryPoint = "__snakebite_test_entry";
+            enum programCode = Args.length == 0
+                ? code ~ "\n"
+                    ~ "auto " ~ entryPoint ~ "() { return " ~ call
+                    ~ "; }\n"
+                : "auto " ~ entryPoint ~ "() {\n"
+                    ~ code ~ "\nreturn " ~ call ~ ";\n}\n";
+            enum program_ = RegisterProgram!(__MODULE__, programCode).program;
+            auto program = Program([parsedProgram(program_)]);
+            auto function_ = findFunction(program.rootModules[0], entryPoint);
+            if (function_ is null)
+                throw new UnitTestException(
+                    text("No function `", entryPoint,
+                        "` in the guest program"),
+                    file, line,
+                );
+
+            // The expectation's own type states what the guest returns, and
+            // `call` writes that many bytes into `&result`, so a mismatch
+            // would scribble past it or read bytes the guest never wrote.
+            // Caught here, naming both types, rather than as a corrupt-looking
+            // value later.
+            auto returnType = function_.type.nextOf;
+            if (T.sizeof != returnType.size)
+                throw new UnitTestException(
+                    text("`", functionName, "` returns `",
+                        returnType.toString,
+                        "` (", returnType.size,
+                        " bytes), but the expected value",
+                        " is `", T.stringof, "` (", T.sizeof, " bytes)"),
+                    file, line,
+                );
+
+            T result;
+            asTestFailure(
+                (new BackendType(program)).call(function_, &result, []),
                 file, line,
             );
-
-        // The expectation's own type states what the guest returns, and
-        // `call` writes that many bytes into `&result`, so a mismatch would
-        // scribble past it or read bytes the guest never wrote. Caught here,
-        // naming both types, rather than as a corrupt-looking value later.
-        auto returnType = function_.type.nextOf;
-        if (T.sizeof != returnType.size)
-            throw new UnitTestException(
-                text("`", functionName, "` returns `", returnType.toString,
-                     "` (", returnType.size, " bytes), but the expected value",
-                     " is `", T.stringof, "` (", T.sizeof, " bytes)"),
-                file, line,
-            );
-
-        T result;
-        asTestFailure((new BackendType(program)).call(function_, &result, []),
-            file, line);
-        result.shouldEqual(expected, file, line);
+            result.shouldEqual(expected, file, line);
+        }
     }
+}
+
+private string callExpression(string functionName, Args...)() {
+    string result = functionName ~ "(";
+    foreach (index, argument; Args) {
+        if (index != 0)
+            result ~= ", ";
+        result ~= argument.stringof;
+    }
+    return result ~ ")";
 }
 
 // Reports a backend's own failure as the test failure it is, at the test's
