@@ -7,18 +7,17 @@ private:
 public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.backends.backend: Program;
-    import snakebite.backends.bytecode.vm: Executable, Vm;
+    import snakebite.backends.bytecode.vm: Function, Vm;
     import snakebite.exception: SnakebiteException;
-
-    private enum frameCapacity = 1024 * 1024;
+    import snakebite.framestack: defaultFrameCapacity;
 
     private Vm _vm;
-    private FuncDeclaration _compiledFunction;
-    private Executable _compiledExecutable;
+    private FuncDeclaration _funcDeclaration;
+    private Function _executable;
 
     public this(const Program program) {
         super(program);
-        _vm = Vm(frameCapacity);
+        _vm = Vm(defaultFrameCapacity);
     }
 
     public void compile(Program program) {
@@ -28,8 +27,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             );
 
         auto executable = compileFunction(program.main.func);
-        _compiledFunction = program.main.func;
-        _compiledExecutable = executable;
+        _funcDeclaration = program.main.func;
+        _executable = executable;
     }
 
     public override void call(
@@ -42,8 +41,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 "bytecode compiler does not support arguments yet",
             );
 
-        if (_compiledFunction is function_) {
-            _vm.call(_compiledExecutable, returnPlace);
+        if (_funcDeclaration is function_) {
+            _vm.call(_executable, returnPlace);
             return;
         }
 
@@ -59,12 +58,12 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 }
 
 
-private imported!"snakebite.backends.bytecode.vm".Executable compileFunction(
+private imported!"snakebite.backends.bytecode.vm".Function compileFunction(
     imported!"dmd.func".FuncDeclaration function_,
 ) {
     import dmd.astenums: Tint32;
     import snakebite.backends.bytecode.vm:
-        Executable, Instruction, opConstantI32, opReturnI32;
+        Function, Instruction, opConstantI32, opReturnI32;
     import snakebite.exception: SnakebiteException;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import std.conv: text;
@@ -108,7 +107,7 @@ private imported!"snakebite.backends.bytecode.vm".Executable compileFunction(
             function_.toString, "`",
         ));
 
-    return Executable(
+    return Function(
         [
             Instruction(&opConstantI32, 0, cast(int) integer.toInteger),
             Instruction(&opReturnI32, 0, 0),

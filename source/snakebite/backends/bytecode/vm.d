@@ -17,7 +17,7 @@ package struct Instruction {
 }
 
 
-package struct Executable {
+package struct Function {
     package Instruction[] instructions;
     package size_t frameSize;
     package uint frameAlignment;
@@ -37,17 +37,17 @@ package struct Vm {
     }
 
     package void call(
-        scope const ref Executable executable,
+        scope const ref Function function_,
         void* returnPlace,
     ) {
-        assert(executable.instructions.length > 0);
-        assert(executable.frameAlignment > 0);
+        assert(function_.instructions.length > 0);
+        assert(function_.frameAlignment > 0);
 
         auto frame = _frames.push(
-            executable.frameSize,
-            executable.frameAlignment,
+            function_.frameSize,
+            function_.frameAlignment,
         );
-        auto pc = executable.instructions.ptr;
+        auto pc = function_.instructions.ptr;
         while (pc !is null)
             pc = pc.handler(pc, frame.base, returnPlace);
     }

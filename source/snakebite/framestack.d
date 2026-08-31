@@ -4,6 +4,9 @@ module snakebite.framestack;
 private:
 
 
+public enum defaultFrameCapacity = 1024 * 1024;
+
+
 // The frame stack every guest call reserves its parameter frame from,
 // bump-allocated and popped LIFO. `push` is the only way to get bytes from
 // it, and the `Frame` it returns is the only way to give them back: a
