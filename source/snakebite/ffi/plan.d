@@ -56,7 +56,9 @@ public struct CallPlan {
         void* returnPlace,
         scope const(void*)[] arguments,
     ) const {
-        import snakebite.ffi.abi: invoke, word, writeWord;
+        import snakebite.ffi.abi:
+            invoke, maxFloatingArguments, maxIntegerArguments, word,
+            writeWord;
         import std.conv: text;
 
         if (arguments.length != _parameterCount)
@@ -68,6 +70,8 @@ public struct CallPlan {
         size_t[maxArguments] words;
         Register.Kind[maxArguments] kinds;
         size_t slot;
+        size_t integerCount;
+        size_t floatingCount;
 
         void loadHiddenReturnPointer() {
             if (!_hiddenReturnPointer)
@@ -81,6 +85,7 @@ public struct CallPlan {
 
             words[slot] = cast(size_t) returnPlace;
             kinds[slot++] = Register.Kind.pointer;
+            ++integerCount;
         }
 
         // A parameter's own eightbytes keep their order either way; what
@@ -88,10 +93,43 @@ public struct CallPlan {
         void load(in size_t i) {
             const plan = _arguments[i];
             auto bytes = cast(ubyte*) arguments[i];
+
+            size_t integerLanes;
+            size_t floatingLanes;
+            foreach (register; plan.registers[0 .. plan.count]) {
+                if (register.kind == Register.Kind.sse)
+                    ++floatingLanes;
+                else
+                    ++integerLanes;
+            }
+
+            const mixed = integerLanes == 1 && floatingLanes == 1;
+            const integerSpills = integerCount + integerLanes
+                > maxIntegerArguments;
+            const floatingSpills = floatingCount + floatingLanes
+                > maxFloatingArguments;
+            const forceInteger = mixed && integerSpills && !floatingSpills;
+            const forceFloating = mixed && floatingSpills && !integerSpills;
+            if (mixed && integerSpills && floatingSpills)
+                throw new Exception(
+                    "ffi cannot place a mixed INTEGER/SSE aggregate " ~
+                        "when both register files need stack arguments",
+                );
+
             foreach (j; 0 .. plan.count) {
+                // `plan` is const, so inference would make this local const.
+                Register.Kind kind = plan.registers[j].kind;
+                if (forceInteger && kind == Register.Kind.sse)
+                    kind = Register.Kind.integer;
+                else if (forceFloating && kind != Register.Kind.sse)
+                    kind = Register.Kind.sse;
                 words[slot] =
                     word(plan.registers[j], bytes + j * size_t.sizeof);
-                kinds[slot++] = plan.registers[j].kind;
+                kinds[slot++] = kind;
+                if (kind == Register.Kind.sse)
+                    ++floatingCount;
+                else
+                    ++integerCount;
             }
         }
 

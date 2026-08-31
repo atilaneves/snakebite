@@ -108,6 +108,26 @@ private extern(C) MixedPair snakebite_ut_mixed_pair(MixedPair value) {
     return MixedPair(value.integer + 4, value.floating * 5);
 }
 
+private extern(C) MixedPair snakebite_ut_mixed_after_six(
+    int a, int b, int c, int d, int e, int f, MixedPair value,
+) {
+    return MixedPair(
+        a + b + c + d + e + f + value.integer,
+        value.floating * 5,
+    );
+}
+
+private extern(C) MixedPair snakebite_ut_mixed_after_eight(
+    double a, double b, double c, double d,
+    double e, double f, double g, double h,
+    MixedPair value,
+) {
+    return MixedPair(
+        cast(int) (a + b + c + d + e + f + g + h) + value.integer,
+        value.floating * 5,
+    );
+}
+
 private extern(C) double snakebite_ut_scale(double value) {
     return value * 2.5;
 }
@@ -268,6 +288,73 @@ unittest {
     cache.of(function_).call(&result, [cast(const void*) &value]);
 
     result.should == MixedPair(43, 7.5);
+}
+
+
+@("called.mixedStructOnStack")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct MixedPair {
+            int integer;
+            double floating;
+        }
+
+        extern(C) MixedPair snakebite_ut_mixed_after_six(
+            int a, int b, int c, int d, int e, int f, MixedPair value,
+        );
+    });
+    auto function_ = findFunction(guestModule,
+        "snakebite_ut_mixed_after_six");
+    assert(function_ !is null,
+        "No `snakebite_ut_mixed_after_six` in the program");
+
+    PlanCache cache;
+    int[6] integers = [1, 2, 3, 4, 5, 6];
+    MixedPair value = MixedPair(7, 1.5);
+    MixedPair result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &integers[0], cast(const void*) &integers[1],
+        cast(const void*) &integers[2], cast(const void*) &integers[3],
+        cast(const void*) &integers[4], cast(const void*) &integers[5],
+        cast(const void*) &value,
+    ]);
+
+    result.should == MixedPair(28, 7.5);
+}
+
+
+@("called.mixedStructAfterSSE")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct MixedPair {
+            int integer;
+            double floating;
+        }
+
+        extern(C) MixedPair snakebite_ut_mixed_after_eight(
+            double a, double b, double c, double d,
+            double e, double f, double g, double h,
+            MixedPair value,
+        );
+    });
+    auto function_ = findFunction(guestModule,
+        "snakebite_ut_mixed_after_eight");
+    assert(function_ !is null,
+        "No `snakebite_ut_mixed_after_eight` in the program");
+
+    PlanCache cache;
+    double[8] floating = [1, 1, 1, 1, 1, 1, 1, 1];
+    MixedPair value = MixedPair(7, 1.5);
+    MixedPair result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &floating[0], cast(const void*) &floating[1],
+        cast(const void*) &floating[2], cast(const void*) &floating[3],
+        cast(const void*) &floating[4], cast(const void*) &floating[5],
+        cast(const void*) &floating[6], cast(const void*) &floating[7],
+        cast(const void*) &value,
+    ]);
+
+    result.should == MixedPair(15, 7.5);
 }
 
 

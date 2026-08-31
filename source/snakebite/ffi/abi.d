@@ -43,13 +43,6 @@ public enum contextPrecedesHiddenReturnPointer = () {
         return false;
 }();
 
-private enum ValueClass {
-    none,
-    integer,
-    sse,
-    memory,
-}
-
 // What one value's bytes have to become to travel in one argument or
 // return register. `integer` is used for an aggregate eightbyte; the
 // scalar kinds retain their widening rules.
@@ -68,6 +61,8 @@ public struct Register {
     public ubyte size;
 
     public static Register of(imported!"dmd.mtype".Type type) {
+        import dmd.astenums: Tvoid;
+
         if (type.ty == Tvoid)
             return Register(Kind.none, 0);
 
@@ -89,6 +84,13 @@ public struct Register {
 // returns and is refused for explicit parameters until stack memory values
 // have a separate call path.
 public struct ArgumentPlan {
+    private enum ValueClass {
+        none,
+        integer,
+        sse,
+        memory,
+    }
+
     public Register[2] registers;
     public ubyte count;
     public bool memory;
@@ -111,6 +113,15 @@ public struct ArgumentPlan {
 // invocation helper, not a type used as the native function's return type:
 // the native return type must itself have the right INTEGER/SSE ABI class.
 public struct ReturnWords {
+    private enum ReturnKind {
+        void_,
+        integer,
+        integerPair,
+        sse,
+        ssePair,
+        mixed,
+    }
+
     public size_t first;
     public size_t second;
     public size_t floatingFirst;
@@ -174,7 +185,9 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
         return plan;
     }
 
-    ValueClass[2] classes = [ValueClass.none, ValueClass.none];
+    ArgumentPlan.ValueClass[2] classes = [
+        ArgumentPlan.ValueClass.none, ArgumentPlan.ValueClass.none,
+    ];
     bool memory;
     classify(type, 0, classes, memory);
     if (memory) {
@@ -183,7 +196,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
     }
 
     foreach (i; 0 .. count) {
-        final switch (classes[i]) with (ValueClass) {
+        final switch (classes[i]) with (ArgumentPlan.ValueClass) {
             case none:
                 break;
             case integer:
@@ -210,7 +223,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
 private void classify(
     imported!"dmd.mtype".Type type,
     in size_t offset,
-    ref ValueClass[2] classes,
+    ref ArgumentPlan.ValueClass[2] classes,
     ref bool memory,
 ) {
     import dmd.astenums:
@@ -230,30 +243,34 @@ private void classify(
     }
 
     if (type.ty == Tfloat32 || type.ty == Tfloat64) {
-        merge(classes, offset, bytes, ValueClass.sse, memory);
+        merge(classes, offset, bytes, ArgumentPlan.ValueClass.sse, memory);
         return;
     }
 
     if (type.ty == Tcomplex32 || type.ty == Tcomplex64) {
         foreach (i; 0 .. (bytes + 7) / 8)
-            merge(classes, offset + i * 8, 8, ValueClass.sse, memory);
+            merge(classes, offset + i * 8, 8,
+                ArgumentPlan.ValueClass.sse, memory);
         return;
     }
 
     if (type.ty == Tpointer || type.ty == Tclass || type.ty == Tdelegate) {
         foreach (i; 0 .. (bytes + 7) / 8)
-            merge(classes, offset + i * 8, 8, ValueClass.integer, memory);
+            merge(classes, offset + i * 8, 8,
+                ArgumentPlan.ValueClass.integer, memory);
         return;
     }
 
     if (type.ty == Tarray) {
-        merge(classes, offset, 8, ValueClass.integer, memory);
-        merge(classes, offset + 8, 8, ValueClass.integer, memory);
+        merge(classes, offset, 8, ArgumentPlan.ValueClass.integer, memory);
+        merge(classes, offset + 8, 8,
+            ArgumentPlan.ValueClass.integer, memory);
         return;
     }
 
     if (type.isIntegral) {
-        merge(classes, offset, bytes, ValueClass.integer, memory);
+        merge(classes, offset, bytes, ArgumentPlan.ValueClass.integer,
+            memory);
         return;
     }
 
@@ -288,10 +305,10 @@ private void classify(
 }
 
 private void merge(
-    ref ValueClass[2] classes,
+    ref ArgumentPlan.ValueClass[2] classes,
     in size_t offset,
     in size_t bytes,
-    in ValueClass incoming,
+    in ArgumentPlan.ValueClass incoming,
     ref bool memory,
 ) {
     const first = offset / 8;
@@ -302,10 +319,10 @@ private void merge(
     }
 
     foreach (i; first .. last + 1) {
-        if (classes[i] == ValueClass.none)
+        if (classes[i] == ArgumentPlan.ValueClass.none)
             classes[i] = incoming;
         else if (classes[i] != incoming)
-            classes[i] = ValueClass.integer;
+            classes[i] = ArgumentPlan.ValueClass.integer;
     }
 }
 
@@ -368,15 +385,6 @@ public void writeWord(
     memcpy(place, &result, register.size);
 }
 
-private enum ReturnKind {
-    void_,
-    integer,
-    integerPair,
-    sse,
-    ssePair,
-    mixed,
-}
-
 private struct IntegerReturn {
     size_t first;
     size_t second;
@@ -395,8 +403,9 @@ private struct MixedReturn {
 // Calls `address` with raw argument words. The class sequence is in the
 // callee's declaration order. With no stack words, integer and SSE words
 // can be grouped because SysV allocates the two register files separately.
-// A mixed call with stack words needs source-order stack slots, so it is
-// rejected until that call shape has a dedicated lowering.
+// The caller converts a mixed aggregate to one class when one register file
+// is full, so its two stack words stay together. A call where both register
+// files need stack words is still rejected because grouping would reorder it.
 public ReturnWords invoke(
     void* address,
     scope const size_t[] words,
@@ -439,8 +448,9 @@ public ReturnWords invoke(
     const kind = returnKind(returnPlan);
     switch (kind) {
         static foreach (returnKind_; [
-            ReturnKind.void_, ReturnKind.integer, ReturnKind.integerPair,
-            ReturnKind.sse, ReturnKind.ssePair, ReturnKind.mixed,
+            ReturnWords.ReturnKind.void_, ReturnWords.ReturnKind.integer,
+            ReturnWords.ReturnKind.integerPair, ReturnWords.ReturnKind.sse,
+            ReturnWords.ReturnKind.ssePair, ReturnWords.ReturnKind.mixed,
         ]) {
             case returnKind_:
                 return dispatch!(returnKind_)(address,
@@ -452,7 +462,7 @@ public ReturnWords invoke(
     }
 }
 
-private ReturnKind returnKind(in ArgumentPlan plan) {
+private ReturnWords.ReturnKind returnKind(in ArgumentPlan plan) {
     size_t integers;
     size_t floating;
     foreach (register; plan.registers[0 .. plan.count]) {
@@ -463,21 +473,21 @@ private ReturnKind returnKind(in ArgumentPlan plan) {
     }
 
     if (integers == 0 && floating == 0)
-        return ReturnKind.void_;
+        return ReturnWords.ReturnKind.void_;
     if (integers == 1 && floating == 0)
-        return ReturnKind.integer;
+        return ReturnWords.ReturnKind.integer;
     if (integers == 2 && floating == 0)
-        return ReturnKind.integerPair;
+        return ReturnWords.ReturnKind.integerPair;
     if (integers == 0 && floating == 1)
-        return ReturnKind.sse;
+        return ReturnWords.ReturnKind.sse;
     if (integers == 0 && floating == 2)
-        return ReturnKind.ssePair;
+        return ReturnWords.ReturnKind.ssePair;
     if (integers == 1 && floating == 1)
-        return ReturnKind.mixed;
+        return ReturnWords.ReturnKind.mixed;
     assert(false, "unsupported return class shape");
 }
 
-private ReturnWords dispatch(ReturnKind kind)(
+private ReturnWords dispatch(ReturnWords.ReturnKind kind)(
     void* address,
     scope const size_t[] integerWords,
     scope const size_t[] floatingWords,
@@ -496,7 +506,7 @@ private ReturnWords dispatch(ReturnKind kind)(
     return ReturnWords.init;
 }
 
-private ReturnWords call(ReturnKind kind, size_t integerCount,
+private ReturnWords call(ReturnWords.ReturnKind kind, size_t integerCount,
     size_t floatingCount)(
     void* address,
     scope const size_t[] integerWords,
@@ -508,23 +518,23 @@ private ReturnWords call(ReturnKind kind, size_t integerCount,
 
     alias Native = NativeFunction!(kind, integerCount, floatingCount).Native;
     ReturnWords result;
-    static if (kind == ReturnKind.void_) {
+    static if (kind == ReturnWords.ReturnKind.void_) {
         mixin("(cast(Native) address)(" ~
             argumentList(integerCount, floatingCount) ~ ");");
     } else {
         mixin("const nativeResult = (cast(Native) address)(" ~
             argumentList(integerCount, floatingCount) ~ ");");
-        static if (kind == ReturnKind.integer)
+        static if (kind == ReturnWords.ReturnKind.integer)
             result.first = nativeResult;
-        else static if (kind == ReturnKind.integerPair) {
+        else static if (kind == ReturnWords.ReturnKind.integerPair) {
             result.first = nativeResult.first;
             result.second = nativeResult.second;
-        } else static if (kind == ReturnKind.sse)
+        } else static if (kind == ReturnWords.ReturnKind.sse)
             result.floatingFirst = bits(nativeResult);
-        else static if (kind == ReturnKind.ssePair) {
+        else static if (kind == ReturnWords.ReturnKind.ssePair) {
             result.floatingFirst = bits(nativeResult.first);
             result.floatingSecond = bits(nativeResult.second);
-        } else static if (kind == ReturnKind.mixed) {
+        } else static if (kind == ReturnWords.ReturnKind.mixed) {
             result.first = nativeResult.integer;
             result.floatingFirst = bits(nativeResult.floating);
         }
@@ -532,19 +542,20 @@ private ReturnWords call(ReturnKind kind, size_t integerCount,
     return result;
 }
 
-private template NativeFunction(ReturnKind kind, size_t integerCount,
+private template NativeFunction(ReturnWords.ReturnKind kind,
+    size_t integerCount,
     size_t floatingCount) {
     import std.meta: Repeat;
 
-    static if (kind == ReturnKind.void_)
+    static if (kind == ReturnWords.ReturnKind.void_)
         alias Return = void;
-    else static if (kind == ReturnKind.integer)
+    else static if (kind == ReturnWords.ReturnKind.integer)
         alias Return = size_t;
-    else static if (kind == ReturnKind.integerPair)
+    else static if (kind == ReturnWords.ReturnKind.integerPair)
         alias Return = IntegerReturn;
-    else static if (kind == ReturnKind.sse)
+    else static if (kind == ReturnWords.ReturnKind.sse)
         alias Return = double;
-    else static if (kind == ReturnKind.ssePair)
+    else static if (kind == ReturnWords.ReturnKind.ssePair)
         alias Return = FloatingReturn;
     else
         alias Return = MixedReturn;
