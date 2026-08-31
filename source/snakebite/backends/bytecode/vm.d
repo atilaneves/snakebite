@@ -75,3 +75,12 @@ package extern(C) void opReturnI32(
     if (returnPlace !is null)
         *cast(int*) returnPlace = *cast(int*) frame;
 }
+
+
+package extern(C) void opReturnVoid(
+    const(Instruction)*,
+    ubyte*,
+    void*,
+    scope const int[],
+) @nogc nothrow {
+}

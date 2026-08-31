@@ -12,8 +12,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.framestack: defaultFrameCapacity;
 
     private Vm _vm;
-    private FuncDeclaration _funcDeclaration;
-    private Function _executable;
+    private Function[FuncDeclaration] _compiled;
 
     public this(const Program program) {
         super(program);
@@ -26,9 +25,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 "bytecode compiler needs a program entry function",
             );
 
-        auto executable = compileFunction(program.main.func);
-        _funcDeclaration = program.main.func;
-        _executable = executable;
+        compiled(program.main.func);
     }
 
     public override void call(
@@ -41,13 +38,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 "bytecode compiler does not support arguments yet",
             );
 
-        if (_funcDeclaration is function_) {
-            _vm.call(_executable, returnPlace);
-            return;
-        }
-
-        auto executable = compileFunction(function_);
-        _vm.call(executable, returnPlace);
+        _vm.call(compiled(function_), returnPlace);
     }
 
     public override string eval(FuncDeclaration function_) {
@@ -55,13 +46,24 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             "eval not implemented for the bytecode backend yet",
         );
     }
+
+    // `function_`'s compiled form, compiling it - and, transitively,
+    // whatever it tail-calls - on first use. Reused on every later call to
+    // the same function, the way compiled code only ever compiles a
+    // function once.
+    private ref const(Function) compiled(FuncDeclaration function_) {
+        if (auto found = function_ in _compiled)
+            return *found;
+
+        return _compiled[function_] = compileFunction(function_);
+    }
 }
 
 
 private imported!"snakebite.backends.bytecode.vm".Function compileFunction(
     imported!"dmd.func".FuncDeclaration function_,
 ) {
-    import dmd.astenums: Tint32;
+    import dmd.astenums: Tint32, Tvoid;
     import snakebite.backends.bytecode.vm:
         Function, Instruction, opConstantI32, opReturnI32;
     import snakebite.exception: SnakebiteException;
@@ -75,29 +77,38 @@ private imported!"snakebite.backends.bytecode.vm".Function compileFunction(
 
     auto functionType = typeFunctionOf(function_);
     if (function_.vthis !is null || functionType.parameterList.length != 0)
-        throw new SnakebiteException(text(
-            "bytecode compiler only supports a zero-argument function: `",
-            function_.toString, "`",
-        ));
+        throw rejection(function_, function_.loc, "a function with parameters");
 
     auto returnType = function_.type.nextOf;
-    if (returnType is null || returnType.ty != Tint32)
-        throw new SnakebiteException(text(
-            "bytecode compiler only supports an `int` return: `",
-            function_.toString, "`",
+    const isVoidReturn = returnType !is null && returnType.ty == Tvoid;
+    const isIntReturn = returnType !is null && returnType.ty == Tint32;
+    if (!isVoidReturn && !isIntReturn)
+        throw rejection(function_, function_.loc, text(
+            "a `", returnType is null ? "auto" : returnType.toString,
+            "` return",
         ));
 
     auto body = function_.fbody is null
         ? null
         : function_.fbody.isCompoundStatement;
-    if (body is null || body.statements is null
-            || body.statements.length != 1)
-        throw new SnakebiteException(text(
-            "bytecode compiler only supports one return statement: `",
-            function_.toString, "`",
-        ));
+    auto statements = body is null ? null : body.statements;
+    const statementCount = statements is null ? 0 : statements.length;
 
-    auto returnStatement = (*body.statements)[0].isReturnStatement;
+    if (isVoidReturn) {
+        foreach (i; 0 .. statementCount) {
+            auto statement = (*statements)[i];
+            if (!isVoidCompatible(statement))
+                throw rejection(function_, statement.loc, statementText(statement));
+        }
+
+        return voidReturn;
+    }
+
+    if (statementCount != 1)
+        throw rejection(function_, function_.loc,
+            "a body other than a single `return` statement");
+
+    auto returnStatement = (*statements)[0].isReturnStatement;
     auto expression = returnStatement is null ? null : returnStatement.exp;
     auto integer = expression is null ? null : expression.isIntegerExp;
     if (integer is null && expression !is null) {
@@ -108,10 +119,11 @@ private imported!"snakebite.backends.bytecode.vm".Function compileFunction(
     }
 
     if (integer is null)
-        throw new SnakebiteException(text(
-            "bytecode compiler only supports returning an `int` constant: `",
-            function_.toString, "`",
-        ));
+        throw rejection(
+            function_,
+            expression is null ? (*statements)[0].loc : expression.loc,
+            statementText((*statements)[0]),
+        );
 
     return Function(
         [
@@ -122,4 +134,70 @@ private imported!"snakebite.backends.bytecode.vm".Function compileFunction(
         int.sizeof,
         int.alignof,
     );
+}
+
+// Whether `statement` carries no meaning the bytecode VM needs to run: an
+// empty scope (nested compound statements are transparent, the way any
+// number of `{ }` nesting is), or a `return`. A `void`-declared function's
+// type forbids a `return` with a value everywhere except the implicit one
+// dmd itself appends to `main` for the C entry point's `int` result, so
+// accepting any `return` here needs no name check to stay honest to that.
+private bool isVoidCompatible(imported!"dmd.statement".Statement statement) {
+    if (statement is null)
+        return true;
+
+    if (statement.isReturnStatement !is null)
+        return true;
+
+    auto compound = statement.isCompoundStatement;
+    if (compound is null)
+        return false;
+
+    if (compound.statements is null)
+        return true;
+
+    foreach (child; *compound.statements)
+        if (!isVoidCompatible(child))
+            return false;
+
+    return true;
+}
+
+private imported!"snakebite.backends.bytecode.vm".Function voidReturn() {
+    import snakebite.backends.bytecode.vm: Function, Instruction, opReturnVoid;
+
+    auto instructions = [Instruction(&opReturnVoid, 0)];
+    int[] constants = [];
+    enum frameSize = 0;
+    enum frameAlignment = 1;
+
+    return Function(instructions, constants, frameSize, frameAlignment);
+}
+
+// Renders `statement` back to source text for a rejection message, on one
+// line: dmd's own renderer (`toChars`) includes the trailing newline a
+// statement carries in source.
+private string statementText(imported!"dmd.statement".Statement statement) {
+    import dmd.hdrgen: toChars;
+    import std.string: fromStringz, strip;
+    import std.conv: text;
+
+    return text("`", toChars(statement).fromStringz.strip, "`");
+}
+
+// A rejection naming where in the guest source it happened (`loc`), what
+// the compiler refused (`operation`), and which function it was compiling.
+private imported!"snakebite.exception".SnakebiteException rejection(
+    imported!"dmd.func".FuncDeclaration function_,
+    imported!"dmd.location".Loc loc,
+    string operation,
+) {
+    import snakebite.exception: SnakebiteException;
+    import std.conv: text;
+    import std.string: fromStringz;
+
+    return new SnakebiteException(text(
+        loc.toChars.fromStringz, ": bytecode compiler cannot compile ",
+        operation, " in `", function_.toString, "`",
+    ));
 }
