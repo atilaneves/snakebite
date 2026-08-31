@@ -29,6 +29,27 @@ static foreach (backend; Matrix!(
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("nested.recursiveGuestCall.countsDown." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(
+            backend,
+            q{
+                int countdown(int n) {
+                    if (n == 0)
+                        return 0;
+                    return countdown(n - 1) + 1;
+                }
+
+                int main() {
+                    return countdown(42) == 42 ? 0 : 1;
+                }
+            },
+        );
+    }
+}
+
 // A delegate that captures nothing never reads its context word, so
 // `call`, a function with no static chain of its own to `main`, must
 // still be able to run it - the delegate's own body needs nothing from
