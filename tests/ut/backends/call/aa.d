@@ -5,6 +5,7 @@ import ut.backends;
 
 
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Interpreter, Because.inexpressible,
         "oh noes"),
 )) {

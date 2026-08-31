@@ -98,9 +98,15 @@ private imported!"snakebite.backends.bytecode.vm".Function compileFunction(
         ));
 
     auto returnStatement = (*body.statements)[0].isReturnStatement;
-    auto integer = returnStatement is null || returnStatement.exp is null
-        ? null
-        : returnStatement.exp.isIntegerExp;
+    auto expression = returnStatement is null ? null : returnStatement.exp;
+    auto integer = expression is null ? null : expression.isIntegerExp;
+    if (integer is null && expression !is null) {
+        auto call = expression.isCallExp;
+        if (call !is null && call.f !is null
+                && (call.arguments is null || call.arguments.length == 0))
+            return compileFunction(call.f);
+    }
+
     if (integer is null)
         throw new SnakebiteException(text(
             "bytecode compiler only supports returning an `int` constant: `",
