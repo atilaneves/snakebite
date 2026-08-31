@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(git -C "$(dirname -- "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 
-compiler=${DC:-ldc}
+compiler=${LDC:-ldc2}
 command -v "$compiler" > /dev/null
 
 builddir=bin/acceptance
