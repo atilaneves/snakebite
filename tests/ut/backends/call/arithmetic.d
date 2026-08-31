@@ -1076,6 +1076,27 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// The postfix expression yields the old value, even when its assignment
+// target is the same variable that the postfix expression modifies.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.postincrement.assignsOldValueWhenAliased."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(
+            backend,
+            q{
+                int aliased() {
+                    int value = 7;
+                    value = value++;
+                    return value;
+                }
+            },
+            "aliased",
+        );
+    }
+}
+
 // `x = y + x`: the right operand reads `x` after the left one, `y`, has
 // been evaluated - so a compiler that evaluates `y` straight into `x`'s
 // own storage (to avoid a temporary of its own) clobbers `x` before the

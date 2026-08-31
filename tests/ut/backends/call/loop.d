@@ -51,6 +51,29 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!()) {
+    @("loop.constantTrueWhileDoesNotFallThrough." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                int yes() {
+                    return 1;
+                }
+
+                int answer() {
+                    while (1) {
+                        if (yes())
+                            return 1;
+                    }
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
     @("loop.forContinueAppliesToNearestLoop." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -141,6 +164,28 @@ static foreach (backend; Matrix!()) {
                     for (int i = 0; i < 3; ++i)
                         n += one();
                     return n;
+                }
+            },
+            "count",
+        );
+    }
+}
+
+
+// A long loop must use bounded host stack space even when it performs no
+// guest calls. This is large enough to expose recursive opcode dispatch.
+static foreach (backend; Matrix!()) {
+    @("loop.bytecodeHandlesLongIterationCount." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        100_000.shouldBeRetOf!(
+            backend,
+            q{
+                int count() {
+                    int i;
+                    while (i < 100_000)
+                        ++i;
+                    return i;
                 }
             },
             "count",

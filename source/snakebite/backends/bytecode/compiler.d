@@ -477,7 +477,6 @@ private final class FunctionCompiler {
 
         _loops ~= LoopContext(loopStart);
         compileStatement(statement._body);
-        const bodyFinished = _finished;
         _loops = _loops[0 .. $ - 1];
         _finished = false;
 
@@ -485,7 +484,7 @@ private final class FunctionCompiler {
         if (branchIndex != size_t.max)
             _instructions[branchIndex].source = _instructions.length;
 
-        _finished = !guarded && bodyFinished;
+        _finished = !guarded;
     }
 
     private void compileFor(ForStatement statement) {
@@ -507,7 +506,6 @@ private final class FunctionCompiler {
 
         _loops ~= LoopContext();
         compileStatement(statement._body);
-        const bodyFinished = _finished;
         _finished = false;
 
         const incrementIndex = _instructions.length;
@@ -522,7 +520,7 @@ private final class FunctionCompiler {
         if (branchIndex != size_t.max)
             _instructions[branchIndex].source = _instructions.length;
 
-        _finished = !guarded && bodyFinished;
+        _finished = !guarded;
     }
 
     private void compileContinue(ContinueStatement statement) {
@@ -668,6 +666,22 @@ private final class FunctionCompiler {
                 expressionText(expression));
 
         const targetOffset = _layout.offsetOf(variable);
+
+        // A postfix expression yields the old value, but also increments
+        // its variable. If both the assignment target and postfix variable
+        // are this same slot, preserve the result in a temporary before
+        // the postfix operation changes the slot.
+        auto post = expression.e2.isPostExp;
+        auto postVarExp = post is null ? null : post.e1.isVarExp;
+        auto postVariable = postVarExp is null
+            ? null : postVarExp.var.isVarDeclaration;
+        if (postVariable is variable) {
+            const tempOffset = reserveTemp(facts);
+            evalInto(expression.e2, tempOffset, facts.size);
+            emit(&opCopy, targetOffset, tempOffset, facts.size);
+            return;
+        }
+
         evalInto(expression.e2, targetOffset, facts.size);
 
         if (destOffset != discardResult && destOffset != targetOffset)

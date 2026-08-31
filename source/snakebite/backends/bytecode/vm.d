@@ -36,7 +36,7 @@ package enum discardResult = size_t.max;
 
 
 package struct Instruction {
-    public alias Handler = extern(C) void function(
+    public alias Handler = const(Instruction)* function(
         const(Instruction)* pc,
         ubyte* frame,
         void* returnPlace,
@@ -115,7 +115,7 @@ package struct Vm {
             function_.frameAlignment,
         );
         auto pc = function_.instructions.ptr;
-        pc.handler(
+        dispatch(
             pc, frame.base, returnPlace, function_.constants,
             function_.callSites, &_frames,
         );
@@ -176,10 +176,11 @@ private ulong loadUnsigned(const(void)* place, in size_t width) @nogc nothrow {
 }
 
 
-// Tail-calls `pc`'s successor: what every opcode below does once it has
-// done its own work, unless it is a branch that took the other path.
+// Returns `pc`'s successor: what every opcode below does once it has done
+// its own work, unless it is a branch that took the other path. The
+// dispatch loop invokes the returned handler.
 // Not `@nogc nothrow`; see `opConstant`.
-private void advance(
+private const(Instruction)* advance(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -188,20 +189,35 @@ private void advance(
     FrameStack* frames,
 ) {
     const next = pc + 1;
-    next.handler(next, frame, returnPlace, constants, callSites, frames);
+    return next;
+}
+
+
+// Runs one guest function without consuming host stack space per opcode.
+private void dispatch(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    FrameStack* frames,
+) {
+    while (pc !is null)
+        pc = pc.handler(
+            pc, frame, returnPlace, constants, callSites, frames);
 }
 
 
 // Writes `constants[pc.source]`, narrowed to `pc.width` bytes, at
 // `frame + pc.destination`.
 //
-// Not `@nogc nothrow`: a tail call through `Instruction.Handler` can reach
-// `opCall`, which can throw (a frame stack overflow) - and the handler
-// alias itself is declared without those attributes for exactly that
-// reason, so every handler that tail-calls through it, this one included,
-// has to go without them too even though nothing this handler itself does
-// allocates or throws.
-package extern(C) void opConstant(
+// Not `@nogc nothrow`: dispatching a returned handler can reach `opCall`,
+// which can throw (a frame stack overflow) - and the handler alias itself
+// is declared without those attributes for exactly that reason, so every
+// handler that returns through it, this one included, has to go without
+// them too even though nothing this handler itself does allocates or
+// throws.
+package const(Instruction)* opConstant(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -211,7 +227,7 @@ package extern(C) void opConstant(
 ) {
     storeWidth(frame + pc.destination, constants[pc.source], pc.width);
     const next = pc + 1;
-    next.handler(next, frame, returnPlace, constants, callSites, frames);
+    return next;
 }
 
 
@@ -220,7 +236,7 @@ package extern(C) void opConstant(
 // assignment's right side already evaluated into the target's own slot
 // copied out to wherever the assignment's value is also needed. Not
 // `@nogc nothrow`; see `opConstant`.
-package extern(C) void opCopy(
+package const(Instruction)* opCopy(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -232,19 +248,17 @@ package extern(C) void opCopy(
 
     memcpy(frame + pc.destination, frame + pc.source, pc.width);
     const next = pc + 1;
-    next.handler(next, frame, returnPlace, constants, callSites, frames);
+    return next;
 }
 
 
 // Calls `callSites[pc.source]`'s callee: pushes its frame, copies each
-// argument in, runs it to its own return instruction - a plain (recursive)
-// call, not a tail one, so control comes back here once the callee's own
-// `opReturn`/`opReturnVoid` stops instead of chaining to a next
-// instruction of its own - copies the result to `frame + pc.destination`
-// (unless `pc.destination` is `discardResult`), and only then tail-calls
-// this call's own next instruction. `pc.width` is unused: the width to
-// copy out comes from the call site's own `returnWidth` instead.
-package extern(C) void opCall(
+// argument in, runs it to its own return instruction through the nested
+// dispatch loop, then copies the result to `frame + pc.destination`
+// (unless `pc.destination` is `discardResult`) and returns this call's own
+// next instruction. `pc.width` is unused: the width to copy out comes
+// from the call site's own `returnWidth` instead.
+package const(Instruction)* opCall(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -274,7 +288,7 @@ package extern(C) void opCall(
     void* returnDestination = site.returnWidth == 0 ? null : returnScratch.ptr;
 
     auto calleePc = callee.instructions.ptr;
-    calleePc.handler(
+    dispatch(
         calleePc, calleeFrame.base, returnDestination, callee.constants,
         callee.callSites, frames,
     );
@@ -283,7 +297,7 @@ package extern(C) void opCall(
         memcpy(frame + pc.destination, returnScratch.ptr, site.returnWidth);
 
     const next = pc + 1;
-    next.handler(next, frame, returnPlace, constants, callSites, frames);
+    return next;
 }
 
 
@@ -291,7 +305,7 @@ package extern(C) void opCall(
 // `null` when the caller discarded the result, the same convention every
 // backend uses for a call whose value nothing reads. `pc.destination` is
 // unused: there is no frame slot on the receiving end, only `returnPlace`.
-package extern(C) void opReturn(
+package const(Instruction)* opReturn(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -303,10 +317,11 @@ package extern(C) void opReturn(
 
     if (returnPlace !is null)
         memcpy(returnPlace, frame + pc.source, pc.width);
+    return null;
 }
 
 
-package extern(C) void opReturnVoid(
+package const(Instruction)* opReturnVoid(
     const(Instruction)*,
     ubyte*,
     void*,
@@ -314,13 +329,14 @@ package extern(C) void opReturnVoid(
     scope const CallSite[],
     FrameStack*,
 ) @nogc nothrow {
+    return null;
 }
 
 
 // Unconditionally transfers control to the instruction `pc.destination`
 // already names, resolved (see `Instruction.destination`'s own doc) to
 // that instruction's address by the compiler before this VM ever runs it.
-package extern(C) void opJump(
+package const(Instruction)* opJump(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -329,7 +345,7 @@ package extern(C) void opJump(
     FrameStack* frames,
 ) {
     const target = cast(const(Instruction)*) pc.destination;
-    target.handler(target, frame, returnPlace, constants, callSites, frames);
+    return target;
 }
 
 
@@ -338,7 +354,7 @@ package extern(C) void opJump(
 // zero - an `if` whose condition was false, a loop whose condition no
 // longer holds, the left side of a short-circuiting `&&` - and falls
 // through to the next instruction otherwise.
-package extern(C) void opBranchFalse(
+package const(Instruction)* opBranchFalse(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -348,18 +364,16 @@ package extern(C) void opBranchFalse(
 ) {
     if (loadUnsigned(frame + pc.destination, pc.width) == 0) {
         const target = cast(const(Instruction)*) pc.source;
-        target.handler(
-            target, frame, returnPlace, constants, callSites, frames);
-        return;
+        return target;
     }
 
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
 
 // As `opBranchFalse`, taking the branch when the tested bytes are instead
 // nonzero - the left side of a short-circuiting `||`.
-package extern(C) void opBranchTrue(
+package const(Instruction)* opBranchTrue(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -369,12 +383,10 @@ package extern(C) void opBranchTrue(
 ) {
     if (loadUnsigned(frame + pc.destination, pc.width) != 0) {
         const target = cast(const(Instruction)*) pc.source;
-        target.handler(
-            target, frame, returnPlace, constants, callSites, frames);
-        return;
+        return target;
     }
 
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
 
@@ -385,7 +397,7 @@ package extern(C) void opBranchTrue(
 // leave are the same whichever way the wider intermediate was extended.
 // `destination` holds the left operand on entry and the answer on exit;
 // `source` holds the right operand, read but not written.
-package extern(C) void opAdd(
+package const(Instruction)* opAdd(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -397,10 +409,10 @@ package extern(C) void opAdd(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a + b), pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opSubtract(
+package const(Instruction)* opSubtract(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -412,10 +424,10 @@ package extern(C) void opSubtract(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a - b), pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opMultiply(
+package const(Instruction)* opMultiply(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -427,10 +439,10 @@ package extern(C) void opMultiply(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a * b), pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opBitAnd(
+package const(Instruction)* opBitAnd(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -442,10 +454,10 @@ package extern(C) void opBitAnd(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a & b), pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opBitOr(
+package const(Instruction)* opBitOr(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -457,10 +469,10 @@ package extern(C) void opBitOr(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a | b), pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opBitXor(
+package const(Instruction)* opBitXor(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -472,10 +484,10 @@ package extern(C) void opBitXor(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a ^ b), pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opShiftLeft(
+package const(Instruction)* opShiftLeft(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -487,12 +499,12 @@ package extern(C) void opShiftLeft(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a << b), pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
 // `>>` on an unsigned left operand, and `>>>` whatever the left operand's
 // signedness: both fill the vacated high bits with zero.
-package extern(C) void opShiftRightLogical(
+package const(Instruction)* opShiftRightLogical(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -504,7 +516,7 @@ package extern(C) void opShiftRightLogical(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a >> b), pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
 // `>>` on a signed left operand: the vacated high bits copy the sign bit
@@ -513,7 +525,7 @@ package extern(C) void opShiftRightLogical(
 // an operand's signedness, and the only one of those where reading
 // `source` signed as well would be wrong: the right operand is a shift
 // count, not a value in the left operand's own domain.
-package extern(C) void opShiftRightArithmetic(
+package const(Instruction)* opShiftRightArithmetic(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -525,7 +537,7 @@ package extern(C) void opShiftRightArithmetic(
     const a = loadSigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, a >> b, pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
 // Division and modulo, unlike every other binary opcode above, answer
@@ -535,7 +547,7 @@ package extern(C) void opShiftRightArithmetic(
 // unsigned. D's own `/` and `%` on `long` already truncate toward zero
 // and take the dividend's sign the way this needs, so this opcode is
 // nothing more than that operator applied to the widened operands.
-package extern(C) void opDivideSigned(
+package const(Instruction)* opDivideSigned(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -547,10 +559,10 @@ package extern(C) void opDivideSigned(
     const a = loadSigned(place, pc.width);
     const b = loadSigned(frame + pc.source, pc.width);
     storeWidth(place, a / b, pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opModuloSigned(
+package const(Instruction)* opModuloSigned(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -562,10 +574,10 @@ package extern(C) void opModuloSigned(
     const a = loadSigned(place, pc.width);
     const b = loadSigned(frame + pc.source, pc.width);
     storeWidth(place, a % b, pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opDivideUnsigned(
+package const(Instruction)* opDivideUnsigned(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -577,10 +589,10 @@ package extern(C) void opDivideUnsigned(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a / b), pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opModuloUnsigned(
+package const(Instruction)* opModuloUnsigned(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -592,7 +604,7 @@ package extern(C) void opModuloUnsigned(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a % b), pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
 
@@ -603,7 +615,7 @@ package extern(C) void opModuloUnsigned(
 // false, but the same bits read signed (`-1 < 1`) are true. Only the
 // answer's single byte at `destination` is written; the compiler copies
 // it out to wherever the `bool` result is actually needed.
-package extern(C) void opLessThanSigned(
+package const(Instruction)* opLessThanSigned(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -615,10 +627,10 @@ package extern(C) void opLessThanSigned(
     const a = loadSigned(place, pc.width);
     const b = loadSigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a < b) ? 1 : 0;
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opLessThanUnsigned(
+package const(Instruction)* opLessThanUnsigned(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -630,10 +642,10 @@ package extern(C) void opLessThanUnsigned(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a < b) ? 1 : 0;
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opLessOrEqualSigned(
+package const(Instruction)* opLessOrEqualSigned(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -645,10 +657,10 @@ package extern(C) void opLessOrEqualSigned(
     const a = loadSigned(place, pc.width);
     const b = loadSigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a <= b) ? 1 : 0;
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opLessOrEqualUnsigned(
+package const(Instruction)* opLessOrEqualUnsigned(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -660,10 +672,10 @@ package extern(C) void opLessOrEqualUnsigned(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a <= b) ? 1 : 0;
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opGreaterThanSigned(
+package const(Instruction)* opGreaterThanSigned(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -675,10 +687,10 @@ package extern(C) void opGreaterThanSigned(
     const a = loadSigned(place, pc.width);
     const b = loadSigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a > b) ? 1 : 0;
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opGreaterThanUnsigned(
+package const(Instruction)* opGreaterThanUnsigned(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -690,10 +702,10 @@ package extern(C) void opGreaterThanUnsigned(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a > b) ? 1 : 0;
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opGreaterOrEqualSigned(
+package const(Instruction)* opGreaterOrEqualSigned(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -705,10 +717,10 @@ package extern(C) void opGreaterOrEqualSigned(
     const a = loadSigned(place, pc.width);
     const b = loadSigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a >= b) ? 1 : 0;
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opGreaterOrEqualUnsigned(
+package const(Instruction)* opGreaterOrEqualUnsigned(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -720,13 +732,13 @@ package extern(C) void opGreaterOrEqualUnsigned(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a >= b) ? 1 : 0;
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
 // `==`/`!=`: both operands share one type by the time the compiler emits
 // either of these, so the same bits compare equal whichever way they are
 // read - neither needs a signed and an unsigned form.
-package extern(C) void opEqual(
+package const(Instruction)* opEqual(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -738,10 +750,10 @@ package extern(C) void opEqual(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a == b) ? 1 : 0;
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opNotEqual(
+package const(Instruction)* opNotEqual(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -753,14 +765,14 @@ package extern(C) void opNotEqual(
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a != b) ? 1 : 0;
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
 
 // `-x` and `~x`: `destination` holds the one operand on entry and the
 // answer on exit; `source` is unused. Neither depends on the operand's
 // signedness - the same low bits result whichever way it was widened.
-package extern(C) void opNegate(
+package const(Instruction)* opNegate(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -771,10 +783,10 @@ package extern(C) void opNegate(
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     storeWidth(place, cast(long) (-a), pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
-package extern(C) void opComplement(
+package const(Instruction)* opComplement(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -785,12 +797,12 @@ package extern(C) void opComplement(
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     storeWidth(place, cast(long) (~a), pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
 // `!x`: true when `x` is zero. `destination` holds the operand, at
 // `pc.width`, on entry and the single-byte `bool` answer on exit.
-package extern(C) void opLogicalNot(
+package const(Instruction)* opLogicalNot(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -801,13 +813,13 @@ package extern(C) void opLogicalNot(
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     *cast(ubyte*) place = (a == 0) ? 1 : 0;
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
 // `cast(bool) x`: true when `x` is nonzero - dmd classifies `bool` as an
 // integral type, so a plain narrowing copy of the operand's low byte would
 // answer wrongly for an operand like `256`, whose low byte is zero.
-package extern(C) void opCastToBool(
+package const(Instruction)* opCastToBool(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -818,7 +830,7 @@ package extern(C) void opCastToBool(
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     *cast(ubyte*) place = (a != 0) ? 1 : 0;
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
 // Widens the `pc.source`-byte operand already at `destination` to fill
@@ -829,7 +841,7 @@ package extern(C) void opCastToBool(
 // `opCopy` instead. Reinterpreting a same-width operand as a differently
 // signed one changes no bits at all, so the compiler does not even emit
 // a copy for that.
-package extern(C) void opCastWidenSigned(
+package const(Instruction)* opCastWidenSigned(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -840,11 +852,11 @@ package extern(C) void opCastWidenSigned(
     auto place = frame + pc.destination;
     const value = loadSigned(place, pc.source);
     storeWidth(place, value, pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
 
 // As `opCastWidenSigned`, filling the new high bits with zero instead.
-package extern(C) void opCastWidenUnsigned(
+package const(Instruction)* opCastWidenUnsigned(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -855,5 +867,5 @@ package extern(C) void opCastWidenUnsigned(
     auto place = frame + pc.destination;
     const value = loadUnsigned(place, pc.source);
     storeWidth(place, cast(long) value, pc.width);
-    advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, frames);
 }
