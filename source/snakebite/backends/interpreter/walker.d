@@ -54,6 +54,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 }
 
 import snakebite.exception: SnakebiteException;
+import dmd.dclass: ClassDeclaration;
 
 // A guest throw must remain distinguishable from a refusal to interpret a
 // guest construct. The runner catches this wrapper, while interpreter
@@ -61,10 +62,12 @@ import snakebite.exception: SnakebiteException;
 // unchanged.
 private final class GuestException: Exception {
     private Throwable _guest;
+    private ClassDeclaration _class;
 
-    public this(Throwable guest) {
+    public this(Throwable guest, ClassDeclaration class_ = null) {
         super(guest.msg);
         _guest = guest;
+        _class = class_;
     }
 }
 
@@ -124,6 +127,10 @@ extern(C++) private final class Evaluator: Visitor {
     // A guest pointer can live in an unscanned frame, so the evaluator keeps
     // each backing allocation reachable for as long as guest state can be.
     private ubyte[][] _allocations;
+    // Guest class references point into these allocations. Keep the
+    // declaration beside each object so a catch can match the actual
+    // derived class after the reference has been widened.
+    private ClassDeclaration[void*] _classes;
     // dmd gives every `arr[... $ ...]` a `lengthVar` declaration for its
     // `$`, which no statement declares and which therefore has no frame
     // slot - and needs none, since the length is a value `visit(IndexExp)`
@@ -411,6 +418,7 @@ extern(C++) private final class Evaluator: Visitor {
         ubyte* frameBase,
         const(FrameLayout)* layout,
         CallExp callSite = null,
+        bool classThisBound = false,
     ) {
         import std.conv: text;
 
@@ -444,10 +452,11 @@ extern(C++) private final class Evaluator: Visitor {
         // silently devirtualize the call and answer from the wrong
         // declaration.
         auto aggregate = function_.isThis();
-        if (aggregate !is null && aggregate.isStructDeclaration is null)
+        if (aggregate !is null && aggregate.isStructDeclaration is null
+                && !classThisBound)
             throw new SnakebiteException(
                 text("interpreter cannot call `", function_.toString,
-                    "`: only a struct method's `this` is supported"),
+                    "`: its class `this` is not bound"),
             );
 
         // A nested function's static chain - the enclosing function's
@@ -620,7 +629,7 @@ extern(C++) private final class Evaluator: Visitor {
             statement._body.accept(this);
         } catch (GuestException exception) {
             foreach (catch_; *statement.catches) {
-                if (!matchesThrowable(catch_))
+                if (!matchesThrowable(catch_, exception))
                     continue;
 
                 bindCatchVariable(catch_, exception._guest);
@@ -642,16 +651,22 @@ extern(C++) private final class Evaluator: Visitor {
         }
     }
 
-    // Matched by symbol identity against dmd's own record of
-    // `object.Throwable`, not by name, so a guest class that merely
-    // shares the name never matches. Any other catch type stays
-    // unmatched and the guest throw continues outward.
-    private bool matchesThrowable(Catch catch_) {
-        import dmd.dclass: ClassDeclaration;
-
+    // Match the actual guest class against the catch class and its base
+    // chain. A native assertion has no guest declaration, but it is still
+    // a Throwable and keeps the existing catch(Throwable) behavior.
+    private bool matchesThrowable(
+        Catch catch_,
+        GuestException exception,
+    ) {
         auto typeClass = catch_.type.isTypeClass;
-        return typeClass !is null
-            && typeClass.sym is ClassDeclaration.throwable;
+        if (typeClass is null)
+            return false;
+
+        if (exception._class is null)
+            return typeClass.sym is ClassDeclaration.throwable;
+
+        return typeClass.sym is exception._class
+            || typeClass.sym.isBaseOf(exception._class, null);
     }
 
     private void bindCatchVariable(Catch catch_, Throwable guest) {
@@ -1057,6 +1072,31 @@ extern(C++) private final class Evaluator: Visitor {
         // not a conversion - unlike a literal, which `storeValue` has
         // to convert from its dmd node first.
         memcpy(_place, slotOf(expression), _facts.size);
+    }
+
+    // A class `this` is a reference value in its hidden frame slot. A
+    // struct `this` is the address of the struct value, so it keeps the
+    // ordinary byte-copy behavior used by struct methods.
+    override void visit(ThisExp expression) {
+        import core.stdc.string: memcpy;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+
+        VarDeclaration variable;
+        if (expression.var is null)
+            variable = cast() _layout.hiddenThis.variable;
+        else
+            variable = expression.var;
+        auto slot = slotOf(expression, variable);
+        if (_type.ty == Tclass) {
+            storeIntegral(
+                _place,
+                loadIntegral(slot, size_t.sizeof, false),
+                _facts.size,
+            );
+            return;
+        }
+
+        memcpy(_place, slot, _facts.size);
     }
 
     // The function `variable` is a parameter or local of - `toParent2`
@@ -1478,15 +1518,30 @@ extern(C++) private final class Evaluator: Visitor {
         // accessors (`isVarDeclaration` among them) are not
         // const-correct, and `slotOf` only reads the declaration.
         if (auto thisExp = target.isThisExp)
-            return slotOf(
+        {
+            auto slot = slotOf(
                 thisExp,
                 thisExp.var is null
                     ? cast() _layout.hiddenThis.variable
                     : thisExp.var,
             );
+            if (target.type.ty == Tclass) {
+                import snakebite.nativelayout: loadIntegral;
+
+                return cast(void*) loadIntegral(
+                    slot, size_t.sizeof, false);
+            }
+            return slot;
+        }
 
         if (auto variable = target.isVarExp)
             return slotOf(variable);
+
+        if (auto cast_ = target.isCastExp) {
+            if (factsOf(cast_.e1.type).isIntegral
+                    && factsOf(target.type).isIntegral)
+                return addressOf(cast_.e1);
+        }
 
         if (auto deref = target.isPtrExp)
             return asPointer(deref.e1);
@@ -2082,6 +2137,27 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto sourceType = expression.e1.type;
 
+        if (sourceType.ty == Tclass && _type.ty == Tclass) {
+            auto value = classReferenceOf(expression.e1);
+            if (value is null) {
+                storeIntegral(_place, 0, _facts.size);
+                return;
+            }
+
+            auto actual = value in _classes;
+            auto target = _type.isTypeClass.sym;
+            const matches = actual is null
+                ? target is sourceType.isTypeClass.sym
+                : target is *actual
+                    || target.isBaseOf(*actual, null);
+            storeIntegral(
+                _place,
+                matches ? cast(size_t) value : 0,
+                _facts.size,
+            );
+            return;
+        }
+
         if (sourceType.ty == Tpointer && _type.ty == Tpointer) {
             evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
             return;
@@ -2391,7 +2467,11 @@ extern(C++) private final class Evaluator: Visitor {
                     "`: it is null"),
             );
 
-        throw new GuestException(guest);
+        auto classDeclaration = cast(void*) guest in _classes;
+        throw new GuestException(
+            guest,
+            classDeclaration is null ? null : *classDeclaration,
+        );
     }
 
     override void visit(ArrayLengthExp expression) {
@@ -2606,6 +2686,48 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         auto arguments = expression.arguments;
+        if (expression.type.ty == Tclass) {
+            auto classType = expression.newtype.isTypeClass;
+            if (classType is null || expression.placement !is null
+                    || expression.thisexp !is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot evaluate `", expression.op,
+                        "` expression: `", expression.toString, "`"),
+                );
+
+            auto declaration = classType.sym;
+            const alignment = declaration.alignsize == 0
+                ? 1 : declaration.alignsize;
+            const padding = alignment - 1;
+            if (declaration.structsize > size_t.max - padding)
+                throw new SnakebiteException(
+                    text("interpreter cannot allocate `",
+                        expression.toString, "`: its alignment padding " ~
+                        "overflows `size_t`"),
+                );
+
+            auto allocation = new ubyte[](declaration.structsize + padding);
+            _allocations ~= allocation;
+            const start = -cast(size_t) allocation.ptr
+                & (alignment - 1);
+            auto object = cast(ubyte*) allocation.ptr + start;
+
+            import core.stdc.string: memset;
+            import object: Exception;
+
+            memset(object, 0, declaration.structsize);
+            auto prototype = new Exception(null);
+            *cast(void**) object = *cast(void**) cast(void*) prototype;
+            initializeClass(declaration, object, expression.loc);
+            _classes[object] = declaration;
+
+            if (expression.member !is null)
+                constructClass(expression, object);
+
+            storeIntegral(_place, cast(size_t) object, _facts.size);
+            return;
+        }
+
         if (expression.type.ty != Tarray || arguments is null
                 || arguments.length != 1)
             throw new SnakebiteException(
@@ -2660,6 +2782,75 @@ extern(C++) private final class Evaluator: Visitor {
         auto bytes = cast(ubyte*) _place;
         storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
+    }
+
+    private void initializeClass(
+        ClassDeclaration declaration,
+        ubyte* object,
+        in Loc loc,
+    ) {
+        if (declaration.baseClass !is null)
+            initializeClass(declaration.baseClass, object, loc);
+
+        foreach (field; declaration.fields) {
+            if (field._init is null)
+                continue;
+
+            auto initializer = field._init.isExpInitializer;
+            if (initializer is null || field._init.isVoidInitializer !is null)
+                continue;
+
+            auto facts = factsOf(field.type);
+            evaluate(
+                initializerValueOf(initializer),
+                field.type,
+                facts,
+                object + field.offset,
+            );
+        }
+    }
+
+    private void constructClass(NewExp expression, ubyte* object) {
+        import std.conv: text;
+
+        auto constructor = expression.member;
+        auto layout = layoutOf(constructor);
+        auto frame = _frames.push(layout.size, layout.alignment);
+
+        import snakebite.nativelayout: storeIntegral;
+
+        if (constructor.vthis is null)
+            throw new SnakebiteException(
+                text("interpreter cannot call class constructor `",
+                    constructor.toString, "`: it has no `this`"),
+            );
+
+        storeIntegral(
+            frame.base + layout.hiddenThis.parameter.offset,
+            cast(size_t) object,
+            size_t.sizeof,
+        );
+
+        auto parameters = typeFunctionOf(constructor).parameterList;
+        auto arguments = expression.arguments;
+        const argumentCount = arguments is null ? 0 : arguments.length;
+        if (argumentCount != parameters.length)
+            throw new SnakebiteException(
+                text("interpreter: `", constructor.toString, "` expects ",
+                    parameters.length, " argument(s), got ", argumentCount),
+            );
+
+        foreach (i; 0 .. parameters.length) {
+            auto parameter = layout.parameters[i];
+            evaluate(
+                (*arguments)[i],
+                parameters[i].type,
+                parameter.facts,
+                frame.base + parameter.offset,
+            );
+        }
+
+        execute(constructor, null, frame.base, layout, null, true);
     }
 
     private void initializeDefault(
@@ -2844,7 +3035,18 @@ extern(C++) private final class Evaluator: Visitor {
             return;
         }
 
-        execute(function_, _place, frame.base, layout, expression);
+        import snakebite.nativelayout: loadIntegral;
+
+        const classThisBound = function_.isThis() !is null
+            && function_.isThis().isClassDeclaration !is null
+            && loadIntegral(
+                frame.base + layout.hiddenThis.parameter.offset,
+                size_t.sizeof,
+                false,
+            ) != 0;
+        execute(
+            function_, _place, frame.base, layout, expression, classThisBound,
+        );
     }
 
     // The callee of a call dmd left unresolved: one reached through a
@@ -2895,6 +3097,22 @@ extern(C++) private final class Evaluator: Visitor {
         return function_;
     }
 
+    private void* classReferenceOf(Expression expression) {
+        import snakebite.nativelayout: loadIntegral;
+        import std.conv: text;
+
+        if (expression.type.ty != Tclass)
+            throw new SnakebiteException(
+                text("interpreter cannot use `", expression.toString,
+                    "` as a class receiver"),
+            );
+
+        const facts = factsOf(expression.type);
+        align(size_t.sizeof) ubyte[size_t.sizeof] value = void;
+        evaluate(expression, expression.type, facts, value.ptr);
+        return cast(void*) loadIntegral(value.ptr, facts.size, false);
+    }
+
     // Reserves `function_`'s frame and binds every argument into it: a
     // `ref` parameter's slot gets the argument's address (`addressOf`),
     // everything else gets its value (`evaluate`), exactly as a compiled
@@ -2930,17 +3148,31 @@ extern(C++) private final class Evaluator: Visitor {
         if (function_.vthis !is null) {
             if (function_.isThis() !is null) {
                 auto dot = expression.e1.isDotVarExp;
-                if (dot is null)
+                auto classDeclaration = function_.isThis().isClassDeclaration;
+                if (classDeclaration !is null) {
+                    if (dot !is null)
+                        storeIntegral(
+                            frame.base + layout.hiddenThis.parameter.offset,
+                            cast(size_t) classReferenceOf(dot.e1),
+                            size_t.sizeof,
+                        );
+                    else
+                        storeIntegral(
+                            frame.base + layout.hiddenThis.parameter.offset,
+                            cast(size_t) classReferenceOf(expression.e1),
+                            size_t.sizeof,
+                        );
+                } else if (dot is null)
                     throw new SnakebiteException(
                         text("interpreter cannot call `", function_.toString,
                             "`: its `this` receiver is not a struct lvalue"),
                     );
-
-                storeIntegral(
-                    frame.base + layout.hiddenThis.parameter.offset,
-                    cast(size_t) addressOf(dot.e1),
-                    size_t.sizeof,
-                );
+                else
+                    storeIntegral(
+                        frame.base + layout.hiddenThis.parameter.offset,
+                        cast(size_t) addressOf(dot.e1),
+                        size_t.sizeof,
+                    );
             } else {
                 // A nested callee's `vthis` is the static link: the
                 // address of the frame it is lexically nested inside,

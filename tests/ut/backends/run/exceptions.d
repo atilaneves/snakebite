@@ -16,7 +16,8 @@ import ut.backends;
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
+    Omit!(Interpreter, Because.unconfirmed,
+        "DMD's native constructor ABI needs stack-word support"),
 )) {
     @("catchMatchesThrownClassByBaseType." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -56,7 +57,8 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
+    Omit!(Interpreter, Because.unconfirmed,
+        "DMD's native constructor ABI needs stack-word support"),
 )) {
     @("throwAsExpressionInTernary." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -91,4 +93,3 @@ static foreach (backend; Matrix!(
         });
     }
 }
-

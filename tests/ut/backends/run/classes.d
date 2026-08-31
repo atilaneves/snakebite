@@ -33,6 +33,36 @@ static foreach (backend; Matrix!(
     }
 }
 
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("classConstructionInitializesFieldsAndRunsConstructor."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int base = 7;
+            }
+
+            class Derived : Base {
+                int value = 2;
+
+                this(int value_) {
+                    value = value_;
+                }
+            }
+
+            void main() {
+                auto derived = new Derived(42);
+                assert(derived.base == 7);
+                assert(derived.value == 42);
+            }
+        });
+    }
+}
+
 // A call through an interface reference finds the class's override, which
 // needs the interface's own offset rather than the class vtable.
 static foreach (backend; Matrix!(
@@ -67,4 +97,3 @@ static foreach (backend; Matrix!(
         });
     }
 }
-
