@@ -1,7 +1,7 @@
 module bench.oracle;
 
 
-import bench.report: BackendReport;
+import bench.report: BackendReport, updateTestCounts;
 import bench.sources: SourceSet;
 import core.time: Duration;
 
@@ -35,7 +35,7 @@ BackendReport oracleReport(
     in uint warmup,
     in uint runs,
 ) {
-    import bench.report: fillTimingStatistics;
+    import bench.report: timingStatistics;
     import bench.sources: isDubProject;
     import std.conv: text;
     import std.datetime.stopwatch: AutoStart, StopWatch;
@@ -61,13 +61,10 @@ BackendReport oracleReport(
         if (tmpBinary.exists)
             tmpBinary.remove;
 
-    auto compileWatch = StopWatch(AutoStart.yes);
-    dmdParseOnly(sources);
-    report.compile = compileWatch.peek;
-
     if (dub)
         throwawayDubTestBuild(directory);
 
+    Duration[] compileTimes;
     Duration[] times;
     report.passed = true;
     string failureOutput;
@@ -79,6 +76,10 @@ BackendReport oracleReport(
             foreach (file; sources.files)
                 touch(file);
 
+        auto compileWatch = StopWatch(AutoStart.yes);
+        dmdParseOnly(sources);
+        const compileElapsed = compileWatch.peek;
+
         auto stopWatch = StopWatch(AutoStart.yes);
         const result = dub
             ? run(["dub", "test", "--compiler=dmd"], directory)
@@ -88,17 +89,13 @@ BackendReport oracleReport(
         if (round < warmup)
             continue;
 
-        times ~= elapsed - report.compile;
+        compileTimes ~= compileElapsed;
+        times ~= elapsed - compileElapsed;
 
         if (result.ramBytes > report.ramBytes)
             report.ramBytes = result.ramBytes;
 
-        const summary = unitThreadedSummary(result.stdout_);
-        if (summary.found) {
-            report.haveCounts = true;
-            report.passCount = summary.passed;
-            report.totalCount = summary.total;
-        }
+        report.updateTestCounts(result.stdout_);
 
         if (result.status != 0) {
             report.passed = false;
@@ -108,7 +105,8 @@ BackendReport oracleReport(
         }
     }
 
-    fillTimingStatistics(report, times);
+    report.compileTime = timingStatistics(compileTimes);
+    report.runTime = timingStatistics(times);
 
     if (failureOutput.length)
         stderr.writeln("dmd oracle failed; its output:\n", failureOutput);
@@ -217,30 +215,6 @@ private ProcessResult run(in string[] command, in string workDir = null) {
         ramBytes = match[1].to!long * 1024;
 
     return ProcessResult(status, readText(stdoutPath), readText(stderrPath), ramBytes);
-}
-
-private struct UnitThreadedSummary {
-    bool found;
-    size_t passed;
-    size_t total;
-}
-
-// unit-threaded's own summary line ("17 test(s) run, 0 failed."), giving a
-// real pass count where druntime's default runner only gives per-module
-// success/failure. Not found (druntime, or any other runner) means the
-// caller falls back to the exit status.
-private UnitThreadedSummary unitThreadedSummary(in string output) {
-    import std.conv: to;
-    import std.regex: matchFirst, regex;
-
-    static summaryPattern = regex(`(\d+) test\(s\) run, (\d+) failed`);
-    const match = output.matchFirst(summaryPattern);
-    if (match.empty)
-        return UnitThreadedSummary.init;
-
-    const total = match[1].to!size_t;
-    const failed = match[2].to!size_t;
-    return UnitThreadedSummary(true, total - failed, total);
 }
 
 // Makes the file newer than its build products, so the next `dub test`

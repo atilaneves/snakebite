@@ -43,5 +43,6 @@ int main(string[] args) {
         "ut.ffi.cost",
         "ut.ffi.symbol",
         "ut.framestack",
+        "ut.bench.report",
     );
 }

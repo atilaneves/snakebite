@@ -4,6 +4,12 @@ module bench.report;
 import core.time: Duration;
 
 
+struct TimingStatistics {
+    Duration minimum;
+    Duration median;
+    Duration sigma;
+}
+
 struct BackendReport {
     string name;
     // The exit-status verdict: the only correctness signal most rows have.
@@ -13,27 +19,46 @@ struct BackendReport {
     bool haveCounts;
     size_t passCount;
     size_t totalCount;
-    Duration minimum;
-    Duration median;
-    double sigmaMilliseconds;
+    TimingStatistics runTime;
     bool hasCompile; // not every backend has a compile step
-    Duration compile;
+    TimingStatistics compileTime;
     long ramBytes;
     // The dmd row: the real workflow, doubling as the correctness oracle
     // the other rows are checked against.
     bool isOracle;
 }
 
-void fillTimingStatistics(ref BackendReport report, Duration[] times) {
+void updateTestCounts(ref BackendReport report, in string output) {
+    import std.conv: to;
+    import std.regex: matchFirst, regex;
+
+    static summaryPattern = regex(`(\d+) test\(s\) run, (\d+) failed`);
+    const match = output.matchFirst(summaryPattern);
+    if (match.empty)
+        return;
+
+    const total = match[1].to!size_t;
+    const failed = match[2].to!size_t;
+    report.haveCounts = true;
+    report.passCount = total - failed;
+    report.totalCount = total;
+}
+
+TimingStatistics timingStatistics(Duration[] times) {
+    import core.time: dur;
     import std.algorithm.iteration: map;
     import std.algorithm.sorting: sort;
     import std.array: array;
+    import std.math: round;
 
     auto sorted = times.dup.sort.release;
-    report.minimum = sorted[0];
-    report.median = (sorted[$ / 2] + sorted[($ - 1) / 2]) / 2;
-    report.sigmaMilliseconds =
-        standardDeviation(times.map!(time => time.total!"usecs" / 1000.0).array);
+    TimingStatistics result;
+    result.minimum = sorted[0];
+    result.median = (sorted[$ / 2] + sorted[($ - 1) / 2]) / 2;
+    result.sigma = dur!"hnsecs"(cast(long) round(
+        standardDeviation(times.map!(time => time.total!"hnsecs").array),
+    ));
+    return result;
 }
 
 void printTable(in BackendReport[] reports) {
@@ -50,7 +75,10 @@ void printTable(in BackendReport[] reports) {
     const oracleFailed = !oracle.empty && !clean(oracle.front);
 
     string[][] rows = [
-        ["backend", "pass", "min", "median", "σ", "compile", "RAM"],
+        [
+            "backend", "pass", "run min", "run median", "run σ",
+            "compile min", "compile median", "compile σ", "RAM max",
+        ],
     ];
     foreach (report; reports) {
         string passCell = passCellText(report);
@@ -62,10 +90,14 @@ void printTable(in BackendReport[] reports) {
         rows ~= [
             report.name,
             passCell,
-            milliseconds(report.minimum),
-            milliseconds(report.median),
-            format!"%.1f"(report.sigmaMilliseconds),
-            report.hasCompile ? milliseconds(report.compile) : "-",
+            milliseconds(report.runTime.minimum),
+            milliseconds(report.runTime.median),
+            milliseconds(report.runTime.sigma),
+            report.hasCompile ? milliseconds(report.compileTime.minimum) : "-",
+            report.hasCompile ? milliseconds(report.compileTime.median) : "-",
+            report.hasCompile
+                ? milliseconds(report.compileTime.sigma)
+                : "-",
             memory(report.ramBytes),
         ];
     }
@@ -118,14 +150,14 @@ private string memory(in long bytes) {
     return format!"%d B"(bytes);
 }
 
-private double standardDeviation(in double[] values) {
+private double standardDeviation(Value)(in Value[] values) {
     import std.algorithm.iteration: map, sum;
     import std.math: sqrt;
 
     if (values.length < 2)
         return 0;
 
-    const mean = values.sum / values.length;
+    const mean = values.sum / cast(double) values.length;
     const variance =
         values.map!(value => (value - mean) ^^ 2).sum / (values.length - 1);
     return variance.sqrt;

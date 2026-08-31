@@ -251,14 +251,18 @@ private BackendReport[] benchmarkAll(Project project, in Options options) {
             // AST); `hasMember` needs the concrete type, so this stays at
             // the one call site that already has it, not inside `benchmark`.
             bool hasCompile;
-            Duration compile;
+            Duration[] compileTimes;
             static if (__traits(hasMember, BackendType, "compile")) {
                 import std.datetime.stopwatch: AutoStart, StopWatch;
 
                 hasCompile = true;
-                auto compileWatch = StopWatch(AutoStart.yes);
-                backend.compile(project.program);
-                compile = compileWatch.peek;
+                foreach (round; 0 .. options.warmup + options.runs) {
+                    backend = new BackendType(project.program);
+                    auto compileWatch = StopWatch(AutoStart.yes);
+                    backend.compile(project.program);
+                    if (round >= options.warmup)
+                        compileTimes ~= compileWatch.peek;
+                }
             }
 
             reports ~= benchmark(
@@ -268,7 +272,7 @@ private BackendReport[] benchmarkAll(Project project, in Options options) {
                 options.warmup,
                 options.runs,
                 hasCompile,
-                compile,
+                compileTimes,
             );
         }
 
@@ -299,18 +303,22 @@ private BackendReport benchmark(
     in uint warmup,
     in uint runs,
     in bool hasCompile,
-    in Duration compile,
+    Duration[] compileTimes,
 ) {
-    import bench.report: fillTimingStatistics;
+    import bench.capture: captureStdout;
+    import bench.report: timingStatistics, updateTestCounts;
     // `run` is a free function over `Backend.call`; UFCS keeps the call
     // site reading like the interface method it used to be.
     import snakebite.backends.backend: run;
     import std.datetime.stopwatch: AutoStart, StopWatch;
+    import std.stdio: write;
 
     BackendReport report;
     report.name = name;
     report.hasCompile = hasCompile;
-    report.compile = compile;
+    if (hasCompile)
+        report.compileTime = timingStatistics(compileTimes);
+    report.passed = true;
 
     const residentBefore = residentSetBytes;
 
@@ -320,12 +328,16 @@ private BackendReport benchmark(
     Duration[] times;
     foreach (round; 0 .. warmup + runs) {
         auto stopWatch = StopWatch(AutoStart.yes);
-        report.passed = backend.run(project.program) == 0;
-        if (round >= warmup)
+        const result = captureStdout(() => backend.run(project.program));
+        write(result.output);
+        report.passed = report.passed && result.status == 0;
+        if (round >= warmup) {
             times ~= stopWatch.peek;
+            report.updateTestCounts(result.output);
+        }
     }
 
-    fillTimingStatistics(report, times);
+    report.runTime = timingStatistics(times);
 
     report.ramBytes = residentSetBytes - residentBefore;
     if (report.ramBytes < 0)
