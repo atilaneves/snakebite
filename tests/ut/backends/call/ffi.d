@@ -61,9 +61,13 @@ static foreach (backend; Matrix!(
 @("dynamicArrayReturn.nativeFFI.Interpreter")
 @Tags("Interpreter")
 unittest {
+    // `findFunction` takes a mutable DMD module, so this local cannot be
+    // const even though the test does not otherwise mutate it.
     auto module_ = parseSnippet(q{
         extern(C) ubyte[] snakebite_ut_dynamic_array();
     });
+    // `PlanCache.of` takes a mutable DMD function declaration, so this local
+    // cannot be const even though the test does not otherwise mutate it.
     auto function_ = findFunction(module_, "snakebite_ut_dynamic_array");
     assert(function_ !is null,
         "No `snakebite_ut_dynamic_array` function in the guest program");
@@ -72,10 +76,10 @@ unittest {
     ubyte[] result;
     cache.of(function_).call(&result, []);
 
-    result.length.shouldEqual(3);
-    result[0].shouldEqual(17);
-    result[1].shouldEqual(31);
-    result[2].shouldEqual(47);
+    result.length.should == 3;
+    result[0].should == 17;
+    result[1].should == 31;
+    result[2].should == 47;
 }
 
 static foreach (backend; Matrix!(
