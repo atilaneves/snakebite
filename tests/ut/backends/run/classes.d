@@ -9,6 +9,7 @@ module ut.backends.run.classes;
 import ut.backends;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
+import std.string: endsWith;
 
 
 // `shared` is a qualifier, not a distinct class: the shared type's
@@ -65,7 +66,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-@("ordinaryClassStorageIsZeroed.Interpreter")
+@("ordinaryClassStorageHasNativeVptr.Interpreter")
 @Tags(Interpreter.stringof)
 unittest {
     auto module_ = parseSnippet(q{
@@ -83,9 +84,14 @@ unittest {
 
     assert(value !is null);
     assert(
-        *cast(void**) cast(void*) value is null,
-        "ordinary guest class storage must remain zeroed",
+        *cast(void**) cast(void*) value !is null,
+        "ordinary guest class storage must have a native vptr",
     );
+
+    auto classInfo = value.classinfo;
+    assert(classInfo !is null);
+    assert(classInfo.name.endsWith(".Plain"), classInfo.name);
+    assert(value.toString.endsWith(".Plain"));
 }
 
 @("classConstructionBindsThisForDependentFieldAssignments.Interpreter")

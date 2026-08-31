@@ -95,6 +95,8 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
         isIntegralSize, storeValue, TypeFacts;
+    import object: Error, Exception, Throwable, TypeInfo_Class;
+    import dmd.root.string: toDString;
     import dmd.astenums:
         Tarray, Tbool, Tclass, Tdelegate, Tfloat32, Tfloat64, Tnoreturn,
         Tint64, Tpointer, Tsarray, Tuns32, Tuns8, Tvoid;
@@ -134,6 +136,13 @@ extern(C++) private final class Evaluator: Visitor {
     // declaration beside each object so a catch can match the actual
     // derived class after the reference has been widened.
     private ClassDeclaration[void*] _classes;
+    private struct GuestClassRuntime {
+        ClassDeclaration declaration;
+        TypeInfo_Class typeInfo;
+        void*[] vtable;
+    }
+
+    private GuestClassRuntime[] _classRuntime;
     // dmd gives every `arr[... $ ...]` a `lengthVar` declaration for its
     // `$`, which no statement declares and which therefore has no frame
     // slot - and needs none, since the length is a value `visit(IndexExp)`
@@ -2695,7 +2704,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto arguments = expression.arguments;
         if (expression.type.ty == Tclass) {
-            auto classType = expression.newtype.isTypeClass;
+            const classType = expression.newtype.isTypeClass;
             if (classType is null || expression.placement !is null
                     || expression.thisexp !is null)
                 throw new SnakebiteException(
@@ -2703,7 +2712,7 @@ extern(C++) private final class Evaluator: Visitor {
                         "` expression: `", expression.toString, "`"),
                 );
 
-            auto declaration = classType.sym;
+            auto declaration = cast(ClassDeclaration) classType.sym;
             const alignment = declaration.alignsize == 0
                 ? 1 : declaration.alignsize;
             const padding = alignment - 1;
@@ -2721,18 +2730,8 @@ extern(C++) private final class Evaluator: Visitor {
             auto object = cast(ubyte*) allocation.ptr + start;
 
             import core.stdc.string: memset;
-            import object: Exception;
-
             memset(object, 0, declaration.structsize);
-            auto exception = ClassDeclaration.exception;
-            if (exception !is null
-                    && (declaration is exception
-                        || exception.isBaseOf(declaration, null))) {
-                // Native exception constructors dispatch through the vptr;
-                // ordinary guest classes have no native vtable yet.
-                auto prototype = new Exception(null);
-                *cast(void**) object = *cast(void**) cast(void*) prototype;
-            }
+            *cast(void**) object = classRuntimeInfo(declaration).vtbl.ptr;
             initializeClass(declaration, object, expression.loc);
             _classes[object] = declaration;
 
@@ -2797,6 +2796,73 @@ extern(C++) private final class Evaluator: Visitor {
         auto bytes = cast(ubyte*) _place;
         storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
+    }
+
+    private TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
+        if (declaration is ClassDeclaration.object)
+            return typeid(Object);
+
+        foreach (runtime; _classRuntime)
+            if (runtime.declaration is declaration)
+                return runtime.typeInfo;
+
+        import std.conv: text;
+
+        if (hasGuestVirtualDispatch(declaration))
+            throw new SnakebiteException(
+                text("interpreter cannot construct `",
+                    declaration.toPrettyChars,
+                    "`: guest virtual/interface dispatch is not supported"),
+            );
+
+        TypeInfo_Class baseInfo;
+        if (declaration.baseClass is null
+                || declaration.baseClass is ClassDeclaration.object)
+            baseInfo = typeid(Object);
+        else if (declaration.baseClass is ClassDeclaration.throwable)
+            baseInfo = typeid(Throwable);
+        else if (declaration.baseClass is ClassDeclaration.exception
+                || (ClassDeclaration.exception !is null
+                    && ClassDeclaration.exception.isBaseOf(
+                        declaration.baseClass, null)))
+            baseInfo = typeid(Exception);
+        else if (declaration.baseClass is ClassDeclaration.errorException
+                || (ClassDeclaration.errorException !is null
+                    && ClassDeclaration.errorException.isBaseOf(
+                        declaration.baseClass, null)))
+            baseInfo = typeid(Error);
+        else
+            baseInfo = classRuntimeInfo(declaration.baseClass);
+
+        auto typeInfo = new TypeInfo_Class;
+        typeInfo.name = cast(string) declaration.toPrettyChars.toDString;
+        typeInfo.base = baseInfo;
+        typeInfo.vtbl = new void*[baseInfo.vtbl.length];
+        typeInfo.vtbl[] = baseInfo.vtbl[];
+        typeInfo.vtbl[0] = cast(void*) typeInfo;
+        typeInfo.m_init = new byte[](declaration.structsize);
+        *cast(void**) typeInfo.m_init.ptr = typeInfo.vtbl.ptr;
+
+        _classRuntime ~= GuestClassRuntime(
+            declaration,
+            typeInfo,
+            typeInfo.vtbl,
+        );
+        return typeInfo;
+    }
+
+    private bool hasGuestVirtualDispatch(ClassDeclaration declaration) {
+        if (declaration.interfaces.length != 0)
+            return true;
+        if (declaration.baseClass is null
+                || declaration.baseClass is ClassDeclaration.object)
+            return false;
+        if (declaration.vtbl.length != declaration.baseClass.vtbl.length)
+            return true;
+        foreach (i; 0 .. declaration.vtbl.length)
+            if (declaration.vtbl[i] !is declaration.baseClass.vtbl[i])
+                return true;
+        return false;
     }
 
     private void initializeClass(
@@ -3155,7 +3221,8 @@ extern(C++) private final class Evaluator: Visitor {
         if (function_.vthis !is null) {
             if (function_.isThis() !is null) {
                 auto dot = expression.e1.isDotVarExp;
-                auto classDeclaration = function_.isThis().isClassDeclaration;
+                const classDeclaration =
+                    cast(ClassDeclaration) function_.isThis().isClassDeclaration;
                 if (classDeclaration !is null) {
                     if (dot !is null)
                         storeIntegral(
