@@ -50,6 +50,56 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("nested.recursiveGuestCall.factorial." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(
+            backend,
+            q{
+                int factorial(int n) {
+                    if (n <= 1)
+                        return 1;
+                    return n * factorial(n - 1);
+                }
+
+                int main() {
+                    return factorial(6) == 720 ? 0 : 1;
+                }
+            },
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("nested.mutualGuestCall.evenOdd." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(
+            backend,
+            q{
+                int odd(int n);
+
+                int even(int n) {
+                    if (n == 0)
+                        return 1;
+                    return odd(n - 1);
+                }
+
+                int odd(int n) {
+                    if (n == 0)
+                        return 0;
+                    return even(n - 1);
+                }
+
+                int main() {
+                    return even(20) == 1 && odd(21) == 1 ? 0 : 1;
+                }
+            },
+        );
+    }
+}
+
 // A delegate that captures nothing never reads its context word, so
 // `call`, a function with no static chain of its own to `main`, must
 // still be able to run it - the delegate's own body needs nothing from
