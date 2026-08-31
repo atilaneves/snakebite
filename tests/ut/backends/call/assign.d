@@ -4,6 +4,37 @@ module ut.backends.call.assign;
 import ut.backends;
 
 
+@("assign.resultIsLvalue.Interpreter")
+@Tags("Interpreter")
+unittest {
+    117.shouldBeRetOf!(
+        Interpreter,
+        q{
+            int calls;
+            int targetCalls;
+            int value;
+
+            int assigned() {
+                ++calls;
+                return 7;
+            }
+
+            ref int target() {
+                ++targetCalls;
+                return value;
+            }
+
+            int result() {
+                int* address = &(target() = assigned());
+                *address = 7;
+                return targetCalls * 100 + calls * 10 + value;
+            }
+        },
+        "result",
+    );
+}
+
+
 // `2 += 5` leaves 7. The addend is behind a call so the answer cannot be
 // folded before a backend runs.
 static foreach (backend; Matrix!(BytecodeUnconfirmed)) {

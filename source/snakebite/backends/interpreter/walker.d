@@ -1178,6 +1178,10 @@ extern(C++) private final class Evaluator: Visitor {
     // a node this interpreter refuses rather than one it reaches this code
     // with.
     override void visit(AssignExp expression) {
+        assign(expression);
+    }
+
+    private void* assign(AssignExp expression) {
         import core.stdc.string: memcpy;
         import std.conv: text;
 
@@ -1221,6 +1225,7 @@ extern(C++) private final class Evaluator: Visitor {
             evaluate(expression.e2, _type, _facts, target);
         }
         memcpy(_place, target, _facts.size);
+        return target;
     }
 
     private bool supportsStruct(Type type) {
@@ -1318,6 +1323,37 @@ extern(C++) private final class Evaluator: Visitor {
             runForEffect(comma.e1);
             return addressOf(comma.e2);
         }
+
+        // An assignment used as an lvalue first performs the assignment,
+        // then names the storage on its left. DMD uses this form for a
+        // copied aggregate whose postblit is called on the new copy.
+        void* assignmentResultAddress(AssignExp assignment) {
+            const facts = factsOf(target.type);
+            auto result = _frames.push(facts.size, facts.alignment);
+
+            auto savedType = _type;
+            auto savedFacts = _facts;
+            auto savedPlace = _place;
+            scope(exit) {
+                _type = savedType;
+                _facts = savedFacts;
+                _place = savedPlace;
+            }
+
+            _type = target.type;
+            _facts = facts;
+            _place = result.base;
+            return assign(assignment);
+        }
+
+        if (auto blit = target.isBlitExp)
+            return assignmentResultAddress(blit);
+
+        if (auto construct = target.isConstructExp)
+            return assignmentResultAddress(construct);
+
+        if (auto assignment = target.isAssignExp)
+            return assignmentResultAddress(assignment);
 
         if (auto call = target.isCallExp)
             return refCallAddress(call);
