@@ -303,7 +303,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // A plain `=` replaces the target instead of adding to it: `+=` here would
 // leave 7. The initialiser is not the answer either, so a backend that
 // dropped the assignment would disagree as well.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("assign.plain.overwrites." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
