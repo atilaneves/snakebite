@@ -1191,7 +1191,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // for a call run at statement level, whose result (`void` or
     // otherwise) is discarded.
     private void compileCall(CallExp expression, in size_t destOffset) {
-        import dmd.astenums: STC, Tint32, Tvoid;
+        import dmd.astenums: STC, Tvoid;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         if (expression.f is null)
@@ -1201,30 +1201,41 @@ extern(C++) private final class FunctionCompiler: Visitor {
         auto callee = expression.f;
         if (callee.fbody is null || _bytecode.hasNativeSymbol(callee)) {
             auto type = typeFunctionOf(callee);
-            if (type.parameterList.length != 1)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-            auto parameter = type.parameterList[0];
-            const parameterFacts = TypeFacts.of(parameter.type);
-            if ((parameter.storageClass & (STC.out_ | STC.lazy_ | STC.ref_)) != 0
-                    || !parameterFacts.isIntegral
-                    || parameterFacts.size != int.sizeof
-                    || type.next.ty != Tint32)
+            const parameterCount = type.parameterList.length;
+            const argumentCount = expression.arguments is null
+                ? 0
+                : expression.arguments.length;
+            if (argumentCount != parameterCount)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
-            const returnType = type.next;
-            if (destOffset != discardResult
-                    && returnType.ty != Tint32)
+            auto returnType = type.next;
+            const isVoidCallee = returnType is null || returnType.ty == Tvoid;
+            const returnFacts = isVoidCallee
+                ? TypeFacts.init
+                : TypeFacts.of(returnType);
+            if (isVoidCallee && destOffset != discardResult)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
-            const argumentOffset = reserveTemp(parameterFacts);
-            evalInto((*expression.arguments)[0], argumentOffset, int.sizeof);
-            const plan = _bytecode._plans.of(callee);
-            _callSites ~= CallSite(null,
-                [Arg(argumentOffset, 0, int.sizeof)], int.sizeof,
-                plan.nativeAddress);
+            Arg[] args;
+            foreach (i; 0 .. parameterCount) {
+                auto parameter = type.parameterList[i];
+                if (parameter.storageClass & (STC.out_ | STC.lazy_ | STC.ref_))
+                    throw rejection(_function, expression.loc,
+                        expressionText(expression));
+
+                const facts = TypeFacts.of(parameter.type);
+                const argumentOffset = reserveTemp(facts);
+                evalInto((*expression.arguments)[i], argumentOffset, facts.size);
+                args ~= Arg(argumentOffset, 0, facts.size);
+            }
+
+            auto plan = &_bytecode._plans.of(callee);
+            _callSites ~= CallSite(
+                null, args, isVoidCallee ? 0 : returnFacts.size,
+                cast(const(void)*) plan, plan.nativeAddress,
+            );
             emit(&opCall, destOffset, _callSites.length - 1, 0);
             return;
         }

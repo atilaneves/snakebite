@@ -23,6 +23,7 @@ package struct CallSite {
     package const(Function)* callee;
     package Arg[] args;
     package size_t returnWidth;
+    package const(void)* nativePlan;
     package void* nativeAddress;
 }
 
@@ -270,7 +271,7 @@ package const(Instruction)* opCall(
     import core.stdc.string: memcpy;
 
     const site = callSites[pc.source];
-    if (site.nativeAddress !is null) {
+    if (site.nativePlan !is null) {
         assert(site.args.length == 1);
         assert(site.returnWidth == int.sizeof);
         alias Native = extern(C) int function(int);
