@@ -338,12 +338,24 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         // `function_` being resolved only means a declaration was found;
-        // it does not mean this call is safe to run directly. A struct
-        // method's hidden context is covered: `bindFrame` fills its
-        // `this` slot from the call's receiver. A nested function's
-        // context is not: its static chain - the enclosing function's
-        // frame - has no representation in this interpreter, so this
-        // throws loudly instead of running with missing context.
+        // it does not mean this call is safe to run directly. Only a
+        // struct method's hidden context is covered: `bindFrame` fills
+        // its `this` slot with the receiver lvalue's address. A class
+        // method is resolved by dmd to the statically known declaration
+        // even though the call is virtual, so running it here would
+        // silently devirtualize the call and answer from the wrong
+        // declaration.
+        auto aggregate = function_.isThis();
+        if (aggregate !is null && aggregate.isStructDeclaration is null)
+            throw new Exception(
+                text("interpreter cannot call `", function_.toString,
+                    "`: only a struct method's `this` is supported"),
+            );
+
+        // A nested function's context is not covered either: its static
+        // chain - the enclosing function's frame - has no representation
+        // in this interpreter, so this throws loudly instead of running
+        // with missing context.
         if (function_.isNested())
             throw new Exception(
                 text("interpreter cannot call `", function_.toString,

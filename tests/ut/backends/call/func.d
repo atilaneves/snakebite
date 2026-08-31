@@ -99,6 +99,36 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A class method call is virtual, but dmd resolves the `CallExp` to the
+// statically known declaration and leaves dispatch to the backend. The
+// interpreter has no virtual dispatch, so running the resolved
+// declaration would silently devirtualize the call; it must refuse a
+// class method instead, even one that never reads `this`.
+@("method.virtualClass.refused.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        class Talker {
+            int answer() {
+                return 42;
+            }
+        }
+
+        int viaClass() {
+            Talker talker;
+            return talker.answer();
+        }
+    });
+    auto function_ = findFunction(module_, "viaClass");
+
+    int result;
+    (new Interpreter).call(function_, &result, [])
+        .shouldThrow;
+}
+
 static foreach (backend; Matrix!()) {
     @("ret.double." ~ backend.stringof)
     @Tags(backend.stringof)
