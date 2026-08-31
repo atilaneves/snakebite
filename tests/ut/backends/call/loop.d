@@ -4,6 +4,33 @@ module ut.backends.call.loop;
 import ut.backends;
 
 
+// Four iterations and a continued second iteration distinguish `while` from
+// a body that runs once and prove that `continue` returns to the condition.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("loop.whileRepeatsAndContinues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        8.shouldBeRetOf!(
+            backend,
+            q{
+                int sum() {
+                    int i;
+                    int total;
+                    while (i < 4) {
+                        ++i;
+                        if (i == 2)
+                            continue;
+                        total += i;
+                    }
+                    return total;
+                }
+            },
+            "sum",
+        );
+    }
+}
+
+
 static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("loop.forRunsBody." ~ backend.stringof)
     @Tags(backend.stringof)
