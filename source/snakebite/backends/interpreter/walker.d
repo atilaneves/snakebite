@@ -2238,6 +2238,7 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(NewExp expression) {
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
+        import dmd.typesem: defaultInit;
         import std.conv: text;
 
         auto arguments = expression.arguments;
@@ -2250,26 +2251,58 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto elementType = expression.type.nextOf;
         const elementFacts = factsOf(elementType);
-        if (elementType.ty != Tbool && elementType.ty != Tuns32
-                && !supportsStruct(elementType))
-            throw new SnakebiteException(
-                text("interpreter cannot allocate an array of unsupported `",
-                    elementType.toString, "` elements"),
-            );
 
         const length = cast(size_t) asIntegral((*arguments)[0]);
         if (elementFacts.size != 0 && length > size_t.max / elementFacts.size)
             throw new SnakebiteException(
                 text("interpreter cannot allocate `", expression.toString,
-                    "`: its byte size overflows `size_t`"),
+                "`: its byte size overflows `size_t`"),
             );
 
-        auto elements = new ubyte[](length * elementFacts.size);
-        _allocations ~= elements;
+        auto initializer = defaultInit(elementType, expression.loc);
+        if (initializer is null)
+            throw new SnakebiteException(
+                text("interpreter cannot initialize an array of `",
+                    elementType.toString, "`: its `.init` has no expression"),
+            );
+
+        const dataSize = length * elementFacts.size;
+        const padding = elementFacts.alignment - 1;
+        if (dataSize > size_t.max - padding)
+            throw new SnakebiteException(
+                text("interpreter cannot allocate `", expression.toString,
+                    "`: its alignment padding overflows `size_t`"),
+            );
+
+        ubyte* elements;
+        if (dataSize != 0) {
+            auto allocation = new ubyte[](dataSize + padding);
+            _allocations ~= allocation;
+
+            const start = -cast(size_t) allocation.ptr
+                & (elementFacts.alignment - 1);
+            elements = cast(ubyte*) allocation.ptr + start;
+
+            foreach (i; 0 .. length) {
+                try
+                    evaluate(
+                        initializer,
+                        elementType,
+                        elementFacts,
+                        elements + i * elementFacts.size,
+                    );
+                catch (SnakebiteException exception)
+                    throw new SnakebiteException(
+                        text("interpreter cannot initialize an array of `",
+                            elementType.toString, "` from its `.init`: ",
+                            exception.msg),
+                    );
+            }
+        }
 
         auto bytes = cast(ubyte*) _place;
         storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
-        *cast(ubyte**) (bytes + arrayPointerOffset) = elements.ptr;
+        *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
     }
 
     override void visit(StructLiteralExp expression) {
