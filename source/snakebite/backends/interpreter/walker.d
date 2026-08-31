@@ -1533,12 +1533,21 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(AddExp expression) {
         import snakebite.nativelayout: storeIntegral;
 
+        const lhsPointer = expression.e1.type.ty == Tpointer;
+        const rhsPointer = expression.e2.type.ty == Tpointer;
         if (expression.type.ty == Tpointer
-                && expression.e1.type.ty == Tpointer
-                && factsOf(expression.e2.type).isIntegral) {
-        const offset = asIntegral(expression.e2);
-            const result = cast(ubyte*) asPointer(expression.e1)
-                + cast(long) offset;
+                && ((lhsPointer && factsOf(expression.e2.type).isIntegral)
+                    || (rhsPointer && factsOf(expression.e1.type).isIntegral))) {
+            void* pointer;
+            long offset;
+            if (lhsPointer) {
+                pointer = asPointer(expression.e1);
+                offset = asIntegral(expression.e2);
+            } else {
+                offset = asIntegral(expression.e1);
+                pointer = asPointer(expression.e2);
+            }
+            const result = cast(ubyte*) pointer + cast(long) offset;
 
             storeIntegral(_place, cast(size_t) result, _facts.size);
             return;

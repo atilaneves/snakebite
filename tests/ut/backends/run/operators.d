@@ -157,6 +157,53 @@ static foreach (backend; Matrix!(
     }
 }
 
+// Integral-plus-pointer addition uses the same native pointee addressing as
+// pointer-plus-integral addition.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("integralPlusPointerAdditionScalesByPointeeSize." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.string: memcpy;
+
+            struct Writer {
+                private uint[] _values;
+
+                long offset() {
+                    return 1;
+                }
+
+                uint* base() {
+                    return _values.ptr;
+                }
+
+                void copyAtOffset() {
+                    const uint[] value = [cast(uint) 0xaabbccdd];
+
+                    memcpy(
+                        cast(long)offset * 1L + base,
+                        value.ptr,
+                        value.length * uint.sizeof,
+                    );
+                }
+            }
+
+            void main() {
+                auto writer = Writer([
+                    cast(uint) 0x11111111,
+                    cast(uint) 0x22222222,
+                ]);
+                writer.copyAtOffset;
+
+                assert(writer._values[0] == cast(uint) 0x11111111);
+                assert(writer._values[1] == cast(uint) 0xaabbccdd);
+            }
+        });
+    }
+}
+
 // Cerealising and decerealising nonzero bytes through the computed pointer
 // preserves the bytes at the nonzero old length.
 static foreach (backend; Matrix!(
