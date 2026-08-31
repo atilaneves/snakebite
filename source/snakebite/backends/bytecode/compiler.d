@@ -63,7 +63,7 @@ private imported!"snakebite.backends.bytecode.vm".Function compileFunction(
 ) {
     import dmd.astenums: Tint32;
     import snakebite.backends.bytecode.vm:
-        encodeInstruction, Function, Opcode;
+        Function, Instruction, opConstantI32, opReturnI32;
     import snakebite.exception: SnakebiteException;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import std.conv: text;
@@ -115,8 +115,8 @@ private imported!"snakebite.backends.bytecode.vm".Function compileFunction(
 
     return Function(
         [
-            encodeInstruction(Opcode.constantI32, 0),
-            encodeInstruction(Opcode.returnI32, 0),
+            Instruction(&opConstantI32, 0),
+            Instruction(&opReturnI32, 0),
         ],
         [cast(int) integer.toInteger],
         int.sizeof,
