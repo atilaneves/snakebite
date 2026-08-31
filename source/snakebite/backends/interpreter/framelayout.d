@@ -231,7 +231,7 @@ extern(C++) private final class LocalsCollector: Visitor {
     import dmd.statement:
         Catch, CompoundStatement, ExpStatement, ForStatement, IfStatement,
         ImportStatement, ReturnStatement, ScopeStatement, Statement,
-        TryCatchStatement;
+        TryCatchStatement, TryFinallyStatement, UnrolledLoopStatement;
 
     alias visit = Visitor.visit;
 
@@ -251,6 +251,15 @@ extern(C++) private final class LocalsCollector: Visitor {
     }
 
     override void visit(CompoundStatement statement) {
+        if (statement.statements is null)
+            return;
+
+        foreach (child; *statement.statements)
+            if (child !is null)
+                child.accept(this);
+    }
+
+    override void visit(UnrolledLoopStatement statement) {
         if (statement.statements is null)
             return;
 
@@ -302,6 +311,14 @@ extern(C++) private final class LocalsCollector: Visitor {
             if (catch_.handler !is null)
                 catch_.handler.accept(this);
         }
+    }
+
+    override void visit(TryFinallyStatement statement) {
+        if (statement._body !is null)
+            statement._body.accept(this);
+
+        if (statement.finalbody !is null)
+            statement.finalbody.accept(this);
     }
 
     private void collectCatchVariable(Catch catch_) {
