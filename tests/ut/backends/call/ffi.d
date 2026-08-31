@@ -13,6 +13,29 @@ private extern(C) ubyte[] snakebite_ut_dynamic_array() {
 }
 
 
+private int remembered;
+
+
+public extern(C) void snakebite_ut_remember(int value) {
+    remembered = value;
+}
+
+
+public extern(C) int snakebite_ut_recall() {
+    return remembered;
+}
+
+
+public extern(C) int snakebite_ut_add(int left, int right) {
+    return left + right;
+}
+
+
+public extern(C) short snakebite_ut_narrow(byte left, ushort right) {
+    return cast(short) (left + right);
+}
+
+
 // `abs` is declared `extern(C)` with no body: nothing in the guest program
 // implements it, so the only way to run these is to call the real symbol
 // the host process already links against.
@@ -50,6 +73,56 @@ static foreach (backend; Matrix!(
                 int answer() {
                     import core.stdc.stdlib: abs;
                     return abs(7);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// These declarations cover different native signatures through the same
+// guest call syntax. Together they require zero and several parameters,
+// a void result, a discarded result, and narrow native-layout values.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "pragma(mangle) native declarations are not routed through FFI"),
+)) {
+    @("signatures.arityAndDiscard." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_remember")
+                extern(C) void nativeRemember(int);
+                pragma(mangle, "snakebite_ut_recall")
+                extern(C) int nativeRecall();
+                pragma(mangle, "snakebite_ut_add")
+                extern(C) int nativeAdd(int, int);
+
+                int answer() {
+                    nativeRemember(10);
+                    nativeAdd(100, 200);
+                    return nativeAdd(nativeRecall(), 32);
+                }
+            },
+            "answer",
+        );
+    }
+
+    @("signatures.narrowValues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        short(42).shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_narrow")
+                extern(C) short nativeNarrow(byte, ushort);
+
+                short answer() {
+                    return nativeNarrow(byte(-2), ushort(44));
                 }
             },
             "answer",
