@@ -2,6 +2,7 @@ module at.ffi.cost;
 
 
 import unit_threaded;
+import snakebite.ffi: LibffiPlan;
 import snakebite.ffi: PlanCache;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -34,7 +35,7 @@ private alias Native = extern(C) int function(int);
 unittest {
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.algorithm: sort;
-    import std.stdio: writefln;
+    import std.stdio: stderr;
 
     auto guestModule = parseSnippet(q{
         extern(C) int abs(int);
@@ -54,6 +55,8 @@ unittest {
     int argument = -42;
     int result;
     auto direct = cast(Native) &abs;
+    auto libffiEager = new LibffiPlan(function_);
+    auto libffiDeferred = new LibffiPlan(function_, true);
 
     // The slot array is built once, outside both loops: a `[&argument]`
     // literal per iteration would allocate, and that allocation would be
@@ -65,15 +68,23 @@ unittest {
     foreach (i; 0 .. 2_000) {
         cast(void) direct(argument);
         plan.call(&result, slots[]);
+        libffiEager.call(&result, slots[]);
+        libffiDeferred.call(&result, slots[]);
     }
 
     size_t sink;
     double[5] baselines;
     double[5] barriers;
+    double[5] libffiEagerTimes;
+    double[5] libffiDeferredTimes;
     double[5] ratios;
+    double[5] eagerRatios;
+    double[5] deferredRatios;
     foreach (sample; 0 .. ratios.length) {
         auto baselineWatch = StopWatch(AutoStart.no);
         auto barrierWatch = StopWatch(AutoStart.no);
+        auto libffiEagerWatch = StopWatch(AutoStart.no);
+        auto libffiDeferredWatch = StopWatch(AutoStart.no);
         foreach (_; 0 .. n / batch) {
             baselineWatch.start;
             foreach (i; 0 .. batch) {
@@ -88,18 +99,47 @@ unittest {
                 sink += cast(size_t) result;
             }
             barrierWatch.stop;
+
+            libffiEagerWatch.start;
+            foreach (i; 0 .. batch) {
+                libffiEager.call(&result, slots[]);
+                sink += cast(size_t) result;
+            }
+            libffiEagerWatch.stop;
+
+            libffiDeferredWatch.start;
+            foreach (i; 0 .. batch) {
+                libffiDeferred.call(&result, slots[]);
+                sink += cast(size_t) result;
+            }
+            libffiDeferredWatch.stop;
         }
         baselines[sample] = baselineWatch.peek.total!"nsecs"
             / cast(double) n;
         barriers[sample] = barrierWatch.peek.total!"nsecs"
             / cast(double) n;
+        libffiEagerTimes[sample] = libffiEagerWatch.peek.total!"nsecs"
+            / cast(double) n;
+        libffiDeferredTimes[sample] = libffiDeferredWatch.peek.total!"nsecs"
+            / cast(double) n;
         ratios[sample] = barriers[sample] / baselines[sample];
+        eagerRatios[sample] = libffiEagerTimes[sample] / baselines[sample];
+        deferredRatios[sample] = libffiDeferredTimes[sample]
+            / baselines[sample];
     }
     sort(baselines[]);
     sort(barriers[]);
+    sort(libffiEagerTimes[]);
+    sort(libffiDeferredTimes[]);
     sort(ratios[]);
-    writefln("  baseline %5.2f ns, barrier %5.2f ns, ratio %4.1fx",
-        baselines[2], barriers[2], ratios[2]);
+    sort(eagerRatios[]);
+    sort(deferredRatios[]);
+    stderr.writefln(
+        "  baseline %5.2f ns, arity %5.2f ns (%4.1fx), " ~
+        "libffi eager %5.2f ns (%4.1fx), libffi deferred %5.2f ns (%4.1fx)",
+        baselines[2], barriers[2], ratios[2], libffiEagerTimes[2],
+        eagerRatios[2], libffiDeferredTimes[2], deferredRatios[2],
+    );
 
     result.should == 42;
     assert(sink != 0, "the baseline loop was optimised away");

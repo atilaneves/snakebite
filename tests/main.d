@@ -40,6 +40,7 @@ int main(string[] args) {
         "ut.backends.layout",
         "ut.backends.program",
         "ut.ffi.plan",
+        "ut.ffi.libffi",
         "ut.ffi.symbol",
         "ut.framestack",
         "ut.bench.report",
