@@ -38,6 +38,7 @@ int main(string[] args) {
         "ut.backends.interpreter.cost",
         "ut.backends.interpreter.framelayout",
         "ut.backends.program",
+        "ut.backends.bytecode",
         "ut.ffi.plan",
         "ut.ffi.cost",
         "ut.framestack",
