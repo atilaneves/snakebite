@@ -85,6 +85,23 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
+// `writeln` initializes a scoped `File` temporary from the native
+// `trustedStdout` value before it writes. This is the public library path
+// used by the rt-simple runner's final summary.
+@("temporary.nativeAggregateFeedsCommaLvalue.Interpreter")
+@Tags("Interpreter")
+unittest {
+    0.shouldBeStatusOf!(Interpreter, q{
+        import std.stdio: writeln;
+
+        void main() {
+            size_t total = 23;
+            size_t failed;
+            writeln(total, " test(s) run, ", failed, " failed.");
+        }
+    });
+}
+
 // Taking the address of a ref-returning call must evaluate the call once and
 // keep the returned alias, not a copy of its value.
 @("ref.return.addressEvaluatedOnce.Interpreter")
