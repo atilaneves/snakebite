@@ -446,11 +446,23 @@ private final class FunctionCompiler {
 
     private void compileWhile(WhileStatement statement) {
         const loopStart = _instructions.length;
-        const conditionOffset = compileCondition(statement.condition);
-        const width = conditionWidth(statement.condition);
-
-        const branchIndex = _instructions.length;
-        emit(&opBranchFalse, conditionOffset, 0, width);
+        // A condition that can never be false - `while (1)` - is never
+        // guarded: the check itself would still compile correctly, but
+        // its false branch would then target the position right after
+        // this loop's own last instruction, which exists only when
+        // something follows the loop in source. Nothing does when a
+        // trivially-true loop is a function's own last statement (its
+        // body returns unconditionally instead), and a branch aimed
+        // one past the last instruction is exactly what `resolveBranches`
+        // exists to catch.
+        const guarded = !isTriviallyTrueCondition(statement.condition);
+        size_t branchIndex = size_t.max;
+        if (guarded) {
+            const conditionOffset = compileCondition(statement.condition);
+            const width = conditionWidth(statement.condition);
+            branchIndex = _instructions.length;
+            emit(&opBranchFalse, conditionOffset, 0, width);
+        }
 
         _loops ~= LoopContext(loopStart);
         compileStatement(statement._body);
@@ -459,20 +471,23 @@ private final class FunctionCompiler {
         _finished = false;
 
         emit(&opJump, loopStart, 0, 0);
-        _instructions[branchIndex].source = _instructions.length;
+        if (branchIndex != size_t.max)
+            _instructions[branchIndex].source = _instructions.length;
 
-        _finished = isTriviallyTrueCondition(statement.condition)
-            && bodyFinished;
+        _finished = !guarded && bodyFinished;
     }
 
     private void compileFor(ForStatement statement) {
         if (statement._init !is null)
             compileStatement(statement._init);
 
-        const hasCondition = statement.condition !is null;
+        // See `compileWhile`'s own doc for why a trivially-true condition
+        // is never guarded.
+        const guarded = statement.condition !is null
+            && !isTriviallyTrueCondition(statement.condition);
         const conditionIndex = _instructions.length;
         size_t branchIndex = size_t.max;
-        if (hasCondition) {
+        if (guarded) {
             const conditionOffset = compileCondition(statement.condition);
             const width = conditionWidth(statement.condition);
             branchIndex = _instructions.length;
@@ -496,8 +511,7 @@ private final class FunctionCompiler {
         if (branchIndex != size_t.max)
             _instructions[branchIndex].source = _instructions.length;
 
-        _finished = isTriviallyTrueCondition(statement.condition)
-            && bodyFinished;
+        _finished = !guarded && bodyFinished;
     }
 
     private void compileContinue(ContinueStatement statement) {

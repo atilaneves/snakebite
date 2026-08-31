@@ -6,7 +6,7 @@ import ut.backends;
 
 // Four iterations and a continued second iteration distinguish `while` from
 // a body that runs once and prove that `continue` returns to the condition.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("loop.whileRepeatsAndContinues." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -31,7 +31,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 }
 
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("loop.forRunsBody." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -50,7 +50,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("loop.forContinueAppliesToNearestLoop." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -125,7 +125,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // Three iterations add up to 3. A body run once, or an `i` that never
 // increments, gives a different answer or no answer at all. `one` is behind
 // a call so the total cannot be folded before a backend runs.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("loop.forRepeatsAndTerminates." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -155,7 +155,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // separate, narrower list of statement kinds a local can be found in.
 // 0 + 1 + 2 is 3; a `step` stuck at its first value or never added in
 // would give a different answer.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("loop.localInBody." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -176,7 +176,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("loop.commaInitialiser." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

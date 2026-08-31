@@ -66,7 +66,7 @@ unittest {
 
 // `2 += 5` leaves 7. The addend is behind a call so the answer cannot be
 // folded before a backend runs.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("assign.addAssign.local." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -253,7 +253,7 @@ static foreach (backend; Matrix!(
 
 // Applied twice, so a backend that wrote the addend over the target instead
 // of adding to it would disagree: the answer differs from the last addend.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("assign.addAssign.accumulates." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -279,7 +279,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 
 // `sum += n` evaluates to the new sum. Every other test here uses `+=` as a
 // statement, where that value is discarded.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("assign.addAssign.isAnExpression." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -328,7 +328,7 @@ static foreach (backend; Matrix!()) {
 // `sum = n` evaluates to the assigned value and leaves it in `sum`. Both
 // halves are added up, so a backend that yielded the old value and one that
 // never wrote `sum` each return 5 rather than 10.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("assign.plain.isAnExpression." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
