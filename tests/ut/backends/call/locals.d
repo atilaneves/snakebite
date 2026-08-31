@@ -4,7 +4,7 @@ module ut.backends.call.locals;
 import ut.backends;
 
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("locals.literalInit." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -24,7 +24,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("locals.callInit." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -49,7 +49,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("locals.noInitialiser." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -73,6 +73,7 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible, "CTFE can't mutate a static local"),
 )) {
     @("locals.staticPersistsAcrossCalls." ~ backend.stringof)

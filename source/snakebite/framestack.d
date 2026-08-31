@@ -4,6 +4,9 @@ module snakebite.framestack;
 private:
 
 
+public enum defaultFrameCapacity = 1024 * 1024;
+
+
 // The frame stack every guest call reserves its parameter frame from,
 // bump-allocated and popped LIFO. `push` is the only way to get bytes from
 // it, and the `Frame` it returns is the only way to give them back: a
@@ -24,7 +27,6 @@ private:
 // with the GC for its whole lifetime, although `Mallocator` owns it.
 public struct FrameStack {
     import core.memory: GC;
-    import snakebite.nativelayout: alignUp;
     import std.experimental.allocator.building_blocks.region: Region;
     import std.experimental.allocator.mallocator: Mallocator;
 
@@ -109,7 +111,7 @@ public struct FrameStack {
                     "to ", Mallocator.alignment, " byte(s)"),
             );
 
-        const alignedUsed = alignUp(mark, alignment);
+        const alignedUsed = roundUp(mark, alignment);
         const padding = alignedUsed - mark;
 
         auto block = _region.allocate(padding + size);
@@ -141,5 +143,15 @@ public struct FrameStack {
         auto block = _base[mark .. used];
         const popped = _region.deallocate(block);
         assert(popped, "frame stack popped out of LIFO order");
+    }
+
+    // The buffer base is already platform-aligned. This only aligns an
+    // allocator offset; DMD's aggregate member-layout rules do not apply.
+    private static size_t roundUp(
+        in size_t offset,
+        in uint alignment,
+    ) @safe @nogc nothrow pure {
+        const remainder = offset % alignment;
+        return remainder == 0 ? offset : offset + alignment - remainder;
     }
 }

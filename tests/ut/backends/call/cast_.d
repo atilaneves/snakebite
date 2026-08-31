@@ -7,7 +7,7 @@ import ut.backends;
 // `5_000_000_000` needs 33 bits, so its low 32 bits - what `cast(int)`
 // keeps - differ from the value itself. An implementation that clamps or
 // saturates instead of truncating fails this.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("cast.narrowing.truncates." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -30,7 +30,7 @@ static foreach (backend; Matrix!()) {
 // Widening a signed operand copies its sign bit into the new high bits, so
 // `cast(long)` of a negative `int` stays negative. An implementation that
 // zero-extends instead answers a large positive value.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("cast.widening.signed." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -53,7 +53,7 @@ static foreach (backend; Matrix!()) {
 // Widening an unsigned operand fills the new high bits with zero, so
 // `cast(long)` of `uint.max` is the same positive value, not -1. An
 // implementation that sign-extends instead answers -1.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("cast.widening.unsigned." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -76,7 +76,7 @@ static foreach (backend; Matrix!()) {
 // The shape the array code needs: a `size_t` (the array's own length,
 // 8 bytes) narrowed to an `int` (4 bytes). The string literal isolates the
 // cast from array support, which is exercised on its own elsewhere.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("cast.narrowLength." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -103,6 +103,7 @@ static foreach (backend; Matrix!()) {
 // copy: a 1-byte element would leave the length unchanged and the two
 // implementations indistinguishable.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "dmd's CTFE keeps a `cast(void[])` array's length as an " ~
         "element count, not a byte count - pinned below"),
@@ -156,7 +157,7 @@ unittest {
 // semantic analysis, so a literal operand would never reach a backend. An
 // implementation that converts through a wider intermediate and rounds
 // once more, or that reinterprets the operand's bits, fails this.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("cast.ulongToFloat.roundsToFloatPrecision." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -180,7 +181,7 @@ static foreach (backend; Matrix!()) {
 // significand holds `2^24 + 1` exactly, so the conversion is exact. An
 // implementation that converts every floating destination at `float`
 // precision fails this while passing the `float` test.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("cast.ulongToDouble.isExact." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -207,7 +208,7 @@ static foreach (backend; Matrix!()) {
 // `1.5 - 1.0` is exact at every precision, so the expectation does not
 // depend on rounding. The operand comes from a function call because dmd
 // folds literal-only arithmetic during semantic analysis.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("cast.ulongToFloat.thenDivideAndSubtract." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -230,7 +231,7 @@ static foreach (backend; Matrix!()) {
 // As above, with a `double` destination: the conversions of `1_000_000`
 // and `1` follow the cast's own type, so the whole chain runs at `double`
 // precision instead.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("cast.ulongToDouble.thenDivideAndSubtract." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -254,7 +255,7 @@ static foreach (backend; Matrix!()) {
 // narrowing takes the operand's low byte instead of comparing it against
 // zero. `256`'s low byte is `0`, which a truncating implementation would
 // store as `false` - D specifies `cast(bool) 256` as `true`.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("cast.bool.nonZeroIsTrue." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

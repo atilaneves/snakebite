@@ -78,7 +78,7 @@ import dmd.visitor: Visitor;
 extern(C++) private final class Evaluator: Visitor {
     import snakebite.backends.backend: Program;
     import snakebite.backends.interpreter.framelayout: FrameLayout;
-    import snakebite.framestack: FrameStack;
+    import snakebite.framestack: FrameStack, defaultFrameCapacity;
     import snakebite.ffi: PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
@@ -193,7 +193,7 @@ extern(C++) private final class Evaluator: Visitor {
     // overloads need that linkage.
     extern(D) public this(const Program program) {
         _program = program;
-        _frames = FrameStack(1024 * 1024);
+        _frames = FrameStack(defaultFrameCapacity);
     }
 
     // Runs `function_` against a fresh top-level frame, mirroring the

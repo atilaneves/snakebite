@@ -13,6 +13,7 @@ import ut.backends;
 // the table from those run-time values, rather than from anything fixed
 // at compile time.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -40,6 +41,7 @@ static foreach (backend; Matrix!(
 // A struct key hashes and compares by its contents, so two separately
 // built strings with the same characters are the same key.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {

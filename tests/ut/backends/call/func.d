@@ -24,6 +24,7 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run mutable struct methods through interpreter frames"),
 )) {
@@ -132,7 +133,7 @@ unittest {
         .shouldThrow;
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("ret.double." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -148,7 +149,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("call." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -175,7 +176,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("call.alignment." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -217,7 +218,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("call.fallthrough." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -239,7 +240,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("call.unreachableAfterReturn." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -264,7 +265,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("call.void." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

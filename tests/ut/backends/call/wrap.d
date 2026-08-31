@@ -2,7 +2,7 @@ module ut.backends.call.wrap;
 
 import ut.backends;
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("wrap.addAssignWrapsAtTargetWidth." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

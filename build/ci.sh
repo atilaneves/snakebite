@@ -8,5 +8,6 @@ if [[ ! -f build.ninja ]]; then
     dub run reggae --compiler="${DC:-ldc}" -- -b ninja
 fi
 
+build/check-bytecode-vm.sh
 ninja bin/ut && bin/ut
 build/benches.sh

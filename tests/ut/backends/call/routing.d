@@ -20,7 +20,7 @@ import std.algorithm.searching: canFind, startsWith;
 // exists in this process, so answering 42 at all is only possible by
 // walking its body - a name-based rule sending `_d_*` spellings to native
 // execution could not.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("rootOwned.underscoreDName." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

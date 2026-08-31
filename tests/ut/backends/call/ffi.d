@@ -24,6 +24,7 @@ private extern(C) ubyte[] snakebite_ut_dynamic_array() {
 // a callee that merely negates, so one argument is positive: `abs` must
 // leave it alone.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {
     @("abs.negative." ~ backend.stringof)
@@ -83,6 +84,7 @@ unittest {
 }
 
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
     Omit!(Interpreter, Because.unconfirmed,
         "needs pointers, casts, slicing and slice assignment first"),

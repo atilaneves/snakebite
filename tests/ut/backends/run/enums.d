@@ -12,6 +12,7 @@ import ut.backends;
 // `with` on an enum type brings its members into scope, so they resolve
 // unqualified.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {

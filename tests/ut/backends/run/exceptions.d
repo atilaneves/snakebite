@@ -14,6 +14,7 @@ import ut.backends;
 // catches a derived exception while a `catch` naming a sibling class does
 // not.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -53,6 +54,7 @@ static foreach (backend; Matrix!(
 // `throw` is an expression, so it can be a branch of a ternary whose other
 // branch has a value.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {

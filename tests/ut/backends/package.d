@@ -1,6 +1,7 @@
 module ut.backends;
 
 public import ut;
+public import snakebite.backends.bytecode: Bytecode;
 public import snakebite.backends.ctfe: Ctfe;
 public import snakebite.backends.interpreter: Interpreter;
 public import std.meta: AliasSeq;
@@ -61,6 +62,8 @@ public struct Omit(B, Because why, string note = "") {
     public enum reason = why;
     public enum note_ = note;
 }
+
+public alias BytecodeUnconfirmed = Omit!(Bytecode, Because.unconfirmed);
 
 // The backends a test runs on: `TestBackends` minus every `Omit!(...)`.
 // Usable directly as `static foreach (backend; Matrix!(...))`.

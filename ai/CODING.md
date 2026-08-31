@@ -47,6 +47,9 @@
   may import another backend's package, and vice versa. Within a single
   backend package, modules can and should import each other, including
   package-private code.
+* Only `snakebite.backends.bytecode.compiler` may import DMD frontend
+  modules. The bytecode VM and all project modules that it imports must
+  compile without DMD frontend import paths.
 
 ## Runtime semantics
 

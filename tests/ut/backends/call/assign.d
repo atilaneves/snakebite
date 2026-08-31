@@ -6,7 +6,7 @@ import ut.backends;
 
 // `2 += 5` leaves 7. The addend is behind a call so the answer cannot be
 // folded before a backend runs.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("assign.addAssign.local." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -28,7 +28,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("assign.dynamicArrayLengthGrowsInPlace." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -47,7 +47,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("assign.dynamicArrayStructFieldLength." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -72,7 +72,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("assign.dynamicArrayElementCompound." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -91,7 +91,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("assign.dynamicArrayStructFieldCompound." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -117,6 +117,7 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot call native memcpy"),
 )) {
     @("assign.cerealMemcpyThroughPointerAndRef." ~ backend.stringof)
@@ -161,6 +162,7 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot hold mutable static state across calls"),
 )) {
@@ -191,7 +193,7 @@ static foreach (backend; Matrix!(
 
 // Applied twice, so a backend that wrote the addend over the target instead
 // of adding to it would disagree: the answer differs from the last addend.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("assign.addAssign.accumulates." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -217,7 +219,7 @@ static foreach (backend; Matrix!()) {
 
 // `sum += n` evaluates to the new sum. Every other test here uses `+=` as a
 // statement, where that value is discarded.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("assign.addAssign.isAnExpression." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -241,7 +243,7 @@ static foreach (backend; Matrix!()) {
 // A plain `=` replaces the target instead of adding to it: `+=` here would
 // leave 7. The initialiser is not the answer either, so a backend that
 // dropped the assignment would disagree as well.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("assign.plain.overwrites." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -266,7 +268,7 @@ static foreach (backend; Matrix!()) {
 // `sum = n` evaluates to the assigned value and leaves it in `sum`. Both
 // halves are added up, so a backend that yielded the old value and one that
 // never wrote `sum` each return 5 rather than 10.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("assign.plain.isAnExpression." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

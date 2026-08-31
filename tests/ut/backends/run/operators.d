@@ -12,6 +12,7 @@ import ut.backends;
 // Shifting a value into bytes and back reconstructs it, which pins the
 // shift amounts and the truncation each `cast(ubyte)` does.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -77,6 +78,7 @@ static foreach (backend; Matrix!(
 // requested element offset, so the cast, multiplication, and pointer
 // addition must all be evaluated by the backend.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("pointerCastAndAdditionCopiesAtOffset." ~ backend.stringof)
@@ -120,6 +122,7 @@ static foreach (backend; Matrix!(
 // Pointer arithmetic uses the pointee size, not byte addressing, for a
 // dynamic array whose elements are wider than one byte.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("pointerCastAndAdditionScalesByPointeeSize." ~ backend.stringof)
@@ -160,6 +163,7 @@ static foreach (backend; Matrix!(
 // Integral-plus-pointer addition uses the same native pointee addressing as
 // pointer-plus-integral addition.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("integralPlusPointerAdditionScalesByPointeeSize." ~ backend.stringof)
@@ -207,6 +211,7 @@ static foreach (backend; Matrix!(
 // Cerealising and decerealising nonzero bytes through the computed pointer
 // preserves the bytes at the nonzero old length.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("cerealiseDecerealiseRoundTripsAtOffset." ~ backend.stringof)
@@ -261,6 +266,7 @@ static foreach (backend; Matrix!(
 // A pointer of another type to the same storage reads and writes those
 // bytes, so a write through it is visible through the original.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -281,6 +287,7 @@ static foreach (backend; Matrix!(
 // An op-assign whose left side is a `ref`-returning call writes through to
 // the referent, not to a temporary.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
