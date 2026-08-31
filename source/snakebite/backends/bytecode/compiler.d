@@ -4,6 +4,7 @@ module snakebite.backends.bytecode.compiler;
 private:
 
 import dmd.visitor: Visitor;
+import snakebite.ffi: PlanCache;
 
 
 public final class Bytecode: imported!"snakebite.backends.backend".Backend {
@@ -14,6 +15,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.framestack: defaultFrameCapacity;
 
     private Vm _vm;
+    private PlanCache _plans;
     // Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
     // recursion - embeds this pointer in its `CallSite` before the body
@@ -56,6 +58,13 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         throw new SnakebiteException(
             "eval not implemented for the bytecode backend yet",
         );
+    }
+
+    package bool hasNativeSymbol(FuncDeclaration function_) {
+        import dmd.mangle: mangleExact;
+        import std.string: fromStringz;
+
+        return _plans.resolve(mangleExact(function_).fromStringz) !is null;
     }
 
     // `function_`'s compiled form, compiling it - and, transitively,
@@ -1185,7 +1194,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // for a call run at statement level, whose result (`void` or
     // otherwise) is discarded.
     private void compileCall(CallExp expression, in size_t destOffset) {
-        import dmd.astenums: Tvoid;
+        import dmd.astenums: STC, Tint32, Tvoid;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         if (expression.f is null)
@@ -1193,6 +1202,35 @@ extern(C++) private final class FunctionCompiler: Visitor {
                 expressionText(expression));
 
         auto callee = expression.f;
+        if (callee.fbody is null || _bytecode.hasNativeSymbol(callee)) {
+            auto type = typeFunctionOf(callee);
+            if (type.parameterList.length != 1)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+            auto parameter = type.parameterList[0];
+            const parameterFacts = TypeFacts.of(parameter.type);
+            if ((parameter.storageClass & (STC.out_ | STC.lazy_ | STC.ref_)) != 0
+                    || !parameterFacts.isIntegral
+                    || parameterFacts.size != int.sizeof
+                    || type.next.ty != Tint32)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const returnType = type.next;
+            if (destOffset != discardResult
+                    && returnType.ty != Tint32)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const argumentOffset = reserveTemp(parameterFacts);
+            evalInto((*expression.arguments)[0], argumentOffset, int.sizeof);
+            const plan = _bytecode._plans.of(callee);
+            _callSites ~= CallSite(null,
+                [Arg(argumentOffset, 0, int.sizeof)], int.sizeof,
+                plan.nativeAddress);
+            emit(&opCall, destOffset, _callSites.length - 1, 0);
+            return;
+        }
         auto calleeFunction = _bytecode.compileFunction(callee);
         auto calleeLayout = FrameLayout.of(callee);
         auto calleeType = typeFunctionOf(callee);
