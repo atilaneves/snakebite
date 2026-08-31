@@ -160,6 +160,30 @@ unittest {
     run.shouldThrow;
 }
 
+@("failureMessage.fromClassField.survivesArrayAppend.Interpreter")
+@Tags("Interpreter")
+unittest {
+    true.shouldBeRetOf!(
+        Interpreter,
+        q{
+            bool fail() {
+                return false;
+            }
+
+            bool result() {
+                string[] messages;
+                try
+                    assert(fail());
+                catch (Throwable throwable)
+                    messages ~= throwable.msg;
+
+                return messages.length == 1 && messages[0].length != 0;
+            }
+        },
+        "result",
+    );
+}
+
 // `AssertError` derives from `Error`, not from `Exception`, so a
 // `catch(Exception)` never matches a failing assertion: the error keeps
 // unwinding to the `catch(AssertError)` outside it.

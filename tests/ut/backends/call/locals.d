@@ -89,6 +89,31 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
+@("locals.dynamicArrayInitialisesAcrossCalls.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        size_t appendOne() {
+            string[] messages;
+            messages ~= "failure";
+            return messages.length;
+        }
+    });
+    auto function_ = findFunction(module_, "appendOne");
+    auto interpreter = interpreter(module_);
+
+    size_t first;
+    interpreter.call(function_, &first, []);
+    first.shouldEqual(1);
+
+    size_t second;
+    interpreter.call(function_, &second, []);
+    second.shouldEqual(1);
+}
+
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible, "CTFE can't mutate a static local"),

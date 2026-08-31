@@ -528,6 +528,24 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("arrays.append.dynamicArrayElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(7).shouldBeRetOf!(
+            backend,
+            q{
+                size_t messageLength() {
+                    string[] messages;
+                    messages ~= "failure";
+                    return messages[0].length;
+                }
+            },
+            "messageLength",
+        );
+    }
+}
+
 // Appending one element at a time past the literal's own capacity forces
 // at least one real reallocation - `_d_arrayappendcTX`'s own lowering
 // asks the GC to grow the block in place first and only calls

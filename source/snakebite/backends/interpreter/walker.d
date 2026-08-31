@@ -89,7 +89,7 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.nativelayout:
         isIntegralSize, storeValue, TypeFacts;
     import dmd.astenums:
-        Tarray, Tbool, Tdelegate, Tfloat32, Tfloat64, Tnoreturn,
+        Tarray, Tbool, Tclass, Tdelegate, Tfloat32, Tfloat64, Tnoreturn,
         Tint64, Tpointer, Tsarray, Tuns32, Tuns8, Tvoid;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
@@ -1311,9 +1311,9 @@ extern(C++) private final class Evaluator: Visitor {
         // type with a destructor or an overloaded assignment, running
         // either as a plain store would be a wrong answer, not a
         // refusal, since D specifies construction and assignment
-        // differently there - so both stay refused in general. An
-        // integral target has neither: constructing, blitting and
-        // assigning one are the same bytes written the same way, which
+        // differently there - so both stay refused in general. Integral
+        // and dynamic-array targets have neither: constructing, blitting
+        // and assigning one are the same bytes written the same way, which
         // is exactly the shape `_d_arrayappendcTX_`'s own lowering
         // writes, on the `~=` lowering's own chain, into the slot it
         // just extended (`a[a.length - 1] = 2`, dmd's own `construct`
@@ -1328,8 +1328,7 @@ extern(C++) private final class Evaluator: Visitor {
         // a postblit.
         const isStructBlit = structType !is null
             && expression.isBlitExp !is null;
-        const isSupportedArray = _type.ty == Tarray
-            && expression.e1.isDotVarExp !is null;
+        const isSupportedArray = _type.ty == Tarray;
         if (structType !is null && !isSupportedStruct && !isStructBlit)
             throw new SnakebiteException(
                 text("interpreter cannot assign unsupported struct `",
@@ -1519,7 +1518,7 @@ extern(C++) private final class Evaluator: Visitor {
                         "`: only a struct field is supported"),
                 );
 
-            return cast(ubyte*) addressOf(dot.e1) + field.offset;
+            return cast(ubyte*) fieldBaseAddress(dot.e1) + field.offset;
         }
 
         throw new SnakebiteException(
@@ -2186,13 +2185,9 @@ extern(C++) private final class Evaluator: Visitor {
         memcpy(_place, asPointer(expression.e1), _facts.size);
     }
 
-    // `info.base`: a struct field read. `__typeAttrs`, on the `~=`
-    // lowering's own chain, reads two fields of the `BlkInfo` `GC.query`
-    // hands back this way. `expression.e1` is an lvalue for every use
-    // this needs (a local struct variable), so `addressOf` already finds
-    // its storage; the field's own byte offset within it is
-    // `expression.var.offset`, laid out by dmd's own struct semantics,
-    // not recomputed here.
+    // `info.base`: an aggregate field read. The field's own byte offset is
+    // `expression.var.offset`, laid out by dmd's own native semantics, not
+    // recomputed here.
     override void visit(DotVarExp expression) {
         import core.stdc.string: memcpy;
         import std.conv: text;
@@ -2201,7 +2196,7 @@ extern(C++) private final class Evaluator: Visitor {
         if (field is null)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
-                    "`: only a struct field read is supported"),
+                    "`: only a field read is supported"),
             );
 
         // `field.offset` below is a whole-byte offset. A bitfield is also
@@ -2215,8 +2210,20 @@ extern(C++) private final class Evaluator: Visitor {
                     "`: reading a bitfield is not supported"),
             );
 
-        auto base = cast(ubyte*) addressOf(expression.e1);
+        auto base = cast(ubyte*) fieldBaseAddress(expression.e1);
         memcpy(_place, base + field.offset, _facts.size);
+    }
+
+    private void* fieldBaseAddress(Expression aggregate) {
+        if (aggregate.type.ty != Tclass)
+            return addressOf(aggregate);
+
+        const facts = factsOf(aggregate.type);
+        assert(facts.size == size_t.sizeof,
+            "a class reference is not one word on this target");
+        void* object;
+        evaluate(aggregate, aggregate.type, facts, &object);
+        return object;
     }
 
     // `typeid(int)`: a class reference to a singleton dmd's glue layer -
