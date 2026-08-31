@@ -4,30 +4,61 @@ module snakebite.backends.bytecode.vm;
 private:
 
 
+// One argument a call instruction copies from the caller's frame into the
+// callee's, at compile time already resolved to both sides' byte offsets
+// and the width to copy - the same three numbers `opCopy` needs for a
+// same-frame copy, just crossing into a frame that does not exist yet
+// when the call instruction runs.
+package struct Arg {
+    package size_t callerOffset;
+    package size_t calleeOffset;
+    package size_t width;
+}
+
+
+// One call site: which compiled function it calls, the arguments to hand
+// it, and the width of the value it hands back (`0` for a `void` callee,
+// which `opCall` then never copies out of the scratch return buffer).
+package struct CallSite {
+    package const(Function)* callee;
+    package Arg[] args;
+    package size_t returnWidth;
+}
+
+
 package struct Instruction {
     public alias Handler = extern(C) void function(
         const(Instruction)* pc,
         ubyte* frame,
         void* returnPlace,
-        scope const int[] constants,
-    ) @nogc nothrow;
+        scope const long[] constants,
+        scope const CallSite[] callSites,
+        FrameStack* frames,
+    );
 
     package Handler handler;
-    package int operand;
+    // What each opcode's three operands mean is decided by the opcode
+    // alone: a frame offset, a width in bytes, a constant or call-site
+    // index - never dmd's own numeric types, so this VM has none of them
+    // to import.
+    package size_t a;
+    package size_t b;
+    package size_t c;
 }
 
 
 package struct Function {
     package Instruction[] instructions;
-    package int[] constants;
+    package long[] constants;
+    package CallSite[] callSites;
     package size_t frameSize;
     package uint frameAlignment;
 }
 
 
-package struct Vm {
-    import snakebite.framestack: FrameStack;
+import snakebite.framestack: FrameStack;
 
+package struct Vm {
     private FrameStack _frames;
 
     @disable this();
@@ -49,31 +80,143 @@ package struct Vm {
             function_.frameAlignment,
         );
         auto pc = function_.instructions.ptr;
-        pc.handler(pc, frame.base, returnPlace, function_.constants);
+        pc.handler(
+            pc, frame.base, returnPlace, function_.constants,
+            function_.callSites, &_frames,
+        );
     }
 }
 
 
-package extern(C) void opConstantI32(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const int[] constants,
+// Stores `value`'s low `width` bytes at `place`, laid out the way compiled
+// D lays out an integral of that width. The VM's own copy of what
+// `snakebite.nativelayout.storeIntegral` does: that module reaches into
+// dmd for `TypeFacts`/`storeValue`, and importing it here would pull dmd
+// frontend modules into a module that must compile without them. Widths
+// are the only numeric fact this VM ever receives, from the compiler that
+// already asked dmd the question - never a dmd `Type` itself.
+private void storeWidth(
+    void* place,
+    in long value,
+    in size_t width,
 ) @nogc nothrow {
-    *cast(int*) frame = constants[pc.operand];
-    const next = pc + 1;
-    next.handler(next, frame, returnPlace, constants);
+    switch (width) {
+        case 1: *cast(ubyte*) place = cast(ubyte) value; return;
+        case 2: *cast(ushort*) place = cast(ushort) value; return;
+        case 4: *cast(uint*) place = cast(uint) value; return;
+        case 8: *cast(ulong*) place = cast(ulong) value; return;
+        default: assert(0, "no native layout for this width");
+    }
 }
 
 
-package extern(C) void opReturnI32(
-    const(Instruction)*,
+// Writes `constants[pc.c]`, narrowed to `pc.b` bytes, at `frame + pc.a`.
+//
+// Not `@nogc nothrow`: a tail call through `Instruction.Handler` can reach
+// `opCall`, which can throw (a frame stack overflow) - and the handler
+// alias itself is declared without those attributes for exactly that
+// reason, so every handler that tail-calls through it, this one included,
+// has to go without them too even though nothing this handler itself does
+// allocates or throws.
+package extern(C) void opConstant(
+    const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
-    scope const int[],
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    FrameStack* frames,
+) {
+    storeWidth(frame + pc.a, constants[pc.c], pc.b);
+    const next = pc + 1;
+    next.handler(next, frame, returnPlace, constants, callSites, frames);
+}
+
+
+// Copies `pc.c` bytes from `frame + pc.b` to `frame + pc.a`: a parameter
+// or local read into another slot, or an assignment's right side already
+// evaluated into the target's own slot copied out to wherever the
+// assignment's value is also needed. Not `@nogc nothrow`; see `opConstant`.
+package extern(C) void opCopy(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    FrameStack* frames,
+) {
+    import core.stdc.string: memcpy;
+
+    memcpy(frame + pc.a, frame + pc.b, pc.c);
+    const next = pc + 1;
+    next.handler(next, frame, returnPlace, constants, callSites, frames);
+}
+
+
+// Calls `callSites[pc.a]`'s callee: pushes its frame, copies each argument
+// in, runs it to its own return instruction - a plain (recursive) call,
+// not a tail one, so control comes back here once the callee's own
+// `opReturn`/`opReturnVoid` stops instead of chaining to a next
+// instruction of its own - copies the result to `frame + pc.b` (unless
+// `pc.b` is `size_t.max`, the caller discarding it), and only then tail-
+// calls this call's own next instruction.
+package extern(C) void opCall(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    FrameStack* frames,
+) {
+    import core.stdc.string: memcpy;
+
+    const site = callSites[pc.a];
+    auto callee = site.callee;
+
+    auto calleeFrame = frames.push(callee.frameSize, callee.frameAlignment);
+
+    foreach (arg; site.args)
+        memcpy(
+            calleeFrame.base + arg.calleeOffset,
+            frame + arg.callerOffset,
+            arg.width,
+        );
+
+    // Sized for the widest integral this VM lays out - a scratch return
+    // buffer that outlives the callee's own frame, unlike one carved from
+    // it, since `opCall` reads back out of it after `calleeFrame` has
+    // already popped.
+    ubyte[8] returnScratch = void;
+    void* returnDestination = site.returnWidth == 0 ? null : returnScratch.ptr;
+
+    auto calleePc = callee.instructions.ptr;
+    calleePc.handler(
+        calleePc, calleeFrame.base, returnDestination, callee.constants,
+        callee.callSites, frames,
+    );
+
+    if (pc.b != size_t.max && site.returnWidth != 0)
+        memcpy(frame + pc.b, returnScratch.ptr, site.returnWidth);
+
+    const next = pc + 1;
+    next.handler(next, frame, returnPlace, constants, callSites, frames);
+}
+
+
+// Copies `pc.b` bytes from `frame + pc.a` to `returnPlace` - `null` when
+// the caller discarded the result, the same convention every backend uses
+// for a call whose value nothing reads.
+package extern(C) void opReturn(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    FrameStack* frames,
 ) @nogc nothrow {
+    import core.stdc.string: memcpy;
+
     if (returnPlace !is null)
-        *cast(int*) returnPlace = *cast(int*) frame;
+        memcpy(returnPlace, frame + pc.a, pc.b);
 }
 
 
@@ -81,6 +224,8 @@ package extern(C) void opReturnVoid(
     const(Instruction)*,
     ubyte*,
     void*,
-    scope const int[],
+    scope const long[],
+    scope const CallSite[],
+    FrameStack*,
 ) @nogc nothrow {
 }

@@ -21,7 +21,7 @@ unittest {
 }
 
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("locals.literalInit." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -41,7 +41,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("locals.callInit." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
