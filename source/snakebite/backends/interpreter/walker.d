@@ -149,7 +149,6 @@ extern(C++) private final class Evaluator: Visitor {
     // The currently executing function's frame.
     private ubyte* _frameBase;
     private const(FrameLayout)* _layout;
-    private VarDeclaration _this;
     // Set by `visit(ReturnStatement)`; checked by `visit(CompoundStatement)`
     // to stop walking sibling statements once one has run. dmd accepts
     // unreachable statements after a `return` (it only warns with `-w`),
@@ -379,37 +378,60 @@ extern(C++) private final class Evaluator: Visitor {
             );
         }
 
-        auto savedType = _type;
-        auto savedFacts = _facts;
-        auto savedPlace = _place;
-        auto savedFrameBase = _frameBase;
-        auto savedLayout = _layout;
-        auto savedThis = _this;
-        auto savedReturned = _returned;
-        auto savedContinued = _continued;
-        auto savedReturnsRef = _returnsRef;
-        scope(exit) {
-            _type = savedType;
-            _facts = savedFacts;
-            _place = savedPlace;
-            _frameBase = savedFrameBase;
-            _layout = savedLayout;
-            _this = savedThis;
-            _returned = savedReturned;
-            _continued = savedContinued;
-            _returnsRef = savedReturnsRef;
-        }
+        const guard = CallStateGuard(this);
 
         _type = function_.type.nextOf;
         _facts = factsOf(_type);
         _place = returnPlace;
         _frameBase = frameBase;
         _layout = layout;
-        _this = function_.vthis;
         _returned = false;
         _continued = false;
         _returnsRef = typeFunctionOf(function_).isRef;
         body_.accept(this);
+    }
+
+    // RAII restore of the per-call evaluator state `execute` repoints at
+    // the callee: constructed before the fields change, and the
+    // destructor puts every one back when the call unwinds, normally or
+    // by throw. One field list in one place, instead of a saved variable
+    // plus a `scope(exit)` line per field growing at the call site.
+    private static struct CallStateGuard {
+        private Evaluator _evaluator;
+        private Type _type;
+        private TypeFacts _facts;
+        private void* _place;
+        private ubyte* _frameBase;
+        private const(FrameLayout)* _layout;
+        private bool _returned;
+        private bool _continued;
+        private bool _returnsRef;
+
+        @disable this();
+        @disable this(this);
+
+        private this(Evaluator evaluator) {
+            _evaluator = evaluator;
+            _type = evaluator._type;
+            _facts = evaluator._facts;
+            _place = evaluator._place;
+            _frameBase = evaluator._frameBase;
+            _layout = evaluator._layout;
+            _returned = evaluator._returned;
+            _continued = evaluator._continued;
+            _returnsRef = evaluator._returnsRef;
+        }
+
+        ~this() {
+            _evaluator._type = _type;
+            _evaluator._facts = _facts;
+            _evaluator._place = _place;
+            _evaluator._frameBase = _frameBase;
+            _evaluator._layout = _layout;
+            _evaluator._returned = _returned;
+            _evaluator._continued = _continued;
+            _evaluator._returnsRef = _returnsRef;
+        }
     }
 
     // Where each parameter's bytes sit in the frame the caller just
@@ -1022,6 +1044,12 @@ extern(C++) private final class Evaluator: Visitor {
                 continue;
             }
 
+            // A dynamic array field is native layout's two-word
+            // `{ size_t length; T* ptr; }` with no copy hook of its own,
+            // so the bytewise copy this predicate guards handles it: the
+            // copy shares the same elements, exactly as compiled D
+            // assignment of a slice does. It is not integral, so without
+            // this the size/integrality check below would reject it.
             if (field.type.ty == Tarray)
                 continue;
 
@@ -1044,8 +1072,21 @@ extern(C++) private final class Evaluator: Visitor {
     private void* addressOf(Expression target) {
         import std.conv: text;
 
+        // dmd's semantic pass resolves a `this` the guest wrote to the
+        // enclosing method's own `vthis` declaration; a constructor's
+        // implicit `return this;` is synthesised with no `var`, and the
+        // layout knows which declaration owns the frame's `this` slot,
+        // so the reach is the same either way.
+        // `cast()`: `_layout` is a const view, but dmd's own AST
+        // accessors (`isVarDeclaration` among them) are not
+        // const-correct, and `slotOf` only reads the declaration.
         if (auto thisExp = target.isThisExp)
-            return slotOf(thisExp, thisExp.var is null ? _this : thisExp.var);
+            return slotOf(
+                thisExp,
+                thisExp.var is null
+                    ? cast() _layout.thisVariable
+                    : thisExp.var,
+            );
 
         if (auto variable = target.isVarExp)
             return slotOf(variable);
