@@ -184,6 +184,33 @@ unittest {
     );
 }
 
+@("tryCatchThrowable.rethrowsCaughtGuestThrowable.Interpreter")
+@Tags("Interpreter")
+unittest {
+    1.shouldBeRetOf!(
+        Interpreter,
+        q{
+            bool fail() {
+                return false;
+            }
+
+            int result() {
+                try {
+                    try
+                        assert(fail());
+                    catch (Throwable caught)
+                        throw caught;
+                } catch (Throwable) {
+                    return 1;
+                }
+
+                return 0;
+            }
+        },
+        "result",
+    );
+}
+
 // `AssertError` derives from `Error`, not from `Exception`, so a
 // `catch(Exception)` never matches a failing assertion: the error keeps
 // unwinding to the `catch(AssertError)` outside it.
