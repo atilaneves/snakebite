@@ -1900,6 +1900,22 @@ extern(C++) private final class Evaluator: Visitor {
             return;
         }
 
+        if (sourceType.ty == Tsarray && _type.ty == Tarray
+                && sourceType.nextOf.equals(_type.nextOf)) {
+            import snakebite.nativelayout:
+                arrayLengthOffset, arrayPointerOffset, storeIntegral;
+
+            const sourceFacts = factsOf(sourceType);
+            const elementSize = factsOf(sourceType.nextOf).size;
+            const length = sourceFacts.size / elementSize;
+            auto bytes = cast(ubyte*) _place;
+            storeIntegral(
+                bytes + arrayLengthOffset, length, size_t.sizeof);
+            *cast(void**) (bytes + arrayPointerOffset) =
+                addressOf(expression.e1);
+            return;
+        }
+
         if (sourceType.ty == Tarray && _type.ty == Tarray) {
             const sourceElementSize = factsOf(sourceType.nextOf).size;
             const destElementSize = factsOf(_type.nextOf).size;
