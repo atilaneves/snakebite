@@ -1075,3 +1075,37 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+// The floating operators the conversion tests elsewhere do not cover:
+// `+`, `*`, and `%`, which D defines over floating operands (`%` as the
+// remainder of truncated division, like `fmod`). Every operand comes
+// from a call so dmd cannot fold the arithmetic away, and every
+// intermediate value - `7.5`, `3.5`, `6.5` - is exact in binary, so the
+// expectation does not depend on rounding.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.floating." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        6.5.shouldBeRetOf!(
+            backend,
+            q{
+                double three() {
+                    return 3.0;
+                }
+
+                double twoAndAHalf() {
+                    return 2.5;
+                }
+
+                double four() {
+                    return 4.0;
+                }
+
+                double combined() {
+                    return three() * twoAndAHalf() % four() + three();
+                }
+            },
+            "combined",
+        );
+    }
+}

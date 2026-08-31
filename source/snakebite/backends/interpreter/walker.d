@@ -1373,16 +1373,18 @@ extern(C++) private final class Evaluator: Visitor {
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
-        // Only the two operators the supported floating expressions
-        // reach; the other arithmetic operators keep refusing a floating
-        // destination below. Both operands already share the expression's
-        // own type - dmd's usual arithmetic conversions convert them
-        // before any backend runs - and a `float` read widened to
-        // `double` is exact, so narrowing each operand back to `float`
-        // recovers it exactly and the operation then rounds once, in the
-        // expression's own precision, the same single rounding compiled
-        // D performs.
-        static if (op == "/" || op == "-")
+        // Every operator that can carry a floating type out of dmd's
+        // semantic pass: the bitwise and shift operators are rejected by
+        // the frontend on floating operands, so the `static if` only
+        // keeps their mixins compilable, it refuses nothing. Both
+        // operands already share the expression's own type - dmd's usual
+        // arithmetic conversions convert them before any backend runs -
+        // and a `float` read widened to `double` is exact, so narrowing
+        // each operand back to `float` recovers it exactly and the
+        // operation then rounds once, in the expression's own precision,
+        // the same single rounding compiled D performs.
+        static if (op == "+" || op == "-" || op == "*" || op == "/"
+                || op == "%")
             if (_type.ty == Tfloat32 || _type.ty == Tfloat64) {
                 const a = asFloating(expression.e1);
                 const b = asFloating(expression.e2);
