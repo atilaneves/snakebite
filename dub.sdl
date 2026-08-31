@@ -35,6 +35,19 @@ configuration "unittest" {
     dependency "unit-threaded" version="*"
 }
 
+configuration "acceptance-test" {
+    targetType "executable"
+    targetName "at"
+    targetPath "bin"
+    lflags "--export-dynamic" platform="linux"
+
+    mainSourceFile "acceptance/main.d"
+    sourcePaths "acceptance"
+    importPaths "acceptance"
+
+    dependency "unit-threaded" version="*"
+}
+
 // Built by build/bench.sh with LDC in release mode: the backends must
 // be optimised for the benchmark numbers to mean anything.
 configuration "bench" {

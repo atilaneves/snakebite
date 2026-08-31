@@ -9,5 +9,7 @@ if [[ ! -f build.ninja ]]; then
 fi
 
 build/check-bytecode-vm.sh
-ninja bin/ut && bin/ut -s
+ninja bin/ut
+bin/ut
+build/acceptance.sh
 build/benches.sh
