@@ -376,7 +376,8 @@ extern(C++) private final class Evaluator: Visitor {
             const(void)*[maxArguments] slots;
             countForeignNameLookup;
             _plans.of(function_).call(
-                returnPlace, argumentSlots(slots, frameBase, layout));
+                returnPlace, argumentSlots(slots, frameBase, layout),
+            );
             return;
         }
 

@@ -226,7 +226,8 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
             const isRef = (type.parameterList[i].storageClass & STC.ref_) != 0;
             const argument = isRef
                 ? ArgumentPlan(
-                    [Register(Register.Kind.pointer, 8), Register.init], 1)
+                    [Register(Register.Kind.pointer, 8), Register.init], 1,
+                )
                 : ArgumentPlan.of(type.parameterList[i].type);
             registers += argument.count;
             if (registers > maxArguments)

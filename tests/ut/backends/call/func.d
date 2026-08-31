@@ -2,6 +2,9 @@ module ut.backends.call.func;
 
 
 import ut.backends;
+import snakebite.backends.backend: Program;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
 
 
 static foreach (backend; Matrix!()) {
@@ -286,11 +289,6 @@ static foreach (backend; Matrix!()) {
             mixin(code);
             outer;
         } else {
-            import snakebite.frontend.compiler: parseSnippet;
-            import snakebite.frontend.dmd.functions: findFunction;
-
-            import snakebite.backends.backend: Program;
-
             auto guestModule = parseSnippet(code);
             auto function_ = findFunction(guestModule, "outer");
             assert(function_ !is null,

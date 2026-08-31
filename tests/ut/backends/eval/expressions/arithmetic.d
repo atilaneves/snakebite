@@ -2,6 +2,9 @@ module ut.backends.eval.expressions.arithmetic;
 
 
 import ut.backends;
+import snakebite.backends.backend: Program;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
 
 
 static foreach (backend; Matrix!(
@@ -178,10 +181,6 @@ static foreach (backend; Matrix!(
 @("float.intToFloatUsesFloatPrecision.Ctfe.diverges")
 @Tags("Ctfe")
 unittest {
-    import snakebite.backends.backend: Program;
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
-
     auto module_ = parseSnippet(q{
         int big() { return 16_777_217; }
         string __eval() {
