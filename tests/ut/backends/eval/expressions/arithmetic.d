@@ -9,7 +9,6 @@ import snakebite.frontend.dmd.functions: findFunction;
 
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("int.operators." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -25,7 +24,6 @@ static foreach (backend; Matrix!(
 // The sign of `%` follows the dividend, not the divisor.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("int.moduloSignFollowsDividend." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -39,7 +37,6 @@ static foreach (backend; Matrix!(
 // `>>` sign-extends, `>>>` zero-fills.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("int.shifts." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -53,7 +50,6 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("int.bitwise." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -69,7 +65,6 @@ static foreach (backend; Matrix!(
 // Complement of an unsigned operand keeps the unsigned type.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("int.unsignedComplementStaysUnsigned." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -81,7 +76,6 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("int.relational." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -100,7 +94,6 @@ static foreach (backend; Matrix!(
 // is unsigned division, not division of the bit pattern as a negative int.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("int.unsignedDivisionAndModulo." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -114,7 +107,6 @@ static foreach (backend; Matrix!(
 // Signed division truncates toward zero, whichever operand is negative.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("long.divisionTruncatesTowardZero." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -130,7 +122,6 @@ static foreach (backend; Matrix!(
 // widening an unsigned value zero-extends.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("int.casts." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -145,7 +136,6 @@ static foreach (backend; Matrix!(
 // Character and boolean operands promote to integers.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("int.integerLikeOperands." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -157,7 +147,6 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("float.operators." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -174,7 +163,11 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges, "CTFE keeps `cast(float)` at real precision"),
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
+    Omit!(
+        Interpreter,
+        Because.unconfirmed,
+        "runtime floating-to-integral cast not implemented yet",
+    ),
 )) {
     @("float.intToFloatUsesFloatPrecision." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -209,7 +202,6 @@ unittest {
 // sees it; an operand behind a function call makes the backend do the work.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("int.runtimeShapedOperators." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -230,7 +222,6 @@ static foreach (backend; Matrix!(
 // The signed operand converts to `uint`, so -1 compares as `uint.max`.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("int.signedUnsignedComparisonIsUnsigned." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -245,7 +236,6 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("int.wraparound." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -261,7 +251,6 @@ static foreach (backend; Matrix!(
 // sign-extension.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("int.unsignedWrapThenWidenZeroExtends." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -276,7 +265,6 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed, "eval not implemented yet"),
 )) {
     @("int.assignmentAndIncrement." ~ backend.stringof)
     @Tags(backend.stringof)

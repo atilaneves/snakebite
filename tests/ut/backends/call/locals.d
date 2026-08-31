@@ -66,7 +66,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("locals.noInitialiser." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
