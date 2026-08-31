@@ -30,6 +30,12 @@ public struct CallPlan {
     // Whether `_return` is meaningless because the result travels through
     // a hidden pointer instead - see `needsHiddenReturnPointer`.
     private bool _hiddenReturnPointer;
+    // A method or nested function receives its context before its explicit
+    // parameters. The caller's first argument slot holds that pointer.
+    private bool _hiddenContext;
+    // dmd and ldc use different orders when both invisible arguments are
+    // present. See `abi.contextPrecedesHiddenReturnPointer`.
+    private bool _contextPrecedesHiddenReturnPointer;
     // Whether the callee reads its parameters out of the registers in
     // reverse declaration order - see `abi.reversedDParameters`.
     private bool _reversedArguments;
@@ -59,11 +65,10 @@ public struct CallPlan {
         size_t[maxArguments] words;
         size_t slot;
 
-        // The hidden pointer is itself the first argument register, ahead
-        // of every real one - the callee writes the result through it
-        // rather than leaving it in a register, so the caller must have
-        // supplied somewhere for that to land.
-        if (_hiddenReturnPointer) {
+        void loadHiddenReturnPointer() {
+            if (!_hiddenReturnPointer)
+                return;
+
             if (returnPlace is null)
                 throw new Exception(
                     "ffi: this plan returns a value larger than a " ~
@@ -83,11 +88,23 @@ public struct CallPlan {
                     word(plan.registers[j], bytes + j * size_t.sizeof);
         }
 
+        size_t firstExplicit;
+        if (_hiddenContext) {
+            firstExplicit = 1;
+            if (_contextPrecedesHiddenReturnPointer)
+                load(0);
+        }
+
+        loadHiddenReturnPointer();
+
+        if (_hiddenContext && !_contextPrecedesHiddenReturnPointer)
+            load(0);
+
         if (_reversedArguments)
-            foreach_reverse (i; 0 .. arguments.length)
+            foreach_reverse (i; firstExplicit .. arguments.length)
                 load(i);
         else
-            foreach (i; 0 .. arguments.length)
+            foreach (i; firstExplicit .. arguments.length)
                 load(i);
 
         const result = invoke(cast(void*) _address, words[0 .. slot]);
@@ -158,8 +175,9 @@ public struct PlanCache {
 // the plan is prepared, rather than on every call that would use it.
 private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
     import snakebite.ffi.abi:
-        ArgumentPlan, Register, maxArguments, needsHiddenReturnPointer,
-        reversedDParameters, supported;
+        ArgumentPlan, Register, contextPrecedesHiddenReturnPointer,
+        maxArguments, needsHiddenReturnPointer, reversedDParameters,
+        supported;
     import snakebite.ffi.symbol: symbolAddress;
     import dmd.astenums: LINK, STC, VarArg;
     import dmd.mangle: mangleExact;
@@ -189,10 +207,16 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
             );
 
         const count = type.parameterList.length;
-        if (count > maxArguments)
+        const hasContext = function_.vthis !is null;
+        const argumentCount = count + hasContext;
+        if (argumentCount > maxArguments)
             throw new Exception(
                 text("ffi cannot call `", function_.toString, "`: it takes ",
-                    count, " arguments, and at most ", maxArguments,
+                    argumentCount,
+                    hasContext
+                        ? " arguments including hidden context, "
+                        : " arguments, ",
+                    "and at most ", maxArguments,
                     " are passed in registers"),
             );
 
@@ -207,6 +231,8 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
         const returnsRef = type.isRef != 0;
         plan._hiddenReturnPointer =
             !returnsRef && needsHiddenReturnPointer(type.nextOf);
+        plan._contextPrecedesHiddenReturnPointer =
+            contextPrecedesHiddenReturnPointer;
 
         // The symbol's calling convention comes from its declared linkage,
         // and `extern(D)` code built by the host's own compiler can read
@@ -220,6 +246,15 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
         size_t registers;
         if (plan._hiddenReturnPointer)
             registers = 1;
+
+        size_t argumentIndex;
+        if (hasContext) {
+            plan._hiddenContext = true;
+            plan._arguments[argumentIndex++] = ArgumentPlan(
+                [Register(Register.Kind.pointer, 8), Register.init], 1,
+            );
+            ++registers;
+        }
 
         foreach (i; 0 .. count) {
             // A `ref` parameter occupies a pointer slot in the caller's
@@ -244,7 +279,7 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
                         " registers"),
                 );
 
-            plan._arguments[i] = argument;
+            plan._arguments[argumentIndex++] = argument;
         }
 
         auto name = mangleExact(function_);
@@ -257,7 +292,7 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
             );
 
         plan._address = address;
-        plan._parameterCount = count;
+        plan._parameterCount = argumentCount;
         if (returnsRef) {
             plan._return = ArgumentPlan(
                 [Register(Register.Kind.pointer, 8), Register.init], 1,

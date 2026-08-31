@@ -37,6 +37,16 @@ public enum reversedDParameters = () {
         return false;
 }();
 
+// Whether a method that returns a large aggregate receives its context
+// before its hidden return pointer. dmd puts `this` first; ldc follows the
+// System V order and puts the hidden return pointer first.
+public enum contextPrecedesHiddenReturnPointer = () {
+    version (DigitalMars)
+        return true;
+    else
+        return false;
+}();
+
 // What one value's bytes have to become to travel in one argument or
 // return register - all a call needs to know about a type, decided once
 // from the dmd `Type` and then kept, so no call reads a dmd type again.

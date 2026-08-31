@@ -85,6 +85,32 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
+// Taking the address of a ref-returning call must evaluate the call once and
+// keep the returned alias, not a copy of its value.
+@("ref.return.addressEvaluatedOnce.Interpreter")
+@Tags("Interpreter")
+unittest {
+    17.shouldBeRetOf!(
+        Interpreter,
+        q{
+            int calls;
+            int value;
+
+            ref int cell() {
+                ++calls;
+                return value;
+            }
+
+            int takeAddress() {
+                int* address = &cell();
+                *address = 7;
+                return calls * 10 + value;
+            }
+        },
+        "takeAddress",
+    );
+}
+
 // `static` storage lives outside any frame, so a `ref` parameter bound to
 // it exercises the one address `slotOf` cannot reach through the frame -
 // `FrameLayout.offsetOf` never reserved it a slot to indirect through in
