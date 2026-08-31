@@ -414,6 +414,29 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("arrays.new.nestedStruct.zeroInitialises." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                struct Point {
+                    int x;
+                    long y;
+                }
+
+                auto points = new Point[](2);
+                assert(points[0].x == 0);
+                assert(points[0].y == 0);
+
+                points[1] = Point(3, 4);
+                assert(points[1].x == 3);
+                assert(points[1].y == 4);
+            }
+        });
+    }
+}
+
 // A literal assigned to a `static` slice is built once, on whichever call
 // first reaches it - its elements must still be readable on a later call
 // to the same function, after the frame that built them has long since
