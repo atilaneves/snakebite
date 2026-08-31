@@ -48,6 +48,19 @@ configuration "acceptance-test" {
     dependency "unit-threaded" version="*"
 }
 
+// The interactive REPL: `dub build -c sb` produces `bin/sb`.
+configuration "sb" {
+    targetType "executable"
+    targetName "sb"
+    targetPath "bin"
+    lflags "--export-dynamic" platform="linux"
+
+    mainSourceFile "source/snakebite/repl/main.d"
+    importPaths "."
+
+    dependency "readline" version="0.3.0"
+}
+
 // Built by build/bench.sh with LDC in release mode: the backends must
 // be optimised for the benchmark numbers to mean anything.
 configuration "bench" {
