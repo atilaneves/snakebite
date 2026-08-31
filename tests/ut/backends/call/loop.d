@@ -72,6 +72,29 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("loop.foreachRefMutatesEveryElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeRetOf!(
+            backend,
+            q{
+                int answer() {
+                    int[] values = [1, 2, 3];
+                    foreach (ref element; values)
+                        element += 10;
+
+                    assert(values[0] == 11);
+                    assert(values[1] == 12);
+                    assert(values[2] == 13);
+                    return 0;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
 // Three iterations add up to 3. A body run once, or an `i` that never
 // increments, gives a different answer or no answer at all. `one` is behind
 // a call so the total cannot be folded before a backend runs.
