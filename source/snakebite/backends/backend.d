@@ -81,6 +81,15 @@ public abstract class Backend {
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
 
+    // The program this backend runs. Whether a callee is interpreted or
+    // called natively is the program's one decision (`isInterpreted`),
+    // so every backend is constructed knowing which program it runs.
+    protected const Program _program;
+
+    protected this(const Program program) {
+        _program = program;
+    }
+
     // Invoke one guest function. `args` and the value written to
     // `returnPlace` are in native layout, exactly as compiled D would lay
     // them out; `returnPlace` must be exactly the return type's size, and

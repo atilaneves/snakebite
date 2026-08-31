@@ -152,7 +152,7 @@ unittest {
     auto function_ = findFunction(module_, "readB");
 
     ubyte result;
-    (new Interpreter).call(function_, &result, [])
+    interpreter(module_).call(function_, &result, [])
         .shouldThrowWithMessage(
             "interpreter cannot evaluate `(*p).b`: reading a bitfield is " ~
                 "not supported");

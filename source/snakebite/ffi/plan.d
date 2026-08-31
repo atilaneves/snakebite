@@ -30,6 +30,9 @@ public struct CallPlan {
     // Whether `_return` is meaningless because the result travels through
     // a hidden pointer instead - see `needsHiddenReturnPointer`.
     private bool _hiddenReturnPointer;
+    // Whether the callee reads its parameters out of the registers in
+    // reverse declaration order - see `abi.reversedDParameters`.
+    private bool _reversedArguments;
 
     // Calls the function this plan was prepared for.
     //
@@ -70,13 +73,22 @@ public struct CallPlan {
             words[slot++] = cast(size_t) returnPlace;
         }
 
-        foreach (i, argument; arguments) {
+        // A parameter's own eightbytes keep their order either way; what
+        // reverses is which parameter gets the lower-numbered registers.
+        void load(in size_t i) {
             const plan = _arguments[i];
-            auto bytes = cast(ubyte*) argument;
+            auto bytes = cast(ubyte*) arguments[i];
             foreach (j; 0 .. plan.count)
                 words[slot++] =
                     word(plan.registers[j], bytes + j * size_t.sizeof);
         }
+
+        if (_reversedArguments)
+            foreach_reverse (i; 0 .. arguments.length)
+                load(i);
+        else
+            foreach (i; 0 .. arguments.length)
+                load(i);
 
         const result = invoke(cast(void*) _address, words[0 .. slot]);
 
@@ -140,9 +152,9 @@ public struct PlanCache {
 private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
     import snakebite.ffi.abi:
         ArgumentPlan, Register, maxArguments, needsHiddenReturnPointer,
-        supported;
+        reversedDParameters, supported;
     import snakebite.ffi.symbol: symbolAddress;
-    import dmd.astenums: STC, VarArg;
+    import dmd.astenums: LINK, STC, VarArg;
     import dmd.mangle: mangleExact;
     import std.conv: text;
     import std.string: fromStringz;
@@ -157,19 +169,6 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
             throw new Exception(
                 text("ffi cannot call `", function_.toString,
                     "`: it is not a function"),
-            );
-
-        // A `ref` return hands back the *address* of the result in the
-        // return register, not the result. `type.nextOf` is the
-        // referred-to type either way, so classifying it would describe a
-        // value that never travels, and writing the return register
-        // through that description would store the low bytes of an
-        // address as if they were the value - a wrong answer that looks
-        // like a right one.
-        if (type.isRef)
-            throw new Exception(
-                text("ffi cannot call `", function_.toString,
-                    "`: it returns by `ref`"),
             );
 
         // A variadic callee is handed its arguments differently - on the
@@ -191,7 +190,25 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
             );
 
         CallPlan plan;
-        plan._hiddenReturnPointer = needsHiddenReturnPointer(type.nextOf);
+        // A `ref` return hands back the *address* of the result in the
+        // return register, not the result: that address is what travels,
+        // whatever `type.nextOf` says, so the return is a pointer and
+        // never needs the hidden pointer a large returned *value* would.
+        // The caller gets the address and reads the value through it -
+        // the same convention the interpreter's own `ref`-returning
+        // calls use (`resolvedRefAddress` in `interpreter/walker.d`).
+        const returnsRef = type.isRef != 0;
+        plan._hiddenReturnPointer =
+            !returnsRef && needsHiddenReturnPointer(type.nextOf);
+
+        // The symbol's calling convention comes from its declared linkage,
+        // and `extern(D)` code built by the host's own compiler can read
+        // its parameters out of the registers in reverse order - an ABI
+        // fact about this process, not a routing decision about the
+        // callee.
+        const linkage = function_.resolvedLinkage;
+        plan._reversedArguments = reversedDParameters
+            && (linkage == LINK.d || linkage == LINK.default_);
 
         size_t registers;
         if (plan._hiddenReturnPointer)
@@ -202,21 +219,16 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
             // frame - the address of the argument's own storage, not a
             // copy of its value (see `FrameLayout.of` in
             // `interpreter/framelayout.d`, which lays such a slot out the
-            // same way). `parameterList[i].type` is the *pointee* type,
-            // so classifying by it describes a value that never travels:
-            // `Register.of(int)` for `ref int` reads 4 bytes of an
-            // address as if they were the value, and `ArgumentPlan.of` for
-            // `ref int[]` reserves two registers and reads 8 bytes past
-            // the single pointer slot the argument actually is. Refusing
-            // here restores the same boundary `FrameLayout.of` used to
-            // draw before it grew a real `ref` layout of its own.
-            if (type.parameterList[i].storageClass & STC.ref_)
-                throw new Exception(
-                    text("ffi cannot call `", function_.toString,
-                        "`: parameter ", i, " is `ref`"),
-                );
-
-            auto argument = ArgumentPlan.of(type.parameterList[i].type);
+            // same way). That address is the value that travels, so the
+            // argument is one pointer register whatever
+            // `parameterList[i].type` - the *pointee* type - would
+            // classify as.
+            const isRef = (type.parameterList[i].storageClass & STC.ref_) != 0;
+            const argument = isRef
+                ? ArgumentPlan(
+                    [Register(Register.Kind.pointer, 8), Register.init], 1,
+                )
+                : ArgumentPlan.of(type.parameterList[i].type);
             registers += argument.count;
             if (registers > maxArguments)
                 throw new Exception(
@@ -239,7 +251,9 @@ private CallPlan prepare(imported!"dmd.func".FuncDeclaration function_) {
 
         plan._address = address;
         plan._parameterCount = count;
-        if (!plan._hiddenReturnPointer)
+        if (returnsRef)
+            plan._return = Register(Register.Kind.pointer, 8);
+        else if (!plan._hiddenReturnPointer)
             plan._return = Register.of(type.nextOf);
 
         return plan;

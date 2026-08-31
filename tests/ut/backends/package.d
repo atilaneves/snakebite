@@ -8,6 +8,7 @@ public import std.meta: AliasSeq;
 import core.sync.mutex: Mutex;
 import dmd.dmodule: Module;
 import dmd.func: FuncDeclaration;
+import snakebite.backends.backend: Program, run;
 import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction, findStruct;
 import std.conv: text;
@@ -81,6 +82,14 @@ public template Matrix(specs...) {
 }
 
 
+// An `Interpreter` whose program owns exactly `module_`, for tests that
+// call one parsed guest function directly rather than running a whole
+// program.
+public Interpreter interpreter(Module module_) {
+    return new Interpreter(Program([module_]));
+}
+
+
 // Renders one expression on one matrix entry and returns the result, for
 // the test to assert on: `eval!(backend, "2 + 3").should == "5"`.
 //
@@ -130,14 +139,12 @@ public void shouldBeStatusOf(
     in string file = __FILE__,
     in size_t line = __LINE__,
 ) {
-    import snakebite.backends.backend: Program, run;
-
     static if (is(BackendType == Native))
         nativeMainStatus!code.shouldEqual(expected, file, line);
     else {
         enum program_ = RegisterProgram!(module_, code).program;
         auto program = Program([parsedProgram(program_)]);
-        asTestFailure(run(new BackendType, program), file, line)
+        asTestFailure(run(new BackendType(program), program), file, line)
             .shouldEqual(expected, file, line);
     }
 }
@@ -191,7 +198,6 @@ public void shouldBeRetOf(
     in size_t line = __LINE__,
 ) {
     import dmd.typesem: size;
-    import snakebite.backends.backend: Program;
 
     static if (is(BackendType == Native)) {
         const native = () {
@@ -223,7 +229,7 @@ public void shouldBeRetOf(
             );
 
         T result;
-        asTestFailure((new BackendType).call(function_, &result, []),
+        asTestFailure((new BackendType(program)).call(function_, &result, []),
             file, line);
         result.shouldEqual(expected, file, line);
     }
@@ -276,9 +282,12 @@ private string evaluate(
     static if (is(BackendType == Native)) {
         mixin(declarations);
         return text(mixin(code));
-    } else
+    } else {
+        auto function_ = parsedFunction(snippet);
+        auto program = Program([function_.getModule]);
         return asTestFailure(
-            (new BackendType).eval(parsedFunction(snippet)), file, line);
+            (new BackendType(program)).eval(function_), file, line);
+    }
 }
 
 

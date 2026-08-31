@@ -9,6 +9,7 @@ private:
 // straight into a caller-designated native address, in native layout.
 public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
+    import snakebite.backends.backend: Program;
 
     // The one evaluator this backend ever creates: it owns the frame
     // stack and the per-function layout cache, both of which must
@@ -16,8 +17,9 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     // thin adapter onto it.
     private Evaluator _evaluator;
 
-    public this() {
-        _evaluator = new Evaluator;
+    public this(const Program program) {
+        super(program);
+        _evaluator = new Evaluator(program);
     }
 
     public override void call(
@@ -74,6 +76,7 @@ import dmd.visitor: Visitor;
 // walks a call's frames, so there is nothing left for a separate
 // `Interpreter`-side cache to hold.
 extern(C++) private final class Evaluator: Visitor {
+    import snakebite.backends.backend: Program;
     import snakebite.backends.interpreter.framelayout: FrameLayout;
     import snakebite.framestack: FrameStack;
     import snakebite.ffi: PlanCache, maxArguments;
@@ -81,7 +84,7 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.nativelayout:
         isIntegralSize, storeValue, TypeFacts;
     import dmd.astenums:
-        LINK, Tarray, Tbool, Tdelegate, Tfloat32, Tfloat64, Tnoreturn,
+        Tarray, Tbool, Tdelegate, Tfloat32, Tfloat64, Tnoreturn,
         Tpointer, Tsarray, Tuns32, Tvoid;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
@@ -125,6 +128,10 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     private Dollar _dollar;
+    // The program being run: its `isInterpreted` is the one decision for
+    // whether a callee is walked here or called natively, made on every
+    // call this evaluator makes.
+    private const Program _program;
     // How to reach each already-compiled function this guest calls,
     // worked out on that function's first call and reused by every call
     // after it - the same cold-path-once shape as `_layouts`.
@@ -181,7 +188,11 @@ extern(C++) private final class Evaluator: Visitor {
     // so the two need different code, and this is what tells them apart.
     private bool _returnsRef;
 
-    public this() {
+    // `extern(D)`: `Program` holds a dynamic array, which is not a valid
+    // member of an `extern(C++)` signature, and only `Visitor`'s `visit`
+    // overloads need that linkage.
+    extern(D) public this(const Program program) {
+        _program = program;
         _frames = FrameStack(1024 * 1024);
     }
 
@@ -353,6 +364,23 @@ extern(C++) private final class Evaluator: Visitor {
     ) {
         import std.conv: text;
 
+        // The one decision for every call this backend makes: a callee the
+        // program owns is walked here, and any other callee already exists
+        // as machine code this process links - druntime is not
+        // reimplemented here, so calling that code is how such a
+        // declaration runs. The program's ownership answer is the whole
+        // decision: no name, linkage, package or body inspection gets a
+        // second vote. Make this branch first so an interpreter capability
+        // check cannot turn a non-root call into a backend-local refusal.
+        if (!_program.isInterpreted(function_)) {
+            const(void)*[maxArguments] slots;
+            countForeignNameLookup;
+            _plans.of(function_).call(
+                returnPlace, argumentSlots(slots, frameBase, layout),
+            );
+            return;
+        }
+
         // `function_` being resolved only means a declaration was found;
         // it does not mean this call is safe to run directly. Only a
         // struct method's hidden context is covered: `bindFrame` fills
@@ -384,32 +412,14 @@ extern(C++) private final class Evaluator: Visitor {
                     "interpreter does not provide"),
             );
 
-        // A declaration with no body is not a program this interpreter can
-        // walk: the body is machine code in a library the host process
-        // already links. druntime is not reimplemented here, so calling
-        // that code is how such a declaration runs.
-        //
-        // Only a non-D linkage, though. `extern(D)` has its own calling
-        // convention, which the FFI does not implement, and a body-less
-        // `extern(D)` declaration is more likely a function whose body
-        // this interpreter simply never saw than one it should go looking
-        // for in the process image.
+        // A root-owned declaration with no body has no code anywhere: the
+        // program owns it, so no library can be expected to implement it.
         auto body_ = function_.fbody;
-        if (body_ is null) {
-            const linkage = function_.resolvedLinkage;
-            if (linkage != LINK.d && linkage != LINK.default_) {
-                const(void)*[maxArguments] slots;
-                countForeignNameLookup;
-                _plans.of(function_).call(
-                    returnPlace, argumentSlots(slots, frameBase, layout));
-                return;
-            }
-
+        if (body_ is null)
             throw new SnakebiteException(
                 text("interpreter cannot call a function with no body: `",
                     function_.toString, "`"),
             );
-        }
 
         const guard = CallStateGuard(this);
 

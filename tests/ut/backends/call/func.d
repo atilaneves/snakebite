@@ -2,6 +2,9 @@ module ut.backends.call.func;
 
 
 import ut.backends;
+import snakebite.backends.backend: Program;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
 
 
 static foreach (backend; Matrix!()) {
@@ -125,7 +128,7 @@ unittest {
     auto function_ = findFunction(module_, "viaClass");
 
     int result;
-    (new Interpreter).call(function_, &result, [])
+    interpreter(module_).call(function_, &result, [])
         .shouldThrow;
 }
 
@@ -286,15 +289,12 @@ static foreach (backend; Matrix!()) {
             mixin(code);
             outer;
         } else {
-            import snakebite.frontend.compiler: parseSnippet;
-            import snakebite.frontend.dmd.functions: findFunction;
-
             auto guestModule = parseSnippet(code);
             auto function_ = findFunction(guestModule, "outer");
             assert(function_ !is null,
                 "No function `outer` in the guest program");
 
-            (new backend).call(function_, null, []);
+            (new backend(Program([guestModule]))).call(function_, null, []);
         }
     }
 }

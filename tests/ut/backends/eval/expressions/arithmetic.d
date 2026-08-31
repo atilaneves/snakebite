@@ -2,6 +2,9 @@ module ut.backends.eval.expressions.arithmetic;
 
 
 import ut.backends;
+import snakebite.backends.backend: Program;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
 
 
 static foreach (backend; Matrix!(
@@ -178,9 +181,6 @@ static foreach (backend; Matrix!(
 @("float.intToFloatUsesFloatPrecision.Ctfe.diverges")
 @Tags("Ctfe")
 unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
-
     auto module_ = parseSnippet(q{
         int big() { return 16_777_217; }
         string __eval() {
@@ -189,7 +189,8 @@ unittest {
         }
     });
 
-    (new Ctfe).eval(findFunction(module_, "__eval")).should == "16777217";
+    (new Ctfe(Program([module_])))
+        .eval(findFunction(module_, "__eval")).should == "16777217";
 }
 
 // With a literal on each side DMD folds the expression before any backend
