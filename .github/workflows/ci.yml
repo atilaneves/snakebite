@@ -45,12 +45,34 @@ jobs:
       - name: Run CI
         run: build/ci.sh
 
-      - name: Install kcov
+      # kcov was dropped from Ubuntu's repos, so it has to be built
+      # from source. Cached by version: bump the "kcov-43" cache key
+      # (and the --branch below) together to pick up a new release.
+      - name: Cache kcov
+        id: cache-kcov
+        if: matrix.os == 'ubuntu-24.04'
+        uses: actions/cache@v4
+        with:
+          path: ~/kcov-install
+          key: kcov-43-${{ matrix.os }}
+
+      - name: Build kcov
+        if: matrix.os == 'ubuntu-24.04' && steps.cache-kcov.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install -y kcov
+          sudo apt-get install -y cmake libdw-dev binutils-dev libcurl4-openssl-dev zlib1g-dev
+          git clone --depth 1 --branch v43 https://github.com/SimonKagstrom/kcov.git /tmp/kcov-src
+          cmake -S /tmp/kcov-src -B /tmp/kcov-build -DCMAKE_INSTALL_PREFIX="$HOME/kcov-install"
+          cmake --build /tmp/kcov-build --parallel
+          cmake --install /tmp/kcov-build
+
+      - name: Add kcov to PATH
+        if: matrix.os == 'ubuntu-24.04'
+        run: echo "$HOME/kcov-install/bin" >> "$GITHUB_PATH"
 
       - name: Coverage
+        if: matrix.os == 'ubuntu-24.04'
         run: build/coverage.sh
 
-      - uses: codecov/codecov-action@v5.1.2
+      - if: matrix.os == 'ubuntu-24.04'
+        uses: codecov/codecov-action@v5.1.2
