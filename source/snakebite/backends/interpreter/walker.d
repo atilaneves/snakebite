@@ -1380,7 +1380,16 @@ extern(C++) private final class Evaluator: Visitor {
                     "`"),
             );
 
-        auto target = addressOf(expression.e1);
+        void* target;
+        try {
+            target = addressOf(expression.e1);
+        } catch (SnakebiteException) {
+            throw new SnakebiteException(
+                text("interpreter cannot assign to `",
+                    expression.e1.toString, "`: `", expression.toString,
+                    "`"),
+            );
+        }
         const stepFacts = factsOf(expression.e2.type);
         const step = asIntegral(expression.e2, stepFacts);
         const current =
