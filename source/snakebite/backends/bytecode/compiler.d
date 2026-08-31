@@ -202,9 +202,12 @@ private final class FunctionCompiler {
     }
 
     private void emit(
-        Instruction.Handler handler, in size_t a, in size_t b, in size_t c,
+        Instruction.Handler handler,
+        in size_t destination,
+        in size_t source,
+        in size_t width,
     ) {
-        _instructions ~= Instruction(handler, a, b, c);
+        _instructions ~= Instruction(handler, destination, source, width);
     }
 
     private size_t addConstant(in long value) {
@@ -276,7 +279,7 @@ private final class FunctionCompiler {
 
         const offset = reserveTemp(_returnFacts);
         evalInto(statement.exp, offset, _returnFacts.size);
-        emit(&opReturn, offset, _returnFacts.size, 0);
+        emit(&opReturn, 0, offset, _returnFacts.size);
     }
 
     // Runs `expression` for effect, at statement level: whatever value it
@@ -389,7 +392,7 @@ private final class FunctionCompiler {
         Expression expression, in size_t destOffset, in size_t width,
     ) {
         if (auto integer = expression.isIntegerExp) {
-            emit(&opConstant, destOffset, width, addConstant(integer.toInteger));
+            emit(&opConstant, destOffset, addConstant(integer.toInteger), width);
             return;
         }
 
@@ -478,7 +481,7 @@ private final class FunctionCompiler {
         const siteIndex = _callSites.length;
         _callSites ~=
             CallSite(calleeFunction, args, isVoidCallee ? 0 : returnFacts.size);
-        emit(&opCall, siteIndex, destOffset, 0);
+        emit(&opCall, destOffset, siteIndex, 0);
     }
 }
 

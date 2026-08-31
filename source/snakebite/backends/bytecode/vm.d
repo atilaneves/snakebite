@@ -26,8 +26,8 @@ package struct CallSite {
 }
 
 
-// `opCall`'s own `pc.b` operand, when the caller has nowhere for the
-// call's result to go - a `void` callee, or a non-`void` one run at
+// `opCall`'s own `pc.destination` operand, when the caller has nowhere for
+// the call's result to go - a `void` callee, or a non-`void` one run at
 // statement level for its effects alone. Not a byte offset any frame ever
 // has, so it cannot collide with one: `_tempSize`/`layout.size` never grow
 // past a compiled function's own frame size, which stays far short of
@@ -46,13 +46,18 @@ package struct Instruction {
     );
 
     package Handler handler;
-    // What each opcode's three operands mean is decided by the opcode
-    // alone: a frame offset, a width in bytes, a constant or call-site
-    // index - never dmd's own numeric types, so this VM has none of them
-    // to import.
-    package size_t a;
-    package size_t b;
-    package size_t c;
+    // `destination` and `source` are frame offsets for `opCopy`/`opReturn`
+    // - `source` is the constant or call-site index instead for
+    // `opConstant`/`opCall`, which have no frame offset to read a value's
+    // identity from. `width` is the byte count `storeWidth`/`memcpy` moves.
+    // Never dmd's own numeric types, whichever role a field plays - so this
+    // VM has none of them to import. `0` means an opcode does not use a
+    // given field, the same way `width` is already unused by `opCall`
+    // (the width to copy out lives on its `CallSite` instead) and by
+    // `opReturnVoid`.
+    package size_t destination;
+    package size_t source;
+    package size_t width;
 }
 
 
@@ -119,7 +124,8 @@ private void storeWidth(
 }
 
 
-// Writes `constants[pc.c]`, narrowed to `pc.b` bytes, at `frame + pc.a`.
+// Writes `constants[pc.source]`, narrowed to `pc.width` bytes, at
+// `frame + pc.destination`.
 //
 // Not `@nogc nothrow`: a tail call through `Instruction.Handler` can reach
 // `opCall`, which can throw (a frame stack overflow) - and the handler
@@ -135,16 +141,17 @@ package extern(C) void opConstant(
     scope const CallSite[] callSites,
     FrameStack* frames,
 ) {
-    storeWidth(frame + pc.a, constants[pc.c], pc.b);
+    storeWidth(frame + pc.destination, constants[pc.source], pc.width);
     const next = pc + 1;
     next.handler(next, frame, returnPlace, constants, callSites, frames);
 }
 
 
-// Copies `pc.c` bytes from `frame + pc.b` to `frame + pc.a`: a parameter
-// or local read into another slot, or an assignment's right side already
-// evaluated into the target's own slot copied out to wherever the
-// assignment's value is also needed. Not `@nogc nothrow`; see `opConstant`.
+// Copies `pc.width` bytes from `frame + pc.source` to `frame +
+// pc.destination`: a parameter or local read into another slot, or an
+// assignment's right side already evaluated into the target's own slot
+// copied out to wherever the assignment's value is also needed. Not
+// `@nogc nothrow`; see `opConstant`.
 package extern(C) void opCopy(
     const(Instruction)* pc,
     ubyte* frame,
@@ -155,19 +162,20 @@ package extern(C) void opCopy(
 ) {
     import core.stdc.string: memcpy;
 
-    memcpy(frame + pc.a, frame + pc.b, pc.c);
+    memcpy(frame + pc.destination, frame + pc.source, pc.width);
     const next = pc + 1;
     next.handler(next, frame, returnPlace, constants, callSites, frames);
 }
 
 
-// Calls `callSites[pc.a]`'s callee: pushes its frame, copies each argument
-// in, runs it to its own return instruction - a plain (recursive) call,
-// not a tail one, so control comes back here once the callee's own
+// Calls `callSites[pc.source]`'s callee: pushes its frame, copies each
+// argument in, runs it to its own return instruction - a plain (recursive)
+// call, not a tail one, so control comes back here once the callee's own
 // `opReturn`/`opReturnVoid` stops instead of chaining to a next
-// instruction of its own - copies the result to `frame + pc.b` (unless
-// `pc.b` is `discardResult`), and only then tail-calls this call's own
-// next instruction.
+// instruction of its own - copies the result to `frame + pc.destination`
+// (unless `pc.destination` is `discardResult`), and only then tail-calls
+// this call's own next instruction. `pc.width` is unused: the width to
+// copy out comes from the call site's own `returnWidth` instead.
 package extern(C) void opCall(
     const(Instruction)* pc,
     ubyte* frame,
@@ -178,7 +186,7 @@ package extern(C) void opCall(
 ) {
     import core.stdc.string: memcpy;
 
-    const site = callSites[pc.a];
+    const site = callSites[pc.source];
     auto callee = site.callee;
 
     auto calleeFrame = frames.push(callee.frameSize, callee.frameAlignment);
@@ -203,17 +211,18 @@ package extern(C) void opCall(
         callee.callSites, frames,
     );
 
-    if (pc.b != discardResult && site.returnWidth != 0)
-        memcpy(frame + pc.b, returnScratch.ptr, site.returnWidth);
+    if (pc.destination != discardResult && site.returnWidth != 0)
+        memcpy(frame + pc.destination, returnScratch.ptr, site.returnWidth);
 
     const next = pc + 1;
     next.handler(next, frame, returnPlace, constants, callSites, frames);
 }
 
 
-// Copies `pc.b` bytes from `frame + pc.a` to `returnPlace` - `null` when
-// the caller discarded the result, the same convention every backend uses
-// for a call whose value nothing reads.
+// Copies `pc.width` bytes from `frame + pc.source` to `returnPlace` -
+// `null` when the caller discarded the result, the same convention every
+// backend uses for a call whose value nothing reads. `pc.destination` is
+// unused: there is no frame slot on the receiving end, only `returnPlace`.
 package extern(C) void opReturn(
     const(Instruction)* pc,
     ubyte* frame,
@@ -225,7 +234,7 @@ package extern(C) void opReturn(
     import core.stdc.string: memcpy;
 
     if (returnPlace !is null)
-        memcpy(returnPlace, frame + pc.a, pc.b);
+        memcpy(returnPlace, frame + pc.source, pc.width);
 }
 
 
