@@ -128,7 +128,7 @@ unittest {
     auto function_ = findFunction(module_, "viaClass");
 
     int result;
-    (new Interpreter).call(function_, &result, [])
+    interpreterOf(module_).call(function_, &result, [])
         .shouldThrow;
 }
 
