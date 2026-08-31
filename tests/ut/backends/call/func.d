@@ -151,6 +151,40 @@ unittest {
         .shouldThrow;
 }
 
+// A class method call is virtual even when the receiver is stored in a base
+// class reference. The interpreter has no class dispatch yet, so it must not
+// run dmd's statically resolved base declaration for a derived object.
+@("method.virtualClassThroughBase.refused.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        class Base {
+            int answer() {
+                return 1;
+            }
+        }
+
+        class Derived : Base {
+            override int answer() {
+                return 2;
+            }
+        }
+
+        int viaBase() {
+            Base value = new Derived;
+            return value.answer();
+        }
+    });
+    auto function_ = findFunction(module_, "viaBase");
+
+    int result;
+    interpreter(module_).call(function_, &result, [])
+        .shouldThrow;
+}
+
 static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("ret.double." ~ backend.stringof)
     @Tags(backend.stringof)

@@ -54,7 +54,6 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 }
 
 import snakebite.exception: SnakebiteException;
-import dmd.dclass: ClassDeclaration;
 
 // A guest throw must remain distinguishable from a refusal to interpret a
 // guest construct. The runner catches this wrapper, while interpreter
@@ -62,9 +61,12 @@ import dmd.dclass: ClassDeclaration;
 // unchanged.
 private final class GuestException: Exception {
     private Throwable _guest;
-    private ClassDeclaration _class;
+    private imported!"dmd.dclass".ClassDeclaration _class;
 
-    public this(Throwable guest, ClassDeclaration class_ = null) {
+    public this(
+        Throwable guest,
+        imported!"dmd.dclass".ClassDeclaration class_ = null,
+    ) {
         super(guest.msg);
         _guest = guest;
         _class = class_;
@@ -87,6 +89,7 @@ import dmd.visitor: Visitor;
 extern(C++) private final class Evaluator: Visitor {
     import snakebite.backends.backend: Program;
     import snakebite.backends.layout: FrameLayout;
+    import dmd.dclass: ClassDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
     import snakebite.ffi: CallPlan, PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -418,7 +421,7 @@ extern(C++) private final class Evaluator: Visitor {
         ubyte* frameBase,
         const(FrameLayout)* layout,
         CallExp callSite = null,
-        bool classThisBound = false,
+        bool classConstructor = false,
     ) {
         import std.conv: text;
 
@@ -450,10 +453,12 @@ extern(C++) private final class Evaluator: Visitor {
         // method is resolved by dmd to the statically known declaration
         // even though the call is virtual, so running it here would
         // silently devirtualize the call and answer from the wrong
-        // declaration.
+        // declaration. Constructors are the one class method this backend
+        // executes directly: construction has selected that declaration,
+        // and the object is not yet available through a virtual reference.
         auto aggregate = function_.isThis();
         if (aggregate !is null && aggregate.isStructDeclaration is null
-                && !classThisBound)
+                && !classConstructor)
             throw new SnakebiteException(
                 text("interpreter cannot call `", function_.toString,
                     "`: its class `this` is not bound"),
@@ -3035,18 +3040,7 @@ extern(C++) private final class Evaluator: Visitor {
             return;
         }
 
-        import snakebite.nativelayout: loadIntegral;
-
-        const classThisBound = function_.isThis() !is null
-            && function_.isThis().isClassDeclaration !is null
-            && loadIntegral(
-                frame.base + layout.hiddenThis.parameter.offset,
-                size_t.sizeof,
-                false,
-            ) != 0;
-        execute(
-            function_, _place, frame.base, layout, expression, classThisBound,
-        );
+        execute(function_, _place, frame.base, layout, expression);
     }
 
     // The callee of a call dmd left unresolved: one reached through a
