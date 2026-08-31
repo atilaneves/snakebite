@@ -12,6 +12,7 @@ import ut.backends;
 // A slice assignment copies element by element and runs the postblit for
 // each one, rather than blitting the whole slice.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -47,6 +48,7 @@ static foreach (backend; Matrix!(
 // The members of an anonymous union occupy the same storage, so writing
 // through one member changes what is read back through another.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -73,6 +75,7 @@ static foreach (backend; Matrix!(
 // A struct declared inside a function sees that function's locals, so its
 // method can call a delegate the function made.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -104,6 +107,7 @@ static foreach (backend; Matrix!(
 // lists, so it works across struct types that share a field layout even
 // though they share no other relationship.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {

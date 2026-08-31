@@ -12,6 +12,7 @@ import ut.backends;
 // A module-level array is initialised before anything runs, so a callee
 // that touches it first still sees its contents.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -50,6 +51,7 @@ static foreach (backend; Matrix!(
 // writing through the result does not change either operand, and writing
 // through an operand afterwards does not change the result.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -86,6 +88,7 @@ static foreach (backend; Matrix!(
 // leaves the original alone, which a backend returning the same
 // (ptr, length) pair would not.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -133,6 +136,7 @@ static foreach (backend; Matrix!(
 // Appending a `dchar` to a `char[]` encodes it as UTF-8, so one append
 // adds as many elements as the code point needs, not one.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -160,6 +164,7 @@ static foreach (backend; Matrix!(
 // Growing storage through the allocator keeps what was already there,
 // across both the element-at-a-time and slice-at-a-time appends.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {

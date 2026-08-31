@@ -5,6 +5,7 @@ import ut.backends;
 
 
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot hold mutable static state across calls"),
 )) {
@@ -36,7 +37,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.length." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -56,7 +57,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.index." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -74,7 +75,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.dollar." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -94,7 +95,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.dollar.nested." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -122,7 +123,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.truth.null." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -143,7 +144,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.truth.literal." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -163,6 +164,7 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns an out-of-range index into a compile-time error, so " ~
         "it cannot be expressed the same way as a runtime throw"),
@@ -242,7 +244,7 @@ unittest {
         .shouldThrow;
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.literal.index." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -259,7 +261,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.literal.length." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -276,7 +278,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.literal.nonConstantElements." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -297,7 +299,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.literal.single." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -314,7 +316,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.literal.empty.length." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -331,7 +333,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.new.runtimeLength.initialiseAndWrite." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -352,7 +354,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.new.uint.initialiseAndWrite." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -407,7 +409,7 @@ unittest {
 // own hook for growing a `T[]` by one element and writing it into the
 // slot that growth made - `CatAssignExp.lowering` (`dmd/expression.d`),
 // not a node any of `expression`'s own children reach.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.append.element." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -425,7 +427,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.append.element.length." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -450,7 +452,7 @@ static foreach (backend; Matrix!()) {
 // first block's capacity is what actually exercises the move, not just
 // the append. Reading the first element back afterwards is what pins
 // that the move copied the old contents rather than losing them.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.append.element.loop.survivesReallocation." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -474,7 +476,7 @@ static foreach (backend; Matrix!()) {
 // `_d_arrayappendcTX` - a different hook, over the same `lowering` field,
 // for a different `CatAssignExp.op` (`concatenateAssign` rather than
 // `concatenateElemAssign`).
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.append.slice." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

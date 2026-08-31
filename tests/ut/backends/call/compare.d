@@ -7,7 +7,7 @@ import ut.backends;
 // `1 < 2` is true and `2 < 1` is false. Both orderings are here so a
 // comparison that always answers the same way fails one of them, and both
 // operands are calls so the answer cannot be folded before a backend runs.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.lessThan.true." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -31,7 +31,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.lessThan.false." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -57,7 +57,7 @@ static foreach (backend; Matrix!()) {
 
 // `uint.max < 1u` is false. Read as two's complement the same bits are -1,
 // which would make it true.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.lessThan.unsigned." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -84,7 +84,7 @@ static foreach (backend; Matrix!()) {
 // The three orderings besides `<`. Each is pinned on both sides of its
 // boundary and on the boundary itself, so an implementation that answers
 // one of them with another - `<=` with `<`, say - fails the equal case.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.lessOrEqual.true." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -108,7 +108,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.lessOrEqual.equal." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -132,7 +132,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.lessOrEqual.false." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -156,7 +156,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.greaterThan.true." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -180,7 +180,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.greaterThan.equal." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -204,7 +204,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.greaterThan.false." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -228,7 +228,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.greaterOrEqual.true." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -252,7 +252,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.greaterOrEqual.equal." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -276,7 +276,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.greaterOrEqual.false." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -302,7 +302,7 @@ static foreach (backend; Matrix!()) {
 
 // `uint.max > 1u` is true. Read as two's complement the same bits are -1,
 // which would make it false.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.greaterThan.unsigned." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -328,7 +328,7 @@ static foreach (backend; Matrix!()) {
 
 // `-1 >= 0` is false. Read as an unsigned bit pattern the same bits are
 // `uint.max`, which would make it true.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.greaterOrEqual.signed." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -354,7 +354,7 @@ static foreach (backend; Matrix!()) {
 
 // `uint.max <= 1u` is false. Read as two's complement the same bits are -1,
 // which would make it true.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.lessOrEqual.unsigned." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -380,7 +380,7 @@ static foreach (backend; Matrix!()) {
 
 // `-1 < 0` is true. Read as an unsigned bit pattern the same bits are
 // `uint.max`, which would make it false.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.lessThan.signed." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -404,7 +404,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.equal.true." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -428,7 +428,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.equal.false." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -452,7 +452,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.notEqual.true." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -476,7 +476,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("compare.notEqual.false." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -501,7 +501,7 @@ static foreach (backend; Matrix!()) {
 }
 
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("logical.and.true." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -525,7 +525,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("logical.and.false." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -549,7 +549,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("logical.or.true." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -573,7 +573,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("logical.or.false." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -601,6 +601,7 @@ static foreach (backend; Matrix!()) {
 // true, so `bump` never runs here and `calls` stays at zero. An
 // implementation that evaluates both sides answers one instead.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read or write mutable module-level state"),
 )) {
@@ -634,6 +635,7 @@ static foreach (backend; Matrix!(
 // The other half of the pair: with the left side true the right side does
 // run, so a backend that never evaluates it fails this one.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read or write mutable module-level state"),
 )) {
@@ -666,6 +668,7 @@ static foreach (backend; Matrix!(
 
 // `||` evaluates its right side only when the left side is false.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read or write mutable module-level state"),
 )) {
@@ -697,6 +700,7 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read or write mutable module-level state"),
 )) {

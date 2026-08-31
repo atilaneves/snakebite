@@ -12,6 +12,7 @@ import ut.backends;
 // `goto` to a label inside the same catch skips the statements between,
 // so they have no effect.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -51,6 +52,7 @@ static foreach (backend; Matrix!(
 // `goto case` and `goto default` jump to another case body and keep
 // running from there, so every body on the path contributes.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -85,6 +87,7 @@ static foreach (backend; Matrix!(
 // `continue` in a `do`-`while` transfers control to the trailing
 // condition check, not back to the start of the body.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -114,6 +117,7 @@ static foreach (backend; Matrix!(
 // `final switch` dispatches to the case matching the value at run time,
 // each case running its own body rather than falling into another's.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -164,6 +168,7 @@ static foreach (backend; Matrix!(
 // skips every remaining element's statement entirely, exactly like an
 // ordinary loop body.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {

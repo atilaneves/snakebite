@@ -12,6 +12,7 @@ import ut.backends;
 // `shared` is a qualifier, not a distinct class: the shared type's
 // `TypeInfo` names the unshared one as its base.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -35,6 +36,7 @@ static foreach (backend; Matrix!(
 // A call through an interface reference finds the class's override, which
 // needs the interface's own offset rather than the class vtable.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {

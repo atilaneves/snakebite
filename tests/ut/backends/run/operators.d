@@ -12,6 +12,7 @@ import ut.backends;
 // Shifting a value into bytes and back reconstructs it, which pins the
 // shift amounts and the truncation each `cast(ubyte)` does.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -76,6 +77,7 @@ static foreach (backend; Matrix!(
 // A pointer of another type to the same storage reads and writes those
 // bytes, so a write through it is visible through the original.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -96,6 +98,7 @@ static foreach (backend; Matrix!(
 // An op-assign whose left side is a `ref`-returning call writes through to
 // the referent, not to a temporary.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {

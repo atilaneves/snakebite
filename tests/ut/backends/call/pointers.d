@@ -7,7 +7,7 @@ import ut.backends;
 // `&b` is dmd's `SymOffExp`, not a general `&expression`: taking a local's
 // address and reading back through it is the simplest lvalue-to-pointer
 // round trip there is.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("pointers.addressOf.read." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -27,7 +27,7 @@ static foreach (backend; Matrix!()) {
 
 // Writing through the pointer changes the variable it points at, not a
 // copy of it: `p` and `b` name the same storage.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("pointers.write.throughPointer." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -49,7 +49,7 @@ static foreach (backend; Matrix!()) {
 // A pointer argument carries the address a `&local` evaluated to, not a
 // copy of the pointee: the callee writes through it and the caller's own
 // local changes.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("pointers.pass.writesCaller." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -73,7 +73,7 @@ static foreach (backend; Matrix!()) {
 
 // A pointer argument also lets the callee hand a value back without a
 // `return`, the read side of the same address the write tests exercise.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("pointers.pass.readsCaller." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -98,6 +98,7 @@ static foreach (backend; Matrix!()) {
 // address every call shares, so a write through the pointer is visible to
 // a later read of `count` itself.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE interpreter refuses to take the address of a " ~
         "thread-local variable at compile time"),
