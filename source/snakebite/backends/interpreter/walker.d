@@ -85,7 +85,7 @@ extern(C++) private final class Evaluator: Visitor {
         isIntegralSize, storeValue, TypeFacts;
     import dmd.astenums:
         Tarray, Tbool, Tdelegate, Tfloat32, Tfloat64, Tnoreturn,
-        Tpointer, Tsarray, Tuns32, Tvoid;
+        Tint64, Tpointer, Tsarray, Tuns32, Tuns8, Tvoid;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
     import dmd.func: FuncDeclaration;
@@ -1533,22 +1533,35 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(AddExp expression) {
         import snakebite.nativelayout: storeIntegral;
 
-        if (_type.ty == Tpointer) {
-            const offsetFacts = factsOf(expression.e2.type);
-            const offset = asIntegral(expression.e2, offsetFacts);
-            const stride = factsOf(_type.nextOf).size;
-            ubyte* result;
-            if (expression.e1.type.ty == Tarray)
-                result = evaluateArray(
-                    expression.e1, factsOf(expression.e1.type),
-                ).elements;
-            else
-                result = cast(ubyte*) asPointer(expression.e1);
+        auto pointerCast = expression.e1.isCastExp;
+        auto scaledOffset = expression.e2.isMulExp;
+        CastExp offsetCast;
+        IntegerExp scale;
+        if (scaledOffset !is null) {
+            offsetCast = scaledOffset.e1.isCastExp;
+            scale = scaledOffset.e2.isIntegerExp;
+        }
 
-            if (offsetFacts.isUnsigned)
-                result += offset * stride;
-            else
-                result += cast(long) offset * cast(long) stride;
+        if (expression.type.ty == Tpointer
+                && pointerCast !is null
+                && pointerCast.type.ty == Tpointer
+                && pointerCast.type.nextOf.ty == Tuns8
+                && pointerCast.e1.type.ty == Tarray
+                && pointerCast.e1.type.nextOf.ty == Tuns8
+                && scaledOffset !is null
+                && scaledOffset.type.ty == Tint64
+                && offsetCast !is null
+                && offsetCast.type.ty == Tint64
+                && offsetCast.e1.type.ty == Type.tsize_t.ty
+                && scale !is null
+                && scale.type.ty == Tint64
+                && scale.toInteger == 1) {
+            const offsetFacts = factsOf(scaledOffset.type);
+            const offset = asIntegral(scaledOffset, offsetFacts);
+            const stride = factsOf(pointerCast.type.nextOf).size;
+            auto result = cast(ubyte*) asPointer(pointerCast);
+
+            result += cast(long) offset * cast(long) stride;
 
             storeIntegral(_place, cast(size_t) result, _facts.size);
             return;

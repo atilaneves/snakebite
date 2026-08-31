@@ -117,6 +117,60 @@ static foreach (backend; Matrix!(
     }
 }
 
+// Cerealising and decerealising nonzero bytes through the computed pointer
+// preserves the bytes at the nonzero old length.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("cerealiseDecerealiseRoundTripsAtOffset." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.string: memcpy;
+
+            struct Cerealiser {
+                private ubyte[] _bytes;
+
+                size_t offset() {
+                    return 2;
+                }
+
+                void cerealise(ubyte[] value) {
+                    const oldLength = offset();
+
+                    memcpy(
+                        cast(ubyte*)this._bytes + cast(long)oldLength,
+                        value.ptr,
+                        value.length,
+                    );
+                }
+
+                void decerealise(ubyte[] value) {
+                    const oldLength = offset();
+
+                    memcpy(
+                        value.ptr,
+                        cast(ubyte*)this._bytes + cast(long)oldLength,
+                        value.length,
+                    );
+                }
+            }
+
+            void main() {
+                Cerealiser cerealiser = Cerealiser([0, 0, 0, 0]);
+                ubyte[] original = [7, 11];
+                cerealiser.cerealise(original);
+
+                ubyte[] decoded = [0, 0];
+                cerealiser.decerealise(decoded);
+
+                assert(decoded[0] == original[0]);
+                assert(decoded[1] == original[1]);
+            }
+        });
+    }
+}
+
 // A pointer of another type to the same storage reads and writes those
 // bytes, so a write through it is visible through the original.
 static foreach (backend; Matrix!(
