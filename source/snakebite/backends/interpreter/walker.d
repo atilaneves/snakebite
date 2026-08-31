@@ -902,7 +902,7 @@ extern(C++) private final class Evaluator: Visitor {
             return;
         }
 
-        if (_type.ty == Tpointer) {
+        if (expression.type.ty == Tpointer) {
             storeIntegral(bytes, functionWord, size_t.sizeof);
             return;
         }
@@ -1531,6 +1531,29 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(AddExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+
+        if (_type.ty == Tpointer) {
+            const offsetFacts = factsOf(expression.e2.type);
+            const offset = asIntegral(expression.e2, offsetFacts);
+            const stride = factsOf(_type.nextOf).size;
+            ubyte* result;
+            if (expression.e1.type.ty == Tarray)
+                result = evaluateArray(
+                    expression.e1, factsOf(expression.e1.type),
+                ).elements;
+            else
+                result = cast(ubyte*) asPointer(expression.e1);
+
+            if (offsetFacts.isUnsigned)
+                result += offset * stride;
+            else
+                result += cast(long) offset * cast(long) stride;
+
+            storeIntegral(_place, cast(size_t) result, _facts.size);
+            return;
+        }
+
         storeBinaryExp!"+"(expression);
     }
 
@@ -1753,9 +1776,10 @@ extern(C++) private final class Evaluator: Visitor {
         // `px.ptr` this way to ask the GC what it already knows about the
         // block backing the array being grown.
         if (sourceType.ty == Tarray && _type.ty == Tpointer) {
-            const value = evaluateArray(expression.e1, factsOf(sourceType));
+            auto bytes = cast(ubyte*) addressOf(expression.e1);
+            const value = *cast(void**) (bytes + arrayPointerOffset);
             storeIntegral(
-                _place, cast(size_t) value.elements, _facts.size);
+                _place, cast(size_t) value, _facts.size);
             return;
         }
 

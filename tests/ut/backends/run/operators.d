@@ -73,6 +73,50 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A byte copy through the post-semantic pointer expression writes at the
+// requested element offset, so the cast, multiplication, and pointer
+// addition must all be evaluated by the backend.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("pointerCastAndAdditionCopiesAtOffset." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.string: memcpy;
+
+            struct Writer {
+                private ubyte[] _bytes;
+
+                size_t offset() {
+                    return 2;
+                }
+
+                void copyAtOffset() {
+                    const oldLength = offset();
+                    const ubyte[] value = [9, 8];
+
+                    memcpy(
+                        cast(ubyte*)this._bytes + cast(long)oldLength,
+                        value.ptr,
+                        value.length,
+                    );
+                }
+            }
+
+            void main() {
+                Writer writer = Writer([1, 2, 3, 4]);
+                writer.copyAtOffset();
+
+                assert(writer._bytes[0] == 1);
+                assert(writer._bytes[1] == 2);
+                assert(writer._bytes[2] == 9);
+                assert(writer._bytes[3] == 8);
+            }
+        });
+    }
+}
+
 // A pointer of another type to the same storage reads and writes those
 // bytes, so a write through it is visible through the original.
 static foreach (backend; Matrix!(
@@ -124,4 +168,3 @@ static foreach (backend; Matrix!(
         });
     }
 }
-
