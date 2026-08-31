@@ -4,6 +4,35 @@ module ut.backends.call.assign;
 import ut.backends;
 
 
+@("assign.structBlitRunsPostblitOnce.Interpreter")
+@Tags("Interpreter")
+unittest {
+    17.shouldBeRetOf!(
+        Interpreter,
+        q{
+            __gshared int copies;
+
+            struct Element {
+                int value;
+
+                this(this) {
+                    ++copies;
+                }
+            }
+
+            int result() {
+                Element source;
+                source.value = 7;
+                const before = copies;
+                Element target = source;
+                return (copies - before) * 10 + target.value;
+            }
+        },
+        "result",
+    );
+}
+
+
 @("assign.resultIsLvalue.Interpreter")
 @Tags("Interpreter")
 unittest {
