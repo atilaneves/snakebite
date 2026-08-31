@@ -6,7 +6,8 @@ gives the shortest compile-and-run time for the Bytecode VM?
 ## Formats
 
 - `fixed32` uses one 32-bit word per instruction and switch dispatch.
-- `direct` stores a predecoded handler pointer and operand in each cell.
+- `direct` stores a predecoded handler pointer and operand in each cell. Each
+  handler tail-calls the next handler.
 - `variable` uses a one-byte opcode and signed LEB128 operands.
 
 The production VM contains only the selected format. This prototype keeps the
@@ -43,15 +44,15 @@ instruction data needed for dispatch and branch targets.
 
 ## Decision
 
-Select fixed 32-bit instructions. On the measured corpus, its median total was
-45.6111 ms. The direct format took 130.7156 ms and the variable format took
-107.3358 ms. Encoding time was less than 0.02 ms for every format, so execution
-time decided the result. The variable format had the smallest code at 92 bytes,
-but its decoding cost did not recover that saving.
+Select direct-threaded instructions. On the measured corpus, their median total
+was 24.3735 ms. Fixed 32-bit dispatch took 46.3469 ms and variable-length
+dispatch took 49.6212 ms. Encoding time was less than 0.02 ms for every format,
+so execution time decided the result. The variable format had the smallest code
+at 92 bytes, but its decoding cost did not recover that saving.
 
-The production VM now uses fixed 32-bit instructions. Full-width D integer
-constants remain in a constant table; an instruction contains its opcode and a
-24-bit table index or operand.
+The production VM now uses direct-threaded instruction cells. Full-width D
+integer constants remain in a constant table. Each cell contains a handler
+pointer and a constant-table index or operand.
 
 ## Environment
 

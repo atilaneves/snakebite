@@ -161,7 +161,7 @@ private struct DirectState {
 }
 
 private struct DirectInstruction {
-    alias Handler = const(DirectInstruction)* function(
+    alias Handler = void function(
         const(DirectInstruction)*,
         DirectState*,
     );
@@ -219,68 +219,76 @@ private int runDirect(
     state.program = &program;
     state.codeBegin = program.functions[functionIndex].code.ptr;
     state.slots[0] = argument;
-    auto pc = state.codeBegin;
-    while (pc !is null)
-        pc = pc.handler(pc, &state);
+    state.codeBegin.handler(state.codeBegin, &state);
     return state.accumulator;
 }
 
-private const(DirectInstruction)* directConstant(
+private void directConstant(
     const(DirectInstruction)* pc, DirectState* state,
-) { state.accumulator = pc.operand; return pc + 1; }
+) { state.accumulator = pc.operand; directNext(pc, state); }
 
-private const(DirectInstruction)* directLoad(
+private void directLoad(
     const(DirectInstruction)* pc, DirectState* state,
-) { state.accumulator = state.slots[pc.operand]; return pc + 1; }
+) { state.accumulator = state.slots[pc.operand]; directNext(pc, state); }
 
-private const(DirectInstruction)* directStore(
+private void directStore(
     const(DirectInstruction)* pc, DirectState* state,
-) { state.slots[pc.operand] = state.accumulator; return pc + 1; }
+) { state.slots[pc.operand] = state.accumulator; directNext(pc, state); }
 
-private const(DirectInstruction)* directAdd(
+private void directAdd(
     const(DirectInstruction)* pc, DirectState* state,
-) { state.accumulator += pc.operand; return pc + 1; }
+) { state.accumulator += pc.operand; directNext(pc, state); }
 
-private const(DirectInstruction)* directSubtract(
+private void directSubtract(
     const(DirectInstruction)* pc, DirectState* state,
-) { state.accumulator -= pc.operand; return pc + 1; }
+) { state.accumulator -= pc.operand; directNext(pc, state); }
 
-private const(DirectInstruction)* directMultiply(
+private void directMultiply(
     const(DirectInstruction)* pc, DirectState* state,
-) { state.accumulator *= pc.operand; return pc + 1; }
+) { state.accumulator *= pc.operand; directNext(pc, state); }
 
-private const(DirectInstruction)* directXor(
+private void directXor(
     const(DirectInstruction)* pc, DirectState* state,
-) { state.accumulator ^= pc.operand; return pc + 1; }
+) { state.accumulator ^= pc.operand; directNext(pc, state); }
 
-private const(DirectInstruction)* directLessThan(
+private void directLessThan(
     const(DirectInstruction)* pc, DirectState* state,
-) { state.accumulator = state.accumulator < pc.operand; return pc + 1; }
+) { state.accumulator = state.accumulator < pc.operand; directNext(pc, state); }
 
-private const(DirectInstruction)* directBranchTrue(
-    const(DirectInstruction)* pc, DirectState* state,
-) {
-    return state.accumulator ? state.codeBegin + pc.operand : pc + 1;
-}
-
-private const(DirectInstruction)* directBranch(
+private void directBranchTrue(
     const(DirectInstruction)* pc, DirectState* state,
 ) {
-    return state.codeBegin + pc.operand;
+    const next = state.accumulator ? state.codeBegin + pc.operand : pc + 1;
+    next.handler(next, state);
 }
 
-private const(DirectInstruction)* directCall(
+private void directBranch(
+    const(DirectInstruction)* pc, DirectState* state,
+) {
+    const next = state.codeBegin + pc.operand;
+    next.handler(next, state);
+}
+
+private void directCall(
     const(DirectInstruction)* pc, DirectState* state,
 ) {
     state.accumulator = runDirect(
         *state.program, pc.operand, state.accumulator,
     );
-    return pc + 1;
+    directNext(pc, state);
 }
 
-private const(DirectInstruction)* directReturn(
+private void directReturn(
     const(DirectInstruction)*, DirectState*,
-) { return null; }
+) {}
+
+private void directNext(
+    const(DirectInstruction)* pc,
+    DirectState* state,
+) {
+    const next = pc + 1;
+    next.handler(next, state);
+}
 
 private struct VariableFunction {
     ubyte[] code;
