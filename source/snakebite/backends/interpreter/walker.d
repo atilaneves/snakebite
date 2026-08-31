@@ -31,9 +31,9 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     }
 
     public override string eval(FuncDeclaration function_) {
-        throw new SnakebiteException(
-            "eval not implemented for the interpreter yet",
-        );
+        string result;
+        call(function_, &result, []);
+        return result;
     }
 
     version(unittest)
