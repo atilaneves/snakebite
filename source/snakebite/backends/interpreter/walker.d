@@ -81,7 +81,8 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.nativelayout:
         isIntegralSize, storeValue, TypeFacts;
     import dmd.astenums:
-        LINK, Tarray, Tbool, Tnoreturn, Tpointer, Tsarray, Tuns32, Tvoid;
+        LINK, Tarray, Tbool, Tfloat32, Tfloat64, Tnoreturn, Tpointer,
+        Tsarray, Tuns32, Tvoid;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
     import dmd.func: FuncDeclaration;
@@ -1500,6 +1501,29 @@ extern(C++) private final class Evaluator: Visitor {
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
+        // Every operator that can carry a floating type out of dmd's
+        // semantic pass: the bitwise and shift operators are rejected by
+        // the frontend on floating operands, so the `static if` only
+        // keeps their mixins compilable, it refuses nothing. Both
+        // operands already share the expression's own type - dmd's usual
+        // arithmetic conversions convert them before any backend runs -
+        // and a `float` read widened to `double` is exact, so narrowing
+        // each operand back to `float` recovers it exactly and the
+        // operation then rounds once, in the expression's own precision,
+        // the same single rounding compiled D performs.
+        static if (op == "+" || op == "-" || op == "*" || op == "/"
+                || op == "%")
+            if (_type.ty == Tfloat32 || _type.ty == Tfloat64) {
+                const a = asFloating(expression.e1);
+                const b = asFloating(expression.e2);
+                if (_type.ty == Tfloat32)
+                    *cast(float*) _place =
+                        mixin("cast(float) a " ~ op ~ " cast(float) b");
+                else
+                    *cast(double*) _place = mixin("a " ~ op ~ " b");
+                return;
+            }
+
         if (!_facts.isIntegral)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
@@ -1513,6 +1537,30 @@ extern(C++) private final class Evaluator: Visitor {
 
         storeIntegral(
             _place, combine!op(a, b, aFacts, bFacts, expression), _facts.size);
+    }
+
+    // As `asIntegral`, for a floating operand. The value comes back as a
+    // `double` because a `float` widens to `double` exactly, so the one
+    // return type carries either width without loss; the caller narrows
+    // back when the operation itself is `float`-precision.
+    private double asFloating(Expression expression) {
+        import std.conv: text;
+
+        auto type = expression.type;
+        if (type.ty != Tfloat32 && type.ty != Tfloat64)
+            throw new SnakebiteException(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "` as floating point: its type is `", type.toString,
+                    "`"),
+            );
+
+        const facts = factsOf(type);
+        align(double.alignof) ubyte[double.sizeof] buffer = void;
+        evaluate(expression, type, facts, buffer.ptr);
+
+        return type.ty == Tfloat32
+            ? *cast(float*) buffer.ptr
+            : *cast(double*) buffer.ptr;
     }
 
     // `-x` and `~x` leave the same low bits whether the operand was read as
@@ -1551,9 +1599,15 @@ extern(C++) private final class Evaluator: Visitor {
     // the length by the ratio of the two element sizes, not copying it
     // verbatim, and that scaling is what this does below. `arr.ptr` is
     // handled too, further down, since dmd lowers it into a `Tarray` to
-    // `Tpointer` cast over the array itself. Anything else this node
-    // could mean - floating point, a class downcast - is refused the
-    // same way an unhandled node already is.
+    // `Tpointer` cast over the array itself. An integral-to-floating
+    // cast rounds the operand's mathematical value to the destination's
+    // own precision, read as signed or unsigned per the operand's type -
+    // the host's own `cast(float)`/`cast(double)` is exactly that
+    // conversion, so it is applied per destination width rather than
+    // through a shared wider intermediate, which for `float` would round
+    // twice. Anything else this node could mean - a class downcast, a
+    // floating-to-integral cast - is refused the same way an unhandled
+    // node already is.
     override void visit(CastExp expression) {
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
@@ -1633,6 +1687,20 @@ extern(C++) private final class Evaluator: Visitor {
                 asIntegral(expression.e1, sourceFacts),
                 _facts.size,
             );
+            return;
+        }
+
+        if (sourceFacts.isIntegral
+                && (_type.ty == Tfloat32 || _type.ty == Tfloat64)) {
+            const value = asIntegral(expression.e1, sourceFacts);
+            if (_type.ty == Tfloat32)
+                *cast(float*) _place = sourceFacts.isUnsigned
+                    ? cast(float) cast(ulong) value
+                    : cast(float) value;
+            else
+                *cast(double*) _place = sourceFacts.isUnsigned
+                    ? cast(double) cast(ulong) value
+                    : cast(double) value;
             return;
         }
 
