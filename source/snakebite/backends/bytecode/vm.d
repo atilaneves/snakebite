@@ -4,6 +4,14 @@ module snakebite.backends.bytecode.vm;
 private:
 
 
+extern(C) void executeCallPlan(
+    const(void)*,
+    void*,
+    scope const(void*)*,
+    size_t,
+);
+
+
 // One argument a call instruction copies from the caller's frame into the
 // callee's, at compile time already resolved to both sides' byte offsets
 // and the width to copy - the same three numbers `opCopy` needs for a
@@ -24,7 +32,6 @@ package struct CallSite {
     package Arg[] args;
     package size_t returnWidth;
     package const(void)* nativePlan;
-    package void* nativeAddress;
 }
 
 
@@ -35,6 +42,7 @@ package struct CallSite {
 // past a compiled function's own frame size, which stays far short of
 // `size_t.max`.
 package enum discardResult = size_t.max;
+package enum maxNativeArguments = 16;
 
 
 package struct Instruction {
@@ -272,13 +280,15 @@ package const(Instruction)* opCall(
 
     const site = callSites[pc.source];
     if (site.nativePlan !is null) {
-        assert(site.args.length == 1);
-        assert(site.returnWidth == int.sizeof);
-        alias Native = extern(C) int function(int);
-        auto argument = *cast(const int*) (frame + site.args[0].callerOffset);
-        auto result = (cast(Native) site.nativeAddress)(argument);
-        if (pc.destination != discardResult)
-            *cast(int*) (frame + pc.destination) = result;
+        const(void)*[maxNativeArguments] arguments;
+        foreach (i, arg; site.args)
+            arguments[i] = frame + arg.callerOffset;
+        auto result = pc.destination == discardResult
+            ? null
+            : frame + pc.destination;
+        executeCallPlan(
+            site.nativePlan, result, arguments.ptr, site.args.length,
+        );
         return pc + 1;
     }
     auto callee = site.callee;

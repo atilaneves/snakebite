@@ -4,7 +4,11 @@ module snakebite.backends.bytecode.compiler;
 private:
 
 import dmd.visitor: Visitor;
-import snakebite.ffi: PlanCache;
+import snakebite.backends.bytecode.vm: maxNativeArguments;
+import snakebite.ffi: maxArguments, PlanCache;
+
+
+static assert(maxNativeArguments == maxArguments);
 
 
 public final class Bytecode: imported!"snakebite.backends.backend".Backend {
@@ -1234,7 +1238,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
             auto plan = &_bytecode._plans.of(callee);
             _callSites ~= CallSite(
                 null, args, isVoidCallee ? 0 : returnFacts.size,
-                cast(const(void)*) plan, plan.nativeAddress,
+                cast(const(void)*) plan,
             );
             emit(&opCall, destOffset, _callSites.length - 1, 0);
             return;

@@ -49,12 +49,6 @@ public struct CallPlan {
     private bool _reversedArguments;
     private FastPath _fastPath;
 
-    // The address is used by backends that have their own DMD-free runtime
-    // representation of a native call site.
-    public void* nativeAddress() const @safe @nogc nothrow pure {
-        return cast(void*) _address;
-    }
-
     // Calls the function this plan was prepared for.
     //
     // `arguments` are the addresses of each argument's native bytes, in
@@ -216,6 +210,19 @@ public struct CallPlan {
             }
         }
     }
+}
+
+// The DMD-free runtime entry point for a prepared call. Backends keep the
+// plan opaque and hand this function addresses of values already stored in
+// native layout.
+public extern(C) void executeCallPlan(
+    const(void)* opaquePlan,
+    void* returnPlace,
+    scope const(void*)* arguments,
+    size_t argumentCount,
+) {
+    const plan = cast(const(CallPlan)*) opaquePlan;
+    plan.call(returnPlace, arguments[0 .. argumentCount]);
 }
 
 // The plans already prepared, one per function. A backend owns one of
