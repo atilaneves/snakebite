@@ -498,9 +498,9 @@ extern(C++) private final class Evaluator: Visitor {
         }
     }
 
-    // Where each parameter's bytes sit in the frame the caller just
-    // filled, in declaration order: what the FFI needs to hand them over,
-    // built from the layout this interpreter already computed.
+    // Where the hidden context and each explicit parameter's bytes sit in
+    // the frame the caller just filled: what the FFI needs to hand them
+    // over, built from the layout this interpreter already computed.
     //
     // Filled into the caller's own storage rather than a fresh array: this
     // runs on every call through the FFI, and the slots are read and done
@@ -511,10 +511,15 @@ extern(C++) private final class Evaluator: Visitor {
         ubyte* frameBase,
         const(FrameLayout)* layout,
     ) {
-        foreach (i, parameter; layout.parameters)
-            slots[i] = frameBase + parameter.offset;
+        size_t count;
+        if (layout.hiddenThis.variable !is null)
+            slots[count++] =
+                frameBase + layout.hiddenThis.parameter.offset;
 
-        return slots[0 .. layout.parameters.length];
+        foreach (i, parameter; layout.parameters)
+            slots[count++] = frameBase + parameter.offset;
+
+        return slots[0 .. count];
     }
 
     override void visit(Statement statement) {
@@ -1281,6 +1286,14 @@ extern(C++) private final class Evaluator: Visitor {
         // call was never given.
         if (auto cond = target.isCondExp)
             return addressOf(truthOf(cond.econd) ? cond.e1 : cond.e2);
+
+        // DMD uses a comma expression when a scoped temporary needs setup
+        // before its initializer. The left side runs for its effects; only
+        // the right side names the resulting lvalue.
+        if (auto comma = target.isCommaExp) {
+            runForEffect(comma.e1);
+            return addressOf(comma.e2);
+        }
 
         if (auto call = target.isCallExp)
             return refCallAddress(call);

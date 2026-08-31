@@ -353,12 +353,38 @@ extern(C++) private final class LocalsCollector: Visitor {
                 : _layout.reserveSlot(variable.type);
             _layout._slotOf[variable] =
                 FrameLayout.VariableSlot(slot.offset, isRef);
+
+            // DMD can place another compiler-generated declaration inside
+            // this variable's initializer. The evaluator strips a
+            // construct or blit wrapper and runs its right side, so collect
+            // declarations from that same expression here.
+            if (auto initializer = variable._init.isExpInitializer) {
+                auto value = initializer.exp;
+                if (auto construct = value.isConstructExp)
+                    value = construct.e2;
+                else if (auto blit = value.isBlitExp)
+                    value = blit.e2;
+                collectDeclarations(value);
+            }
             return;
         }
 
         if (auto comma = expression.isCommaExp) {
             collectDeclarations(comma.e1);
             collectDeclarations(comma.e2);
+            return;
+        }
+
+        if (auto call = expression.isCallExp) {
+            collectDeclarations(call.e1);
+            if (call.arguments !is null)
+                foreach (argument; *call.arguments)
+                    collectDeclarations(argument);
+            return;
+        }
+
+        if (auto dot = expression.isDotVarExp) {
+            collectDeclarations(dot.e1);
             return;
         }
 

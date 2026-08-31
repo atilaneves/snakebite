@@ -69,6 +69,16 @@ private extern(C) ref int snakebite_ut_cell() {
     return _cell;
 }
 
+private struct ThreeWords {
+    size_t first;
+    size_t second;
+    size_t third;
+}
+
+private extern(C) ThreeWords snakebite_ut_three_words() {
+    return ThreeWords(17, 31, 47);
+}
+
 
 @("called.refParameter")
 unittest {
@@ -109,6 +119,29 @@ unittest {
     cache.of(function_).call(&address, []);
 
     (*address).should == 1234;
+}
+
+
+@("called.hiddenPointerReturn")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct ThreeWords {
+            size_t first;
+            size_t second;
+            size_t third;
+        }
+
+        extern(C) ThreeWords snakebite_ut_three_words();
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_three_words");
+    assert(function_ !is null,
+        "No `snakebite_ut_three_words` in the program");
+
+    PlanCache cache;
+    ThreeWords result;
+    cache.of(function_).call(&result, []);
+
+    result.should == ThreeWords(17, 31, 47);
 }
 
 
