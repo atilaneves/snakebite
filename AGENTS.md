@@ -69,3 +69,20 @@ communicated between agents. Review subagents get the PR number and
 nothing else, they can read review comments and markdown
 instructions. Fixer subagents should resolve conversations after
 pushing, otherwise there's no new diff.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the canonical triage label vocabulary. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use the single-context domain-document layout. See
+`docs/agents/domain.md`.

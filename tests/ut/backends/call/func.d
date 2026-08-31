@@ -23,6 +23,24 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+
+static foreach (backend; Matrix!()) {
+    @("ret.int.fullWidth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1_234_567_890.shouldBeRetOf!(
+            backend,
+            q{
+                int answer() {
+                    return 1_234_567_890;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
