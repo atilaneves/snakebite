@@ -102,7 +102,7 @@ extern(C++) private final class Evaluator: Visitor {
         Catch, CompoundStatement, ContinueStatement, ExpStatement,
         ForStatement, IfStatement, ImportStatement, ReturnStatement,
         ScopeStatement, Statement, TryCatchStatement, TryFinallyStatement,
-        UnrolledLoopStatement;
+        ThrowStatement, UnrolledLoopStatement;
     import dmd.tokens: EXP;
 
     alias visit = Visitor.visit;
@@ -758,6 +758,10 @@ extern(C++) private final class Evaluator: Visitor {
             return;
 
         runForEffect(statement.exp);
+    }
+
+    override void visit(ThrowStatement statement) {
+        throwGuest(statement.exp);
     }
 
     // Runs `expression` for its side effects, discarding whatever value it
@@ -2357,6 +2361,36 @@ extern(C++) private final class Evaluator: Visitor {
             __FILE__,
             __LINE__,
         );
+        throw new GuestException(guest);
+    }
+
+    override void visit(ThrowExp expression) {
+        throwGuest(expression.e1);
+    }
+
+    private void throwGuest(Expression expression) {
+        import snakebite.nativelayout: loadIntegral;
+        import std.conv: text;
+
+        if (expression.type.ty != Tclass)
+            throw new SnakebiteException(
+                text("interpreter cannot throw `", expression.toString,
+                    "`: it is not a class reference"),
+            );
+
+        const facts = factsOf(expression.type);
+        align(size_t.sizeof) ubyte[size_t.sizeof] value = void;
+        evaluate(expression, expression.type, facts, value.ptr);
+
+        auto guest = cast(Throwable) cast(void*) loadIntegral(
+            value.ptr, facts.size, false,
+        );
+        if (guest is null)
+            throw new SnakebiteException(
+                text("interpreter cannot throw `", expression.toString,
+                    "`: it is null"),
+            );
+
         throw new GuestException(guest);
     }
 
