@@ -4,6 +4,96 @@ module ut.backends.call.control_flow;
 import ut.backends;
 
 
+@("tryFinally.scopeExitRuns.Interpreter")
+@Tags("Interpreter")
+unittest {
+    3.shouldBeRetOf!(
+        Interpreter,
+        q{
+            int result() {
+                int value;
+                {
+                    scope(exit) value = 3;
+                    value = 2;
+                }
+                return value;
+            }
+        },
+        "result",
+    );
+}
+
+
+@("tryFinally.scopeExitRunsDuringReturnAndThrow.Interpreter")
+@Tags("Interpreter")
+unittest {
+    23.shouldBeRetOf!(
+        Interpreter,
+        q{
+            int value;
+
+            int returns() {
+                scope(exit) value = 2;
+                return 7;
+            }
+
+            bool passes() {
+                return false;
+            }
+
+            int result() {
+                returns();
+                try {
+                    scope(exit) value = value * 10 + 3;
+                    assert(passes());
+                } catch (Throwable) {
+                }
+                return value;
+            }
+        },
+        "result",
+    );
+}
+
+
+@("tryFinally.scopeExitRunsDuringContinue.Interpreter")
+@Tags("Interpreter")
+unittest {
+    3.shouldBeRetOf!(
+        Interpreter,
+        q{
+            int result() {
+                int exits;
+                for (int i; i < 3; ++i) {
+                    scope(exit) ++exits;
+                    continue;
+                }
+                return exits;
+            }
+        },
+        "result",
+    );
+}
+
+
+@("unrolledLoop.staticForeachRunsInOrder.Interpreter")
+@Tags("Interpreter")
+unittest {
+    123.shouldBeRetOf!(
+        Interpreter,
+        q{
+            int result() {
+                int value;
+                static foreach (digit; [1, 2, 3])
+                    value = value * 10 + digit;
+                return value;
+            }
+        },
+        "result",
+    );
+}
+
+
 static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("if.taken." ~ backend.stringof)
     @Tags(backend.stringof)

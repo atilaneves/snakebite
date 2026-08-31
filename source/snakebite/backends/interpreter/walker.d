@@ -95,7 +95,8 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.statement:
         Catch, CompoundStatement, ContinueStatement, ExpStatement,
         ForStatement, IfStatement, ImportStatement, ReturnStatement,
-        ScopeStatement, Statement, TryCatchStatement;
+        ScopeStatement, Statement, TryCatchStatement, TryFinallyStatement,
+        UnrolledLoopStatement;
     import dmd.tokens: EXP;
 
     alias visit = Visitor.visit;
@@ -565,6 +566,16 @@ extern(C++) private final class Evaluator: Visitor {
         }
     }
 
+    override void visit(TryFinallyStatement statement) {
+        try {
+            if (statement._body !is null)
+                statement._body.accept(this);
+        } finally {
+            if (statement.finalbody !is null)
+                statement.finalbody.accept(this);
+        }
+    }
+
     // Matched by symbol identity against dmd's own record of
     // `object.Throwable`, not by name, so a guest class that merely
     // shares the name never matches. Any other catch type stays
@@ -588,6 +599,19 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(CompoundStatement statement) {
+        if (statement.statements is null)
+            return;
+
+        foreach (child; *statement.statements) {
+            if (child !is null) {
+                child.accept(this);
+                if (_returned || _continued)
+                    return;
+            }
+        }
+    }
+
+    override void visit(UnrolledLoopStatement statement) {
         if (statement.statements is null)
             return;
 
