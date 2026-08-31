@@ -66,6 +66,12 @@ public enum arrayLengthOffset = 0;
 public enum arrayPointerOffset = size_t.sizeof;
 public enum arrayValueSize = size_t.sizeof + (void*).sizeof;
 
+// A delegate is `struct { void* ptr; void* funcptr; }`: the context
+// word first, the function word after it.
+public enum delegateContextOffset = 0;
+public enum delegateFunctionOffset = (void*).sizeof;
+public enum delegateValueSize = 2 * (void*).sizeof;
+
 // Whether `storeIntegral` has a layout for that width, so a caller that
 // must decide before it has a value to store asks the same question the
 // store itself would.
