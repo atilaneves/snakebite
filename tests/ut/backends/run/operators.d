@@ -93,7 +93,7 @@ static foreach (backend; Matrix!(
                 }
 
                 void copyAtOffset() {
-                    const oldLength = offset();
+                    const oldLength = offset;
                     const ubyte[] value = [9, 8];
 
                     memcpy(
@@ -105,8 +105,8 @@ static foreach (backend; Matrix!(
             }
 
             void main() {
-                Writer writer = Writer([1, 2, 3, 4]);
-                writer.copyAtOffset();
+                auto writer = Writer([1, 2, 3, 4]);
+                writer.copyAtOffset;
 
                 assert(writer._bytes[0] == 1);
                 assert(writer._bytes[1] == 2);
@@ -135,8 +135,8 @@ static foreach (backend; Matrix!(
                     return 2;
                 }
 
-                void cerealise(ubyte[] value) {
-                    const oldLength = offset();
+                void cerealise(in ubyte[] value) {
+                    const oldLength = offset;
 
                     memcpy(
                         cast(ubyte*)this._bytes + cast(long)oldLength,
@@ -146,7 +146,7 @@ static foreach (backend; Matrix!(
                 }
 
                 void decerealise(ubyte[] value) {
-                    const oldLength = offset();
+                    const oldLength = offset;
 
                     memcpy(
                         value.ptr,
@@ -157,11 +157,11 @@ static foreach (backend; Matrix!(
             }
 
             void main() {
-                Cerealiser cerealiser = Cerealiser([0, 0, 0, 0]);
-                ubyte[] original = [7, 11];
+                auto cerealiser = Cerealiser([0, 0, 0, 0]);
+                const original = [cast(ubyte) 7, cast(ubyte) 11];
                 cerealiser.cerealise(original);
 
-                ubyte[] decoded = [0, 0];
+                auto decoded = [cast(ubyte) 0, cast(ubyte) 0];
                 cerealiser.decerealise(decoded);
 
                 assert(decoded[0] == original[0]);

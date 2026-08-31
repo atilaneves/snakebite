@@ -1533,21 +1533,21 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(AddExp expression) {
         import snakebite.nativelayout: storeIntegral;
 
-        auto pointerCast = expression.e1.isCastExp;
-        auto scaledOffset = expression.e2.isMulExp;
+        const pointerCast = expression.e1.isCastExp;
+        const scaledOffset = expression.e2.isMulExp;
         CastExp offsetCast;
         IntegerExp scale;
         if (scaledOffset !is null) {
-            offsetCast = scaledOffset.e1.isCastExp;
-            scale = scaledOffset.e2.isIntegerExp;
+        offsetCast = cast() scaledOffset.e1.isCastExp;
+        scale = cast() scaledOffset.e2.isIntegerExp;
         }
 
         if (expression.type.ty == Tpointer
                 && pointerCast !is null
                 && pointerCast.type.ty == Tpointer
-                && pointerCast.type.nextOf.ty == Tuns8
+            && (cast() pointerCast).type.nextOf.ty == Tuns8
                 && pointerCast.e1.type.ty == Tarray
-                && pointerCast.e1.type.nextOf.ty == Tuns8
+            && (cast() pointerCast.e1.type).nextOf.ty == Tuns8
                 && scaledOffset !is null
                 && scaledOffset.type.ty == Tint64
                 && offsetCast !is null
@@ -1556,12 +1556,11 @@ extern(C++) private final class Evaluator: Visitor {
                 && scale !is null
                 && scale.type.ty == Tint64
                 && scale.toInteger == 1) {
-            const offsetFacts = factsOf(scaledOffset.type);
-            const offset = asIntegral(scaledOffset, offsetFacts);
-            const stride = factsOf(pointerCast.type.nextOf).size;
-            auto result = cast(ubyte*) asPointer(pointerCast);
-
-            result += cast(long) offset * cast(long) stride;
+        const offsetFacts = factsOf(cast() scaledOffset.type);
+        const offset = asIntegral(cast() scaledOffset, offsetFacts);
+        const stride = factsOf((cast() pointerCast).type.nextOf).size;
+        const result = cast(ubyte*) asPointer(cast() pointerCast)
+                + cast(long) offset * cast(long) stride;
 
             storeIntegral(_place, cast(size_t) result, _facts.size);
             return;
@@ -1789,7 +1788,7 @@ extern(C++) private final class Evaluator: Visitor {
         // `px.ptr` this way to ask the GC what it already knows about the
         // block backing the array being grown.
         if (sourceType.ty == Tarray && _type.ty == Tpointer) {
-            auto bytes = cast(ubyte*) addressOf(expression.e1);
+            const bytes = cast(ubyte*) addressOf(expression.e1);
             const value = *cast(void**) (bytes + arrayPointerOffset);
             storeIntegral(
                 _place, cast(size_t) value, _facts.size);
