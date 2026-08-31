@@ -932,9 +932,8 @@ static foreach (backend; Matrix!()) {
 }
 
 // dmd's integral promotions widen a target narrower than `int` before the
-// operator is applied, so the left side arrives as `cast(int)b` rather than
-// a variable and the interpreter refuses. Pinned so the boundary is
-// deliberate: every compound assignment above works at 4 and 8 bytes only.
+// operator is applied, so the left side arrives as `cast(int)value`. The
+// interpreter must still write the promoted result back to the byte slot.
 @("arithmetic.addAssign.narrowTarget.Interpreter")
 @Tags("Interpreter")
 unittest {
@@ -953,10 +952,8 @@ unittest {
     auto function_ = findFunction(module_, "wrapped");
 
     byte result;
-    interpreter(module_).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "interpreter cannot assign to `cast(int)value`: " ~
-            "`cast(int)value += cast(int)step()`");
+    interpreter(module_).call(function_, &result, []);
+    result.should == -56;
 }
 
 // dmd's semantic pass rewrites `--x` into `x -= 1`, so this pins the

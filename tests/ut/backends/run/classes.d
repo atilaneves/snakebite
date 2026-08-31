@@ -7,6 +7,9 @@ module ut.backends.run.classes;
 
 
 import ut.backends;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
+import std.string: endsWith;
 
 
 // `shared` is a qualifier, not a distinct class: the shared type's
@@ -31,6 +34,137 @@ static foreach (backend; Matrix!(
             }
         });
     }
+}
+
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("classConstructionInitializesFieldsAndRunsConstructor."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int base = 7;
+            }
+
+            class Derived : Base {
+                int value = 2;
+
+                this(int value_) {
+                    value = value_;
+                }
+            }
+
+            void main() {
+                auto derived = new Derived(42);
+                assert(derived.base == 7);
+                assert(derived.value == 42);
+            }
+        });
+    }
+}
+
+@("ordinaryClassStorageHasNativeVptr.Interpreter")
+@Tags(Interpreter.stringof)
+unittest {
+    auto module_ = parseSnippet(q{
+        class Plain {
+        }
+
+        Plain make() {
+            return new Plain;
+        }
+    });
+    auto function_ = findFunction(module_, "make");
+
+    Object value;
+    interpreter(module_).call(function_, &value, []);
+
+    assert(value !is null);
+    assert(
+        *cast(void**) cast(void*) value !is null,
+        "ordinary guest class storage must have a native vptr",
+    );
+
+    auto classInfo = value.classinfo;
+    assert(classInfo !is null);
+    assert(classInfo.name.endsWith(".Plain"), classInfo.name);
+    assert(value.toString.endsWith(".Plain"));
+}
+
+@("classConstructionBindsThisForDependentFieldAssignments.Interpreter")
+@Tags(Interpreter.stringof)
+unittest {
+    0.shouldBeStatusOf!(Interpreter, q{
+        class Base {
+            int first = 7;
+        }
+
+        class Values : Base {
+            int second;
+            int third;
+
+            this() {
+                this.second = this.first + 1;
+                third = second + 1;
+            }
+        }
+
+        void main() {
+            auto values = new Values;
+            assert(values.first == 7);
+            assert(values.second == 8);
+            assert(values.third == 9);
+        }
+    });
+}
+
+@("classConstructionCallsGuestBaseConstructor.Interpreter")
+@Tags(Interpreter.stringof)
+unittest {
+    0.shouldBeStatusOf!(Interpreter, q{
+        class Base {
+            int value;
+
+            this(int value_) {
+                value = value_;
+            }
+        }
+
+        class Derived : Base {
+            this() {
+                super(42);
+            }
+        }
+
+        void main() {
+            auto derived = new Derived;
+            assert(derived.value == 42);
+        }
+    });
+}
+
+@("classCastUsesGuestClassHierarchy.Interpreter")
+@Tags(Interpreter.stringof)
+unittest {
+    0.shouldBeStatusOf!(Interpreter, q{
+        class Base {
+        }
+
+        class Derived : Base {
+        }
+
+        class Other {
+        }
+
+        void main() {
+            Base base = new Derived;
+            assert(cast(Derived) base !is null);
+            assert(cast(Other) base is null);
+        }
+    });
 }
 
 // A call through an interface reference finds the class's override, which
@@ -67,4 +201,3 @@ static foreach (backend; Matrix!(
         });
     }
 }
-
