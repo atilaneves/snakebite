@@ -179,6 +179,11 @@ extern(C++) private final class Evaluator: Visitor {
     // The currently executing function's frame.
     private ubyte* _frameBase;
     private const(FrameLayout)* _layout;
+    // The currently executing function's own declaration - `frameOf`'s
+    // starting point for walking the static chain up from wherever
+    // execution currently is, one hop of `outerVars`' own reasoning per
+    // level of nesting.
+    private FuncDeclaration _function;
     // Set by `visit(ReturnStatement)`; checked by `visit(CompoundStatement)`
     // to stop walking sibling statements once one has run. dmd accepts
     // unreachable statements after a `return` (it only warns with `-w`),
@@ -420,20 +425,26 @@ extern(C++) private final class Evaluator: Visitor {
                     "`: only a struct method's `this` is supported"),
             );
 
-        // A nested function's context is not covered either: its static
-        // chain - the enclosing function's frame - has no representation
-        // in this interpreter, so this throws loudly instead of running
-        // with missing context. A nested function that reads no
-        // enclosing local (`outerVars`, filled by dmd's
-        // `checkNestedReference`, is empty) is the one exception: it
-        // gets a static chain in compiled D but never dereferences it -
-        // a non-capturing `delegate` literal is exactly this shape - so
-        // running it without one changes nothing it can observe.
-        if (function_.isNested() && function_.outerVars.length != 0)
+        // A nested function's static chain - the enclosing function's
+        // frame - is covered when the callee's frame outlives no longer
+        // than the call that made it: `bindFrame` passes the caller's own
+        // frame (reached by walking `frameOf`, if the callee is nested
+        // more than one level deep) as `vthis`, and `slotOf` reads an
+        // outer variable back through that same link. What is not
+        // covered is a callee dmd's `needsClosure()` says escapes its
+        // enclosing call - one whose captured locals must outlive the
+        // frame stack pops them from, which this interpreter's frame
+        // stack, unlike a heap-allocated closure, cannot provide - so
+        // that one case alone still throws loudly instead of running
+        // with a dangling context.
+        import dmd.funcsem: needsClosure;
+
+        if (function_.isNested() && function_.needsClosure())
             throw new SnakebiteException(
                 text("interpreter cannot call `", function_.toString,
-                    "`: it needs a static chain, which the ",
-                    "interpreter does not provide"),
+                    "`: it captures an outer variable that must outlive ",
+                    "the enclosing call, which the interpreter's frame ",
+                    "stack does not support"),
             );
 
         // A root-owned declaration with no body has no code anywhere: the
@@ -452,6 +463,7 @@ extern(C++) private final class Evaluator: Visitor {
         _place = returnPlace;
         _frameBase = frameBase;
         _layout = layout;
+        _function = function_;
         _returned = false;
         _continued = false;
         _returnsRef = typeFunctionOf(function_).isRef;
@@ -470,6 +482,7 @@ extern(C++) private final class Evaluator: Visitor {
         private void* _place;
         private ubyte* _frameBase;
         private const(FrameLayout)* _layout;
+        private FuncDeclaration _function;
         private bool _returned;
         private bool _continued;
         private bool _returnsRef;
@@ -484,6 +497,7 @@ extern(C++) private final class Evaluator: Visitor {
             _place = evaluator._place;
             _frameBase = evaluator._frameBase;
             _layout = evaluator._layout;
+            _function = evaluator._function;
             _returned = evaluator._returned;
             _continued = evaluator._continued;
             _returnsRef = evaluator._returnsRef;
@@ -495,6 +509,7 @@ extern(C++) private final class Evaluator: Visitor {
             _evaluator._place = _place;
             _evaluator._frameBase = _frameBase;
             _evaluator._layout = _layout;
+            _evaluator._function = _function;
             _evaluator._returned = _returned;
             _evaluator._continued = _continued;
             _evaluator._returnsRef = _returnsRef;
@@ -991,6 +1006,59 @@ extern(C++) private final class Evaluator: Visitor {
         memcpy(_place, slotOf(expression), _facts.size);
     }
 
+    // The function `variable` is a parameter or local of - `toParent2`
+    // walks up past any block or `Catch` scope in between, which are not
+    // `Dsymbol`s of their own, straight to the nearest enclosing function
+    // or aggregate. `null` for anything else it could be a member of
+    // (an aggregate's field, reached through `this` rather than a static
+    // chain, or a module-scope symbol) - `frameOf`'s caller is the one
+    // that turns that into a refusal, since only it knows whether "not a
+    // frame variable at all" or "not on the chain from here" is the
+    // right thing to say.
+    private FuncDeclaration outerFunctionOf(VarDeclaration variable) {
+        auto parent = variable.toParent2();
+        return parent is null ? null : parent.isFuncDeclaration;
+    }
+
+    // Where `owner`'s own frame is: `owner` itself if it is the function
+    // currently executing, otherwise found by following the static chain
+    // up from there - one context-word hop per level of nesting, reading
+    // each frame's own `vthis` slot the same way `bindFrame` filled it,
+    // exactly as compiled D follows the same chain to reach the same
+    // frame. Both a direct call to a nested function (`bindFrame`, to
+    // learn what context to pass its callee) and an outer-variable read
+    // (`slotOf`, to learn where the variable actually lives) need this.
+    private ubyte* frameOf(FuncDeclaration owner) {
+        import snakebite.nativelayout: loadIntegral;
+        import std.conv: text;
+
+        auto fn = _function;
+        auto base = _frameBase;
+        while (fn !is owner) {
+            auto layout = layoutOf(fn);
+            if (layout.hiddenThis.variable is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot reach `", owner.toString,
+                        "`'s frame from `", fn.toString,
+                        "`: it has no static chain of its own"),
+                );
+
+            auto parent = fn.toParent2();
+            fn = parent is null ? null : parent.isFuncDeclaration;
+            if (fn is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot reach `", owner.toString,
+                        "`'s frame: it is not on the current static chain"),
+                );
+
+            base = cast(ubyte*) loadIntegral(
+                base + layout.hiddenThis.parameter.offset, size_t.sizeof,
+                false);
+        }
+
+        return base;
+    }
+
     // Where the variable read or written by `expression` lives: the
     // current frame for a parameter or local, and storage of its own for
     // anything in the data segment. A read and a compound assignment
@@ -1023,13 +1091,35 @@ extern(C++) private final class Evaluator: Visitor {
             return staticSlotOf(variable);
 
         countForeignNameLookup;
-        auto slot = _frameBase + _layout.offsetOf(variable);
+
+        // A parameter or local of the currently executing function itself
+        // is the common case, and the only one a non-nested function ever
+        // has. `variable` not being one of those is what an outer
+        // variable - read from inside a nested function, through the
+        // static chain `bindFrame` set up when it was called - looks
+        // like here, so that is tried next rather than refusing outright.
+        auto base = _frameBase;
+        auto layout = _layout;
+        if (!layout.hasSlot(variable)) {
+            auto owner = outerFunctionOf(variable);
+            if (owner is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot reach `", original.toString,
+                        "`: not a parameter or local in the current ",
+                        "frame or an enclosing one"),
+                );
+
+            base = frameOf(owner);
+            layout = layoutOf(owner);
+        }
+
+        auto slot = base + layout.offsetOf(variable);
 
         // A `ref` variable's own slot holds the address of the referenced
         // storage, not the storage itself. Reading through it once more here,
         // the one place every read, write and address-of a variable resolves
         // its slot, makes a reach of the variable reach its target instead.
-        if (_layout.isRef(variable))
+        if (layout.isRef(variable))
             return cast(ubyte*) loadIntegral(slot, size_t.sizeof, false);
 
         return slot;
@@ -1121,9 +1211,16 @@ extern(C++) private final class Evaluator: Visitor {
         // both. Any future backend that walks a body's AST itself,
         // rather than handing it to dmd's engine, inherits the same
         // need.
+        // A nested function declaration - `int lookup(string key) { ... }`
+        // written as a statement - likewise binds a name to a
+        // `FuncDeclaration` dmd has already resolved every call to, not
+        // storage this evaluator has to create: nothing runs until the
+        // guest calls `lookup`, at which point `visit(CallExp)` reaches
+        // it as `expression.f`, not through this declaration at all.
         if (expression.declaration.isStructDeclaration !is null
                 || expression.declaration.isAliasDeclaration !is null
-                || expression.declaration.isTemplateDeclaration !is null)
+                || expression.declaration.isTemplateDeclaration !is null
+                || expression.declaration.isFuncDeclaration !is null)
             return;
 
         auto variable = expression.declaration.isVarDeclaration;
@@ -1431,6 +1528,25 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         auto array = expression.e1;
+
+        // `ptr[i]` has no length of its own to bound-check against - the
+        // same as compiled D, which leaves that to whatever built the
+        // pointer. dmd's own rvalue-AA-index lowering (`aa[key]`, see
+        // `visit(AssocArrayLiteralExp)` for the literal's own lowering)
+        // takes exactly this shape: `_d_aaGetRvalueX!(K, V)(aa, key)[0]`,
+        // a pointer indexed at a literal `0`, wrapped by dmd's own
+        // semantic pass in a `? :` that already turned a missing key into
+        // `RangeError` before this is ever reached - so the null this
+        // would otherwise have to guard against never arrives here.
+        if (array.type.ty == Tpointer) {
+            const stride = factsOf(array.type.nextOf).size;
+            auto base = cast(ubyte*) asPointer(array);
+            const index = indexOf(expression, 0);
+
+            return ElementAddress(
+                cast(void*) (base + index * stride), stride);
+        }
+
         const value = evaluateArray(array, factsOf(array.type));
         const index = indexOf(expression, value.length);
 
@@ -2536,6 +2652,29 @@ extern(C++) private final class Evaluator: Visitor {
         expression.lowering.accept(this);
     }
 
+    // An associative-array literal has no glue-layer codegen of its own to
+    // interpret either: dmd's semantic pass lowers it to a call to
+    // `object._d_assocarrayliteralTX!(K, V)` (`AssocArrayLiteralExp.lowering`),
+    // built from the very same key and value `ArrayLiteralExp`s the guest
+    // wrote, the same way `~=` is lowered to a call rather than left as an
+    // operator this interpreter would otherwise have to build the runtime
+    // representation for itself. Evaluating `lowering` runs that call
+    // through the ordinary `CallExp` path, which resolves it as
+    // already-compiled druntime code the same way any other FFI call is
+    // resolved.
+    override void visit(AssocArrayLiteralExp expression) {
+        import std.conv: text;
+
+        if (expression.lowering is null)
+            throw new SnakebiteException(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: only a lowered associative-array literal is ",
+                    "supported"),
+            );
+
+        expression.lowering.accept(this);
+    }
+
     override void visit(CommaExp expression) {
         runForEffect(expression.e1);
         expression.e2.accept(this);
@@ -2679,15 +2818,25 @@ extern(C++) private final class Evaluator: Visitor {
                     size_t.sizeof,
                 );
             } else {
-                // A nested callee that got past `execute`'s check reads
-                // no enclosing local, so the only context it can ever
-                // carry is the null one a non-capturing delegate holds -
-                // stored rather than left as whatever bytes the frame
-                // stack last held, so a read of the slot is
-                // deterministic.
+                // A nested callee's `vthis` is the static link: the
+                // address of the frame it is lexically nested inside,
+                // exactly as compiled D passes it - found by
+                // `frameOf` from wherever this call itself is running,
+                // which is that frame when the callee is nested directly
+                // inside the caller, and reached by hopping further up
+                // the chain when it is nested deeper than that.
+                auto enclosing = function_.toParent2() is null
+                    ? null : function_.toParent2().isFuncDeclaration;
+                if (enclosing is null)
+                    throw new SnakebiteException(
+                        text("interpreter cannot call `",
+                            function_.toString, "`: its enclosing ",
+                            "function could not be determined"),
+                    );
+
                 storeIntegral(
                     frame.base + layout.hiddenThis.parameter.offset,
-                    0,
+                    cast(size_t) frameOf(enclosing),
                     size_t.sizeof,
                 );
             }

@@ -32,6 +32,7 @@ int main(string[] args) {
         "ut.backends.call.routing",
         "ut.backends.call.arrays",
         "ut.backends.call.aa",
+        "ut.backends.call.nested",
         "ut.backends.call.control_flow",
         "ut.backends.call.exceptions",
         "ut.backends.eval.expressions.arithmetic",

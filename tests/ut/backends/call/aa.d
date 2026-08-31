@@ -6,10 +6,8 @@ import ut.backends;
 
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.inexpressible,
-        "oh noes"),
 )) {
-    @("arrays.append.static.repeatedCalls." ~ backend.stringof)
+    @("aa.index.static.nestedFunctionLookup." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         42.shouldBeRetOf!(

@@ -76,7 +76,7 @@ public struct Register {
     // in the wrong register, which would run and return a
     // plausible-looking wrong answer.
     public static Register of(imported!"dmd.mtype".Type type) {
-        import dmd.astenums: Tclass, Tpointer, Tvoid;
+        import dmd.astenums: Taarray, Tclass, Tpointer, Tvoid;
         import dmd.typesem: size;
         import std.conv: text;
 
@@ -87,8 +87,12 @@ public struct Register {
         // other: `TypeInfo`, the one class-typed argument this ABI is
         // asked to pass so far (`GC.malloc`'s `ti`), is a GC-owned object
         // the guest never allocates or destructures, only hands over by
-        // its address.
-        if (type.ty == Tpointer || type.ty == Tclass)
+        // its address. An associative array is the same shape again: its
+        // native representation is one pointer to druntime's own `Impl`
+        // (or null, for an empty one) - `V[K]`, the parameter
+        // `_d_aaGetRvalueX` (on the rvalue-AA-index lowering's own chain)
+        // takes its associative array by, is exactly this.
+        if (type.ty == Tpointer || type.ty == Tclass || type.ty == Taarray)
             return Register(Kind.pointer, 8);
 
         if (type.isIntegral) {
