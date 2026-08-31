@@ -7,6 +7,8 @@ module ut.backends.run.classes;
 
 
 import ut.backends;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
 
 
 // `shared` is a qualifier, not a distinct class: the shared type's
@@ -61,6 +63,29 @@ static foreach (backend; Matrix!(
             }
         });
     }
+}
+
+@("ordinaryClassStorageIsZeroed.Interpreter")
+@Tags(Interpreter.stringof)
+unittest {
+    auto module_ = parseSnippet(q{
+        class Plain {
+        }
+
+        Plain make() {
+            return new Plain;
+        }
+    });
+    auto function_ = findFunction(module_, "make");
+
+    Object value;
+    interpreter(module_).call(function_, &value, []);
+
+    assert(value !is null);
+    assert(
+        *cast(void**) cast(void*) value is null,
+        "ordinary guest class storage must remain zeroed",
+    );
 }
 
 @("classConstructionBindsThisForDependentFieldAssignments.Interpreter")

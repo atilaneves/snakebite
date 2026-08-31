@@ -2721,8 +2721,15 @@ extern(C++) private final class Evaluator: Visitor {
             import object: Exception;
 
             memset(object, 0, declaration.structsize);
-            auto prototype = new Exception(null);
-            *cast(void**) object = *cast(void**) cast(void*) prototype;
+            auto exception = ClassDeclaration.exception;
+            if (exception !is null
+                    && (declaration is exception
+                        || exception.isBaseOf(declaration, null))) {
+                // Native exception constructors dispatch through the vptr;
+                // ordinary guest classes have no native vtable yet.
+                auto prototype = new Exception(null);
+                *cast(void**) object = *cast(void**) cast(void*) prototype;
+            }
             initializeClass(declaration, object, expression.loc);
             _classes[object] = declaration;
 
