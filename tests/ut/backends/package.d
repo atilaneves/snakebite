@@ -81,6 +81,16 @@ public template Matrix(specs...) {
 }
 
 
+// An `Interpreter` whose program owns exactly `module_`, for tests that
+// call one parsed guest function directly rather than running a whole
+// program.
+public Interpreter interpreterOf(Module module_) {
+    import snakebite.backends.backend: Program;
+
+    return new Interpreter(Program([module_]));
+}
+
+
 // Renders one expression on one matrix entry and returns the result, for
 // the test to assert on: `eval!(backend, "2 + 3").should == "5"`.
 //
@@ -137,7 +147,7 @@ public void shouldBeStatusOf(
     else {
         enum program_ = RegisterProgram!(module_, code).program;
         auto program = Program([parsedProgram(program_)]);
-        asTestFailure(run(new BackendType, program), file, line)
+        asTestFailure(run(new BackendType(program), program), file, line)
             .shouldEqual(expected, file, line);
     }
 }
@@ -223,7 +233,7 @@ public void shouldBeRetOf(
             );
 
         T result;
-        asTestFailure((new BackendType).call(function_, &result, []),
+        asTestFailure((new BackendType(program)).call(function_, &result, []),
             file, line);
         result.shouldEqual(expected, file, line);
     }
@@ -276,9 +286,14 @@ private string evaluate(
     static if (is(BackendType == Native)) {
         mixin(declarations);
         return text(mixin(code));
-    } else
+    } else {
+        import snakebite.backends.backend: Program;
+
+        auto function_ = parsedFunction(snippet);
+        auto program = Program([function_.getModule]);
         return asTestFailure(
-            (new BackendType).eval(parsedFunction(snippet)), file, line);
+            (new BackendType(program)).eval(function_), file, line);
+    }
 }
 
 

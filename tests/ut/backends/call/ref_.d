@@ -164,7 +164,7 @@ unittest {
     auto function_ = findFunction(module_, "identity");
 
     int result;
-    (new Interpreter).call(function_, &result, [])
+    interpreterOf(module_).call(function_, &result, [])
         .shouldThrowWithMessage(
             "interpreter cannot call `identity` from the host: it " ~
                 "returns by `ref`");

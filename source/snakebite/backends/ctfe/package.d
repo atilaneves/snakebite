@@ -7,6 +7,11 @@ private:
 // Runs guest code with dmd's own compile-time function evaluator.
 public final class Ctfe: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
+    import snakebite.backends.backend: Program;
+
+    public this(const Program program) {
+        super(program);
+    }
 
     public override void call(
         FuncDeclaration function_,

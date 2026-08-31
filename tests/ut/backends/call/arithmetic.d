@@ -285,7 +285,7 @@ unittest {
     auto function_ = findFunction(module_, "quotient");
 
     int result;
-    (new Interpreter).call(function_, &result, [])
+    interpreterOf(module_).call(function_, &result, [])
         .shouldThrowWithMessage(
             "interpreter: division by zero in `seven() / zero()`");
 }
@@ -304,7 +304,7 @@ unittest {
     auto function_ = findFunction(module_, "remainder");
 
     int result;
-    (new Interpreter).call(function_, &result, [])
+    interpreterOf(module_).call(function_, &result, [])
         .shouldThrowWithMessage(
             "interpreter: division by zero in `seven() % zero()`");
 }
@@ -327,7 +327,7 @@ unittest {
     auto function_ = findFunction(module_, "quotient");
 
     uint result;
-    (new Interpreter).call(function_, &result, [])
+    interpreterOf(module_).call(function_, &result, [])
         .shouldThrowWithMessage(
             "interpreter: division by zero in `seven() / zero()`");
 }
@@ -346,7 +346,7 @@ unittest {
     auto function_ = findFunction(module_, "remainder");
 
     uint result;
-    (new Interpreter).call(function_, &result, [])
+    interpreterOf(module_).call(function_, &result, [])
         .shouldThrowWithMessage(
             "interpreter: division by zero in `seven() % zero()`");
 }
@@ -369,11 +369,11 @@ unittest {
     });
 
     long quotient;
-    (new Interpreter).call(findFunction(module_, "quotient"), &quotient, []);
+    interpreterOf(module_).call(findFunction(module_, "quotient"), &quotient, []);
     quotient.shouldEqual(long.min);
 
     long remainder;
-    (new Interpreter).call(findFunction(module_, "remainder"), &remainder, []);
+    interpreterOf(module_).call(findFunction(module_, "remainder"), &remainder, []);
     remainder.shouldEqual(0);
 }
 
@@ -639,7 +639,7 @@ unittest {
     auto function_ = findFunction(module_, "shifted");
 
     int result;
-    (new Interpreter).call(function_, &result, [])
+    interpreterOf(module_).call(function_, &result, [])
         .shouldThrowWithMessage(
             "interpreter cannot shift by 32 in `one() << width()`: " ~
             "the left operand has 32 bits");
@@ -659,7 +659,7 @@ unittest {
     auto function_ = findFunction(module_, "shifted");
 
     int result;
-    (new Interpreter).call(function_, &result, [])
+    interpreterOf(module_).call(function_, &result, [])
         .shouldThrowWithMessage(
             "interpreter cannot shift by -1 in `one() >> back()`: " ~
             "the left operand has 32 bits");
@@ -953,7 +953,7 @@ unittest {
     auto function_ = findFunction(module_, "wrapped");
 
     byte result;
-    (new Interpreter).call(function_, &result, [])
+    interpreterOf(module_).call(function_, &result, [])
         .shouldThrowWithMessage(
             "interpreter cannot assign to `cast(int)value`: " ~
             "`cast(int)value += cast(int)step()`");

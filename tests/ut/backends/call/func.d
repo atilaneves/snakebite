@@ -289,12 +289,14 @@ static foreach (backend; Matrix!()) {
             import snakebite.frontend.compiler: parseSnippet;
             import snakebite.frontend.dmd.functions: findFunction;
 
+            import snakebite.backends.backend: Program;
+
             auto guestModule = parseSnippet(code);
             auto function_ = findFunction(guestModule, "outer");
             assert(function_ !is null,
                 "No function `outer` in the guest program");
 
-            (new backend).call(function_, null, []);
+            (new backend(Program([guestModule]))).call(function_, null, []);
         }
     }
 }

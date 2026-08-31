@@ -25,6 +25,18 @@ public enum supported = () {
         return false;
 }();
 
+// Whether native `extern(D)` code in this process assigns parameters to
+// registers in reverse declaration order. dmd's `extern(D)` variant of the
+// System V convention does; ldc and gdc keep the C order. The compiler
+// that built this binary also built the druntime it links, so this is a
+// compile-time fact about the host process, not about the guest.
+public enum reversedDParameters = () {
+    version (DigitalMars)
+        return true;
+    else
+        return false;
+}();
+
 // What one value's bytes have to become to travel in one argument or
 // return register - all a call needs to know about a type, decided once
 // from the dmd `Type` and then kept, so no call reads a dmd type again.
