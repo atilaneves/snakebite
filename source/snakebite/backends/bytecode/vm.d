@@ -4,23 +4,27 @@ module snakebite.backends.bytecode.vm;
 private:
 
 
-package struct Instruction {
-    public alias Handler = extern(C) const(Instruction)* function(
-        const(Instruction)* pc,
-        ubyte* frame,
-        void* returnPlace,
-    ) @nogc nothrow;
-
-    package Handler handler;
-    package size_t offset;
-    package int immediate;
+package enum Opcode: ubyte {
+    constantI32,
+    returnI32,
 }
 
 
 package struct Function {
-    package Instruction[] instructions;
+    package uint[] instructions;
+    package int[] constants;
     package size_t frameSize;
     package uint frameAlignment;
+}
+
+
+package uint encodeInstruction(
+    in Opcode opcode,
+    in int operand,
+) @safe @nogc nothrow pure {
+    assert(operand >= -8_388_608);
+    assert(operand <= 8_388_607);
+    return (uint(opcode) << 24) | (cast(uint) operand & 0x00ff_ffff);
 }
 
 
@@ -47,29 +51,20 @@ package struct Vm {
             function_.frameSize,
             function_.frameAlignment,
         );
-        auto pc = function_.instructions.ptr;
-        while (pc !is null)
-            pc = pc.handler(pc, frame.base, returnPlace);
+        size_t pc;
+        while (true) {
+            const instruction = function_.instructions[pc++];
+            const opcode = cast(Opcode) (instruction >> 24);
+            const operand = cast(int) (instruction << 8) >> 8;
+            final switch (opcode) with (Opcode) {
+                case constantI32:
+                    *cast(int*) frame.base = function_.constants[operand];
+                    break;
+                case returnI32:
+                    if (returnPlace !is null)
+                        *cast(int*) returnPlace = *cast(int*) frame.base;
+                    return;
+            }
+        }
     }
-}
-
-
-package extern(C) const(Instruction)* opConstantI32(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-) @nogc nothrow {
-    *cast(int*) (frame + pc.offset) = pc.immediate;
-    return pc + 1;
-}
-
-
-package extern(C) const(Instruction)* opReturnI32(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-) @nogc nothrow {
-    if (returnPlace !is null)
-        *cast(int*) returnPlace = *cast(int*) (frame + pc.offset);
-    return null;
 }
