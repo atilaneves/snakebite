@@ -14,4 +14,4 @@ fi
 ninja bin/ut
 
 rm -rf coverage
-kcov --include-path="$PWD/source" coverage bin/ut
+kcov --include-path="$PWD/source/snakebite" coverage bin/ut
