@@ -61,10 +61,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     }
 
     package bool hasNativeSymbol(FuncDeclaration function_) {
-        import dmd.mangle: mangleExact;
-        import std.string: fromStringz;
-
-        return _plans.resolve(mangleExact(function_).fromStringz) !is null;
+        return _plans.hasNativeSymbol(function_);
     }
 
     // `function_`'s compiled form, compiling it - and, transitively,

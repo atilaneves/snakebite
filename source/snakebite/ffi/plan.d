@@ -229,13 +229,40 @@ public struct CallPlan {
 // it, which is the caller's business and not this package's.
 public struct PlanCache {
     private CallPlan*[imported!"dmd.func".FuncDeclaration] _plans;
+    private bool[imported!"dmd.func".FuncDeclaration] _nativeSymbols;
     private Resolver _resolver;
     private size_t _preparations;
+    version(unittest) private size_t _nativeSymbolLookups;
 
     // Resolves a linker name through the cache shared by this backend's
     // plan preparation and its other FFI operations.
     public void* resolve(in char[] name) {
         return _resolver.resolve(name);
+    }
+
+    // Whether `function_` has machine code in this process. Missing symbols
+    // are cached too because a synthesized function with a body can validly
+    // have no native counterpart.
+    public bool hasNativeSymbol(
+        imported!"dmd.func".FuncDeclaration function_,
+    ) {
+        import dmd.mangle: mangleExact;
+        import std.string: fromStringz;
+
+        if (auto cached = function_ in _nativeSymbols)
+            return *cached;
+
+        version(unittest) ++_nativeSymbolLookups;
+        const found = resolve(mangleExact(function_).fromStringz) !is null;
+        _nativeSymbols[function_] = found;
+        return found;
+    }
+
+    version(unittest)
+    public size_t nativeSymbolLookups()
+        @safe @nogc nothrow pure const scope
+    {
+        return _nativeSymbolLookups;
     }
 
     version(unittest)

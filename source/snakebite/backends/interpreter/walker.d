@@ -177,11 +177,6 @@ extern(C++) private final class Evaluator: Visitor {
     // one query, one lookup. Whatever the callee does inside to answer is
     // its own, and is not counted here.
     version(unittest) private size_t _foreignNameLookups;
-    // Whether an instantiated function has a native symbol. This decision
-    // is separate from the plan cache because a missing symbol means the
-    // evaluator must walk the function body instead of calling through FFI.
-    private bool[FuncDeclaration] _nativeSymbols;
-
     // The destination: while walking statements, the enclosing function's
     // return type and return place; `evaluate` narrows it to each
     // subexpression's own destination.
@@ -301,7 +296,8 @@ extern(C++) private final class Evaluator: Visitor {
     // lives: a variable's storage, or how to reach a called function.
     version(unittest)
     extern(D) final size_t nameLookups() @safe @nogc nothrow pure const scope {
-        return _foreignNameLookups + _layouts.lookups + _statics.lookups;
+        return _foreignNameLookups + _layouts.lookups + _statics.lookups
+            + _plans.nativeSymbolLookups;
     }
 
     // Every hash lookup this evaluator has made to find out what a `Type`
@@ -326,17 +322,7 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     private bool hasNativeSymbol(FuncDeclaration function_) {
-        import dmd.mangle: mangleExact;
-        import std.string: fromStringz;
-
-        if (auto cached = function_ in _nativeSymbols)
-            return *cached;
-
-        countForeignNameLookup;
-        const found = _plans.resolve(mangleExact(function_).fromStringz)
-            !is null;
-        _nativeSymbols[function_] = found;
-        return found;
+        return _plans.hasNativeSymbol(function_);
     }
 
     // `function_`'s frame layout, from the cache; computed on its first
