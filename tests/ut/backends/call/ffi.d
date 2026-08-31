@@ -2,6 +2,15 @@ module ut.backends.call.ffi;
 
 
 import ut.backends;
+import snakebite.ffi: PlanCache;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
+
+
+private extern(C) ubyte[] snakebite_ut_dynamic_array() {
+    static ubyte[] values = [17, 31, 47];
+    return values;
+}
 
 
 // `abs` is declared `extern(C)` with no body: nothing in the guest program
@@ -46,6 +55,31 @@ static foreach (backend; Matrix!(
             "answer",
         );
     }
+}
+
+
+@("dynamicArrayReturn.nativeFFI.Interpreter")
+@Tags("Interpreter")
+unittest {
+    // `findFunction` takes a mutable DMD module, so this local cannot be
+    // const even though the test does not otherwise mutate it.
+    auto module_ = parseSnippet(q{
+        extern(C) ubyte[] snakebite_ut_dynamic_array();
+    });
+    // `PlanCache.of` takes a mutable DMD function declaration, so this local
+    // cannot be const even though the test does not otherwise mutate it.
+    auto function_ = findFunction(module_, "snakebite_ut_dynamic_array");
+    assert(function_ !is null,
+        "No `snakebite_ut_dynamic_array` function in the guest program");
+
+    PlanCache cache;
+    ubyte[] result;
+    cache.of(function_).call(&result, []);
+
+    result.length.should == 3;
+    result[0].should == 17;
+    result[1].should == 31;
+    result[2].should == 47;
 }
 
 static foreach (backend; Matrix!(

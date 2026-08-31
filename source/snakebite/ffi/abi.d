@@ -129,6 +129,15 @@ public struct ArgumentPlan {
     }
 }
 
+// The return words from an indirect call. A dynamic array's native value is
+// two integer-class words, and the other supported return values use only the
+// first word. Keeping both words here lets the caller preserve the exact
+// native return representation without converting it.
+public struct ReturnWords {
+    public size_t first;
+    public size_t second;
+}
+
 // Whether `type` returns through a hidden pointer instead of a register:
 // the System V AMD64 ABI classifies an aggregate over 16 bytes as MEMORY
 // regardless of its fields, which means the caller allocates the result's
@@ -196,10 +205,10 @@ public void writeWord(
 }
 
 // Calls `address` with `words` in argument registers and hands back the
-// return register, raw. A `void` callee leaves it holding whatever it last
-// used it for, so only a caller whose plan says something is returned
-// reads it.
-public size_t invoke(void* address, scope const size_t[] words) {
+// first two integer-class return registers, raw. A `void` callee leaves them
+// holding whatever it last used them for, so only a caller whose plan says
+// something is returned reads them.
+public ReturnWords invoke(void* address, scope const size_t[] words) {
     import std.conv: text;
 
     switch (words.length) {
@@ -219,7 +228,7 @@ public size_t invoke(void* address, scope const size_t[] words) {
 private template Native(size_t count) {
     import std.meta: Repeat;
 
-    alias Native = extern(C) size_t function(Repeat!(count, size_t));
+    alias Native = extern(C) ReturnWords function(Repeat!(count, size_t));
 }
 
 private string argumentList(in size_t count) {
