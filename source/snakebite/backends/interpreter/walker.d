@@ -338,12 +338,12 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         // `function_` being resolved only means a declaration was found;
-        // it does not mean this call is safe to run directly. For
-        // `obj.method(...)`, dmd sets the resolved declaration to the
-        // statically known method still needs its `this` frame slot, which
-        // `bindFrame` fills from the call's receiver. A nested function's
-        // static chain has no such compiler-provided representation here,
-        // so this throws loudly instead of running with missing context.
+        // it does not mean this call is safe to run directly. A struct
+        // method's hidden context is covered: `bindFrame` fills its
+        // `this` slot from the call's receiver. A nested function's
+        // context is not: its static chain - the enclosing function's
+        // frame - has no representation in this interpreter, so this
+        // throws loudly instead of running with missing context.
         if (function_.isNested())
             throw new Exception(
                 text("interpreter cannot call `", function_.toString,
