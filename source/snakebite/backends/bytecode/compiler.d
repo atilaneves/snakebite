@@ -951,10 +951,54 @@ private final class FunctionCompiler {
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        evalInto(expression.e1, destOffset, width);
+        const leftOffset = reserveTemp(facts);
+        evalOperandInto(expression.e1, leftOffset, width);
         const rightOffset = reserveTemp(facts);
-        evalInto(expression.e2, rightOffset, width);
-        emit(handler, destOffset, rightOffset, width);
+        evalOperandInto(expression.e2, rightOffset, width);
+        emit(handler, leftOffset, rightOffset, width);
+
+        if (destOffset != leftOffset)
+            emit(&opCopy, destOffset, leftOffset, width);
+    }
+
+    // Evaluates `operand` for use as one side of a binary opcode that
+    // reads both its operands at one shared `width` - `compileBinary`'s
+    // own opcodes, whose `Instruction` has only one `width` field for
+    // both. Every operator's own usual arithmetic conversions already
+    // give both operands `width` except a shift's right side, which
+    // keeps its own, possibly narrower, type (`x << (someByte + 1)`) -
+    // evaluating it as if it already had `width` bytes reserved, the way
+    // `evalInto`'s `VarExp` case does verbatim, would `opCopy` bytes past
+    // whatever narrower storage actually holds it. This evaluates the
+    // operand at its own type's width first, then widens or narrows the
+    // same temporary in place to `width` - the same conversion a cast to
+    // `width` bytes performs, because that is exactly what reading a
+    // narrower or wider operand as this opcode's shared width means.
+    private void evalOperandInto(
+        Expression operand, in size_t destOffset, in size_t width,
+    ) {
+        const operandFacts = TypeFacts.of(operand.type);
+        if (!operandFacts.isIntegral || !isIntegralSize(operandFacts.size))
+            throw rejection(_function, operand.loc, expressionText(operand));
+
+        if (operandFacts.size == width) {
+            evalInto(operand, destOffset, width);
+            return;
+        }
+
+        if (operandFacts.size < width) {
+            evalInto(operand, destOffset, operandFacts.size);
+            emit(
+                operandFacts.isUnsigned
+                    ? &opCastWidenUnsigned : &opCastWidenSigned,
+                destOffset, operandFacts.size, width,
+            );
+            return;
+        }
+
+        const temp = reserveTemp(operandFacts);
+        evalInto(operand, temp, operandFacts.size);
+        emit(&opCopy, destOffset, temp, width);
     }
 
     // `<`, `<=`, `>`, `>=`, `==`, `!=`: both operands are read into
@@ -1037,25 +1081,47 @@ private final class FunctionCompiler {
             emit(&opCopy, destOffset, operandOffset, 1);
     }
 
-    // `&&`/`||`: the left operand, already `bool`-typed, is evaluated
-    // directly into `destOffset`; a branch skips the right operand
-    // exactly when D's own short-circuit rule says to - `&&` skips it
-    // once the left side is already false, `||` once it is already
-    // true - leaving the left side's own value as the whole expression's
-    // answer. Otherwise the right operand overwrites `destOffset`,
-    // becoming the answer instead.
+    // `&&`/`||`: dmd does not cast either operand to `bool` - `yes() &&
+    // five()`, `five()` returning a plain `int`, is legal and tests
+    // `five()` for nonzero the same way an `if`'s own condition does - so
+    // each operand is evaluated at its own type's width (`compileCondition`,
+    // the same helper `if`/`while`/`for`/the ternary already use), never
+    // at this expression's own one-byte `bool` width: evaluating an `int`
+    // operand there would truncate it to its low byte before testing it,
+    // and evaluating a call there would have `compileCall` write the
+    // callee's full return width into a one-byte slot. A branch skips the
+    // right operand exactly when D's own short-circuit rule says to -
+    // `&&` skips it once the left side is already false, `||` once it is
+    // already true - and whichever operand actually decided the answer is
+    // then reduced to a proper `bool` and copied out to `destOffset`.
     private void compileLogical(
         LogicalExp expression, in size_t destOffset, in size_t width,
     ) {
-        evalInto(expression.e1, destOffset, width);
+        const leftOffset = compileCondition(expression.e1);
+        const leftWidth = conditionWidth(expression.e1);
 
         const branchIndex = _instructions.length;
         auto shortCircuit = expression.op == EXP.andAnd
             ? &opBranchFalse : &opBranchTrue;
-        emit(shortCircuit, destOffset, 0, width);
+        emit(shortCircuit, leftOffset, 0, leftWidth);
 
-        evalInto(expression.e2, destOffset, width);
+        // The left side did not decide the answer: the right side's own
+        // truthiness does.
+        const rightOffset = compileCondition(expression.e2);
+        const rightWidth = conditionWidth(expression.e2);
+        emit(&opCastToBool, rightOffset, 0, rightWidth);
+        if (destOffset != rightOffset)
+            emit(&opCopy, destOffset, rightOffset, 1);
+        const jumpIndex = _instructions.length;
+        emit(&opJump, 0, 0, 0);
+
+        // Short-circuited: the left side decided the answer by itself.
         _instructions[branchIndex].source = _instructions.length;
+        emit(&opCastToBool, leftOffset, 0, leftWidth);
+        if (destOffset != leftOffset)
+            emit(&opCopy, destOffset, leftOffset, 1);
+
+        _instructions[jumpIndex].destination = _instructions.length;
     }
 
     // `cond ? a : b`: only the branch the condition selects at run time

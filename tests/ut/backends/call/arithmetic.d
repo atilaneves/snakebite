@@ -1076,6 +1076,66 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `x = y + x`: the right operand reads `x` after the left one, `y`, has
+// been evaluated - so a compiler that evaluates `y` straight into `x`'s
+// own storage (to avoid a temporary of its own) clobbers `x` before the
+// right operand ever reads it, answering `y + y` instead of `y + x`.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.rhsReadsAssignTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        5.shouldBeRetOf!(
+            backend,
+            q{
+                int two() {
+                    return 2;
+                }
+
+                int three() {
+                    return 3;
+                }
+
+                int sum() {
+                    int x = two();
+                    int y = three();
+                    x = y + x;
+                    return x;
+                }
+            },
+            "sum",
+        );
+    }
+}
+
+// A shift's right operand keeps its own type - dmd does not promote it to
+// match the left operand the way it does for every other binary
+// operator - so it can be narrower than the left operand it is shifting.
+// Evaluating it as though it already had the left operand's own width
+// would read past its own, narrower storage.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.leftShift.narrowerCount." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        4.shouldBeRetOf!(
+            backend,
+            q{
+                int one() {
+                    return 1;
+                }
+
+                byte two() {
+                    return 2;
+                }
+
+                int shifted() {
+                    return one() << two();
+                }
+            },
+            "shifted",
+        );
+    }
+}
+
 // The floating operators the conversion tests elsewhere do not cover:
 // `+`, `*`, and `%`, which D defines over floating operands (`%` as the
 // remainder of truncated division, like `fmod`). Every operand comes

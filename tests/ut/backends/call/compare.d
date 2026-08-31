@@ -591,6 +591,35 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// dmd does not cast either operand of `&&`/`||` to `bool` - a plain `int`
+// operand is legal and is tested for nonzero the same way an `if`'s own
+// condition is. `256`'s low byte is zero, so evaluating the operand at
+// this expression's own one-byte `bool` width instead of its own `int`
+// width would truncate it to zero and answer `false`.
+static foreach (backend; Matrix!()) {
+    @("logical.and.intOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int big() {
+                    return 256;
+                }
+
+                int one() {
+                    return 1;
+                }
+
+                bool both() {
+                    return big() && one() == 1;
+                }
+            },
+            "both",
+        );
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("logical.and.false." ~ backend.stringof)
     @Tags(backend.stringof)
