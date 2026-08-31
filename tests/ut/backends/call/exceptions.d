@@ -73,6 +73,91 @@ static foreach (backend; Matrix!(
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("tryCatchThrowable.passingTrySkipsCatch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int value;
+                    try {
+                        value = 1;
+                    } catch(Throwable caught) {
+                        value = 2;
+                    }
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a failing assertion into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("tryCatchThrowable.catchesGuestAssertion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(
+            backend,
+            q{
+                bool fail() {
+                    return false;
+                }
+
+                int result() {
+                    int value;
+                    try {
+                        assert(fail());
+                        value = 1;
+                    } catch(Throwable caught) {
+                        value = 2;
+                    }
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+// Interpreter-only by nature: the behaviour under test is the interpreter's
+// own refusal of a construct it does not support, which no other backend
+// has. The `switch` runs fine everywhere else.
+@("tryCatchThrowable.doesNotCatchInterpreterFailure.Interpreter")
+@Tags("Interpreter")
+unittest {
+    void run() {
+        2.shouldBeRetOf!(
+            Interpreter,
+            q{
+                int result() {
+                    try {
+                        switch (1) {
+                            case 1:
+                                break;
+
+                            default:
+                                break;
+                        }
+                    } catch(Throwable) {
+                        return 1;
+                    }
+                    return 2;
+                }
+            },
+            "result",
+        );
+    }
+
+    run.shouldThrow;
+}
+
 // `AssertError` derives from `Error`, not from `Exception`, so a
 // `catch(Exception)` never matches a failing assertion: the error keeps
 // unwinding to the `catch(AssertError)` outside it.
