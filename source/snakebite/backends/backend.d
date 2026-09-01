@@ -55,6 +55,16 @@ public struct Program {
 }
 
 
+// Cumulative work done by a backend's compiler. A backend without a
+// compilation phase leaves `hasCompiler` false; this is distinct from a
+// compiler whose measured duration is zero.
+public struct CompilationStatistics {
+    bool hasCompiler;
+    size_t cacheMisses;
+    imported!"core.time".Duration duration;
+}
+
+
 public abstract class Backend {
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
@@ -66,6 +76,12 @@ public abstract class Backend {
 
     protected this(const Program program) {
         _program = program;
+    }
+
+    // Read-only cumulative statistics. Backends without a compilation phase
+    // use the default empty result.
+    public CompilationStatistics compilationStatistics() const {
+        return CompilationStatistics.init;
     }
 
     // Invoke one guest function. `args` and the value written to

@@ -138,7 +138,16 @@ private string passCellText(in BackendReport report) {
 string milliseconds(in Duration duration) {
     import std.format: format;
 
-    return format!"%.1f ms"(duration.total!"usecs" / 1000.0);
+    const hundredNanoseconds = duration.total!"hnsecs";
+    const milliseconds = hundredNanoseconds / 10_000.0;
+    if (hundredNanoseconds > 0 && milliseconds < 0.05) {
+        const microseconds = hundredNanoseconds / 10.0;
+        if (microseconds >= 0.05)
+            return format!"%.1f us"(microseconds);
+        return format!"%.1f ns"(hundredNanoseconds * 100.0);
+    }
+
+    return format!"%.1f ms"(milliseconds);
 }
 
 private string memory(in long bytes) {
