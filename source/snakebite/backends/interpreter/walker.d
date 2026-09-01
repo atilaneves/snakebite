@@ -548,6 +548,8 @@ extern(C++) private final class Evaluator: Visitor {
             || interpretsTemplate
             || hasInterpretedDelegateArgument(callSite);
         if (!interprets) {
+            rejectInterpretedFunctionPointerArgument(
+                function_, arguments, argumentCount);
             const plan = callSite is null
                 ? &_plans.of(function_)
                 : callPlanOf(callSite, function_);
@@ -605,6 +607,65 @@ extern(C++) private final class Evaluator: Visitor {
         _gotoTarget = null;
         _switchStart = null;
         body_.accept(this);
+    }
+
+    // `visit(SymOffExp)`/`visit(FuncExp)` store a guest function pointer's
+    // value as the `FuncDeclaration` itself, since this backend has no
+    // machine code of its own for an interpreted function - `calleeOf`
+    // resolves that stand-in back on every call this evaluator makes. A
+    // call routed to real native code instead (`function_` here has no
+    // guest body to walk) hands its arguments to the FFI seam as opaque
+    // bytes, which marshals a function-pointer argument's bits unchanged
+    // into a register; if those bits are one of this backend's
+    // declaration stand-ins rather than an executable address, the native
+    // callee jumps to it and the host segfaults with no diagnostic.
+    // Checked once here, at the one place every native call's arguments
+    // are about to leave this evaluator for good, rather than in every
+    // caller that might produce such a value.
+    //
+    // Only a function-pointer-typed parameter is inspected: any other
+    // parameter's bytes might legitimately contain the same bit pattern
+    // (an `int` happening to equal some declaration's address, say)
+    // without meaning a function pointer at all.
+    private void rejectInterpretedFunctionPointerArgument(
+        FuncDeclaration function_,
+        const(void*)* arguments,
+        size_t argumentCount,
+    ) {
+        import snakebite.nativelayout: loadIntegral;
+        import std.conv: text;
+
+        auto type = function_.type.isTypeFunction;
+        if (type is null)
+            return;
+
+        size_t index = function_.vthis !is null ? 1 : 0;
+        foreach (i; 0 .. type.parameterList.length) {
+            if (index >= argumentCount)
+                return;
+
+            const argumentIndex = index++;
+            auto pointer = type.parameterList[i].type.isTypePointer;
+            if (pointer is null || pointer.next.isTypeFunction is null)
+                continue;
+
+            const raw = loadIntegral(
+                arguments[argumentIndex], size_t.sizeof, false);
+            if (raw == 0)
+                continue;
+
+            auto candidate = cast(FuncDeclaration) cast(void*) raw;
+            if (!_program.isInterpreted(candidate))
+                continue;
+
+            throw new SnakebiteException(
+                text("interpreter cannot call `", function_.toString,
+                    "` with `", candidate.toString, "` as a function "
+                    ~ "pointer argument: calling an interpreted function "
+                    ~ "back from native code is not yet supported "
+                    ~ "(see issue #9)"),
+            );
+        }
     }
 
     // dmd lowers `foreach` over an associative array to a call to a
@@ -3036,6 +3097,14 @@ extern(C++) private final class Evaluator: Visitor {
         import snakebite.nativelayout: storeIntegral;
 
         if (auto function_ = expression.var.isFuncDeclaration) {
+            // A function has no fields for `offset` to select between: dmd
+            // never emits a non-zero offset alongside a `FuncDeclaration`
+            // `var`, so this stand-in scheme (see above) has nowhere to
+            // apply an offset to. Asserted rather than silently ignored,
+            // so a dmd change that starts doing so is caught here instead
+            // of producing a function pointer value that is quietly wrong.
+            assert(expression.offset == 0,
+                "SymOffExp naming a function has a non-zero offset");
             storeIntegral(
                 _place, cast(size_t) cast(void*) function_, _facts.size);
             return;
