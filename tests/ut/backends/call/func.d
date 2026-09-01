@@ -147,6 +147,30 @@ static foreach (backend; Matrix!(
             "drive",
         );
     }
+
+    @("struct.implicitFieldAssign." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        9.shouldBeRetOf!(
+            backend,
+            q{
+                struct Counter {
+                    int value;
+
+                    void set(int next) {
+                        value = next;
+                    }
+                }
+
+                int drive() {
+                    auto counter = Counter();
+                    counter.set(9);
+                    return counter.value;
+                }
+            },
+            "drive",
+        );
+    }
 }
 
 static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
