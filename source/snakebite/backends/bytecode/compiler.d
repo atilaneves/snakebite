@@ -1703,6 +1703,12 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // like `x + 1` only evaluating can produce. `[]` needs no allocation at
     // all: a null pointer and a zero length already are an empty dynamic
     // array's own two words.
+    //
+    // The length and pointer are built up in a temporary, not `destOffset`
+    // itself, and copied out to `destOffset` only once every element is
+    // done: an element expression can read `destOffset`'s own variable
+    // (`a = [a[1], a[0]]`), and until the whole literal is ready that
+    // variable's old value is the only correct thing living there.
     private void compileArrayLiteral(
         ArrayLiteralExp expression, in size_t destOffset,
     ) {
@@ -1721,20 +1727,24 @@ extern(C++) private final class FunctionCompiler: Visitor {
         const count =
             expression.elements is null ? 0 : expression.elements.length;
 
-        emit(&opConstant, destOffset + arrayLengthOffset,
-            addConstant(cast(long) count), size_t.sizeof);
-
         if (count == 0) {
+            emit(&opConstant, destOffset + arrayLengthOffset,
+                addConstant(0), size_t.sizeof);
             emit(&opConstant, destOffset + arrayPointerOffset,
                 addConstant(0), size_t.sizeof);
             return;
         }
 
+        const lengthOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, lengthOffset,
+            addConstant(cast(long) count), size_t.sizeof);
+
+        const pointerOffset = reserveTemp(pointerFacts);
         const sizeOffset = reserveTemp(pointerFacts);
         emit(&opConstant, sizeOffset,
             addConstant(cast(long) (count * elementFacts.size)),
             size_t.sizeof);
-        emitAllocate(sizeOffset, destOffset + arrayPointerOffset);
+        emitAllocate(sizeOffset, pointerOffset);
 
         foreach (i; 0 .. count) {
             auto element = (*expression.elements)[i];
@@ -1742,8 +1752,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
             evalInto(element, elementOffset, elementFacts.size);
 
             const addressOffset = reserveTemp(pointerFacts);
-            emit(&opCopy, addressOffset, destOffset + arrayPointerOffset,
-                size_t.sizeof);
+            emit(&opCopy, addressOffset, pointerOffset, size_t.sizeof);
             if (i != 0) {
                 const byteOffsetOffset = reserveTemp(pointerFacts);
                 emit(&opConstant, byteOffsetOffset,
@@ -1754,6 +1763,11 @@ extern(C++) private final class FunctionCompiler: Visitor {
             emit(&opStoreIndirect, addressOffset, elementOffset,
                 elementFacts.size);
         }
+
+        emit(&opCopy, destOffset + arrayLengthOffset, lengthOffset,
+            size_t.sizeof);
+        emit(&opCopy, destOffset + arrayPointerOffset, pointerOffset,
+            size_t.sizeof);
     }
 
     // `new T[](n)`/`new T[n]` - dmd represents both spellings the same way.

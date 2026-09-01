@@ -300,6 +300,28 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!()) {
+    @("arrays.literal.selfReferentialAssign." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // `a = [a[1], a[0]]` evaluates its elements against `a`'s old
+        // value. An implementation that writes the new length/pointer
+        // into `a`'s slot before evaluating the elements would have each
+        // element read back through the new, not-yet-initialised block.
+        65.shouldBeRetOf!(
+            backend,
+            q{
+                int flipped() {
+                    int[] a = [5, 6];
+                    a = [a[1], a[0]];
+                    return a[0] * 10 + a[1];
+                }
+            },
+            "flipped",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
     @("arrays.literal.single." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
