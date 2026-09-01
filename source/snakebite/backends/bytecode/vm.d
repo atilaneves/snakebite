@@ -4,6 +4,16 @@ module snakebite.backends.bytecode.vm;
 private:
 
 
+extern(C) void executeCallPlan(
+    const(void)* opaquePlan,
+    void* returnPlace,
+    scope const(void*)* arguments,
+    size_t argumentCount,
+);
+
+import snakebite.ffi.limits: maxArguments;
+
+
 // One argument a call instruction copies from the caller's frame into the
 // callee's, at compile time already resolved to both sides' byte offsets
 // and the width to copy - the same three numbers `opCopy` needs for a
@@ -23,7 +33,7 @@ package struct CallSite {
     package const(Function)* callee;
     package Arg[] args;
     package size_t returnWidth;
-    package void* nativeAddress;
+    package const(void)* nativePlan;
 }
 
 
@@ -270,14 +280,16 @@ package const(Instruction)* opCall(
     import core.stdc.string: memcpy;
 
     const site = callSites[pc.source];
-    if (site.nativeAddress !is null) {
-        assert(site.args.length == 1);
-        assert(site.returnWidth == int.sizeof);
-        alias Native = extern(C) int function(int);
-        auto argument = *cast(const int*) (frame + site.args[0].callerOffset);
-        auto result = (cast(Native) site.nativeAddress)(argument);
-        if (pc.destination != discardResult)
-            *cast(int*) (frame + pc.destination) = result;
+    if (site.nativePlan !is null) {
+        const(void)*[maxArguments] arguments;
+        foreach (i, arg; site.args)
+            arguments[i] = frame + arg.callerOffset;
+        auto result = pc.destination == discardResult
+            ? null
+            : frame + pc.destination;
+        executeCallPlan(
+            site.nativePlan, result, arguments.ptr, site.args.length,
+        );
         return pc + 1;
     }
     auto callee = site.callee;
