@@ -181,7 +181,7 @@ public void storeValue(
     void* place,
 ) {
     import core.stdc.string: memset;
-    import dmd.astenums: Tarray, Tfloat32, Tfloat64, Tfloat80;
+    import dmd.astenums: Tarray, Tfloat32, Tfloat64, Tfloat80, Tsarray;
     import dmd.expressionsem: toInteger, toReal;
     import dmd.typesem: nextOf;
     import std.conv: text;
@@ -241,8 +241,13 @@ public void storeValue(
         return;
     }
 
-    if (type.isTypeStruct !is null && value.isIntegerExp
-            && value.toInteger == 0) {
+    // A static array's `.init` is every element's own `.init`, but for a
+    // zero integer value that is the same all-zero bytes regardless of
+    // the element type - the same shortcut already taken for a struct's
+    // zero `.init` above, rather than recursing element by element to
+    // reach the same bytes.
+    if ((type.isTypeStruct !is null || type.ty == Tsarray)
+            && value.isIntegerExp && value.toInteger == 0) {
         memset(place, 0, facts.size);
         return;
     }

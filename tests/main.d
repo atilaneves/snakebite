@@ -15,6 +15,7 @@ int main(string[] args) {
         "ut.backends.run.enums",
         "ut.backends.run.exceptions",
         "ut.backends.run.operators",
+        "ut.backends.run.staticarrays",
         "ut.backends.run.structs",
         "ut.backends.run.templates",
         "ut.backends.call.func",

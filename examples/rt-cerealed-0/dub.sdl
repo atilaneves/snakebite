@@ -1,0 +1,16 @@
+name "rt-cerealed-0"
+targetType "library"
+targetPath "bin"
+dflags "-checkaction=context"
+
+
+configuration "unittest" {
+    targetType "executable"
+    targetName "ut"
+    targetPath "bin"
+
+    mainSourceFile "tests/main.d"
+    excludedSourceFiles "source/main.d"
+    sourcePaths "tests"
+    importPaths "tests"
+}
