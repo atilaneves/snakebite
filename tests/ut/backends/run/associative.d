@@ -9,13 +9,33 @@ module ut.backends.run.associative;
 import ut.backends;
 
 
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("newStructWithStringField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        5.shouldBeRetOf!(backend, q{
+            struct Value {
+                string text;
+            }
+
+            int main() {
+                auto value = new Value("hello");
+                return cast(int) value.text.length;
+            }
+        }, "main");
+    }
+}
+
+
 // An associative array literal evaluates its key expressions and builds
 // the table from those run-time values, rather than from anything fixed
 // at compile time.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("assocArrayLiteralWithRuntimeKeys." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -43,7 +63,6 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("structKeyedLookupComparesContents." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -86,4 +105,3 @@ static foreach (backend; Matrix!(
         });
     }
 }
-
