@@ -2176,6 +2176,29 @@ extern(C++) private final class Evaluator: Visitor {
                 cast(void*) (base + index * stride), stride);
         }
 
+        // A static array's own storage is already contiguous elements,
+        // not a `{length, ptr}` pair `evaluateArray` below reads out of -
+        // the same distinction `visit(IndexExp)` draws for a read. The
+        // element's address is the array's own address (found the same
+        // way any other lvalue's is, recursing through another
+        // `indexAddressOf` call when `array` is itself an indexing of a
+        // further-nested static array, e.g. `b[1][2]`) plus its offset.
+        if (array.type.ty == Tsarray) {
+            const length = cast(size_t) array.type.isTypeSArray.dim.toInteger;
+            const index = indexOf(expression, length);
+            if (index < 0 || cast(size_t) index >= length)
+                throw new SnakebiteException(
+                    text("interpreter cannot index `", array.toString,
+                        "` at ", index, ": the array is ", length,
+                        " long"),
+                );
+
+            const stride = factsOf(array.type.nextOf).size;
+            auto base = cast(ubyte*) addressOf(array);
+            return ElementAddress(
+                cast(void*) (base + index * stride), stride);
+        }
+
         const value = evaluateArray(array, factsOf(array.type));
         const index = indexOf(expression, value.length);
 
@@ -2420,6 +2443,37 @@ extern(C++) private final class Evaluator: Visitor {
             const bytes = a.length * factsOf(type.nextOf).size;
             const equal = a.length == b.length
                 && (bytes == 0 || memcmp(a.elements, b.elements, bytes) == 0);
+            const answer = expression.op == EXP.equal ? equal : !equal;
+
+            storeIntegral(_place, answer ? 1 : 0, _facts.size);
+            return;
+        }
+
+        // A static array has no length to disagree on - both operands
+        // share the same type and therefore the same element count - so
+        // its whole value, laid out as contiguous elements with no
+        // header, is comparable the same way a dynamic array's elements
+        // are: byte for byte, unless DMD's own lowering says otherwise
+        // for elements needing semantic equality (a `float`/`double`
+        // element's NaN, or one with its own `opEquals`).
+        if (type.ty == Tsarray) {
+            if (expression.lowering !is null) {
+                evaluate(
+                    expression.lowering,
+                    expression.lowering.type,
+                    factsOf(expression.lowering.type),
+                    _place,
+                );
+                return;
+            }
+
+            const facts = factsOf(type);
+            auto left = _frames.push(facts.size, facts.alignment);
+            auto right = _frames.push(facts.size, facts.alignment);
+            evaluate(expression.e1, type, facts, left.base);
+            evaluate(expression.e2, type, facts, right.base);
+            const equal = facts.size == 0
+                || memcmp(left.base, right.base, facts.size) == 0;
             const answer = expression.op == EXP.equal ? equal : !equal;
 
             storeIntegral(_place, answer ? 1 : 0, _facts.size);
