@@ -2502,12 +2502,6 @@ extern(C++) private final class Evaluator: Visitor {
                     return false;
                 continue;
             }
-            if (fieldType.ty == Tfloat80) {
-                if (*cast(const real*) a != *cast(const real*) b)
-                    return false;
-                continue;
-            }
-
             const facts = factsOf(fieldType);
             if (memcmp(a, b, facts.size) != 0)
                 return false;
