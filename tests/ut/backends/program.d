@@ -2,10 +2,12 @@ module ut.backends.program;
 
 
 import snakebite.backends.backend: Program;
+import snakebite.backends.bytecode: Bytecode;
 import snakebite.frontend.compiler: parseSnippets;
 import snakebite.frontend.dmd.functions:
     findFunction,
     findModuleConstructors;
+import ut;
 
 
 @("isInterpreted.rootModule")
@@ -23,6 +25,37 @@ unittest {
     auto program = Program([modules[0]]);
 
     assert(program.isInterpreted(findFunction(modules[0], "rootFunction")));
+}
+
+
+@("bytecode.compilationStatistics.countsLazyCacheMisses")
+@Tags(Bytecode.stringof)
+unittest {
+    auto module_ = parseSnippets([
+        q{
+            module bytecodeCompilationStatistics;
+            int helper() { return 1; }
+            int other() { return 2; }
+            void main() { helper(); }
+        },
+    ])[0];
+    auto program = Program([module_]);
+    auto backend = new Bytecode(program);
+
+    backend.compilationStatistics.hasCompiler.shouldBeTrue;
+    backend.compilationStatistics.cacheMisses.shouldEqual(0);
+
+    backend.call(findFunction(module_, "main"), null, []);
+    auto afterMain = backend.compilationStatistics;
+    afterMain.cacheMisses.shouldEqual(2);
+
+    backend.call(findFunction(module_, "main"), null, []);
+    backend.compilationStatistics.cacheMisses.shouldEqual(2);
+
+    backend.call(findFunction(module_, "other"), null, []);
+    backend.compilationStatistics.cacheMisses.shouldEqual(3);
+    (backend.compilationStatistics.duration >= afterMain.duration)
+        .shouldBeTrue;
 }
 
 

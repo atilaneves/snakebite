@@ -244,35 +244,11 @@ private BackendReport[] benchmarkAll(Project project, in Options options) {
     BackendReport[] reports;
     static foreach (BackendType; imported!"snakebite.backends".Backends)
         if (selected(options, backendName!BackendType)) {
-            auto backend = new BackendType(project.program);
-
-            // Not every backend has a compile step (`Backend` doesn't
-            // declare one - CTFE, say, interprets directly from the parsed
-            // AST); `hasMember` needs the concrete type, so this stays at
-            // the one call site that already has it, not inside `benchmark`.
-            bool hasCompile;
-            Duration[] compileTimes;
-            static if (__traits(hasMember, BackendType, "compile")) {
-                import std.datetime.stopwatch: AutoStart, StopWatch;
-
-                hasCompile = true;
-                foreach (round; 0 .. options.warmup + options.runs) {
-                    backend = new BackendType(project.program);
-                    auto compileWatch = StopWatch(AutoStart.yes);
-                    backend.compile(project.program);
-                    if (round >= options.warmup)
-                        compileTimes ~= compileWatch.peek;
-                }
-            }
-
-            reports ~= benchmark(
-                backend,
+            reports ~= benchmark!BackendType(
                 backendName!BackendType,
                 project,
                 options.warmup,
                 options.runs,
-                hasCompile,
-                compileTimes,
             );
         }
 
@@ -296,14 +272,11 @@ private bool selected(in Options options, in string name) {
     return wanted.length == 0 || wanted.canFind(name);
 }
 
-private BackendReport benchmark(
-    imported!"snakebite.backends".Backend backend,
+private BackendReport benchmark(BackendType)(
     in string name,
     Project project,
     in uint warmup,
     in uint runs,
-    in bool hasCompile,
-    Duration[] compileTimes,
 ) {
     import bench.capture: captureStdout;
     import bench.report: timingStatistics, updateTestCounts;
@@ -315,9 +288,6 @@ private BackendReport benchmark(
 
     BackendReport report;
     report.name = name;
-    report.hasCompile = hasCompile;
-    if (hasCompile)
-        report.compileTime = timingStatistics(compileTimes);
     report.passed = true;
 
     const residentBefore = residentSetBytes;
@@ -326,18 +296,30 @@ private BackendReport benchmark(
     // measured runs. Noisy, but silencing them left failures with no
     // explanation at all; the noise is the lesser evil.
     Duration[] times;
+    Duration[] compileTimes;
     foreach (round; 0 .. warmup + runs) {
         auto stopWatch = StopWatch(AutoStart.yes);
+        auto backend = new BackendType(project.program);
+        const compilationBefore = backend.compilationStatistics;
         const result = captureStdout(() => backend.run(project.program));
-        write(result.output);
-        report.passed = report.passed && result.status == 0;
+        const elapsed = stopWatch.peek;
+        const compilationAfter = backend.compilationStatistics;
+        const compilationElapsed =
+            compilationAfter.duration - compilationBefore.duration;
         if (round >= warmup) {
-            times ~= stopWatch.peek;
+            write(result.output);
+            report.passed = report.passed && result.status == 0;
+            report.hasCompile = compilationAfter.hasCompiler;
+            if (report.hasCompile)
+                compileTimes ~= compilationElapsed;
+            times ~= elapsed - compilationElapsed;
             report.updateTestCounts(result.output);
         }
     }
 
     report.runTime = timingStatistics(times);
+    if (report.hasCompile)
+        report.compileTime = timingStatistics(compileTimes);
 
     report.ramBytes = residentSetBytes - residentBefore;
     if (report.ramBytes < 0)

@@ -148,19 +148,22 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // besides the one symbol lookup.
     private void* _allocatorAddress;
     private TypeInfo[] _typeInfoRoots;
+    private size_t _compilationDepth;
+    private size_t _cacheMisses;
+    private imported!"core.time".Duration _compilationTime;
 
     public this(const Program program) {
         super(program);
         _vm = Vm(defaultFrameCapacity);
     }
 
-    public void compile(Program program) {
-        if (program.main.func is null)
-            throw new SnakebiteException(
-                "bytecode compiler needs a program entry function",
-            );
-
-        compileFunction(program.main.func);
+    public override imported!"snakebite.backends.backend".CompilationStatistics
+        compilationStatistics() const {
+        return imported!"snakebite.backends.backend".CompilationStatistics(
+            true,
+            _cacheMisses,
+            _compilationTime,
+        );
     }
 
     public override void call(
@@ -259,6 +262,18 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
         if (auto found = function_ in _compiled)
             return *found;
+
+        import std.datetime.stopwatch: AutoStart, StopWatch;
+
+        const outermost = _compilationDepth == 0;
+        ++_compilationDepth;
+        ++_cacheMisses;
+        auto stopWatch = StopWatch(AutoStart.yes);
+        scope (exit) {
+            --_compilationDepth;
+            if (outermost)
+                _compilationTime += stopWatch.peek;
+        }
 
         // A struct method's hidden `this` is not a value this compiler
         // lays out yet; only a free function's own parameters are.

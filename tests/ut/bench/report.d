@@ -2,7 +2,7 @@ module ut.bench.report;
 
 
 import bench.report: BackendReport, updateTestCounts;
-import core.time: msecs;
+import core.time: dur, hnsecs, msecs;
 import ut;
 
 
@@ -27,6 +27,16 @@ unittest {
     statistics.minimum.shouldEqual(1.msecs);
     statistics.median.shouldEqual(2.msecs);
     statistics.sigma.shouldEqual(1.msecs);
+}
+
+
+@("milliseconds.doesNotRoundNonzeroToZero")
+unittest {
+    import bench.report: milliseconds;
+
+    milliseconds(1.hnsecs).shouldEqual("0.1 us");
+    milliseconds(dur!"usecs"(1)).shouldEqual("1.0 us");
+    milliseconds(1.msecs).shouldEqual("1.0 ms");
 }
 
 
