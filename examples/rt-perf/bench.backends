@@ -1,3 +1,4 @@
 # CTFE cannot run this one yet.
+bytecode
 interpreter
 dmd

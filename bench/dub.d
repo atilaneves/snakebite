@@ -13,6 +13,7 @@ SourceSet dubSourceSet(in string directory) {
     import std.algorithm.iteration: filter, map;
     import std.array: array;
     import std.conv: text;
+    import std.file: readText;
 
     auto files = dubDescribe(directory, "source-files", DubConfig.test);
     if (files.length == 0)
@@ -31,13 +32,74 @@ SourceSet dubSourceSet(in string directory) {
         .filter!(flag => flag.length > 0)
         .array;
 
+    string[string] sourceOverrides;
+    foreach (file; files)
+        if (isGeneratedTestRoot(file))
+            sourceOverrides[file] = noIoTestRoot(file.readText);
+
     return SourceSet(
         files,
         dubDescribe(directory, "import-paths", DubConfig.test),
         dubDescribe(directory, "string-import-paths", DubConfig.test),
         dubDescribe(directory, "lflags", DubConfig.test),
         FrontendFlags(compilerArguments),
+        sourceOverrides,
     );
+}
+
+private bool isGeneratedTestRoot(in string path) @safe pure {
+    import std.path: baseName;
+
+    return path.baseName == "dub_test_root.d";
+}
+
+private string noIoTestRoot(in string source) @safe pure {
+    import std.algorithm.searching: skipOver;
+    import std.string: indexOf, stripLeft;
+
+    const runner = source.indexOf("version(D_BetterC)");
+    if (runner < 0
+        || source[0 .. runner].indexOf("module dub_test_root;") < 0
+        || source[0 .. runner].indexOf("alias allModules") < 0)
+        throw new Exception("Dub generated an unknown test root");
+
+    auto remainder = source[runner .. $];
+    if (!remainder.skipOver("version(D_BetterC)"))
+        throw new Exception("Dub generated an unknown test root");
+    remainder = remainder.stripLeft;
+    remainder = afterBlock(remainder);
+    remainder = remainder.stripLeft;
+    if (!remainder.skipOver("else"))
+        throw new Exception("Dub generated an unknown test root");
+    remainder = remainder.stripLeft;
+    remainder = afterBlock(remainder);
+    if (remainder.stripLeft.length != 0)
+        throw new Exception("Dub generated an unknown test root");
+
+    return source[0 .. runner] ~ q{
+int main() {
+    foreach (module_; allModules)
+        foreach (test; __traits(getUnitTests, module_))
+            test();
+
+    return 0;
+}
+};
+}
+
+private string afterBlock(in string source) @safe pure {
+    if (source.length == 0 || source[0] != '{')
+        throw new Exception("Dub generated an unknown test root");
+
+    size_t depth;
+    foreach (index, character; source) {
+        if (character == '{')
+            ++depth;
+        else if (character == '}' && --depth == 0)
+            return source[index + 1 .. $];
+    }
+
+    throw new Exception("Dub generated an unknown test root");
 }
 
 // `dub describe --data=options` reports dub's own semantic option names
