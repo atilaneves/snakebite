@@ -66,6 +66,62 @@ unittest {
     (caught !is null).shouldBeTrue;
 }
 
+// A failure several guest activations deep must pop every one of them on
+// its way out - each nested call's own `opCall` handler pushed one onto the
+// VM's shared frame stack - so that stack is exactly as empty afterwards as
+// if the failing call had never run. A later, unrelated call on the same
+// `Bytecode`, reusing that same frame stack, is the observable proof: it
+// only computes the right answer if nothing the failed call reserved is
+// still sitting on it.
+@("assert.fails.unhandled.unwindsNestedActivationsCleanly.Bytecode")
+@Tags("Bytecode")
+unittest {
+    import core.exception: AssertError;
+    import snakebite.backends.backend: Program;
+    import snakebite.backends.bytecode: Bytecode;
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        bool fail() {
+            return false;
+        }
+
+        int deepest() {
+            assert(fail());
+            return 0;
+        }
+
+        int middle() {
+            return deepest() + 1;
+        }
+
+        int outermost() {
+            return middle() + 1;
+        }
+
+        int tripleFour() {
+            return 4 * 3;
+        }
+    });
+    auto outermost = findFunction(module_, "outermost");
+    auto tripleFour = findFunction(module_, "tripleFour");
+    auto bytecode = new Bytecode(Program([module_]));
+
+    AssertError caught;
+    int discarded;
+    try
+        bytecode.call(outermost, &discarded, []);
+    catch (AssertError error)
+        caught = error;
+
+    (caught !is null).shouldBeTrue;
+
+    int tripled;
+    bytecode.call(tripleFour, &tripled, []);
+    tripled.shouldEqual(12);
+}
+
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
