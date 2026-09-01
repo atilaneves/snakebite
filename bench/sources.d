@@ -10,6 +10,7 @@ struct SourceSet {
     string[] stringImportPaths;
     string[] linkerFlags;
     imported!"snakebite.frontend.compiler".FrontendFlags flags;
+    string[string] sourceOverrides;
 }
 
 SourceSet sourceSet(

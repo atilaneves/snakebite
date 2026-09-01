@@ -49,8 +49,14 @@ public imported!"dmd.dmodule".Module[] parseRootModules(
     in string[] filePaths,
     in string[] importPaths,
     in FrontendFlags flags,
+    in string[string] sourceOverrides = null,
 ) {
-    return compiler.parseRootModules(filePaths, importPaths, flags);
+    return compiler.parseRootModules(
+        filePaths,
+        importPaths,
+        flags,
+        sourceOverrides,
+    );
 }
 
 public imported!"dmd.dmodule".Module parseSnippet(in string source) {
@@ -267,18 +273,25 @@ final class Compiler {
         in string[] filePaths,
         in string[] importPaths,
         in FrontendFlags flags,
+        in string[string] sourceOverrides,
     ) {
         mutex.lock;
         scope(exit) mutex.unlock;
         requireInitialized;
 
-        return parseRootModulesLocked(filePaths, importPaths, flags);
+        return parseRootModulesLocked(
+            filePaths,
+            importPaths,
+            flags,
+            sourceOverrides,
+        );
     }
 
     private imported!"dmd.dmodule".Module[] parseRootModulesLocked(
         in string[] filePaths,
         in string[] importPaths,
         in FrontendFlags flags,
+        in string[string] sourceOverrides,
     ) {
         import dmd.dmodule: Module;
         import dmd.frontend: addImport, dmdParseModule = parseModule;
@@ -316,9 +329,12 @@ final class Compiler {
                 continue;
             }
 
+            const sourceOverride = filePath in sourceOverrides;
+            const source = sourceOverride is null
+                ? filePath.readText
+                : *sourceOverride;
             auto result = dmdParseModule(
-                dmdFileName(filePath, importPaths),
-                filePath.readText,
+                dmdFileName(filePath, importPaths), source,
             );
             if (result.diagnostics.hasErrors)
                 throw new Exception(diagnosticMessageWithLocations);

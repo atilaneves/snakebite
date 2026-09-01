@@ -338,7 +338,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     import dmd.statement:
         CompoundStatement, ContinueStatement, ExpStatement, ForStatement,
         IfStatement, ImportStatement, ReturnStatement, ScopeStatement,
-        Statement, WhileStatement;
+        Statement, UnrolledLoopStatement, WhileStatement;
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
         Arg, AssertSite, CallSite, discardResult, Function, Instruction,
@@ -532,6 +532,17 @@ extern(C++) private final class FunctionCompiler: Visitor {
         statement.accept(this);
     }
 
+    private void compileStatements(Statements)(Statements* statements) {
+        if (statements is null)
+            return;
+
+        foreach (child; *statements) {
+            compileStatement(child);
+            if (_finished)
+                return;
+        }
+    }
+
     extern(C++):
 
     override void visit(Statement statement) {
@@ -539,14 +550,11 @@ extern(C++) private final class FunctionCompiler: Visitor {
     }
 
     override void visit(CompoundStatement statement) {
-        if (statement.statements is null)
-            return;
+        compileStatements(statement.statements);
+    }
 
-        foreach (child; *statement.statements) {
-            compileStatement(child);
-            if (_finished)
-                return;
-        }
+    override void visit(UnrolledLoopStatement statement) {
+        compileStatements(statement.statements);
     }
 
     override void visit(ScopeStatement statement) {
