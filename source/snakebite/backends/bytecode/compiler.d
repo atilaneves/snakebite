@@ -379,12 +379,14 @@ extern(C++) private final class FunctionCompiler: Visitor {
         opLessThanUnsigned, opLoadIndirect, opLogicalNot, opModuloSigned,
         opModuloUnsigned, opMultiply, opNegate, opNotEqual, opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
-        opStoreIndirect, opSubtract, opZero;
+        opStaticAddress, opStaticLoad, opStaticStore, opStoreIndirect,
+        opSubtract, opZero;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf;
     import snakebite.backends.layout: FrameLayout;
     import snakebite.exception: SnakebiteException;
-    import snakebite.nativelayout: alignUp, isIntegralSize, TypeFacts;
+    import snakebite.nativelayout:
+        alignUp, isIntegralSize, storeValue, TypeFacts;
 
     alias visit = Visitor.visit;
 
@@ -409,6 +411,13 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
+    private struct StaticSlot {
+        size_t offset;
+        TypeFacts facts;
+    }
+    private StaticSlot[VarDeclaration] _staticSlots;
+    private ubyte[] _staticInitialValue;
+    private uint _staticAlignment = 1;
     // Set once nothing after the statement just compiled can run: a
     // `return`, a `continue`, or an `if`/loop whose every path already
     // ends one of those. Every statement kind after one in the same block
@@ -498,9 +507,13 @@ extern(C++) private final class FunctionCompiler: Visitor {
             );
         }
 
+        auto staticData = allocateStaticData;
+        resolveStaticAddresses(staticData);
+
         return Function(
             _instructions, _constants, _callSites, _assertSites,
             exceptionHandlers,
+            staticData,
             _tempSize, _tempAlignment,
         );
     }
@@ -521,6 +534,88 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private size_t addConstant(in long value) {
         _constants ~= value;
         return _constants.length - 1;
+    }
+
+    // Reserves one native-layout slot for a function-local static and stores
+    // its constant initializer in the same layout. A static initializer is
+    // part of the compiled function's persistent data, so the declaration
+    // statement itself has no per-call instruction to run.
+    private size_t staticOffsetOf(VarDeclaration variable) {
+        import std.conv: text;
+
+        if (auto found = variable in _staticSlots)
+            return found.offset;
+
+        if (!variable.isDataseg)
+            throw rejection(_function, variable.loc,
+                text("the variable `", variable.toString, "`"));
+
+        const facts = TypeFacts.of(variable.type);
+        if (!isSupportedFacts(facts, variable.type))
+            throw rejection(_function, variable.loc,
+                text("the variable `", variable.toString, "`"));
+
+        const offset = alignUp(_staticInitialValue.length, facts.alignment);
+        const end = offset + facts.size;
+        _staticInitialValue.length = end;
+        if (facts.alignment > _staticAlignment)
+            _staticAlignment = facts.alignment;
+        _staticSlots[variable] = StaticSlot(offset, facts);
+
+        import dmd.typesem: defaultInit;
+
+        auto initializer = variable._init is null
+            ? null : variable._init.isExpInitializer;
+        if (variable._init !is null && initializer is null)
+            throw rejection(_function, variable.loc, text(
+                "the variable `", variable.toString, "`",
+            ));
+        auto value = initializer is null
+            ? defaultInit(variable.type, variable.loc)
+            : initializerValueOf(initializer);
+
+        try
+            storeValue(
+                variable.type,
+                facts,
+                value,
+                _staticInitialValue.ptr + offset,
+            );
+        catch (Throwable)
+            throw rejection(_function, variable.loc,
+                text("the variable `", variable.toString, "`"));
+
+        return offset;
+    }
+
+    private ubyte[] allocateStaticData() {
+        if (_staticInitialValue.length == 0)
+            return null;
+
+        auto block = new ubyte[
+            _staticInitialValue.length + _staticAlignment - 1];
+        const start = -cast(size_t) block.ptr & (_staticAlignment - 1);
+        auto data = block[start .. start + _staticInitialValue.length];
+        data[] = _staticInitialValue[];
+        return data;
+    }
+
+    private void resolveStaticAddresses(ubyte[] staticData) {
+        if (staticData is null)
+            return;
+
+        foreach (ref instruction; _instructions) {
+            size_t* address;
+            if (instruction.handler is &opStaticLoad
+                    || instruction.handler is &opStaticAddress)
+                address = &instruction.source;
+            else if (instruction.handler is &opStaticStore)
+                address = &instruction.destination;
+            else
+                continue;
+
+            *address = cast(size_t) (staticData.ptr + *address);
+        }
     }
 
     // Grows this compiled function's own frame past whatever `_layout`
@@ -976,9 +1071,14 @@ extern(C++) private final class FunctionCompiler: Visitor {
             return;
 
         auto variable = expression.declaration.isVarDeclaration;
-        if (variable is null || variable.isDataseg)
+        if (variable is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
+
+        if (variable.isDataseg) {
+            staticOffsetOf(variable);
+            return;
+        }
 
         const facts = TypeFacts.of(variable.type);
         if (!isSupportedFacts(facts, variable.type))
@@ -1052,7 +1152,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
         auto varExp = expression.e1.isVarExp;
         auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg)
+        if (variable is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -1060,6 +1160,17 @@ extern(C++) private final class FunctionCompiler: Visitor {
         if (!isSupportedFacts(facts, variable.type))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
+
+        if (variable.isDataseg) {
+            const staticOffset = staticOffsetOf(variable);
+            const valueOffset = reserveTemp(facts);
+            evalInto(expression.e2, valueOffset, facts.size);
+            emit(&opStaticStore, staticOffset, valueOffset, facts.size);
+
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, facts.size);
+            return;
+        }
 
         if (_layout.isRef(variable))
             return compileIndirectAssign(expression, varExp, destOffset);
@@ -1206,7 +1317,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     ) {
         auto varExp = expression.e1.isVarExp;
         auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg)
+        if (variable is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -1222,6 +1333,18 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
         const rightOffset = reserveTemp(facts);
         evalInto(expression.e2, rightOffset, facts.size);
+
+        if (variable.isDataseg) {
+            const valueOffset = reserveTemp(facts);
+            const staticOffset = staticOffsetOf(variable);
+            emit(&opStaticLoad, valueOffset, staticOffset, facts.size);
+            emit(handler, valueOffset, rightOffset, facts.size);
+            emit(&opStaticStore, staticOffset, valueOffset, facts.size);
+
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, facts.size);
+            return;
+        }
 
         // A `ref` target's own slot holds its storage's address, not the
         // storage: the current value is read through it into a temporary,
@@ -1277,7 +1400,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private void compilePost(PostExp expression, in size_t destOffset) {
         auto varExp = expression.e1.isVarExp;
         auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg)
+        if (variable is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -1285,6 +1408,24 @@ extern(C++) private final class FunctionCompiler: Visitor {
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
+
+        if (variable.isDataseg) {
+            const valueOffset = reserveTemp(facts);
+            const staticOffset = staticOffsetOf(variable);
+            emit(&opStaticLoad, valueOffset, staticOffset, facts.size);
+
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, facts.size);
+
+            const stepOffset = reserveTemp(facts);
+            evalInto(expression.e2, stepOffset, facts.size);
+
+            auto handler = expression.op == EXP.plusPlus
+                ? &opAdd : &opSubtract;
+            emit(handler, valueOffset, stepOffset, facts.size);
+            emit(&opStaticStore, staticOffset, valueOffset, facts.size);
+            return;
+        }
 
         const varOffset = _layout.offsetOf(variable);
 
@@ -1597,8 +1738,14 @@ extern(C++) private final class FunctionCompiler: Visitor {
     override void visit(VarExp expression) {
         requireDestination(expression);
         auto variable = expression.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg)
+        if (variable is null)
             return visit(cast(Expression) expression);
+
+        if (variable.isDataseg) {
+            emit(&opStaticLoad, _destination,
+                staticOffsetOf(variable), _width);
+            return;
+        }
 
         // `$` inside an index has no frame slot of its own - dmd hands out
         // a fresh `VarDeclaration` for it that no statement declares
@@ -1633,8 +1780,17 @@ extern(C++) private final class FunctionCompiler: Visitor {
     override void visit(SymOffExp expression) {
         requireDestination(expression);
         auto variable = expression.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg || expression.offset != 0)
+        if (variable is null || expression.offset != 0)
             return visit(cast(Expression) expression);
+
+        if (variable.isDataseg) {
+            const addressOffset = reserveTemp(pointerFacts);
+            emit(&opStaticAddress, addressOffset,
+                staticOffsetOf(variable), size_t.sizeof);
+            if (addressOffset != _destination)
+                emit(&opCopy, _destination, addressOffset, size_t.sizeof);
+            return;
+        }
 
         const addressOffset = addressOfVariable(variable);
         if (addressOffset != _destination)
@@ -2641,7 +2797,13 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private size_t compileAddress(Expression expression) {
         if (auto varExp = expression.isVarExp) {
             auto variable = varExp.var.isVarDeclaration;
-            if (variable !is null && !variable.isDataseg)
+            if (variable !is null && variable.isDataseg) {
+                const addressOffset = reserveTemp(pointerFacts);
+                emit(&opStaticAddress, addressOffset,
+                    staticOffsetOf(variable), size_t.sizeof);
+                return addressOffset;
+            }
+            if (variable !is null)
                 return addressOfVariable(variable);
         }
 
