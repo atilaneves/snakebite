@@ -3,6 +3,7 @@ module snakebite.backends.bytecode.compiler;
 
 private:
 
+import dmd.mtype: Type;
 import dmd.visitor: Visitor;
 import object: TypeInfo, TypeInfo_Array, TypeInfo_Class;
 import snakebite.ffi: maxArguments, PlanCache;
@@ -207,7 +208,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _allocatorAddress;
     }
 
-    private TypeInfo runtimeTypeInfo(imported!"dmd.mtype".Type type) {
+    private TypeInfo runtimeTypeInfo(Type type) {
         import dmd.astenums:
             Tarray, Tbool, Tchar, Tdchar, Tfloat32, Tfloat64, Tint8, Tint16,
             Tint32, Tint64, Tuns8, Tuns16, Tuns32, Tuns64, Twchar;
@@ -249,27 +250,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             case Tfloat64: return typeid(double);
             default: return null;
         }
-    }
-
-    private TypeInfo_Class runtimeClassInfo(
-        imported!"dmd.mtype".Type type,
-    ) {
-        import dmd.astenums: Tclass;
-        import std.conv: text;
-
-        if (type.ty != Tclass)
-            throw new SnakebiteException(text(
-                "bytecode compiler cannot compile a non-class catch type `",
-                type.toString, "`",
-            ));
-
-        auto info = cast(TypeInfo_Class) cast() runtimeTypeInfo(type);
-        if (info is null)
-            throw new SnakebiteException(text(
-                "bytecode compiler cannot resolve catch type `",
-                type.toString, "`",
-            ));
-        return info;
     }
 
     // `function_`'s compiled form, compiling it - and, transitively,
@@ -452,11 +432,11 @@ extern(C++) private final class FunctionCompiler: Visitor {
     }
 
     private struct PendingExceptionHandler {
-        TypeInfo_Class type;
-        size_t bodyStart;
-        size_t bodyEnd;
-        size_t handler;
-        size_t catchOffset;
+        private TypeInfo_Class _type;
+        private size_t _bodyStart;
+        private size_t _bodyEnd;
+        private size_t _handler;
+        private size_t _catchOffset;
     }
     private LoopContext[] _loops;
     private size_t _destination;
@@ -505,16 +485,16 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
         ExceptionHandler[] exceptionHandlers;
         foreach (pending; _exceptionHandlers) {
-            if (pending.handler >= _instructions.length)
+            if (pending._handler >= _instructions.length)
                 throw rejection(_function, _function.loc,
                     "an empty catch handler");
 
             exceptionHandlers ~= ExceptionHandler(
-                pending.type,
-                instructionAt(pending.bodyStart),
-                instructionAt(pending.bodyEnd),
-                instructionAt(pending.handler),
-                pending.catchOffset,
+                pending._type,
+                instructionAt(pending._bodyStart),
+                instructionAt(pending._bodyEnd),
+                instructionAt(pending._handler),
+                pending._catchOffset,
             );
         }
 
@@ -658,7 +638,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
             const catchOffset = catch_.var is null
                 ? size_t.max
                 : _layout.offsetOf(catch_.var);
-            auto type = _bytecode.runtimeClassInfo(catch_.type);
+            auto type = runtimeClassInfo(catch_.type);
             _exceptionHandlers ~= PendingExceptionHandler(
                 type, bodyStart, bodyEnd, handler, catchOffset,
             );
@@ -700,6 +680,25 @@ extern(C++) private final class FunctionCompiler: Visitor {
     }
 
     extern(D):
+
+    private TypeInfo_Class runtimeClassInfo(Type type) {
+        import dmd.astenums: Tclass;
+        import std.conv: text;
+
+        if (type.ty != Tclass)
+            throw new SnakebiteException(text(
+                "bytecode compiler cannot compile a non-class catch type `",
+                type.toString, "`",
+            ));
+
+        auto info = cast(TypeInfo_Class) cast() _bytecode.runtimeTypeInfo(type);
+        if (info is null)
+            throw new SnakebiteException(text(
+                "bytecode compiler cannot resolve catch type `",
+                type.toString, "`",
+            ));
+        return info;
+    }
 
     private void compileReturn(ReturnStatement statement) {
         _finished = true;
