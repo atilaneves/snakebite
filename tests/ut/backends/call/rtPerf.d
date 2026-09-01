@@ -167,3 +167,39 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+// The real `kernel.structs` bench in `examples/rt-perf` - struct
+// construction, an array of structs, and element stores, loads and
+// copies - reproduced here with `for` loops rather than the bench's own
+// `foreach`, which is not yet in scope for every backend.
+static foreach (backend; Matrix!()) {
+    @("rtPerf.structs." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0L.shouldBeRetOf!(
+            backend,
+            q{
+                struct KernelPoint {
+                    int x;
+                    int y;
+                }
+
+                long structs() {
+                    auto pts = new KernelPoint[](600);
+                    for (int i = 0; i < 600; ++i)
+                        pts[i] = KernelPoint(i, -i);
+
+                    long acc;
+                    for (int rep = 0; rep < 10; ++rep) {
+                        for (int i = 0; i < 600; ++i) {
+                            const q = pts[i];
+                            acc += q.x + q.y;
+                        }
+                    }
+                    return acc;
+                }
+            },
+            "structs",
+        );
+    }
+}

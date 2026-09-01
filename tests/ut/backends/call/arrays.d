@@ -559,7 +559,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.new.nestedStruct.zeroInitialises." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

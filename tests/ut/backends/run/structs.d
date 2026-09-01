@@ -136,3 +136,144 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A struct literal writes each field at its own native offset, and a
+// plain field assignment overwrites only that field's own bytes, leaving
+// its siblings untouched.
+static foreach (backend; Matrix!()) {
+    @("localStructConstructionAndFieldAssignment." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                long y;
+            }
+
+            void main() {
+                auto p = Point(3, 4);
+                assert(p.x == 3);
+                assert(p.y == 4);
+
+                p.x = 10;
+                assert(p.x == 10);
+                assert(p.y == 4);
+            }
+        });
+    }
+}
+
+// Assigning one struct local to another copies every field's bytes, not a
+// reference: mutating the copy leaves the original untouched.
+static foreach (backend; Matrix!()) {
+    @("structLocalAssignmentCopiesByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
+            void main() {
+                auto a = Point(1, 2);
+                auto b = a;
+                b.x = 99;
+
+                assert(a.x == 1);
+                assert(b.x == 99);
+            }
+        });
+    }
+}
+
+// A struct passed by value into a function, and returned by value out of
+// one, is copied both ways - the callee's own mutation of its parameter
+// never reaches the caller's argument.
+static foreach (backend; Matrix!()) {
+    @("structParametersAndReturnsCopyByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
+            Point make(int a, int b) {
+                return Point(a, b);
+            }
+
+            int sum(Point p) {
+                p.x = -1;
+                return p.x + p.y;
+            }
+
+            void main() {
+                auto p = make(3, 4);
+                assert(sum(p) == 3);
+                assert(p.x == 3);
+            }
+        });
+    }
+}
+
+// A nested struct field is reached through its own enclosing field's
+// offset, added to the outer field's.
+static foreach (backend; Matrix!()) {
+    @("nestedStructFieldAccess." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner {
+                int value;
+            }
+
+            struct Outer {
+                Inner inner;
+                int tag;
+            }
+
+            void main() {
+                Outer o;
+                o.inner.value = 7;
+                o.tag = 2;
+                assert(o.inner.value == 7);
+                assert(o.tag == 2);
+            }
+        });
+    }
+}
+
+// A whole struct element is stored and loaded through the array's own
+// indirection - `opStoreIndirect`/`opLoadIndirect` moving `struct.sizeof`
+// bytes at once, the same as a scalar element's own single word - and
+// reading it out into a local copies its bytes rather than aliasing the
+// array's own storage.
+static foreach (backend; Matrix!()) {
+    @("arrayOfStructsElementStoreLoadAndCopy." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
+            void main() {
+                auto points = new Point[](3);
+                points[0] = Point(1, 2);
+                points[1] = Point(3, 4);
+                points[2] = Point(5, 6);
+
+                auto copy = points[1];
+                copy.x = -1;
+
+                assert(points[1].x == 3);
+                assert(copy.x == -1);
+                assert(points[0].x + points[2].x == 6);
+                assert(points[0].y + points[2].y == 8);
+            }
+        });
+    }
+}
+
