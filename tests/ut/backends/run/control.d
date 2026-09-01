@@ -13,7 +13,6 @@ import ut.backends;
 // takes `default` when no case matches.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("switchDispatchesAndFallsThrough." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -55,7 +54,6 @@ static foreach (backend; Matrix!(
 // the interpreter must route that call through the normal native boundary.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("switchOnStringUsesDruntime." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -126,7 +124,6 @@ static foreach (backend; Matrix!(
 // running from there, so every body on the path contributes.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("gotoCaseAndDefaultFallThrough." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -190,7 +187,6 @@ static foreach (backend; Matrix!(
 // each case running its own body rather than falling into another's.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("finalSwitchDispatchesEveryEnumMember." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -233,7 +229,6 @@ static foreach (backend; Matrix!(
 // A case range and a case list each select one shared case body.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("switchSupportsCaseRangesAndLists." ~ backend.stringof)
     @Tags(backend.stringof)
