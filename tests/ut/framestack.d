@@ -12,33 +12,31 @@ import snakebite.framestack: FrameStack;
 // that wrapper. Routing the call through an explicitly `@system`,
 // void-returning function sidesteps that: nothing crosses back out for
 // `shouldThrowWithMessage` to destroy.
-private void pushAlignmentAboveMallocator() @system {
-    import std.experimental.allocator.mallocator: Mallocator;
+private void pushAlignmentAbovePage() @system {
+    import core.memory: pageSize;
 
     auto stack = FrameStack(1024);
-    cast(void) stack.push(4, cast(uint) Mallocator.alignment * 2);
+    cast(void) stack.push(4, cast(uint) pageSize * 2);
 }
 
 
-@("push.alignmentAboveMallocator")
+@("push.alignmentAbovePage")
 unittest {
-    import std.experimental.allocator.mallocator: Mallocator;
+    import core.memory: pageSize;
     import std.conv: text;
 
-    const alignment = cast(uint) Mallocator.alignment * 2;
+    const alignment = cast(uint) pageSize * 2;
 
-    // The backing buffer is only ever aligned to `Mallocator.alignment`;
-    // a request beyond that could not be honored, so `push` refuses it
-    // instead of silently handing back a misaligned slot.
-    pushAlignmentAboveMallocator.shouldThrowWithMessage(
+    // The reservation is page-aligned, so a larger alignment could return
+    // a pointer outside the reserved range.
+    pushAlignmentAbovePage.shouldThrowWithMessage(
         text("frame stack cannot honor a ", alignment,
-            "-byte alignment: the backing buffer is only aligned to ",
-            Mallocator.alignment, " byte(s)"));
+            "-byte alignment: the backing buffer is page-aligned"));
 }
 
 
 private void pushBeyondCapacity() @system {
-    auto stack = FrameStack(4);
+    auto stack = FrameStack(4, 4);
     cast(void) stack.push(100, 1);
 }
 
@@ -53,15 +51,24 @@ unittest {
 }
 
 
+@("push.growsWithoutMoving")
+unittest {
+    import core.memory: pageSize;
+
+    auto stack = FrameStack(1, pageSize * 2);
+    auto outer = stack.push(1, 1);
+    auto address = outer.base;
+    auto inner = stack.push(pageSize, 1);
+
+    (outer.base == address).should == true;
+}
+
+
 @("push.zeroSize")
 unittest {
     auto stack = FrameStack(16);
 
-    // `Region.allocate(0)` treats a zero-size request as a failed one,
-    // not an empty reservation - the shape every no-argument guest
-    // function's frame takes. `push` special-cases it so that call still
-    // gets a `Frame` back, one whose `base` nothing will dereference,
-    // instead of `push` reporting an overflow that never happened.
+    // A parameterless guest function has no frame bytes to reserve.
     auto frame = stack.push(0, 1);
     (frame.base is null).should == true;
 }
