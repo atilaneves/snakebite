@@ -21,7 +21,7 @@ import snakebite.exception: SnakebiteException;
 // its own frame past `size` on top of what this type already reserved.
 package struct FrameLayout {
     import snakebite.ffi.call: CallAdapter;
-    import snakebite.nativelayout: alignUp, TypeFacts;
+    import snakebite.nativelayout: alignUp, delegateValueSize, TypeFacts;
     import dmd.declaration: VarDeclaration;
     import dmd.func: FuncDeclaration;
     import dmd.mtype: Type;
@@ -117,21 +117,16 @@ package struct FrameLayout {
         foreach (i; 0 .. parameterList.length) {
             auto parameter = parameterList[i];
 
-            // `out` needs its own zero-before-call semantics on top of
-            // the same pointer-slot shape `ref` gets below, and `lazy`
-            // is a delegate, not a pointer at all - neither has a frame
-            // layout this interpreter builds yet, so both still throw.
-            if (parameter.storageClass & (STC.out_ | STC.lazy_))
-                throw new SnakebiteException(
-                    text("interpreter cannot pass `out`/`lazy` parameter ",
-                        i, " of `", function_.toString, "` by value"),
-                );
-
-            const isRefParameter = (parameter.storageClass & STC.ref_) != 0;
+            const isRefParameter = (parameter.storageClass
+                & (STC.ref_ | STC.out_)) != 0;
 
             auto slot = isRefParameter
                 ? layout.reserveSlot(
                     TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
+                : parameter.storageClass & STC.lazy_
+                    ? layout.reserveSlot(TypeFacts(
+                        delegateValueSize,
+                        size_t.sizeof, false, false))
                 : layout.reserveSlot(parameter.type);
 
             layout.parameters[i] =
@@ -230,7 +225,7 @@ package struct FrameLayout {
     }
 }
 
-import dmd.visitor: Visitor;
+import dmd.visitor: SemanticTimeTransitiveVisitor;
 
 // Decides which locals get a frame slot by walking the statement kinds a
 // function body is built from: `CompoundStatement` and `ScopeStatement`
@@ -258,15 +253,18 @@ import dmd.visitor: Visitor;
 // statement without this collector also learning to walk into it, the
 // gap surfaces as `FrameLayout.offsetOf` failing to find that local, not
 // as a wrong answer.
-extern(C++) private final class LocalsCollector: Visitor {
-    import dmd.expression: Expression;
+extern(C++) private final class LocalsCollector:
+    SemanticTimeTransitiveVisitor {
+    import dmd.declaration: VarDeclaration;
+    import dmd.expression:
+        CatAssignExp, DeclarationExp, Expression, LoweredAssignExp;
     import dmd.statement:
         Catch, CompoundStatement, DoStatement, ExpStatement, ForStatement,
         IfStatement, ImportStatement, LabelStatement, ReturnStatement,
         ScopeStatement, Statement, TryCatchStatement, TryFinallyStatement,
         UnrolledLoopStatement;
 
-    alias visit = Visitor.visit;
+    alias visit = SemanticTimeTransitiveVisitor.visit;
 
     private FrameLayout* _layout;
 
@@ -314,6 +312,10 @@ extern(C++) private final class LocalsCollector: Visitor {
     // on every iteration, but it is the same one frame slot every time,
     // laid out once like any other local.
     override void visit(ForStatement statement) {
+        if (statement.condition !is null)
+            collectDeclarations(statement.condition);
+        if (statement.increment !is null)
+            collectDeclarations(statement.increment);
         if (statement._body !is null)
             statement._body.accept(this);
     }
@@ -333,6 +335,8 @@ extern(C++) private final class LocalsCollector: Visitor {
     // known, and a local in the branch not taken this call is in the one
     // taken the next.
     override void visit(IfStatement statement) {
+        if (statement.condition !is null)
+            collectDeclarations(statement.condition);
         if (statement.ifbody !is null)
             statement.ifbody.accept(this);
 
@@ -377,6 +381,53 @@ extern(C++) private final class LocalsCollector: Visitor {
             collectDeclarations(statement.exp);
     }
 
+    override void visit(DeclarationExp expression) {
+        auto variable = expression.declaration.isVarDeclaration;
+        if (variable is null)
+            return;
+
+        collectVariable(variable);
+    }
+
+    override void visit(LoweredAssignExp expression) {
+        expression.e1.accept(this);
+        expression.e2.accept(this);
+        collectDeclarations(expression.lowering);
+    }
+
+    override void visit(CatAssignExp expression) {
+        expression.e1.accept(this);
+        expression.e2.accept(this);
+        collectDeclarations(expression.lowering);
+    }
+
+    private void collectVariable(VarDeclaration variable) {
+        // A `static` local is one variable per function, not one per
+        // call, so a frame - popped on return - is the wrong storage.
+        if (variable.isDataseg)
+            return;
+
+        import dmd.astenums: STC;
+        import snakebite.nativelayout: TypeFacts;
+
+        const isRef = (variable.storage_class & STC.ref_) != 0;
+        const slot = isRef
+            ? _layout.reserveSlot(
+                TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
+            : _layout.reserveSlot(variable.type);
+        _layout._slotOf[variable] =
+            FrameLayout.VariableSlot(slot.offset, isRef);
+
+        if (auto initializer = variable._init.isExpInitializer) {
+            auto value = initializer.exp;
+            if (auto construct = value.isConstructExp)
+                value = construct.e2;
+            else if (auto blit = value.isBlitExp)
+                value = blit.e2;
+            collectDeclarations(value);
+        }
+    }
+
     // A declaration this collector needs to find is not always the whole
     // of a statement's expression, the way `long sum = 0;` is: dmd's own
     // `~=` lowering (`CatAssignExp.lowering`) can introduce a compiler
@@ -389,101 +440,7 @@ extern(C++) private final class LocalsCollector: Visitor {
     // real work, so this follows it there too rather than missing
     // whatever `Evaluator` will actually run.
     private void collectDeclarations(Expression expression) {
-        import dmd.expression: CatAssignExp;
-        import snakebite.nativelayout: TypeFacts;
-
-        if (auto declarationExp = expression.isDeclarationExp) {
-            auto variable = declarationExp.declaration.isVarDeclaration;
-            if (variable is null)
-                return;
-
-            // A `static` local is one variable per function, not one per
-            // call, so a frame - popped on return - is the wrong storage
-            // for it. `Evaluator` keeps it elsewhere; with no slot here,
-            // a reach that looks in the frame instead is refused by
-            // `offsetOf` rather than reading a variable reset on every
-            // call.
-            if (variable.isDataseg)
-                return;
-
-            import dmd.astenums: STC;
-
-            const isRef = (variable.storage_class & STC.ref_) != 0;
-            const slot = isRef
-                ? _layout.reserveSlot(
-                    TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
-                : _layout.reserveSlot(variable.type);
-            _layout._slotOf[variable] =
-                FrameLayout.VariableSlot(slot.offset, isRef);
-
-            // DMD can place another compiler-generated declaration inside
-            // this variable's initializer. The evaluator strips a
-            // construct or blit wrapper and runs its right side, so collect
-            // declarations from that same expression here.
-            if (auto initializer = variable._init.isExpInitializer) {
-                auto value = initializer.exp;
-                if (auto construct = value.isConstructExp)
-                    value = construct.e2;
-                else if (auto blit = value.isBlitExp)
-                    value = blit.e2;
-                collectDeclarations(value);
-            }
-            return;
-        }
-
-        if (auto comma = expression.isCommaExp) {
-            collectDeclarations(comma.e1);
-            collectDeclarations(comma.e2);
-            return;
-        }
-
-        if (auto call = expression.isCallExp) {
-            collectDeclarations(call.e1);
-            if (call.arguments !is null)
-                foreach (argument; *call.arguments)
-                    collectDeclarations(argument);
-            return;
-        }
-
-        if (auto dot = expression.isDotVarExp) {
-            collectDeclarations(dot.e1);
-            return;
-        }
-
-        // dmd's rvalue-AA-index lowering (`lowerAAIndexRead` in
-        // `expressionsem.d`) replaces `aa[key]` itself with
-        // `IndexExp(CommaExp(__aaget declaration, ...), 0)` - the
-        // `CommaExp` this recurses into through `e1` is where the
-        // compiler temporary actually is; `e2` is a plain literal `0`
-        // for that lowering, but a guest-written `arr[f()]` can put a
-        // declaration in its own index expression too, so both sides are
-        // walked the same way `~=`'s lowering chain already is above.
-        if (auto index = expression.isIndexExp) {
-            collectDeclarations(index.e1);
-            collectDeclarations(index.e2);
-            return;
-        }
-
-        // dmd's parser always builds a `CatAssignExp` for `~=`, then
-        // semantic() narrows it in place to whichever of the two `final`
-        // subclasses fits - `CatElemAssignExp` for appending one element
-        // (`arr ~= x;`, the common case) or `CatDcharAssignExp` for a
-        // `dchar` - and leaves it a plain `CatAssignExp` only for the
-        // third case, appending a whole slice. `lowering` lives on the
-        // base class, so all three carry it; matching only
-        // `isCatAssignExp` here would miss the element and dchar cases,
-        // which is where a compiler temp (`__appendtmp*`) actually
-        // appears. Each `isXxxExp` compares `Expression.op` and hands
-        // back a reference to `this` at its own static type - a widening
-        // upcast to `CatAssignExp` from there is a plain pointer
-        // conversion, not a class-to-class downcast, so it stays sound.
-        CatAssignExp catAssign = expression.isCatAssignExp;
-        if (catAssign is null)
-            catAssign = expression.isCatElemAssignExp;
-        if (catAssign is null)
-            catAssign = expression.isCatDcharAssignExp;
-
-        if (catAssign !is null && catAssign.lowering !is null)
-            collectDeclarations(catAssign.lowering);
+        if (expression !is null)
+            expression.accept(this);
     }
 }

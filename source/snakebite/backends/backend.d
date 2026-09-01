@@ -224,13 +224,13 @@ private int runUnittests(
 // Runs one guest call, reporting an escaping `Throwable` the way druntime
 // reports one out of `main`: the message on stderr, and the process fails.
 private bool failing(scope void delegate() call) {
-    import core.stdc.stdio: fprintf, stderr;
-    import std.string: toStringz;
+    import std.stdio: stderr;
 
     try
         call();
     catch (Throwable throwable) {
-        fprintf(stderr, "%s\n", throwable.msg.toStringz);
+        stderr.writeln(throwable.msg);
+        stderr.writeln("at ", throwable.file, ":", throwable.line);
         return true;
     }
 

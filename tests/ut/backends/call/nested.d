@@ -174,38 +174,31 @@ static foreach (backend; Matrix!(
     }
 }
 
-// `middle`'s own nested function, `captureIt`, has its address taken and
-// handed to a delegate variable - dmd's conservative `needsClosure()`
-// rule (`FuncDeclaration.tookAddressOf`) marks `middle` as needing to
-// heap-allocate its own frame for exactly this reason, regardless of
-// `dg` never leaving `middle`'s own scope. A heap-allocated frame can
-// outlive the call that made it, which calling `middle` here cannot
-// provide, so it refuses loudly rather than handing `captureIt` a static
-// link into storage that would not outlive it the way a real closure's
-// would.
-@("nested.staticChain.escapingCaptureIsRefused.Interpreter")
+// Taking `captureIt`'s address makes dmd move `x` to a heap-allocated
+// closure. Returning the delegate proves that the captured storage remains
+// available after the function that created it has returned.
+@("nested.staticChain.escapingCaptureOutlivesCreator.Interpreter")
 @Tags("Interpreter")
 unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
-
-    auto module_ = parseSnippet(q{
-        int outer() {
-            int middle() {
-                int x = 5;
-                int captureIt() { return x; }
-                int delegate() dg = &captureIt;
-                return dg();
+    67.shouldBeRetOf!(
+        Interpreter,
+        q{
+        int delegate() makeCounter() {
+            int count = 5;
+            int next() {
+                return ++count;
             }
-            return middle();
-        }
-    });
-    auto function_ = findFunction(module_, "outer");
 
-    int result;
-    interpreter(module_).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "interpreter cannot call `middle`: it captures an outer " ~
-                "variable that must outlive the enclosing call, which " ~
-                "the interpreter's frame stack does not support");
+            return &next;
+        }
+
+        int main() {
+            auto counter = makeCounter();
+            int first = counter();
+            int second = counter();
+            return first * 10 + second;
+        }
+        },
+        "main",
+    );
 }

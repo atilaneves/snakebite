@@ -92,13 +92,15 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.backends.backend: Program;
     import snakebite.backends.layout: FrameLayout;
     import dmd.dclass: ClassDeclaration;
+    import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
     import snakebite.ffi:
         CallPlan, CallResult, PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
         isIntegralSize, storeValue, TypeFacts;
-    import object: Error, Exception, Throwable, TypeInfo_Class;
+    import object:
+        Error, Exception, Throwable, TypeInfo_Class, TypeInfo_Struct;
     import dmd.root.string: toDString;
     import dmd.astenums:
         Tarray, Tbool, Tclass, Tdelegate, Tfloat32, Tfloat64, Tnoreturn,
@@ -129,6 +131,11 @@ extern(C++) private final class Evaluator: Visitor {
     // function's first call (the cold path) and reused by every call
     // after it.
     private Cache!(FuncDeclaration, FrameLayout) _layouts;
+    // Storage for locals that dmd moves out of an activation frame when it
+    // decides that the frame must survive its call. The backing bytes are
+    // kept in `_allocations`, so a delegate can retain this context after
+    // the frame stack has popped the call.
+    private Cache!(FuncDeclaration, ClosureLayout) _closures;
     // Storage for every data-segment variable the guest has reached so
     // far, keyed by its declaration. Such a variable is one variable per
     // program, not one per call, so a frame - popped on return - cannot
@@ -149,6 +156,11 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     private GuestClassRuntime[] _classRuntime;
+    // A non-root struct can be requested by an interpreted compiler-generated
+    // function even when its native TypeInfo was omitted by the compiler. The
+    // runtime object is kept by declaration so repeated `typeid` expressions
+    // see one stable identity.
+    private Cache!(StructDeclaration, TypeInfo_Struct) _structRuntime;
     // dmd gives every `arr[... $ ...]` a `lengthVar` declaration for its
     // `$`, which no statement declares and which therefore has no frame
     // slot - and needs none, since the length is a value `visit(IndexExp)`
@@ -180,6 +192,30 @@ extern(C++) private final class Evaluator: Visitor {
 
     private CallSitePlan[] _callPlans;
     private CallSitePlan _lastCallSitePlan;
+
+    // The native closure starts with its enclosing context pointer. The
+    // captured variables follow it at the offsets dmd uses for a closure
+    // object. Their slots are separate from the activation frame because a
+    // closure can outlive that frame.
+    private struct ClosureLayout {
+        private struct Slot {
+            size_t offset;
+            TypeFacts facts;
+            bool isRef;
+        }
+
+        private size_t size;
+        private uint alignment = 1;
+        private Slot[VarDeclaration] _slots;
+
+        private bool hasSlot(VarDeclaration variable) const {
+            return (variable in _slots) !is null;
+        }
+
+        private Slot slotOf(VarDeclaration variable) const {
+            return *(variable in _slots);
+        }
+    }
     // Every dmd `Type` this evaluator has ever asked dmd about, keyed by
     // the `Type` node itself: `Type.size`/`alignsize`/`isIntegral`/
     // `isUnsigned` are pure functions of the type, re-entering dmd's
@@ -214,6 +250,10 @@ extern(C++) private final class Evaluator: Visitor {
     private void* _place;
     // The currently executing function's frame.
     private ubyte* _frameBase;
+    // The current function's closure, or null when its locals stay in its
+    // frame. A nested callee receives this pointer as its hidden context
+    // when it captures a variable from this function.
+    private ubyte* _closureBase;
     private const(FrameLayout)* _layout;
     // The currently executing function's own declaration - `frameOf`'s
     // starting point for walking the static chain up from wherever
@@ -387,6 +427,85 @@ extern(C++) private final class Evaluator: Visitor {
         return function_ in _layouts;
     }
 
+    private const(ClosureLayout)* closureLayoutOf(
+        FuncDeclaration function_,
+    ) {
+        if (auto cached = function_ in _closures)
+            return cached;
+
+        import dmd.astenums: STC;
+        import snakebite.nativelayout:
+            alignUp, delegateValueSize;
+
+        ClosureLayout closure;
+        closure.size = size_t.sizeof;
+        closure.alignment = size_t.sizeof;
+
+        foreach (variable; function_.closureVars) {
+            const isRef = (variable.storage_class
+                & (STC.ref_ | STC.out_)) != 0;
+            const facts = variable.storage_class & STC.lazy_
+                ? TypeFacts(
+                    delegateValueSize, size_t.sizeof, false, false)
+                : isRef
+                    ? TypeFacts(size_t.sizeof, size_t.sizeof, false, false)
+                    : factsOf(variable.type);
+            const offset = alignUp(closure.size, facts.alignment);
+            closure._slots[variable] = ClosureLayout.Slot(
+                offset, facts, isRef);
+            closure.size = offset + facts.size;
+            if (facts.alignment > closure.alignment)
+                closure.alignment = facts.alignment;
+        }
+
+        _closures[function_] = closure;
+        return function_ in _closures;
+    }
+
+    private ubyte* allocateClosure(
+        FuncDeclaration function_,
+        ubyte* frameBase,
+        const(FrameLayout)* layout,
+    ) {
+        import core.stdc.string: memcpy, memset;
+        import snakebite.nativelayout: storeIntegral;
+        import dmd.astenums: STC;
+
+        const closureLayout = closureLayoutOf(function_);
+        const padding = closureLayout.alignment - 1;
+        auto allocation = new ubyte[](closureLayout.size + padding);
+        _allocations ~= allocation;
+
+        const start = -cast(size_t) allocation.ptr
+            & (closureLayout.alignment - 1);
+        auto closure = allocation.ptr + start;
+        memset(closure, 0, closureLayout.size);
+
+        auto parent = function_.toParent2;
+        auto parentFunction = parent is null ? null : parent.isFuncDeclaration;
+        storeIntegral(
+            closure,
+            parentFunction is null
+                ? 0 : cast(size_t) tryContextOf(parentFunction),
+            size_t.sizeof,
+        );
+
+        foreach (variable; function_.closureVars) {
+            if (!variable.isParameter)
+                continue;
+
+            const slot = closureLayout.slotOf(variable);
+            const frameSlot = layout.offsetOf(variable);
+            memcpy(
+                closure + slot.offset,
+                frameBase + frameSlot,
+                slot.facts.size,
+            );
+        }
+
+        return closure;
+    }
+
     // `type`'s facts, from the cache; computed on the first visit of any
     // node with this type.
     extern(D) private TypeFacts factsOf(Type type) {
@@ -462,10 +581,16 @@ extern(C++) private final class Evaluator: Visitor {
         // Other non-root declarations still run as native code already
         // linked into the process.
         const isGuest = _program.isInterpreted(function_);
-        const interpretsTemplate = !isGuest
-            && function_.isInstantiated() !is null
-            && function_.fbody !is null && !hasNativeSymbol(function_);
-        if (!isGuest && !interpretsTemplate) {
+        const isTemplate = function_.isInstantiated() !is null
+            && function_.fbody !is null;
+        // A template instance can inherit the guest module of its call site,
+        // even when dmd also emitted a native specialization for it. Check
+        // the process symbol for every instantiated body so guest ownership
+        // does not force a duplicate walk of code druntime already provides.
+        const interpretsTemplate = isTemplate
+            && !hasNativeSymbol(function_);
+        const interprets = isGuest && !isTemplate || interpretsTemplate;
+        if (!interprets) {
             const plan = callSite is null
                 ? &_plans.of(function_)
                 : callPlanOf(callSite, function_);
@@ -491,27 +616,7 @@ extern(C++) private final class Evaluator: Visitor {
                     "`: its class `this` is not bound"),
             );
 
-        // A nested function's static chain - the enclosing function's
-        // frame - is covered when the callee's frame outlives no longer
-        // than the call that made it: `bindFrame` passes the caller's own
-        // frame (reached by walking `frameOf`, if the callee is nested
-        // more than one level deep) as `vthis`, and `slotOf` reads an
-        // outer variable back through that same link. What is not
-        // covered is a callee dmd's `needsClosure()` says escapes its
-        // enclosing call - one whose captured locals must outlive the
-        // frame stack pops them from, which this interpreter's frame
-        // stack, unlike a heap-allocated closure, cannot provide - so
-        // that one case alone still throws loudly instead of running
-        // with a dangling context.
         import dmd.funcsem: needsClosure;
-
-        if (function_.isNested() && function_.needsClosure())
-            throw new SnakebiteException(
-                text("interpreter cannot call `", function_.toString,
-                    "`: it captures an outer variable that must outlive ",
-                    "the enclosing call, which the interpreter's frame ",
-                    "stack does not support"),
-            );
 
         // A root-owned declaration with no body has no code anywhere: the
         // program owns it, so no library can be expected to implement it.
@@ -523,6 +628,10 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         const guard = CallStateGuard(this);
+
+        _closureBase = null;
+        if (function_.needsClosure())
+            _closureBase = allocateClosure(function_, frameBase, layout);
 
         _type = function_.type.nextOf;
         _facts = factsOf(_type);
@@ -576,6 +685,7 @@ extern(C++) private final class Evaluator: Visitor {
         private TypeFacts _facts;
         private void* _place;
         private ubyte* _frameBase;
+        private ubyte* _closureBase;
         private const(FrameLayout)* _layout;
         private FuncDeclaration _function;
         private bool _returned;
@@ -596,6 +706,7 @@ extern(C++) private final class Evaluator: Visitor {
             _facts = evaluator._facts;
             _place = evaluator._place;
             _frameBase = evaluator._frameBase;
+            _closureBase = evaluator._closureBase;
             _layout = evaluator._layout;
             _function = evaluator._function;
             _returned = evaluator._returned;
@@ -613,6 +724,7 @@ extern(C++) private final class Evaluator: Visitor {
             _evaluator._facts = _facts;
             _evaluator._place = _place;
             _evaluator._frameBase = _frameBase;
+            _evaluator._closureBase = _closureBase;
             _evaluator._layout = _layout;
             _evaluator._function = _function;
             _evaluator._returned = _returned;
@@ -727,7 +839,7 @@ extern(C++) private final class Evaluator: Visitor {
 
         import snakebite.nativelayout: storeIntegral;
 
-        auto slot = _frameBase + _layout.offsetOf(catch_.var);
+        auto slot = storageOf(catch_.var);
         storeIntegral(slot, cast(size_t) cast(void*) guest, size_t.sizeof);
     }
 
@@ -1250,32 +1362,48 @@ extern(C++) private final class Evaluator: Visitor {
     // A function literal as a value. The function word holds the
     // declaration itself rather than a machine address, because this
     // backend has no machine code for the literal - `calleeOf` reads it
-    // back when the value is called. The context word is what tells a
-    // delegate this interpreter can run from one it cannot: null is the
-    // only context a non-capturing literal ever needs, so `calleeOf`
-    // refuses anything else. A literal that reads an enclosing local
-    // needs the frame it read from as its context, which this
-    // interpreter does not represent, so it is refused here - where the
-    // value is made - rather than at some later call through it.
+    // back when the value is called. A capturing literal carries the
+    // enclosing frame or closure as its context, and that storage remains
+    // reachable through `_allocations` when the enclosing call returns.
     override void visit(FuncExp expression) {
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, storeIntegral;
         import std.conv: text;
 
+        import dmd.funcsem: needsClosure;
+
         auto literal = expression.fd;
-        if (literal is null || literal.isThis() !is null
-                || literal.outerVars.length != 0)
+        if (literal is null || literal.isThis() !is null)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
-                    "`: only a non-capturing function literal is supported"),
+                    "`: its function declaration is unsupported"),
             );
 
         auto bytes = cast(ubyte*) _place;
+        if (bytes is null)
+            throw new SnakebiteException(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: it has no destination"),
+            );
         const functionWord = cast(size_t) cast(void*) literal;
 
         if (_type.ty == Tdelegate) {
+            auto context = cast(size_t) 0;
+            if (literal.outerVars.length != 0 || literal.needsClosure()) {
+                auto parent = literal.toParent2;
+                auto parentFunction = parent is null
+                    ? null : parent.isFuncDeclaration;
+                if (parentFunction is null)
+                    throw new SnakebiteException(
+                        text("interpreter cannot evaluate `",
+                            expression.toString,
+                            "`: its enclosing function could not be " ~
+                            "determined"),
+                    );
+                context = cast(size_t) tryContextOf(parentFunction);
+            }
             storeIntegral(
-                bytes + delegateContextOffset, 0, size_t.sizeof);
+                bytes + delegateContextOffset, context, size_t.sizeof);
             storeIntegral(
                 bytes + delegateFunctionOffset, functionWord, size_t.sizeof);
             return;
@@ -1289,6 +1417,80 @@ extern(C++) private final class Evaluator: Visitor {
         throw new SnakebiteException(
             text("interpreter cannot evaluate `", expression.toString,
                 "` as a `", _type.toString, "`"),
+        );
+    }
+
+    // `&nested` is lowered by dmd to a DelegateExp whose expression is the
+    // nested function itself. Its context is the enclosing frame or heap
+    // closure, just as for a delegate literal. The function declaration is
+    // retained in the function word for the interpreter to resolve later.
+    override void visit(DelegateExp expression) {
+        import snakebite.nativelayout:
+            delegateContextOffset, delegateFunctionOffset, storeIntegral;
+        import std.conv: text;
+
+        auto function_ = expression.func;
+        if (function_ is null || function_.isThis() !is null
+                || _type.ty != Tdelegate)
+            throw new SnakebiteException(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: its delegate declaration is unsupported"),
+            );
+
+        auto context = cast(size_t) 0;
+        if (function_.outerVars.length != 0
+                || functionNeedsClosure(function_)) {
+            auto parent = function_.toParent2;
+            auto parentFunction = parent is null
+                ? null : parent.isFuncDeclaration;
+            if (parentFunction is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot evaluate `",
+                        expression.toString,
+                        "`: its enclosing function could not be determined"),
+                );
+            context = cast(size_t) tryContextOf(parentFunction);
+        }
+
+        auto bytes = cast(ubyte*) _place;
+        if (bytes is null)
+            throw new SnakebiteException(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: it has no destination"),
+            );
+        storeIntegral(
+            bytes + delegateContextOffset, context, size_t.sizeof);
+        storeIntegral(
+            bytes + delegateFunctionOffset,
+            cast(size_t) cast(void*) function_,
+            size_t.sizeof,
+        );
+    }
+
+    override void visit(DelegatePtrExp expression) {
+        import snakebite.nativelayout: delegateContextOffset;
+
+        visitDelegateWord(expression.e1, delegateContextOffset);
+    }
+
+    override void visit(DelegateFuncptrExp expression) {
+        import snakebite.nativelayout: delegateFunctionOffset;
+
+        visitDelegateWord(expression.e1, delegateFunctionOffset);
+    }
+
+    private void visitDelegateWord(Expression expression, size_t offset) {
+        import core.stdc.string: memcpy;
+        import snakebite.nativelayout: delegateValueSize;
+
+        const facts = factsOf(expression.type);
+        assert(facts.size == delegateValueSize);
+        align(size_t.sizeof) ubyte[delegateValueSize] value = void;
+        evaluate(expression, expression.type, facts, value.ptr);
+        memcpy(
+            _place,
+            value.ptr + offset,
+            _facts.size,
         );
     }
 
@@ -1357,60 +1559,61 @@ extern(C++) private final class Evaluator: Visitor {
         return parent is null ? null : parent.isFuncDeclaration;
     }
 
-    // Where `owner`'s own frame is: `owner` itself if it is the function
+    // Where `owner`'s own context is: `owner` itself if it is the function
     // currently executing, otherwise found by following the static chain
-    // up from there - one context-word hop per level of nesting, reading
-    // each frame's own `vthis` slot the same way `bindFrame` filled it,
-    // exactly as compiled D follows the same chain to reach the same
-    // frame. Both a direct call to a nested function (`bindFrame`, to
-    // learn what context to pass its callee) and an outer-variable read
-    // (`slotOf`, to learn where the variable actually lives) need this;
-    // the former is content with "unreachable" as an answer (nothing on
-    // that path ever dereferences a link that was never asked for), the
-    // latter is not, so it refuses through this wrapper instead.
-    private ubyte* frameOf(FuncDeclaration owner) {
+    // up from there - one context hop per level of nesting. A context is
+    // either a frame or a heap closure, as dmd decides for that owner.
+    private ubyte* contextOf(FuncDeclaration owner) {
         import std.conv: text;
 
-        auto base = tryFrameOf(owner);
+        auto base = tryContextOf(owner);
         if (base is null)
             throw new SnakebiteException(
                 text("interpreter cannot reach `", owner.toString,
-                    "`'s frame: it is not on the current static chain"),
+                    "`'s context: it is not on the current static chain"),
             );
 
         return base;
     }
 
-    // As `frameOf`, but `null` rather than a thrown exception when
-    // `owner`'s frame is not reachable from here - a caller nested
-    // several levels above `owner` on the chain relays `owner`'s frame on
-    // to a callee nested inside it without ever reading from it itself,
-    // exactly as compiled D's own relayed static link does, and that
-    // relay must succeed even when the function doing the relaying
-    // happens not to be on `owner`'s chain at all (a non-capturing
-    // callee's link is never dereferenced, so an unreachable answer is a
-    // fine one to pass on).
-    private ubyte* tryFrameOf(FuncDeclaration owner) {
+    // As `contextOf`, but `null` rather than a thrown exception when
+    // `owner`'s context is not reachable from here. The null result is
+    // useful for a non-capturing delegate, whose context is never read.
+    private ubyte* tryContextOf(FuncDeclaration owner) {
         import snakebite.nativelayout: loadIntegral;
+        import dmd.funcsem: needsClosure;
 
         auto fn = _function;
-        auto base = _frameBase;
+        auto base = functionNeedsClosure(fn)
+            ? _closureBase : _frameBase;
         while (fn !is owner) {
-            auto layout = layoutOf(fn);
-            if (layout.hiddenThis.variable is null)
+            if (base is null)
                 return null;
 
+            if (functionNeedsClosure(fn))
+                base = cast(ubyte*) loadIntegral(
+                    base, size_t.sizeof, false);
+            else {
+                auto layout = layoutOf(fn);
+                if (layout.hiddenThis.variable is null)
+                    return null;
+                base = cast(ubyte*) loadIntegral(
+                    base + layout.hiddenThis.parameter.offset,
+                    size_t.sizeof, false);
+            }
             auto parent = fn.toParent2();
             fn = parent is null ? null : parent.isFuncDeclaration;
             if (fn is null)
                 return null;
-
-            base = cast(ubyte*) loadIntegral(
-                base + layout.hiddenThis.parameter.offset, size_t.sizeof,
-                false);
         }
 
         return base;
+    }
+
+    private bool functionNeedsClosure(FuncDeclaration function_) {
+        import dmd.funcsem: needsClosure;
+
+        return function_.needsClosure();
     }
 
     // Where the variable read or written by `expression` lives: the
@@ -1420,6 +1623,43 @@ extern(C++) private final class Evaluator: Visitor {
     // both come here.
     private ubyte* slotOf(VarExp expression) {
         return slotOf(expression, expression.var);
+    }
+
+    // The raw slot for a declaration, before indirecting through a `ref`
+    // variable. Declarations need this address to initialize a reference
+    // slot itself; reads and writes use `slotOf` below and indirect it.
+    private ubyte* storageOf(VarDeclaration variable) {
+        auto owner = outerFunctionOf(variable);
+        if (owner !is null && functionNeedsClosure(owner)) {
+            auto context = contextOf(owner);
+            const closure = closureLayoutOf(owner);
+            if (closure.hasSlot(variable))
+                return context + closure.slotOf(variable).offset;
+        }
+
+        if (_layout.hasSlot(variable))
+            return _frameBase + _layout.offsetOf(variable);
+
+        if (owner is null)
+            throw new SnakebiteException(
+                "interpreter cannot find storage for a local variable",
+            );
+
+        return contextOf(owner) + layoutOf(owner).offsetOf(variable);
+    }
+
+    private bool isRefStorage(VarDeclaration variable) {
+        auto owner = outerFunctionOf(variable);
+        if (owner !is null && functionNeedsClosure(owner)) {
+            const closure = closureLayoutOf(owner);
+            if (closure.hasSlot(variable))
+                return closure.slotOf(variable).isRef;
+        }
+
+        if (_layout.hasSlot(variable))
+            return _layout.isRef(variable);
+
+        return owner !is null && layoutOf(owner).isRef(variable);
     }
 
     // As above, for a caller that already has the `Declaration` in hand
@@ -1438,7 +1678,9 @@ extern(C++) private final class Evaluator: Visitor {
         if (variable is null)
             throw new SnakebiteException(
                 text("interpreter cannot reach `", original.toString,
-                    "`: not a parameter or local in the current frame"),
+                    "` (", declaration.kind, ") in `",
+                    _function.ident.toString,
+                    ": not a parameter or local in the current frame"),
             );
 
         if (variable.isDataseg)
@@ -1448,22 +1690,36 @@ extern(C++) private final class Evaluator: Visitor {
 
         // A parameter or local of the currently executing function itself
         // is the common case, and the only one a non-nested function ever
-        // has. `variable` not being one of those is what an outer
-        // variable - read from inside a nested function, through the
-        // static chain `bindFrame` set up when it was called - looks
-        // like here, so that is tried next rather than refusing outright.
+        // has. A variable in a function's closure is checked first because
+        // dmd moved it out of the activation frame; all other variables use
+        // the frame or context chain below.
+        auto owner = outerFunctionOf(variable);
+        if (owner !is null && functionNeedsClosure(owner)) {
+            auto context = contextOf(owner);
+            const closure = closureLayoutOf(owner);
+            if (closure.hasSlot(variable)) {
+                const slot = closure.slotOf(variable);
+                auto result = context + slot.offset;
+                if (slot.isRef)
+                    return cast(ubyte*) loadIntegral(
+                        result, size_t.sizeof, false);
+                return result;
+            }
+        }
+
         auto base = _frameBase;
         auto layout = _layout;
         if (!layout.hasSlot(variable)) {
-            auto owner = outerFunctionOf(variable);
-            if (owner is null)
-                throw new SnakebiteException(
+                if (owner is null)
+                    throw new SnakebiteException(
                     text("interpreter cannot reach `", original.toString,
+                        "` (", variable.ident.toString, ") in `",
+                        _function.ident.toString,
                         "`: not a parameter or local in the current ",
                         "frame or an enclosing one"),
                 );
 
-            base = frameOf(owner);
+            base = contextOf(owner);
             layout = layoutOf(owner);
         }
 
@@ -1590,9 +1846,6 @@ extern(C++) private final class Evaluator: Visitor {
         if (variable.isDataseg)
             return;
 
-        countForeignNameLookup;
-        const offset = _layout.offsetOf(variable);
-
         // `T value = void` requests storage without initialization. The
         // frame slot already exists, so executing this declaration performs
         // no write. Code must assign any bytes it reads, as in compiled D.
@@ -1608,18 +1861,19 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         auto value = initializerValueOf(expInitializer);
-        if (_layout.isRef(variable)) {
+        auto slot = storageOf(variable);
+        if (isRefStorage(variable)) {
             import snakebite.nativelayout: storeIntegral;
 
             storeIntegral(
-                _frameBase + offset,
+                slot,
                 cast(size_t) addressOf(value),
                 size_t.sizeof,
             );
             return;
         }
 
-        evaluate(value, variable.type, _frameBase + offset);
+        evaluate(value, variable.type, slot);
     }
 
     // DMD lowers dynamic-array length assignment to a native druntime call
@@ -1665,6 +1919,11 @@ extern(C++) private final class Evaluator: Visitor {
         // a postblit.
         const isStructBlit = structType !is null
             && expression.isBlitExp !is null;
+        // A scalar `ConstructExp` initializes storage that has no prior
+        // value. This includes immutable fields in a constructor, which
+        // cannot use ordinary assignment syntax but still have native bytes
+        // that can be written once.
+        const isConstruct = expression.isConstructExp !is null;
         const isSupportedArray = _type.ty == Tarray;
         if (structType !is null && !isSupportedStruct && !isStructBlit)
             throw new SnakebiteException(
@@ -1672,7 +1931,7 @@ extern(C++) private final class Evaluator: Visitor {
                     structType.toString, "`"),
             );
 
-        if (expression.op != EXP.assign && !_facts.isIntegral
+        if (expression.op != EXP.assign && !_facts.isIntegral && !isConstruct
                 && !isSupportedStruct && !isStructBlit
                 && !isSupportedArray)
             throw new SnakebiteException(
@@ -1910,6 +2169,12 @@ extern(C++) private final class Evaluator: Visitor {
             const stride = factsOf(array.type.nextOf).size;
             auto base = cast(ubyte*) asPointer(array);
             const index = indexOf(expression, 0);
+
+            if (base is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot index through a null pointer in `",
+                        expression.toString, "` at ", index),
+                );
 
             return ElementAddress(
                 cast(void*) (base + index * stride), stride);
@@ -2384,6 +2649,14 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto sourceType = expression.e1.type;
 
+        // `cast(void) e` discards the value but keeps e's effects. DMD
+        // emits this around compiler-generated calls whose return value is
+        // intentionally ignored, including associative-array iteration.
+        if (_type.ty == Tvoid) {
+            runForEffect(expression.e1);
+            return;
+        }
+
         if (sourceType.ty == Tclass && _type.ty == Tclass) {
             auto value = classReferenceOf(expression.e1);
             if (value is null) {
@@ -2639,12 +2912,25 @@ extern(C++) private final class Evaluator: Visitor {
         auto name = type.vtinfo.ident.toString;
         countForeignNameLookup;
         auto address = _plans.resolve(name);
-        if (address is null)
+        if (address is null) {
+            auto structType = type.isTypeStruct;
+            if (structType !is null
+                    && !isRootOwnedStruct(structType.sym)) {
+                storeIntegral(
+                    _place,
+                    cast(size_t) cast(void*)
+                        structRuntimeInfo(structType.sym),
+                    _facts.size,
+                );
+                return;
+            }
+
             throw new SnakebiteException(
                 text("interpreter cannot resolve the symbol `", name,
                     "` for `", expression.toString,
                     "`: it is not in this process"),
             );
+        }
 
         storeIntegral(_place, cast(size_t) address, _facts.size);
     }
@@ -2971,6 +3257,45 @@ extern(C++) private final class Evaluator: Visitor {
             return;
         }
 
+        if (expression.type.ty == Tpointer) {
+            const structType = expression.newtype.isTypeStruct;
+            if (structType is null || expression.placement !is null
+                    || expression.thisexp !is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot evaluate `", expression.op,
+                        "` expression: `", expression.toString, "`"),
+                );
+
+            const declaration = structType.sym;
+            const alignment = declaration.alignsize == 0
+                ? 1 : declaration.alignsize;
+            const padding = alignment - 1;
+            if (declaration.structsize > size_t.max - padding)
+                throw new SnakebiteException(
+                    text("interpreter cannot allocate `",
+                        expression.toString, "`: its alignment padding " ~
+                        "overflows `size_t`"),
+                );
+
+            auto allocation = new ubyte[](declaration.structsize + padding);
+            _allocations ~= allocation;
+            const start = -cast(size_t) allocation.ptr
+                & (alignment - 1);
+            auto object = cast(ubyte*) allocation.ptr + start;
+            initializeDefault(
+                expression.newtype,
+                factsOf(expression.newtype),
+                object,
+                expression.loc,
+            );
+
+            if (expression.member !is null)
+                constructStruct(expression, object);
+
+            storeIntegral(_place, cast(size_t) object, _facts.size);
+            return;
+        }
+
         if (expression.type.ty != Tarray || arguments is null
                 || arguments.length != 1)
             throw new SnakebiteException(
@@ -3097,7 +3422,30 @@ extern(C++) private final class Evaluator: Visitor {
         return typeInfo;
     }
 
+    private TypeInfo_Struct structRuntimeInfo(StructDeclaration declaration) {
+        if (auto cached = declaration in _structRuntime)
+            return *cached;
+
+        auto typeInfo = new TypeInfo_Struct;
+        typeInfo.m_init = new byte[](declaration.structsize);
+        typeInfo.m_align = declaration.alignsize;
+        if (declaration.hasPointerField)
+            typeInfo.m_flags = TypeInfo_Struct.StructFlags.hasPointers;
+
+        _structRuntime[declaration] = typeInfo;
+        return typeInfo;
+    }
+
     private bool isRootOwnedClass(ClassDeclaration declaration) const {
+        const module_ = declaration.getModule;
+        foreach (rootModule; _program.rootModules)
+            if (module_ is rootModule)
+                return true;
+
+        return false;
+    }
+
+    private bool isRootOwnedStruct(StructDeclaration declaration) const {
         const module_ = declaration.getModule;
         foreach (rootModule; _program.rootModules)
             if (module_ is rootModule)
@@ -3144,6 +3492,49 @@ extern(C++) private final class Evaluator: Visitor {
         if (constructor.vthis is null)
             throw new SnakebiteException(
                 text("interpreter cannot call class constructor `",
+                    constructor.toString, "`: it has no `this`"),
+            );
+
+        storeIntegral(
+            frame.base + layout.hiddenThis.parameter.offset,
+            cast(size_t) object,
+            size_t.sizeof,
+        );
+
+        auto parameters = typeFunctionOf(constructor).parameterList;
+        auto arguments = expression.arguments;
+        const argumentCount = arguments is null ? 0 : arguments.length;
+        if (argumentCount != parameters.length)
+            throw new SnakebiteException(
+                text("interpreter: `", constructor.toString, "` expects ",
+                    parameters.length, " argument(s), got ", argumentCount),
+            );
+
+        foreach (i; 0 .. parameters.length) {
+            auto parameter = layout.parameters[i];
+            evaluate(
+                (*arguments)[i],
+                parameters[i].type,
+                parameter.facts,
+                frame.base + parameter.offset,
+            );
+        }
+
+        executeCall(constructor, null, frame.base, layout, null, true);
+    }
+
+    private void constructStruct(NewExp expression, ubyte* object) {
+        import std.conv: text;
+
+        auto constructor = expression.member;
+        auto layout = layoutOf(constructor);
+        auto frame = _frames.push(layout.size, layout.alignment);
+
+        import snakebite.nativelayout: storeIntegral;
+
+        if (constructor.vthis is null)
+            throw new SnakebiteException(
+                text("interpreter cannot call struct constructor `",
                     constructor.toString, "`: it has no `this`"),
             );
 
@@ -3327,16 +3718,23 @@ extern(C++) private final class Evaluator: Visitor {
     // value into `_place` for this ordinary expression path; `addressOf`
     // uses `refCallAddress` when the expression itself is an lvalue.
     override void visit(CallExp expression) {
-        auto function_ = expression.f;
-        if (function_ is null)
-            function_ = calleeOf(expression);
+        import core.stdc.string: memcpy;
+        import std.conv: text;
+
+        auto callee = expression.f is null
+            ? calleeOf(expression)
+            : Callee(expression.f, null, false);
+        auto function_ = callee.function_;
 
         void* classReceiver;
+        bool hasClassReceiver;
         auto aggregate = function_.isThis;
-        if (aggregate !is null && aggregate.isClassDeclaration !is null) {
+        if (aggregate !is null && aggregate.isClassDeclaration !is null
+                && !callee.fromDelegate) {
             auto dot = expression.e1.isDotVarExp;
             auto receiver = dot is null ? expression.e1 : dot.e1;
             classReceiver = classReferenceOf(receiver);
+            hasClassReceiver = true;
             if (classReceiver is null)
                 throw new SnakebiteException(
                     text("interpreter cannot call `", expression.toString,
@@ -3356,6 +3754,9 @@ extern(C++) private final class Evaluator: Visitor {
             function_,
             layout,
             classReceiver,
+            hasClassReceiver,
+            callee.context,
+            callee.fromDelegate,
         );
 
         auto nativeVirtual = nativeVirtualAddress(function_, classReceiver);
@@ -3368,7 +3769,6 @@ extern(C++) private final class Evaluator: Visitor {
             );
             return;
         }
-
         executeCall(
             function_, _place, frame.base, layout, expression,
             function_.isCtorDeclaration() !is null,
@@ -3429,14 +3829,19 @@ extern(C++) private final class Evaluator: Visitor {
         return staticFunction;
     }
 
+    private struct Callee {
+        FuncDeclaration function_;
+        void* context;
+        bool fromDelegate;
+    }
+
     // The callee of a call dmd left unresolved: one reached through a
     // value rather than a name, which for this interpreter means a
     // delegate. The value's function word is the declaration
-    // `visit(FuncExp)` stored, read back here. A non-null context word
-    // means the delegate carries a captured frame this interpreter does
-    // not represent, so it is refused by name rather than run without
-    // the frame it needs.
-    private FuncDeclaration calleeOf(CallExp expression) {
+    // `visit(FuncExp)` stored, read back here. Its context word is passed
+    // directly into the callee's hidden context slot, since the delegate
+    // may be called after the function that created it has returned.
+    private Callee calleeOf(CallExp expression) {
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize,
             loadIntegral;
@@ -3459,12 +3864,6 @@ extern(C++) private final class Evaluator: Visitor {
 
         const context = loadIntegral(
             value.ptr + delegateContextOffset, size_t.sizeof, false);
-        if (context != 0)
-            throw new SnakebiteException(
-                text("interpreter cannot call `", expression.toString,
-                    "`: the delegate's context is not null, and a captured ",
-                    "context is not supported"),
-            );
 
         auto function_ = cast(FuncDeclaration) cast(void*) loadIntegral(
             value.ptr + delegateFunctionOffset, size_t.sizeof, false);
@@ -3474,7 +3873,7 @@ extern(C++) private final class Evaluator: Visitor {
                     "`: the delegate is null"),
             );
 
-        return function_;
+        return Callee(function_, cast(void*) context, true);
     }
 
     private void* classReferenceOf(Expression expression) {
@@ -3505,9 +3904,13 @@ extern(C++) private final class Evaluator: Visitor {
         FuncDeclaration function_,
         const(FrameLayout)* layout,
         void* classReceiver = null,
+        bool hasClassReceiver = false,
+        void* delegateContext = null,
+        bool fromDelegate = false,
     ) {
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
+        import dmd.astenums: STC;
 
         // The callee's parameter types, which a body-less declaration has
         // just as much as one with a body - unlike `parameters`, which
@@ -3532,15 +3935,28 @@ extern(C++) private final class Evaluator: Visitor {
                 const classDeclaration =
                     cast(ClassDeclaration) function_.isThis.isClassDeclaration;
                 if (classDeclaration !is null) {
-                    if (classReceiver is null)
+                    if (hasClassReceiver)
+                        storeIntegral(
+                            frame.base + layout.hiddenThis.parameter.offset,
+                            cast(size_t) classReceiver,
+                            size_t.sizeof,
+                        );
+                    else if (fromDelegate)
+                        storeIntegral(
+                            frame.base + layout.hiddenThis.parameter.offset,
+                            cast(size_t) delegateContext,
+                            size_t.sizeof,
+                        );
+                    else {
                         classReceiver = classReferenceOf(
                             dot is null ? expression.e1 : dot.e1,
                         );
-                    storeIntegral(
-                        frame.base + layout.hiddenThis.parameter.offset,
-                        cast(size_t) classReceiver,
-                        size_t.sizeof,
-                    );
+                        storeIntegral(
+                            frame.base + layout.hiddenThis.parameter.offset,
+                            cast(size_t) classReceiver,
+                            size_t.sizeof,
+                        );
+                    }
                 } else if (dot is null)
                     throw new SnakebiteException(
                         text("interpreter cannot call `", function_.toString,
@@ -3553,21 +3969,10 @@ extern(C++) private final class Evaluator: Visitor {
                         size_t.sizeof,
                     );
             } else {
-                // A nested callee's `vthis` is the static link: the
-                // address of the frame it is lexically nested inside,
-                // exactly as compiled D passes it - found by `tryFrameOf`
-                // from wherever this call itself is running, which is
-                // that frame when the callee is nested directly inside
-                // the caller, and reached by hopping further up the chain
-                // when it is nested deeper than that. Whether the callee
-                // itself reads an outer variable is not enough to decide
-                // this: it may relay the link on unread to a nested call
-                // of its own instead, exactly as compiled D's own relayed
-                // static link does, so the walk is always attempted. It
-                // can still fail to reach the enclosing frame - when the
-                // caller is not itself on that static chain at all - and
-                // 0 is passed in that case, which is fine for a link
-                // nothing along this callee's own nested calls reads.
+                // A nested callee's `vthis` is its enclosing context. A
+                // delegate supplies this context directly because it may
+                // outlive the call that created it; a direct call finds it
+                // by walking the current static chain.
                 auto enclosing = function_.toParent2() is null
                     ? null : function_.toParent2().isFuncDeclaration;
                 if (enclosing is null)
@@ -3577,11 +3982,12 @@ extern(C++) private final class Evaluator: Visitor {
                             "function could not be determined"),
                     );
 
+                const context = fromDelegate
+                    ? cast(size_t) delegateContext
+                    : cast(size_t) tryContextOf(enclosing);
                 storeIntegral(
                     frame.base + layout.hiddenThis.parameter.offset,
-                    cast(size_t) tryFrameOf(enclosing),
-                    size_t.sizeof,
-                );
+                    context, size_t.sizeof);
             }
         }
 
@@ -3597,18 +4003,25 @@ extern(C++) private final class Evaluator: Visitor {
             auto parameter = layout.parameters[i];
             auto slot = frame.base + parameter.offset;
 
-            void* argumentAddress() {
-                return addressOf(argument);
-            }
-
-            void evaluateArgument(void* place) {
+            if (parameter.isRef) {
+                auto address = cast(ubyte*) addressOf(argument);
+                storeIntegral(
+                    slot, cast(size_t) address, size_t.sizeof);
+                if (parameterList[i].storageClass & STC.out_)
+                    initializeDefault(
+                        parameterList[i].type,
+                        factsOf(parameterList[i].type),
+                        address,
+                        expression.loc,
+                    );
+            } else
                 evaluate(
-                    argument, parameterList[i].type, parameter.facts, place);
-            }
-
-            parameter.call.store(
-                slot, &argumentAddress, &evaluateArgument,
-            );
+                    argument,
+                    parameterList[i].storageClass & STC.lazy_
+                        ? argument.type : parameterList[i].type,
+                    parameter.facts,
+                    slot,
+                );
         }
 
         return frame;

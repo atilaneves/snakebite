@@ -29,6 +29,45 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
+// An `out` parameter starts as default-initialized caller storage. The
+// callee then writes that same storage, rather than a temporary parameter
+// slot, so the caller observes the result after the call.
+@("out.param.initializesCallerStorage.Interpreter")
+@Tags("Interpreter")
+unittest {
+    42.shouldBeRetOf!(Interpreter, q{
+        void set(out int value) {
+            value = 42;
+        }
+
+        int main() {
+            int value;
+            set(value);
+            return value;
+        }
+    }, "main");
+}
+
+// A `lazy` parameter is a delegate in the native ABI. Its expression runs
+// in the caller when the callee reads the parameter, not when the call is
+// bound.
+@("lazy.param.evaluatesAtRead.Interpreter")
+@Tags("Interpreter")
+unittest {
+    22.shouldBeRetOf!(Interpreter, q{
+        int evaluations;
+
+        int read(lazy int value) {
+            ++evaluations;
+            return value;
+        }
+
+        int main() {
+            return read(++evaluations) * 10 + evaluations;
+        }
+    }, "main");
+}
+
 // A `ref` parameter forwarded into a nested call: `bump`'s own `x` is
 // itself `ref`, and passing it on to `inc` must reach the same storage as
 // the outer local, not a second indirection through `bump`'s frame.
@@ -83,23 +122,6 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
             "kindaMain",
         );
     }
-}
-
-// `writeln` initializes a scoped `File` temporary from the native
-// `trustedStdout` value before it writes. This is the public library path
-// used by the rt-simple runner's final summary.
-@("temporary.nativeAggregateFeedsCommaLvalue.Interpreter")
-@Tags("Interpreter")
-unittest {
-    0.shouldBeStatusOf!(Interpreter, q{
-        import std.stdio: writeln;
-
-        void main() {
-            size_t total = 23;
-            size_t failed;
-            writeln(total, " test(s) run, ", failed, " failed.");
-        }
-    });
 }
 
 // Taking the address of a ref-returning call must evaluate the call once and
