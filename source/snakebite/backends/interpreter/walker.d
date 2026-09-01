@@ -113,6 +113,9 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.init: ExpInitializer;
     import dmd.location: Loc;
     import dmd.mtype: Type;
+    import dmd.typesem: nextOf;
+    import dmd.expressionsem: toInteger;
+    import dmd.funcsem: isVirtualMethod;
     import dmd.statement:
         BreakStatement, CaseStatement, Catch, CompoundStatement,
         ContinueStatement, DefaultStatement, DoStatement, ExpStatement,

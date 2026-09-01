@@ -185,6 +185,7 @@ private int runMain(
     imported!"dmd.func".FuncDeclaration main_,
 ) {
     import dmd.astenums: Tvoid;
+    import dmd.typesem: nextOf;
 
     if (main_ is null)
         return 0;
