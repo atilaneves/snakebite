@@ -897,6 +897,48 @@ package const(Instruction)* opNotEqual(
     return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
+// `==`/`!=` on `float`/`double`: unlike the integral form above, the same
+// bits do not always compare equal to themselves - IEEE 754 makes NaN
+// compare unequal to every value, itself included - so this reads both
+// operands as the floating type their shared `pc.width` (4 or 8) names and
+// lets the host's own float comparison answer, rather than reusing
+// `opEqual`/`opNotEqual`'s bit-pattern test.
+package const(Instruction)* opFloatEqual(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto place = frame + pc.destination;
+    const result = pc.width == 4
+        ? *cast(float*) place == *cast(const float*) (frame + pc.source)
+        : *cast(double*) place == *cast(const double*) (frame + pc.source);
+    *cast(ubyte*) place = result ? 1 : 0;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package const(Instruction)* opFloatNotEqual(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto place = frame + pc.destination;
+    const result = pc.width == 4
+        ? *cast(float*) place != *cast(const float*) (frame + pc.source)
+        : *cast(double*) place != *cast(const double*) (frame + pc.source);
+    *cast(ubyte*) place = result ? 1 : 0;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
 
 // `-x` and `~x`: `destination` holds the one operand on entry and the
 // answer on exit; `source` is unused. Neither depends on the operand's

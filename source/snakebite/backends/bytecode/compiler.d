@@ -7,6 +7,46 @@ import dmd.visitor: Visitor;
 import snakebite.ffi: maxArguments, PlanCache;
 
 
+// Whether this compiler can lay `facts` out in a frame slot at all: an
+// integral of a width `nativelayout.storeIntegral` knows, or a dynamic
+// array, always `nativelayout.arrayValueSize` bytes as its own two-word
+// `{length, pointer}` pair regardless of its element type. Shared between
+// `Bytecode.compileFunction`'s parameter/return checks and
+// `FunctionCompiler.compileCall`'s, which ask the same question of a
+// callee's own signature.
+private bool isSupportedFacts(
+    in imported!"snakebite.nativelayout".TypeFacts facts,
+) {
+    import snakebite.nativelayout: isIntegralSize;
+
+    return facts.isDynamicArray
+        || (facts.isIntegral && isIntegralSize(facts.size));
+}
+
+// Whether `type` is `float`/`double` - `TypeFacts` has no notion of its own
+// for this, since nothing outside array element types and their literals
+// needs to ask, unlike `isIntegral`/`isDynamicArray`, which drive checks
+// all over this compiler.
+private bool isFloatingType(imported!"dmd.mtype".Type type) {
+    import dmd.astenums: Tfloat32, Tfloat64;
+
+    return type.ty == Tfloat32 || type.ty == Tfloat64;
+}
+
+// An array element type this compiler can lay out: every integral width it
+// already accepts elsewhere, plus `float`/`double`, which have no `.init`
+// this compiler can write any other way but zero.
+private bool isSupportedElementFacts(
+    in imported!"snakebite.nativelayout".TypeFacts facts,
+    imported!"dmd.mtype".Type type,
+) {
+    import snakebite.nativelayout: isIntegralSize;
+
+    return (facts.isIntegral && isIntegralSize(facts.size))
+        || isFloatingType(type);
+}
+
+
 public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.backends.backend: Program;
@@ -25,16 +65,11 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // once and never relocates, unlike an associative array's own
     // storage, which can rehash as more entries go in.
     private Function*[FuncDeclaration] _compiled;
-    // One `GC.malloc` block per `static`/`__gshared` variable this compiler
-    // has ever met, allocated once on first reference and never moved or
-    // freed for this backend's own lifetime - a compiled function bakes the
-    // block's address straight into its own bytecode as a constant (see
-    // `visit(VarExp)`/`compileAssign`), so the address has to stay good for
-    // as long as that bytecode can still run. Rooted individually because
-    // nothing else references the block: no frame slot, no other GC-scanned
-    // field, ever holds this pointer - only a `long` inside a `Function`'s
-    // own `constants`, which the collector has no reason to treat as one.
-    private void*[imported!"dmd.declaration".VarDeclaration] _staticAddresses;
+    // The resolved address of druntime's own allocator, looked up once and
+    // reused by every `new T[](n)`/array literal any function compiles -
+    // the same `Resolver` `_plans` already owns, so this costs nothing new
+    // besides the one symbol lookup.
+    private void* _allocatorAddress;
 
     public this(const Program program) {
         super(program);
@@ -74,39 +109,21 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _plans.hasNativeSymbol(function_);
     }
 
-    // `variable`'s own persistent storage, allocated the first time any
-    // function's compilation reaches a reference to it and reused by every
-    // function compiled after - one block per variable for this backend's
-    // whole life, never one per call and never one per compiled function,
-    // the same one `static this()`'s writes and `main`'s later reads must
-    // agree on.
-    package void* staticAddressOf(
-        imported!"dmd.declaration".VarDeclaration variable,
-    ) {
-        import core.memory: GC;
-        import core.stdc.string: memset;
-        import snakebite.nativelayout: storeValue, TypeFacts;
+    // The address of druntime's own `gc_malloc`, the real allocator a
+    // `new T[](n)`/array literal calls through the same FFI `Resolver`
+    // every guest-declared native call already goes through - never a
+    // private bump allocator or free list of this compiler's own.
+    package void* allocatorAddress() {
+        if (_allocatorAddress is null) {
+            _allocatorAddress = _plans.resolve("gc_malloc");
+            if (_allocatorAddress is null)
+                throw new SnakebiteException(
+                    "bytecode compiler cannot resolve druntime's " ~
+                        "`gc_malloc`",
+                );
+        }
 
-        if (auto found = variable in _staticAddresses)
-            return *found;
-
-        const facts = TypeFacts.of(variable.type);
-        auto block = GC.malloc(facts.size);
-        memset(block, 0, facts.size);
-        GC.addRoot(block);
-        _staticAddresses[variable] = block;
-
-        // Not every dataseg declaration has an explicit initialiser
-        // (`__gshared int trace;` does not), but dmd still installs an
-        // `ExpInitializer` holding the type's own default value the same
-        // way it does for a local (see `compileDeclaration`'s own doc) -
-        // this only skips the write for the rarer case of no initializer
-        // at all, not for an implicit zero.
-        if (variable._init !is null)
-            if (auto expInitializer = variable._init.isExpInitializer)
-                storeValue(variable.type, facts, expInitializer.exp, block);
-
-        return block;
+        return _allocatorAddress;
     }
 
     // `function_`'s compiled form, compiling it - and, transitively,
@@ -119,7 +136,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         import dmd.astenums: STC, Tvoid;
         import snakebite.backends.layout: FrameLayout;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
-        import snakebite.nativelayout: isIntegralSize, TypeFacts;
+        import snakebite.nativelayout: TypeFacts;
         import std.conv: text;
 
         if (function_ is null)
@@ -139,7 +156,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         auto returnType = function_.type.nextOf;
         const isVoidReturn = returnType !is null && returnType.ty == Tvoid;
         const returnFacts = isVoidReturn ? TypeFacts.init : TypeFacts.of(returnType);
-        if (!isVoidReturn && !(returnFacts.isIntegral && isIntegralSize(returnFacts.size)))
+        if (!isVoidReturn && !isSupportedFacts(returnFacts))
             throw rejection(function_, function_.loc, text(
                 "a `", returnType is null ? "auto" : returnType.toString,
                 "` return",
@@ -152,7 +169,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                     "a `ref`/`out`/`lazy` parameter");
 
             const facts = TypeFacts.of(parameter.type);
-            if (!facts.isIntegral || !isIntegralSize(facts.size))
+            if (!isSupportedFacts(facts))
                 throw rejection(function_, function_.loc, text(
                     "a `", parameter.type.toString, "` parameter"));
         }
@@ -206,12 +223,12 @@ extern(C++) private final class FunctionCompiler: Visitor {
         opBranchTrue, opCall,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
         opConstant, opCopy, opDivideSigned, opDivideUnsigned, opEqual,
-        opGreaterOrEqualSigned, opGreaterOrEqualUnsigned, opGreaterThanSigned,
-        opGreaterThanUnsigned, opJump, opLessOrEqualSigned,
-        opLessOrEqualUnsigned, opLessThanSigned, opLessThanUnsigned,
-        opLoadIndirect, opLogicalNot, opModuloSigned, opModuloUnsigned,
-        opMultiply, opNegate, opNotEqual, opReturn, opReturnVoid,
-        opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
+        opFloatEqual, opFloatNotEqual, opGreaterOrEqualSigned,
+        opGreaterOrEqualUnsigned, opGreaterThanSigned, opGreaterThanUnsigned,
+        opJump, opLessOrEqualSigned, opLessOrEqualUnsigned, opLessThanSigned,
+        opLessThanUnsigned, opLoadIndirect, opLogicalNot, opModuloSigned,
+        opModuloUnsigned, opMultiply, opNegate, opNotEqual, opReturn,
+        opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
         opStoreIndirect, opSubtract;
     import snakebite.backends.layout: FrameLayout;
     import snakebite.exception: SnakebiteException;
@@ -257,6 +274,16 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private LoopContext[] _loops;
     private size_t _destination;
     private size_t _width;
+    // The `$` currently in scope, if any: the `VarDeclaration` dmd hands
+    // out for it (`IndexExp.lengthVar`) and where its value - the
+    // enclosing array's own length, already evaluated - sits in this
+    // frame. `compileElementAddress` binds this around compiling an
+    // index's own expression and restores whatever was there before once
+    // it is done, the same way a nested `$` inside that index (a call's
+    // own argument, say) must see its own array's length rather than this
+    // one's.
+    private VarDeclaration _dollarVariable;
+    private size_t _dollarOffset;
 
     public this(
         Bytecode bytecode,
@@ -305,19 +332,6 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private size_t addConstant(in long value) {
         _constants ~= value;
         return _constants.length - 1;
-    }
-
-    // A pointer-sized temporary holding `variable`'s own persistent
-    // storage's address, ready for `opLoadIndirect`/`opStoreIndirect` to
-    // read or write through. The address itself never changes once
-    // `staticAddressOf` first hands it out, so this can always bake it in
-    // as a plain constant rather than recomputing it.
-    private size_t compileStaticAddress(VarDeclaration variable) {
-        const address = cast(long) _bytecode.staticAddressOf(variable);
-        const offset = reserveTemp(
-            TypeFacts(size_t.sizeof, size_t.sizeof, false, true));
-        emit(&opConstant, offset, addConstant(address), size_t.sizeof);
-        return offset;
     }
 
     // Grows this compiled function's own frame past whatever `_layout`
@@ -457,8 +471,23 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // returning `int`, is truthy exactly when its low bytes are nonzero,
     // the same test `opBranchFalse`/`opBranchTrue` already make of
     // whatever width they are handed.
+    //
+    // A dynamic array has no such single width of its own to test: its
+    // truthiness is D's `ptr !is null` rule, not "any of its sixteen bytes
+    // is nonzero" (a zero-length array over real storage is still `true`),
+    // so this evaluates the array once and hands back its pointer word
+    // alone - `conditionWidth` below reports that same narrower width for
+    // it, not the array's own full size.
     private size_t compileCondition(Expression condition) {
+        import snakebite.nativelayout: arrayPointerOffset;
+
         const facts = TypeFacts.of(condition.type);
+        if (facts.isDynamicArray) {
+            const arrayOffset = reserveTemp(facts);
+            evalInto(condition, arrayOffset, facts.size);
+            return arrayOffset + arrayPointerOffset;
+        }
+
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             throw rejection(_function, condition.loc,
                 expressionText(condition));
@@ -469,7 +498,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
     }
 
     private size_t conditionWidth(Expression condition) {
-        return TypeFacts.of(condition.type).size;
+        const facts = TypeFacts.of(condition.type);
+        return facts.isDynamicArray ? size_t.sizeof : facts.size;
     }
 
     // `assert(cond)`: evaluated the same way an `if`'s own condition is,
@@ -674,7 +704,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
                 expressionText(expression));
 
         const facts = TypeFacts.of(variable.type);
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
+        if (!isSupportedFacts(facts))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -703,35 +733,19 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // goes too, `discardResult` when a caller at statement level has
     // nowhere for it and does not want it.
     private void compileAssign(AssignExp expression, in size_t destOffset) {
+        if (auto indexTarget = expression.e1.isIndexExp)
+            return compileIndexAssign(expression, indexTarget, destOffset);
+
         auto varExp = expression.e1.isVarExp;
         auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
-        if (variable is null || _layout.isRef(variable))
+        if (variable is null || variable.isDataseg || _layout.isRef(variable))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
         const facts = TypeFacts.of(variable.type);
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
+        if (!isSupportedFacts(facts))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
-
-        // A `static`/`__gshared` target has no frame slot at all - `evalInto`
-        // still evaluates the right side into one of its own, but the write
-        // itself goes through the address `compileStaticAddress` bakes in,
-        // not `opCopy` into `_layout`'s storage. It has no postfix
-        // self-reference case to worry about either: a local's own slot can
-        // collide with a postfix operand's, forcing the temporary below, but
-        // a `static` write and a `static` postfix read never share the one
-        // frame slot that collision is about.
-        if (variable.isDataseg) {
-            const addressOffset = compileStaticAddress(variable);
-            const valueOffset = reserveTemp(facts);
-            evalInto(expression.e2, valueOffset, facts.size);
-            emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
-
-            if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, facts.size);
-            return;
-        }
 
         const targetOffset = _layout.offsetOf(variable);
 
@@ -754,6 +768,32 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
         if (destOffset != discardResult && destOffset != targetOffset)
             emit(&opCopy, destOffset, targetOffset, facts.size);
+    }
+
+    // `arr[i] = value`. Struct-typed elements are out of scope here (they
+    // fail `isSupportedElementFacts` below the same way a struct local
+    // would), so this never has to worry about the target being anything
+    // wider than a single scalar `opStoreIndirect` can write in one go.
+    private void compileIndexAssign(
+        AssignExp expression, IndexExp target, in size_t destOffset,
+    ) {
+        const arrayFacts = TypeFacts.of(target.e1.type);
+        if (!arrayFacts.isDynamicArray)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const facts = TypeFacts.of(expression.e1.type);
+        if (!isSupportedElementFacts(facts, expression.e1.type))
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const addressOffset = compileElementAddress(target, arrayFacts);
+        const valueOffset = reserveTemp(facts);
+        evalInto(expression.e2, valueOffset, facts.size);
+        emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
+
+        if (destOffset != discardResult)
+            emit(&opCopy, destOffset, valueOffset, facts.size);
     }
 
     // `+=`, `-=`, ... and every other compound assignment: the target is
@@ -882,25 +922,146 @@ extern(C++) private final class FunctionCompiler: Visitor {
             addConstant(expression.toInteger), _width);
     }
 
+    // A `float`/`double` literal, as the raw bits `opConstant` writes -
+    // `storeValue` already knows how to lay either width out (see its own
+    // doc), so this only has to fold that same compile-time write into one
+    // constant rather than reimplementing the float-to-bits conversion.
+    override void visit(RealExp expression) {
+        import snakebite.nativelayout: storeValue;
+
+        requireDestination(expression);
+
+        const facts = TypeFacts.of(expression.type);
+        if (!isFloatingType(expression.type))
+            return visit(cast(Expression) expression);
+
+        long bits;
+        storeValue(expression.type, facts, expression, &bits);
+        emit(&opConstant, _destination, addConstant(bits), _width);
+    }
+
+    // A string literal is a slice over dmd's own memory, never copied or
+    // allocated - `storeValue` already knows how to write that pair of
+    // words at compile time (see its own doc), the same way it already
+    // writes an `IntegerExp`'s bytes; this only has to fold that same
+    // compile-time write into two constants `opConstant` can hand to the
+    // VM, since a temporary this compiler owns is host memory dmd's
+    // `storeValue` can write straight into.
+    override void visit(StringExp expression) {
+        import core.stdc.string: memcpy;
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset, arrayValueSize,
+            storeValue;
+
+        requireDestination(expression);
+
+        const facts = TypeFacts.of(expression.type);
+        if (!facts.isDynamicArray)
+            return visit(cast(Expression) expression);
+
+        ubyte[arrayValueSize] bytes = void;
+        storeValue(expression.type, facts, expression, bytes.ptr);
+
+        long length, pointer;
+        memcpy(&length, bytes.ptr + arrayLengthOffset, size_t.sizeof);
+        memcpy(&pointer, bytes.ptr + arrayPointerOffset, size_t.sizeof);
+
+        emit(&opConstant, _destination + arrayLengthOffset,
+            addConstant(length), size_t.sizeof);
+        emit(&opConstant, _destination + arrayPointerOffset,
+            addConstant(pointer), size_t.sizeof);
+    }
+
     override void visit(VarExp expression) {
         requireDestination(expression);
         auto variable = expression.var.isVarDeclaration;
-        if (variable is null || _layout.isRef(variable))
+        if (variable is null || variable.isDataseg || _layout.isRef(variable))
             return visit(cast(Expression) expression);
 
-        if (variable.isDataseg) {
-            const facts = TypeFacts.of(variable.type);
-            if (!facts.isIntegral || !isIntegralSize(facts.size))
-                return visit(cast(Expression) expression);
-
-            const addressOffset = compileStaticAddress(variable);
-            emit(&opLoadIndirect, _destination, addressOffset, _width);
+        // `$` inside an index has no frame slot of its own - dmd hands out
+        // a fresh `VarDeclaration` for it that no statement declares
+        // (`FrameLayout` never reserves it a slot for exactly that reason),
+        // and `compileElementAddress` binds `_dollar` to the length it
+        // stands for around evaluating the index expression it appears in.
+        if (variable is _dollarVariable) {
+            emit(&opCopy, _destination, _dollarOffset, _width);
             return;
         }
 
         const source = _layout.offsetOf(variable);
         if (source != _destination)
             emit(&opCopy, _destination, source, _width);
+    }
+
+    // `arr.length`: the array's own length word, read straight out of its
+    // own two-word slot - `arrayLengthOffset` is `0`, so this is really
+    // just `arr`'s own first word, but named through the constant rather
+    // than assumed, the same way `compileElementAddress` names the pointer
+    // word through `arrayPointerOffset` instead of assuming it comes
+    // second.
+    override void visit(ArrayLengthExp expression) {
+        import snakebite.nativelayout: arrayLengthOffset;
+
+        requireDestination(expression);
+
+        const facts = TypeFacts.of(expression.e1.type);
+        if (!facts.isDynamicArray)
+            return visit(cast(Expression) expression);
+
+        const arrayOffset = reserveTemp(facts);
+        evalInto(expression.e1, arrayOffset, facts.size);
+        emit(&opCopy, _destination, arrayOffset + arrayLengthOffset, _width);
+    }
+
+    // `arr[i]`, read as a value. `compileElementAddress` does the shared
+    // work of computing where that element actually lives; this only adds
+    // the load once that address is in hand.
+    override void visit(IndexExp expression) {
+        requireDestination(expression);
+
+        const facts = TypeFacts.of(expression.e1.type);
+        if (!facts.isDynamicArray)
+            return visit(cast(Expression) expression);
+
+        const addressOffset = compileElementAddress(expression, facts);
+        emit(&opLoadIndirect, _destination, addressOffset, _width);
+    }
+
+    // `[a, b, c]`. Every element is evaluated in order into the block this
+    // allocates, even when every one of them happens to be a constant - dmd
+    // already folds a genuinely compile-time-constant literal into
+    // something this compiler need never see as an `ArrayLiteralExp` at
+    // all, so one that does reach here may have an element like `x + 1`
+    // that only evaluating can produce.
+    override void visit(ArrayLiteralExp expression) {
+        requireDestination(expression);
+        compileArrayLiteral(expression, _destination);
+    }
+
+    // `new T[](n)`/`new T[n]`: dmd represents both spellings the same way,
+    // an allocation of `n` elements whose count is only known once this
+    // compiler evaluates `n` itself.
+    override void visit(NewExp expression) {
+        requireDestination(expression);
+        compileNewArray(expression, _destination);
+    }
+
+    // `null`, as a dynamic array: the same all-zero two words `[]` already
+    // writes for an empty literal, since a `null` slice and an empty one
+    // share that same representation.
+    override void visit(NullExp expression) {
+        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+
+        requireDestination(expression);
+
+        const facts = TypeFacts.of(expression.type);
+        if (!facts.isDynamicArray)
+            return visit(cast(Expression) expression);
+
+        emit(&opConstant, _destination + arrayLengthOffset,
+            addConstant(0), size_t.sizeof);
+        emit(&opConstant, _destination + arrayPointerOffset,
+            addConstant(0), size_t.sizeof);
     }
 
     override void visit(CallExp expression) {
@@ -1123,6 +1284,35 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // of those, copied out to `destOffset` only when it differs.
     private void compileComparison(BinExp expression, in size_t destOffset) {
         const operandFacts = TypeFacts.of(expression.e1.type);
+
+        // `float`/`double` compare unequal to themselves when they are NaN,
+        // so this reaches for the host's own float comparison
+        // (`opFloatEqual`/`opFloatNotEqual`) rather than the bit-pattern
+        // test every integral comparison uses - only `==`/`!=` are
+        // supported for now, since nothing in scope needs a floating
+        // ordering.
+        if (isFloatingType(expression.e1.type)) {
+            Instruction.Handler floatHandler;
+            with (EXP) switch (expression.op) {
+                case equal: floatHandler = &opFloatEqual; break;
+                case notEqual: floatHandler = &opFloatNotEqual; break;
+                default:
+                    throw rejection(_function, expression.loc,
+                        expressionText(expression));
+            }
+
+            const floatLeftOffset = reserveTemp(operandFacts);
+            evalInto(expression.e1, floatLeftOffset, operandFacts.size);
+            const floatRightOffset = reserveTemp(operandFacts);
+            evalInto(expression.e2, floatRightOffset, operandFacts.size);
+            emit(floatHandler, floatLeftOffset, floatRightOffset,
+                operandFacts.size);
+
+            if (destOffset != floatLeftOffset)
+                emit(&opCopy, destOffset, floatLeftOffset, 1);
+            return;
+        }
+
         if (!operandFacts.isIntegral || !isIntegralSize(operandFacts.size))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
@@ -1179,18 +1369,15 @@ extern(C++) private final class FunctionCompiler: Visitor {
         emit(handler, destOffset, 0, width);
     }
 
-    // `!x`: evaluated at the operand's own width, then reduced to a
-    // single-byte `bool` the same way a comparison is - copied out to
-    // `destOffset` only when the temporary is not already it.
+    // `!x`: evaluated the same way any other condition is - `compileCondition`
+    // already knows how to reduce a dynamic array operand to its pointer
+    // word alone, which this needs exactly as much as `if`/`while` do -
+    // then reduced to a single-byte `bool` the same way a comparison is,
+    // copied out to `destOffset` only when the temporary is not already it.
     private void compileNot(NotExp expression, in size_t destOffset) {
-        const facts = TypeFacts.of(expression.e1.type);
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        const operandOffset = reserveTemp(facts);
-        evalInto(expression.e1, operandOffset, facts.size);
-        emit(&opLogicalNot, operandOffset, 0, facts.size);
+        const operandOffset = compileCondition(expression.e1);
+        const width = conditionWidth(expression.e1);
+        emit(&opLogicalNot, operandOffset, 0, width);
 
         if (destOffset != operandOffset)
             emit(&opCopy, destOffset, operandOffset, 1);
@@ -1380,9 +1567,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
         Arg[] args;
         foreach (i; 0 .. parameterCount) {
             auto parameter = calleeLayout.parameters[i];
-            if (!parameter.facts.isIntegral
-                    || !isIntegralSize(parameter.facts.size)
-                    || parameter.isRef)
+            if (!isSupportedFacts(parameter.facts) || parameter.isRef)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
@@ -1399,8 +1584,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
             calleeReturnType is null || calleeReturnType.ty == Tvoid;
         const returnFacts =
             isVoidCallee ? TypeFacts.init : TypeFacts.of(calleeReturnType);
-        if (!isVoidCallee
-                && !(returnFacts.isIntegral && isIntegralSize(returnFacts.size)))
+        if (!isVoidCallee && !isSupportedFacts(returnFacts))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
         if (isVoidCallee && destOffset != discardResult)
@@ -1411,6 +1595,233 @@ extern(C++) private final class FunctionCompiler: Visitor {
         _callSites ~=
             CallSite(calleeFunction, args, isVoidCallee ? 0 : returnFacts.size);
         emit(&opCall, destOffset, siteIndex, 0);
+    }
+
+    // A pointer-sized temporary: the shape every address this compiler
+    // computes at run time - an array element's, a `static`'s own, an
+    // allocation's result - shares, whatever the value living behind it
+    // eventually is.
+    private TypeFacts pointerFacts() {
+        return TypeFacts(size_t.sizeof, size_t.sizeof, false, true);
+    }
+
+    // Where `expression`'s element actually lives: `expression.e1`'s own
+    // pointer word, offset by its index times the element's own size.
+    // Shared by a load (`visit(IndexExp)`) and a store
+    // (`compileIndexAssign`), which differ only in what they do with the
+    // address once they have it.
+    //
+    // An index outside the array would otherwise read or write through
+    // whatever raw address the arithmetic below happens to land on -
+    // corrupting host memory, not failing the guest - so this checks
+    // before computing that address, reusing `opAssert` rather than a
+    // second throwing opcode for the same "fail loudly, now" job.
+    private size_t compileElementAddress(
+        IndexExp expression, in TypeFacts arrayFacts,
+    ) {
+        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+
+        const arrayOffset = reserveTemp(arrayFacts);
+        evalInto(expression.e1, arrayOffset, arrayFacts.size);
+
+        auto outerDollarVariable = _dollarVariable;
+        auto outerDollarOffset = _dollarOffset;
+        scope (exit) {
+            _dollarVariable = outerDollarVariable;
+            _dollarOffset = outerDollarOffset;
+        }
+        if (expression.lengthVar !is null) {
+            _dollarVariable = expression.lengthVar;
+            _dollarOffset = arrayOffset + arrayLengthOffset;
+        }
+
+        const indexOffset = reserveTemp(pointerFacts);
+        evalOperandInto(expression.e2, indexOffset, size_t.sizeof);
+
+        const boundsOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, boundsOffset, indexOffset, size_t.sizeof);
+        emit(&opLessThanUnsigned, boundsOffset,
+            arrayOffset + arrayLengthOffset, size_t.sizeof);
+        emit(&opAssert, boundsOffset, 0, 1);
+
+        const elementSizeOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, elementSizeOffset,
+            addConstant(cast(long) arrayFacts.elementSize), size_t.sizeof);
+        emit(&opMultiply, indexOffset, elementSizeOffset, size_t.sizeof);
+
+        const addressOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, addressOffset, arrayOffset + arrayPointerOffset,
+            size_t.sizeof);
+        emit(&opAdd, addressOffset, indexOffset, size_t.sizeof);
+
+        return addressOffset;
+    }
+
+    // Calls druntime's allocator for `size` bytes and leaves the resulting
+    // pointer at `resultOffset` - `destOffset + arrayPointerOffset`, for
+    // every caller here, so the array's own pointer word is filled in
+    // directly rather than through an extra copy. Every element type this
+    // compiler accepts is a scalar with no pointers of its own, so the
+    // block is always `NO_SCAN`: nothing inside it is ever itself a
+    // reference the collector would need to follow.
+    private void emitAllocate(in size_t sizeOffset, in size_t resultOffset) {
+        import core.memory: GC;
+
+        const siteIndex = _callSites.length;
+        _callSites ~= CallSite(
+            null,
+            [Arg(sizeOffset, 0, size_t.sizeof)],
+            (void*).sizeof,
+            null,
+            _bytecode.allocatorAddress,
+            true,
+            GC.BlkAttr.NO_SCAN,
+        );
+        emit(&opCall, resultOffset, siteIndex, 0);
+    }
+
+    // `elementType`'s own `.init`, as the raw bits `opConstant` can write
+    // into an element slot directly - zero for most of the scalar types
+    // this compiler accepts, but not for `float`/`double`, whose `.init`
+    // is NaN, not zero, so a `new T[](n)`'s default fill cannot simply
+    // zero the block the way an integral element's default could.
+    private long defaultConstantOf(
+        imported!"dmd.mtype".Type elementType,
+        in TypeFacts elementFacts,
+    ) {
+        import dmd.typesem: defaultInit;
+        import snakebite.nativelayout: storeValue;
+
+        auto initializer = defaultInit(elementType, _function.loc);
+        long bits;
+        storeValue(elementType, elementFacts, initializer, &bits);
+        return bits;
+    }
+
+    // `[a, b, c]`: allocates one block through druntime for every element,
+    // then evaluates each element expression directly into its own slot in
+    // it - never constant-folded bytes copied in bulk, since an element
+    // like `x + 1` only evaluating can produce. `[]` needs no allocation at
+    // all: a null pointer and a zero length already are an empty dynamic
+    // array's own two words.
+    private void compileArrayLiteral(
+        ArrayLiteralExp expression, in size_t destOffset,
+    ) {
+        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+
+        const facts = TypeFacts.of(expression.type);
+        if (!facts.isDynamicArray)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const elementFacts = TypeFacts.of(expression.type.nextOf);
+        if (!isSupportedElementFacts(elementFacts, expression.type.nextOf))
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const count =
+            expression.elements is null ? 0 : expression.elements.length;
+
+        emit(&opConstant, destOffset + arrayLengthOffset,
+            addConstant(cast(long) count), size_t.sizeof);
+
+        if (count == 0) {
+            emit(&opConstant, destOffset + arrayPointerOffset,
+                addConstant(0), size_t.sizeof);
+            return;
+        }
+
+        const sizeOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, sizeOffset,
+            addConstant(cast(long) (count * elementFacts.size)),
+            size_t.sizeof);
+        emitAllocate(sizeOffset, destOffset + arrayPointerOffset);
+
+        foreach (i; 0 .. count) {
+            auto element = (*expression.elements)[i];
+            const elementOffset = reserveTemp(elementFacts);
+            evalInto(element, elementOffset, elementFacts.size);
+
+            const addressOffset = reserveTemp(pointerFacts);
+            emit(&opCopy, addressOffset, destOffset + arrayPointerOffset,
+                size_t.sizeof);
+            if (i != 0) {
+                const byteOffsetOffset = reserveTemp(pointerFacts);
+                emit(&opConstant, byteOffsetOffset,
+                    addConstant(cast(long) (i * elementFacts.size)),
+                    size_t.sizeof);
+                emit(&opAdd, addressOffset, byteOffsetOffset, size_t.sizeof);
+            }
+            emit(&opStoreIndirect, addressOffset, elementOffset,
+                elementFacts.size);
+        }
+    }
+
+    // `new T[](n)`/`new T[n]` - dmd represents both spellings the same way.
+    // `n` is a run-time value, unlike a literal's own element count, so the
+    // default fill below is a genuine loop rather than something this
+    // compiler can unroll at compile time.
+    private void compileNewArray(NewExp expression, in size_t destOffset) {
+        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+
+        const facts = TypeFacts.of(expression.type);
+        if (!facts.isDynamicArray || expression.arguments is null
+                || expression.arguments.length != 1)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        auto elementType = expression.type.nextOf;
+        const elementFacts = TypeFacts.of(elementType);
+        if (!isSupportedElementFacts(elementFacts, elementType))
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const countOffset = reserveTemp(pointerFacts);
+        evalOperandInto(
+            (*expression.arguments)[0], countOffset, size_t.sizeof);
+        emit(&opCopy, destOffset + arrayLengthOffset, countOffset,
+            size_t.sizeof);
+
+        const sizeOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, sizeOffset,
+            addConstant(cast(long) elementFacts.size), size_t.sizeof);
+        emit(&opMultiply, sizeOffset, countOffset, size_t.sizeof);
+        emitAllocate(sizeOffset, destOffset + arrayPointerOffset);
+
+        const indexOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, indexOffset, addConstant(0), size_t.sizeof);
+
+        const loopStart = _instructions.length;
+        const condOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, condOffset, indexOffset, size_t.sizeof);
+        emit(&opLessThanUnsigned, condOffset, countOffset, size_t.sizeof);
+        const branchIndex = _instructions.length;
+        emit(&opBranchFalse, condOffset, 0, 1);
+
+        const addressOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, addressOffset, destOffset + arrayPointerOffset,
+            size_t.sizeof);
+        const byteOffsetOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, byteOffsetOffset, indexOffset, size_t.sizeof);
+        const elementSizeOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, elementSizeOffset,
+            addConstant(cast(long) elementFacts.size), size_t.sizeof);
+        emit(&opMultiply, byteOffsetOffset, elementSizeOffset, size_t.sizeof);
+        emit(&opAdd, addressOffset, byteOffsetOffset, size_t.sizeof);
+
+        const defaultOffset = reserveTemp(elementFacts);
+        emit(&opConstant, defaultOffset,
+            addConstant(defaultConstantOf(elementType, elementFacts)),
+            elementFacts.size);
+        emit(&opStoreIndirect, addressOffset, defaultOffset,
+            elementFacts.size);
+
+        const oneOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, oneOffset, addConstant(1), size_t.sizeof);
+        emit(&opAdd, indexOffset, oneOffset, size_t.sizeof);
+
+        emit(&opJump, loopStart, 0, 0);
+        _instructions[branchIndex].source = _instructions.length;
     }
 }
 

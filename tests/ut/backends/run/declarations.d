@@ -12,6 +12,7 @@ import ut.backends;
 // Every `shared static this` runs before any `static this`, and each group
 // runs in declaration order.
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("sharedStaticCtorsRunFirst." ~ backend.stringof)
@@ -41,6 +42,7 @@ static foreach (backend; Matrix!(
 
 
 static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("rootTemplateStaticCtorRunsBeforeMain." ~ backend.stringof)
