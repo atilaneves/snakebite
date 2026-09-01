@@ -377,7 +377,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
         opGreaterOrEqualUnsigned, opGreaterThanSigned, opGreaterThanUnsigned,
         opJump, opLessOrEqualSigned, opLessOrEqualUnsigned, opLessThanSigned,
         opLessThanUnsigned, opLoadIndirect, opLogicalNot, opModuloSigned,
-        opModuloUnsigned, opMultiply, opNegate, opNotEqual, opReturn,
+        opModuloUnsigned, opMultiply, opNegate, opNotEqual, opRangeError,
+        opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
         opStoreIndirect, opSubtract, opZero;
     import dmd.expressionsem: toInteger;
@@ -1747,14 +1748,11 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // whole-array slice of it before iterating, to fix the range being
     // walked against mutation of the original variable during the loop.
     // A dynamic array's whole slice is the same two words as the array
-    // itself, so this is nothing more than evaluating `e1` again; a
-    // bounded slice (`arr[a .. b]`) is out of scope, since nothing this
-    // compiler lowers writes one.
+    // itself, so it does not need the bounds work of a bounded slice.
     override void visit(SliceExp expression) {
         import dmd.astenums: Tpointer;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset;
-        import std.conv: text;
         import std.string: fromStringz;
 
         requireDestination(expression);
@@ -1830,19 +1828,18 @@ extern(C++) private final class FunctionCompiler: Visitor {
         emit(&opCopy, orderOffset, lowOffset, size_t.sizeof);
         emit(&opLessOrEqualUnsigned, orderOffset, highOffset, size_t.sizeof);
         const site = AssertSite(
-            text("bytecode: slice out of bounds: `", expression.toString,
-                "`"),
+            null,
             expression.loc.filename.fromStringz.idup,
             expression.loc.linnum,
         );
         _assertSites ~= site;
-        emit(&opAssert, orderOffset, _assertSites.length - 1, 1);
+        const siteIndex = _assertSites.length - 1;
+        emit(&opRangeError, orderOffset, siteIndex, 1);
 
         emit(&opCopy, orderOffset, highOffset, size_t.sizeof);
         emit(&opLessOrEqualUnsigned, orderOffset,
             arrayOffset + arrayLengthOffset, size_t.sizeof);
-        _assertSites ~= site;
-        emit(&opAssert, orderOffset, _assertSites.length - 1, 1);
+        emit(&opRangeError, orderOffset, siteIndex, 1);
 
         emit(&opCopy, _destination + arrayLengthOffset,
             highOffset, size_t.sizeof);

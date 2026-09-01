@@ -115,10 +115,9 @@ package struct Instruction {
 }
 
 
-// One `assert` site: the message and source location `opAssert` builds a
-// real `AssertError` from when its condition is false, resolved to plain
-// strings and a line number at compile time so this VM never has to reach
-// into dmd's own `Loc` to answer them.
+// One run-time check site, resolved to plain values at compile time so this
+// VM never has to reach into dmd's own `Loc`. Assertions use all fields;
+// range checks only need the source location.
 package struct AssertSite {
     package string message;
     package string file;
@@ -370,6 +369,29 @@ package const(Instruction)* opAssert(
 
     const site = assertSites[pc.source];
     throw new AssertError(site.message, site.file, site.line);
+}
+
+
+// A slice bounds failure must use druntime's range-error path. A backend
+// assertion would have a different D type and could not be caught as the
+// `RangeError` that compiled D specifies.
+package const(Instruction)* opRangeError(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    if (loadUnsigned(frame + pc.destination, pc.width) != 0)
+        return advance(pc, frame, returnPlace, constants, callSites,
+            assertSites, frames);
+
+    import core.exception: onRangeError;
+
+    const site = assertSites[pc.source];
+    onRangeError(site.file, site.line);
 }
 
 

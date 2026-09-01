@@ -638,6 +638,45 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+@("arrays.slice.bounded.boundsFailures.throwRangeError.Bytecode")
+@Tags("Bytecode")
+unittest {
+    import core.exception: RangeError;
+    import snakebite.backends.backend: Program;
+    import snakebite.backends.bytecode: Bytecode;
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        int upperTooLarge() {
+            int[] values = [10, 20, 30, 40];
+            int[] invalid = values[3 .. 5];
+            return cast(int) invalid.length;
+        }
+
+        int reversedBounds() {
+            int[] values = [10, 20, 30, 40];
+            size_t lower = 3;
+            size_t upper = 2;
+            int[] invalid = values[lower .. upper];
+            return cast(int) invalid.length;
+        }
+    });
+    auto instance = new Bytecode(Program([module_]));
+
+    foreach (name; ["upperTooLarge", "reversedBounds"]) {
+        auto function_ = findFunction(module_, name);
+        RangeError caught;
+        int result;
+        try
+            instance.call(function_, &result, []);
+        catch (RangeError error)
+            caught = error;
+
+        (caught !is null).shouldBeTrue;
+    }
+}
+
 // A literal assigned to a `static` slice is built once, on whichever call
 // first reaches it - its elements must still be readable on a later call
 // to the same function, after the frame that built them has long since
