@@ -3,6 +3,7 @@ module ut.backends.program;
 
 import snakebite.backends.backend: Program;
 import snakebite.backends.bytecode: Bytecode;
+import snakebite.backends.ctfe: Ctfe;
 import snakebite.frontend.compiler: parseSnippets;
 import snakebite.frontend.dmd.functions:
     findFunction,
@@ -25,6 +26,21 @@ unittest {
     auto program = Program([modules[0]]);
 
     assert(program.isInterpreted(findFunction(modules[0], "rootFunction")));
+}
+
+
+@("compilationStatistics.noCompiler")
+@Tags(Ctfe.stringof)
+unittest {
+    auto module_ = parseSnippets([
+        q{
+            module noCompilationStatistics;
+        },
+    ])[0];
+    auto statistics = (new Ctfe(Program([module_]))).compilationStatistics;
+
+    statistics.hasCompiler.shouldBeFalse;
+    statistics.cacheMisses.shouldEqual(0);
 }
 
 
