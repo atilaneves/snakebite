@@ -244,3 +244,36 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A whole struct element is stored and loaded through the array's own
+// indirection - `opStoreIndirect`/`opLoadIndirect` moving `struct.sizeof`
+// bytes at once, the same as a scalar element's own single word - and
+// reading it out into a local copies its bytes rather than aliasing the
+// array's own storage.
+static foreach (backend; Matrix!()) {
+    @("arrayOfStructsElementStoreLoadAndCopy." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
+            void main() {
+                auto points = new Point[](3);
+                points[0] = Point(1, 2);
+                points[1] = Point(3, 4);
+                points[2] = Point(5, 6);
+
+                auto copy = points[1];
+                copy.x = -1;
+
+                assert(points[1].x == 3);
+                assert(copy.x == -1);
+                assert(points[0].x + points[2].x == 6);
+                assert(points[0].y + points[2].y == 8);
+            }
+        });
+    }
+}
+
