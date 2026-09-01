@@ -94,9 +94,7 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.dclass: ClassDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
     import snakebite.ffi:
-        CallPlan, CallResult, PlanCache, invokeCall,
-        maxArguments, rejectHostReferenceReturn, returnFromCall,
-        storeArgument;
+        CallPlan, CallResult, PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
         isIntegralSize, storeValue, TypeFacts;
@@ -306,10 +304,9 @@ extern(C++) private final class Evaluator: Visitor {
                     "interpreter backend",
             );
 
-        rejectHostReferenceReturn(function_);
-
         withCompilerLock({
             auto layout = layoutOf(function_);
+            layout.call.rejectHostReferenceReturn(function_);
             auto frame = _frames.push(layout.size, layout.alignment);
 
             executeCall(function_, returnPlace, frame.base, layout);
@@ -433,8 +430,8 @@ extern(C++) private final class Evaluator: Visitor {
             );
         }
 
-        return invokeCall(
-            function_, returnPlace,
+        return layout.call.invoke(
+            returnPlace,
             argumentSlots(slots, frameBase, layout),
             &executeCallee,
         );
@@ -853,8 +850,8 @@ extern(C++) private final class Evaluator: Visitor {
             evaluate(statement.exp, _type, _facts, frame.base);
         }
 
-        returnFromCall(
-            _function, _place, &referenceAddress, &evaluateValue,
+        _layout.call.returnFromCall(
+            _place, &referenceAddress, &evaluateValue,
         );
     }
 
@@ -3609,8 +3606,8 @@ extern(C++) private final class Evaluator: Visitor {
                     argument, parameterList[i].type, parameter.facts, place);
             }
 
-            storeArgument(
-                function_, i, slot, &argumentAddress, &evaluateArgument,
+            parameter.call.store(
+                slot, &argumentAddress, &evaluateArgument,
             );
         }
 
