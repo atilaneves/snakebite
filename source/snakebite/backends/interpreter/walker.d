@@ -103,8 +103,8 @@ extern(C++) private final class Evaluator: Visitor {
         Error, Exception, Throwable, TypeInfo_Class, TypeInfo_Struct;
     import dmd.root.string: toDString;
     import dmd.astenums:
-        Tarray, Tbool, Tclass, Tdelegate, Tfloat32, Tfloat64, Tnoreturn,
-        Tint64, Tpointer, Tsarray, Tuns32, Tuns8, Tvoid;
+        Tarray, Tbool, Tclass, Tdelegate, Tfloat32, Tfloat64, Tfloat80,
+        Tnoreturn, Tint64, Tpointer, Tsarray, Tuns32, Tuns8, Tvoid;
     import dmd.arraytypes: Expressions;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
@@ -2329,6 +2329,21 @@ extern(C++) private final class Evaluator: Visitor {
     private extern(D) void storeCmpExp(string op)(CmpExp expression) {
         import snakebite.nativelayout: storeIntegral;
 
+        // dmd's usual arithmetic conversions give both operands the same
+        // type, so testing either one for a floating type is enough. The
+        // comparison itself is made at `real`'s own width, wide enough to
+        // hold every operand exactly, since D's floating ordering follows
+        // IEEE 754 rather than any integral signedness rule.
+        auto type = expression.e1.type;
+        if (type.ty == Tfloat32 || type.ty == Tfloat64
+                || type.ty == Tfloat80) {
+            const a = asFloating(expression.e1);
+            const b = asFloating(expression.e2);
+            const answer = mixin("a " ~ op ~ " b");
+            storeIntegral(_place, answer ? 1 : 0, _facts.size);
+            return;
+        }
+
         const aFacts = factsOf(expression.e1.type);
         const bFacts = factsOf(expression.e2.type);
         const a = asIntegral(expression.e1, aFacts);
@@ -2414,7 +2429,8 @@ extern(C++) private final class Evaluator: Visitor {
         bool equal;
         if (type.ty == Tpointer)
             equal = asPointer(expression.e1) == asPointer(expression.e2);
-        else if (type.ty == Tfloat32 || type.ty == Tfloat64)
+        else if (type.ty == Tfloat32 || type.ty == Tfloat64
+                || type.ty == Tfloat80)
             equal = asFloating(expression.e1) == asFloating(expression.e2);
         else if (factsOf(type).isIntegral)
             equal = asIntegral(expression.e1) == asIntegral(expression.e2);
@@ -2483,6 +2499,11 @@ extern(C++) private final class Evaluator: Visitor {
             }
             if (fieldType.ty == Tfloat64) {
                 if (*cast(const double*) a != *cast(const double*) b)
+                    return false;
+                continue;
+            }
+            if (fieldType.ty == Tfloat80) {
+                if (*cast(const real*) a != *cast(const real*) b)
                     return false;
                 continue;
             }
@@ -2653,20 +2674,24 @@ extern(C++) private final class Evaluator: Visitor {
         // keeps their mixins compilable, it refuses nothing. Both
         // operands already share the expression's own type - dmd's usual
         // arithmetic conversions convert them before any backend runs -
-        // and a `float` read widened to `double` is exact, so narrowing
-        // each operand back to `float` recovers it exactly and the
-        // operation then rounds once, in the expression's own precision,
+        // and every narrower width widens to `real` exactly, so narrowing
+        // each operand back to the expression's own width recovers it
+        // exactly and the operation then rounds once, in that precision,
         // the same single rounding compiled D performs.
         static if (op == "+" || op == "-" || op == "*" || op == "/"
                 || op == "%")
-            if (_type.ty == Tfloat32 || _type.ty == Tfloat64) {
+            if (_type.ty == Tfloat32 || _type.ty == Tfloat64
+                    || _type.ty == Tfloat80) {
                 const a = asFloating(expression.e1);
                 const b = asFloating(expression.e2);
                 if (_type.ty == Tfloat32)
                     *cast(float*) _place =
                         mixin("cast(float) a " ~ op ~ " cast(float) b");
+                else if (_type.ty == Tfloat64)
+                    *cast(double*) _place =
+                        mixin("cast(double) a " ~ op ~ " cast(double) b");
                 else
-                    *cast(double*) _place = mixin("a " ~ op ~ " b");
+                    *cast(real*) _place = mixin("a " ~ op ~ " b");
                 return;
             }
 
@@ -2686,14 +2711,16 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     // As `asIntegral`, for a floating operand. The value comes back as a
-    // `double` because a `float` widens to `double` exactly, so the one
-    // return type carries either width without loss; the caller narrows
-    // back when the operation itself is `float`-precision.
-    private double asFloating(Expression expression) {
+    // `real` because `float` and `double` both widen to it exactly, so the
+    // one return type carries any of the three widths without loss; the
+    // caller narrows back when the operation itself is `float`- or
+    // `double`-precision.
+    private real asFloating(Expression expression) {
         import std.conv: text;
 
         auto type = expression.type;
-        if (type.ty != Tfloat32 && type.ty != Tfloat64)
+        if (type.ty != Tfloat32 && type.ty != Tfloat64
+                && type.ty != Tfloat80)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "` as floating point: its type is `", type.toString,
@@ -2701,12 +2728,14 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         const facts = factsOf(type);
-        align(double.alignof) ubyte[double.sizeof] buffer = void;
+        align(real.alignof) ubyte[real.sizeof] buffer = void;
         evaluate(expression, type, facts, buffer.ptr);
 
-        return type.ty == Tfloat32
-            ? *cast(float*) buffer.ptr
-            : *cast(double*) buffer.ptr;
+        if (type.ty == Tfloat32)
+            return *cast(float*) buffer.ptr;
+        if (type.ty == Tfloat64)
+            return *cast(double*) buffer.ptr;
+        return *cast(real*) buffer.ptr;
     }
 
     // `-x` and `~x` leave the same low bits whether the operand was read as
@@ -2714,6 +2743,22 @@ extern(C++) private final class Evaluator: Visitor {
     private extern(D) void storeUnaryExp(string op)(UnaExp expression) {
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
+
+        // `~` is rejected by the frontend on floating operands, so the
+        // `static if` only keeps its mixin compilable for this operator;
+        // only `-` ever reaches here with a floating type.
+        static if (op == "-")
+            if (_type.ty == Tfloat32 || _type.ty == Tfloat64
+                    || _type.ty == Tfloat80) {
+                const a = asFloating(expression.e1);
+                if (_type.ty == Tfloat32)
+                    *cast(float*) _place = -cast(float) a;
+                else if (_type.ty == Tfloat64)
+                    *cast(double*) _place = -cast(double) a;
+                else
+                    *cast(real*) _place = -a;
+                return;
+            }
 
         if (!_facts.isIntegral)
             throw new SnakebiteException(
@@ -2894,6 +2939,25 @@ extern(C++) private final class Evaluator: Visitor {
                 *cast(double*) _place = sourceFacts.isUnsigned
                     ? cast(double) cast(ulong) value
                     : cast(double) value;
+            return;
+        }
+
+        // A floating-to-floating cast rounds the operand's own value to
+        // the destination's own precision - `asFloating` already widens
+        // any of the three to `real` without loss, so narrowing that back
+        // to the destination's width is the one rounding the host's own
+        // `cast(float)`/`cast(double)`/`cast(real)` performs.
+        if ((sourceType.ty == Tfloat32 || sourceType.ty == Tfloat64
+                    || sourceType.ty == Tfloat80)
+                && (_type.ty == Tfloat32 || _type.ty == Tfloat64
+                    || _type.ty == Tfloat80)) {
+            const value = asFloating(expression.e1);
+            if (_type.ty == Tfloat32)
+                *cast(float*) _place = cast(float) value;
+            else if (_type.ty == Tfloat64)
+                *cast(double*) _place = cast(double) value;
+            else
+                *cast(real*) _place = value;
             return;
         }
 
