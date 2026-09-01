@@ -1192,9 +1192,8 @@ static foreach (backend; Matrix!(
 
 // The bytecode compiler's own type switch recognises only `float` and
 // `double` as floating types - `real` has no case there at all, so a
-// program using it cannot be compiled for that backend, unlike `float`/
-// `double`, which are merely unconfirmed.
-private alias RealOmit = Omit!(Bytecode, Because.inexpressible,
+// program using it cannot be compiled for that backend.
+private alias RealOmit = Omit!(Bytecode, Because.unconfirmed,
     "the bytecode compiler recognises only `float`/`double` as floating "
         ~ "types, not `real`");
 
