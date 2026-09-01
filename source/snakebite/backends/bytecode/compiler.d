@@ -113,7 +113,7 @@ private bool isSupportedElementFacts(
 public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.backends.backend: Program;
-    import snakebite.backends.bytecode.vm: Function, Vm;
+    import snakebite.backends.bytecode.vm: Function, maxReturnWidth, Vm;
     import snakebite.exception: SnakebiteException;
     import snakebite.framestack: defaultFrameCapacity;
 
@@ -219,7 +219,13 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         auto returnType = function_.type.nextOf;
         const isVoidReturn = returnType !is null && returnType.ty == Tvoid;
         const returnFacts = isVoidReturn ? TypeFacts.init : TypeFacts.of(returnType);
-        if (!isVoidReturn && !isSupportedFacts(returnFacts, returnType))
+        // `opCall`'s own scratch return buffer is fixed at `maxReturnWidth`
+        // bytes (see its own doc) - wide enough for every integral and a
+        // dynamic array's own two words, but not necessarily for a plain
+        // struct, whose size this compiler otherwise never bounds.
+        if (!isVoidReturn
+                && (!isSupportedFacts(returnFacts, returnType)
+                    || returnFacts.size > maxReturnWidth))
             throw rejection(function_, function_.loc, text(
                 "a `", returnType is null ? "auto" : returnType.toString,
                 "` return",

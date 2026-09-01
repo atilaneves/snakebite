@@ -14,6 +14,14 @@ extern(C) void executeCallPlan(
 import snakebite.ffi.limits: maxArguments;
 
 
+// The widest value `opCall` can hand back to its caller: wide enough for
+// a dynamic array's own two words, and the compiler's own ceiling on a
+// guest callee's return type (see `Bytecode.compileFunction`) - a plain
+// struct too wide to fit is refused there rather than compiled to a call
+// that would overflow `opCall`'s own scratch return buffer below.
+package enum maxReturnWidth = 16;
+
+
 // One argument a call instruction copies from the caller's frame into the
 // callee's, at compile time already resolved to both sides' byte offsets
 // and the width to copy - the same three numbers `opCopy` needs for a
@@ -373,11 +381,13 @@ package const(Instruction)* opCall(
             arg.width,
         );
 
-    // Sized for the widest value this VM ever returns - a dynamic array's
-    // two words - a scratch return buffer that outlives the callee's own
-    // frame, unlike one carved from it, since `opCall` reads back out of
-    // it after `calleeFrame` has already popped.
-    ubyte[16] returnScratch = void;
+    // A scratch return buffer that outlives the callee's own frame, unlike
+    // one carved from it, since `opCall` reads back out of it after
+    // `calleeFrame` has already popped. Sized to `maxReturnWidth` - the
+    // compiler refuses to compile a guest callee whose return is wider
+    // than that (see its own doc), so `site.returnWidth` never exceeds it
+    // here.
+    ubyte[maxReturnWidth] returnScratch = void;
     void* returnDestination = site.returnWidth == 0 ? null : returnScratch.ptr;
 
     auto calleePc = callee.instructions.ptr;
