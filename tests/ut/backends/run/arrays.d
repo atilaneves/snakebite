@@ -138,7 +138,6 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("appendingDcharEncodesUtf8." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -156,6 +155,33 @@ static foreach (backend; Matrix!(
 
                 assert(s.length == 1 + 2 + 4);
                 assert(s == "A\u00e9\U0001F600");
+            }
+        });
+    }
+}
+
+// Appending a `dchar` to a `wchar[]` encodes it as UTF-16, so a code
+// point outside the Basic Multilingual Plane becomes a surrogate pair
+// (two elements), not one.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("appendingDcharEncodesUtf16." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            dchar pick(dchar value) {
+                return value;
+            }
+
+            void main() {
+                wchar[] s;
+                s ~= pick('\u00e9');
+                s ~= pick('\U0001F600');
+
+                assert(s.length == 1 + 2);
+                assert(s == "\u00e9\U0001F600"w);
             }
         });
     }
