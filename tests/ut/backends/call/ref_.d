@@ -6,7 +6,7 @@ import ut.backends;
 
 // The simplest `ref` round trip: the callee mutates the parameter twice,
 // and both mutations land on the caller's own local, not a copy of it.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("ref.param.mutatedByCallee." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -26,6 +26,21 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
             },
             "kindaMain",
         );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("ref.param.postincrement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(backend, q{
+            void increment(ref int value) { value++; }
+            int kindaMain() {
+                int value = 1;
+                increment(value);
+                return value;
+            }
+        }, "kindaMain");
     }
 }
 
@@ -91,7 +106,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // A `ref` parameter forwarded into a nested call: `bump`'s own `x` is
 // itself `ref`, and passing it on to `inc` must reach the same storage as
 // the outer local, not a second indirection through `bump`'s frame.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("ref.param.passesThroughNestedCall." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -121,7 +136,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // A `ref` return is an lvalue: assigning through the call itself changes
 // whichever of the two arguments it picked, and the caller's own local -
 // not a copy the call handed back - is what changed.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("ref.return.assignableThroughCall." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -142,6 +157,34 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
             "kindaMain",
         );
     }
+}
+
+static foreach (backend; Matrix!()) {
+    @("ref.return.readAsValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(backend, q{
+            ref int pick(ref int value) { return value; }
+            int kindaMain() { int value = 2; return pick(value); }
+        }, "kindaMain");
+    }
+}
+
+// `writeln` initializes a scoped `File` temporary from the native
+// `trustedStdout` value before it writes. This is the public library path
+// used by the rt-simple runner's final summary.
+@("temporary.nativeAggregateFeedsCommaLvalue.Interpreter")
+@Tags("Interpreter")
+unittest {
+    0.shouldBeStatusOf!(Interpreter, q{
+        import std.stdio: writeln;
+
+        void main() {
+            size_t total = 23;
+            size_t failed;
+            writeln(total, " test(s) run, ", failed, " failed.");
+        }
+    });
 }
 
 // Taking the address of a ref-returning call must evaluate the call once and
@@ -207,7 +250,7 @@ static foreach (backend; Matrix!(
 // of string literals and a whole-slice assignment, the only slice
 // operations the interpreter supports today; `ArrayLiteralExp` and
 // `CatAssignExp` are out of scope here.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("ref.param.wholeSliceThroughReference." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

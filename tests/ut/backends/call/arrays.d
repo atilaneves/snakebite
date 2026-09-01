@@ -637,7 +637,7 @@ unittest {
 // own hook for growing a `T[]` by one element and writing it into the
 // slot that growth made - `CatAssignExp.lowering` (`dmd/expression.d`),
 // not a node any of `expression`'s own children reach.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.append.element." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -655,7 +655,21 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+@("arrays.append.elementThroughIndexedSlice.Bytecode")
+@Tags("Bytecode")
+unittest {
+    2.shouldBeRetOf!(Bytecode, q{
+        int appended() {
+            int[] inner = [1];
+            int[][] arrays;
+            arrays ~= inner;
+            arrays[0] ~= 2;
+            return arrays[0][1];
+        }
+    }, "appended");
+}
+
+static foreach (backend; Matrix!()) {
     @("arrays.append.element.length." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -673,7 +687,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.append.dynamicArrayElement." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -698,7 +712,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // first block's capacity is what actually exercises the move, not just
 // the append. Reading the first element back afterwards is what pins
 // that the move copied the old contents rather than losing them.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.append.element.loop.survivesReallocation." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -722,7 +736,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // `_d_arrayappendcTX` - a different hook, over the same `lowering` field,
 // for a different `CatAssignExp.op` (`concatenateAssign` rather than
 // `concatenateElemAssign`).
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.append.slice." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

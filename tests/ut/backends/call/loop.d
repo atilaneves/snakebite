@@ -98,7 +98,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("loop.foreachRefInitialisesArrayForNestedReads." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -122,7 +122,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("loop.foreachRefMutatesEveryElement." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
