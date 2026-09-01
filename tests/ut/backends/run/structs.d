@@ -344,6 +344,29 @@ static foreach (backend; Matrix!(
     }
 }
 
+// `new S(args)` with no declared constructor initializes the fields
+// positionally, in declaration order, from the constructor arguments -
+// the same as a struct literal `S(args)` would.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("newStructWithStringField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        5.shouldBeRetOf!(backend, q{
+            struct Value {
+                string text;
+            }
+
+            int main() {
+                auto value = new Value("hello");
+                return cast(int) value.text.length;
+            }
+        }, "main");
+    }
+}
+
 // A whole struct element is stored and loaded through the array's own
 // indirection - `opStoreIndirect`/`opLoadIndirect` moving `struct.sizeof`
 // bytes at once, the same as a scalar element's own single word - and
