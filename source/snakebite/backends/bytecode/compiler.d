@@ -23,6 +23,68 @@ private bool isSupportedFacts(
         || (facts.isIntegral && isIntegralSize(facts.size));
 }
 
+// As above, for a caller that also has `type` in hand and so can ask the
+// one further question `TypeFacts` alone cannot answer: whether `type` is
+// a struct this compiler can copy bytewise (see `isPlainOldStruct`).
+private bool isSupportedFacts(
+    in imported!"snakebite.nativelayout".TypeFacts facts,
+    imported!"dmd.mtype".Type type,
+) {
+    return isSupportedFacts(facts) || isPlainOldStruct(type);
+}
+
+// Whether this compiler can treat `type` as plain bytes it never has to
+// call guest code to copy, construct or destroy: a struct with no
+// postblit, copy constructor, destructor or user-defined assignment, not a
+// `union` (whose fields this compiler cannot lay out from a plain field
+// list) and not nested in an enclosing scope (a local struct with its own
+// `this` captured context, unsupported the same way a method is), whose
+// every field is itself one of an integral this compiler already lays
+// out, a dynamic array (a plain two-word slice, copied the same way an
+// integral field is - by value, sharing whatever it points at), or a
+// nested struct meeting this same predicate. `declaration.zeroInit` is
+// required too: this compiler's only default-value story for a struct is
+// zeroing its bytes (see `opZero`), the same way `nativelayout.storeValue`
+// already special-cases a zero-init struct's own `.init` elsewhere.
+private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
+    import dmd.astenums: STC, Tarray;
+    import snakebite.nativelayout: isIntegralSize, TypeFacts;
+
+    auto structType = type.isTypeStruct;
+    if (structType is null)
+        return false;
+
+    auto declaration = structType.sym;
+    if (!declaration.zeroInit
+            || declaration.isUnionDeclaration !is null
+            || declaration.enclosing !is null
+            || declaration.postblit !is null || declaration.hasCopyCtor
+            || declaration.dtor !is null
+            || declaration.hasIdentityAssign || declaration.hasBlitAssign)
+        return false;
+
+    foreach (field; declaration.fields) {
+        if (field.isBitFieldDeclaration !is null
+                || (field.storage_class & STC.ref_))
+            return false;
+
+        if (field.type.isTypeStruct !is null) {
+            if (!isPlainOldStruct(field.type))
+                return false;
+            continue;
+        }
+
+        if (field.type.ty == Tarray)
+            continue;
+
+        const facts = TypeFacts.of(field.type);
+        if (!facts.isIntegral || !isIntegralSize(facts.size))
+            return false;
+    }
+
+    return true;
+}
+
 // Whether `type` is `float`/`double` - `TypeFacts` has no notion of its own
 // for this, since nothing outside array element types and their literals
 // needs to ask, unlike `isIntegral`/`isDynamicArray`, which drive checks
@@ -43,7 +105,8 @@ private bool isSupportedElementFacts(
     import snakebite.nativelayout: isIntegralSize;
 
     return (facts.isIntegral && isIntegralSize(facts.size))
-        || isFloatingType(type);
+        || isFloatingType(type)
+        || isPlainOldStruct(type);
 }
 
 
@@ -156,7 +219,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         auto returnType = function_.type.nextOf;
         const isVoidReturn = returnType !is null && returnType.ty == Tvoid;
         const returnFacts = isVoidReturn ? TypeFacts.init : TypeFacts.of(returnType);
-        if (!isVoidReturn && !isSupportedFacts(returnFacts))
+        if (!isVoidReturn && !isSupportedFacts(returnFacts, returnType))
             throw rejection(function_, function_.loc, text(
                 "a `", returnType is null ? "auto" : returnType.toString,
                 "` return",
@@ -169,7 +232,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                     "a `ref`/`out`/`lazy` parameter");
 
             const facts = TypeFacts.of(parameter.type);
-            if (!isSupportedFacts(facts))
+            if (!isSupportedFacts(facts, parameter.type))
                 throw rejection(function_, function_.loc, text(
                     "a `", parameter.type.toString, "` parameter"));
         }
@@ -229,7 +292,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
         opLessThanUnsigned, opLoadIndirect, opLogicalNot, opModuloSigned,
         opModuloUnsigned, opMultiply, opNegate, opNotEqual, opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
-        opStoreIndirect, opSubtract;
+        opStoreIndirect, opSubtract, opZero;
     import snakebite.backends.layout: FrameLayout;
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout: alignUp, isIntegralSize, TypeFacts;
@@ -698,13 +761,21 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // gave it - `int sum = 0;` is a `DeclarationExp` here, the same as in
     // the interpreter.
     private void compileDeclaration(DeclarationExp expression) {
+        // A function-local struct declaration binds a name to a type
+        // dmd's semantic pass has already resolved every use of - nothing
+        // runs when it is "declared" here, the same way an `import`
+        // inside a function body binds a name with nothing left to
+        // execute (see `visit(ImportStatement)`).
+        if (expression.declaration.isStructDeclaration !is null)
+            return;
+
         auto variable = expression.declaration.isVarDeclaration;
         if (variable is null || variable.isDataseg)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
         const facts = TypeFacts.of(variable.type);
-        if (!isSupportedFacts(facts))
+        if (!isSupportedFacts(facts, variable.type))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -736,6 +807,9 @@ extern(C++) private final class FunctionCompiler: Visitor {
         if (auto indexTarget = expression.e1.isIndexExp)
             return compileIndexAssign(expression, indexTarget, destOffset);
 
+        if (auto fieldTarget = expression.e1.isDotVarExp)
+            return compileFieldAssign(expression, fieldTarget, destOffset);
+
         auto varExp = expression.e1.isVarExp;
         auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
         if (variable is null || variable.isDataseg || _layout.isRef(variable))
@@ -743,7 +817,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
                 expressionText(expression));
 
         const facts = TypeFacts.of(variable.type);
-        if (!isSupportedFacts(facts))
+        if (!isSupportedFacts(facts, variable.type))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -770,10 +844,66 @@ extern(C++) private final class FunctionCompiler: Visitor {
             emit(&opCopy, destOffset, targetOffset, facts.size);
     }
 
-    // `arr[i] = value`. Struct-typed elements are out of scope here (they
-    // fail `isSupportedElementFacts` below the same way a struct local
-    // would), so this never has to worry about the target being anything
-    // wider than a single scalar `opStoreIndirect` can write in one go.
+    // `s.field = value`, `s` a chain of local struct fields (`a.b.c = 5`)
+    // grounded in a local or parameter - never an array element, which has
+    // no frame offset of its own to write the field's bytes into (see
+    // `fieldBaseFrameOffset`).
+    private void compileFieldAssign(
+        AssignExp expression, DotVarExp target, in size_t destOffset,
+    ) {
+        auto field = target.var.isVarDeclaration;
+        if (field is null || field.isBitFieldDeclaration !is null
+                || !isPlainOldStruct(target.e1.type))
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const facts = TypeFacts.of(target.type);
+        if (!isSupportedFacts(facts, target.type))
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const targetOffset = fieldBaseFrameOffset(target.e1) + field.offset;
+        evalInto(expression.e2, targetOffset, facts.size);
+
+        if (destOffset != discardResult && destOffset != targetOffset)
+            emit(&opCopy, destOffset, targetOffset, facts.size);
+    }
+
+    // Where `expression` - a local, a parameter, or a field access chain
+    // grounded in one of those - already lives in this frame, with no
+    // `evalInto` of its own needed to get it there: `compileFieldAssign`'s
+    // own target, and each step of a nested field chain (`a.b.c`) it
+    // recurses through to reach `a`'s own slot before adding every field
+    // offset from there back down to `c`.
+    private size_t fieldBaseFrameOffset(Expression expression) {
+        if (auto varExp = expression.isVarExp) {
+            auto variable = varExp.var.isVarDeclaration;
+            if (variable is null || variable.isDataseg
+                    || _layout.isRef(variable))
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            return _layout.offsetOf(variable);
+        }
+
+        if (auto dot = expression.isDotVarExp) {
+            auto field = dot.var.isVarDeclaration;
+            if (field is null || field.isBitFieldDeclaration !is null
+                    || !isPlainOldStruct(dot.e1.type))
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            return fieldBaseFrameOffset(dot.e1) + field.offset;
+        }
+
+        throw rejection(_function, expression.loc,
+            expressionText(expression));
+    }
+
+    // `arr[i] = value`. `opStoreIndirect` writes `facts.size` bytes
+    // wherever `expression.e2` evaluated to, whatever that width is - a
+    // scalar or a whole plain-old struct - so this needs no case of its
+    // own for either.
     private void compileIndexAssign(
         AssignExp expression, IndexExp target, in size_t destOffset,
     ) {
@@ -918,6 +1048,24 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
     override void visit(IntegerExp expression) {
         requireDestination(expression);
+
+        // A zero-init struct's own `.init` is `IntegerExp(0)` - dmd's own
+        // shorthand for "zero every byte", the same one
+        // `nativelayout.storeValue` already special-cases for a struct
+        // target. `opConstant`'s `storeWidth` only lays out up to 8 bytes,
+        // the widest integral this compiler ever moves through a single
+        // constant, so a wider destination (only ever a zero-init struct's
+        // own slot; every other value this compiler evaluates is `long`s
+        // sized or narrower) reaches for `opZero` instead.
+        if (_width > long.sizeof) {
+            if (expression.toInteger != 0)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            emit(&opZero, _destination, 0, _width);
+            return;
+        }
+
         emit(&opConstant, _destination,
             addConstant(expression.toInteger), _width);
     }
@@ -991,6 +1139,53 @@ extern(C++) private final class FunctionCompiler: Visitor {
         const source = _layout.offsetOf(variable);
         if (source != _destination)
             emit(&opCopy, _destination, source, _width);
+    }
+
+    // `s.field`, read as a value. `expression.e1` is evaluated into a
+    // temporary of its own first, whatever kind of expression it is - a
+    // local, an array element, another field access - the same way any
+    // other sub-expression this compiler evaluates is; the field then
+    // reads out of that temporary at its own `field.offset`, laid out by
+    // dmd's own native semantics rather than recomputed here.
+    override void visit(DotVarExp expression) {
+        requireDestination(expression);
+
+        auto field = expression.var.isVarDeclaration;
+        if (field is null || field.isBitFieldDeclaration !is null
+                || !isPlainOldStruct(expression.e1.type))
+            return visit(cast(Expression) expression);
+
+        const baseFacts = TypeFacts.of(expression.e1.type);
+        const baseOffset = reserveTemp(baseFacts);
+        evalInto(expression.e1, baseOffset, baseFacts.size);
+        emit(&opCopy, _destination, baseOffset + field.offset, _width);
+    }
+
+    // `Point(3, 4)`, dmd's own literal form for a plain-old struct with no
+    // user-defined constructor: every field evaluated directly into its
+    // own slot at `field.offset` within `_destination`, zeroed first for
+    // any field the literal itself leaves out - the same "zero, then fill
+    // what is given" shape `compileNewArray`'s own default fill and
+    // `StructLiteralExp.elements` sparseness both call for.
+    override void visit(StructLiteralExp expression) {
+        requireDestination(expression);
+
+        if (!isPlainOldStruct(expression.type))
+            return visit(cast(Expression) expression);
+
+        emit(&opZero, _destination, 0, _width);
+
+        if (expression.elements is null)
+            return;
+
+        foreach (i, element; *expression.elements) {
+            if (element is null)
+                continue;
+
+            auto field = expression.sd.fields[i];
+            const facts = TypeFacts.of(field.type);
+            evalInto(element, _destination + field.offset, facts.size);
+        }
     }
 
     // `arr.length`: the array's own length word, read straight out of its
@@ -1567,7 +1762,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
         Arg[] args;
         foreach (i; 0 .. parameterCount) {
             auto parameter = calleeLayout.parameters[i];
-            if (!isSupportedFacts(parameter.facts) || parameter.isRef)
+            if (!isSupportedFacts(parameter.facts, calleeType.parameterList[i].type)
+                    || parameter.isRef)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
@@ -1584,7 +1780,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
             calleeReturnType is null || calleeReturnType.ty == Tvoid;
         const returnFacts =
             isVoidCallee ? TypeFacts.init : TypeFacts.of(calleeReturnType);
-        if (!isVoidCallee && !isSupportedFacts(returnFacts))
+        if (!isVoidCallee && !isSupportedFacts(returnFacts, calleeReturnType))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
         if (isVoidCallee && destOffset != discardResult)
@@ -1833,9 +2029,16 @@ extern(C++) private final class FunctionCompiler: Visitor {
         emit(&opAdd, addressOffset, byteOffsetOffset, size_t.sizeof);
 
         const defaultOffset = reserveTemp(elementFacts);
-        emit(&opConstant, defaultOffset,
-            addConstant(defaultConstantOf(elementType, elementFacts)),
-            elementFacts.size);
+        // A zero-init struct element can be wider than the 8 bytes
+        // `defaultConstantOf` folds a default into - it goes through
+        // `opZero` directly instead, the same way `visit(IntegerExp)`
+        // reaches for it over `opConstant` for the same reason.
+        if (isPlainOldStruct(elementType))
+            emit(&opZero, defaultOffset, 0, elementFacts.size);
+        else
+            emit(&opConstant, defaultOffset,
+                addConstant(defaultConstantOf(elementType, elementFacts)),
+                elementFacts.size);
         emit(&opStoreIndirect, addressOffset, defaultOffset,
             elementFacts.size);
 

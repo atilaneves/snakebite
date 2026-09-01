@@ -1061,6 +1061,27 @@ package const(Instruction)* opLoadIndirect(
 }
 
 
+// Zeroes `pc.width` bytes at `frame + pc.destination` - a zero-init struct
+// local or array element wider than the 8 bytes `opConstant`'s `storeWidth`
+// lays out, the only width this VM's integral opcodes cannot already carry
+// as a single constant.
+package const(Instruction)* opZero(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    import core.stdc.string: memset;
+
+    memset(frame + pc.destination, 0, pc.width);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+
 // As `opLoadIndirect`, the other way: writes `pc.width` bytes from `frame +
 // pc.source` to the address held at `frame + pc.destination`.
 package const(Instruction)* opStoreIndirect(
