@@ -3,11 +3,11 @@ module snakebite.ffi.abi;
 
 private:
 
+import snakebite.ffi.limits: maxArguments;
 
-// The call plan keeps this many parameter slots. The integer register
-// limit is separate: values after the first six integer words go on the
-// stack, but they still belong to the function's parameter list.
-public enum maxArguments = 16;
+// The integer register limit is separate: values after the first six
+// integer words go on the stack, but they still belong to the function's
+// parameter list.
 public enum maxIntegerArguments = 6;
 public enum maxFloatingArguments = 8;
 

@@ -4,11 +4,7 @@ module snakebite.backends.bytecode.compiler;
 private:
 
 import dmd.visitor: Visitor;
-import snakebite.backends.bytecode.vm: maxNativeArguments;
 import snakebite.ffi: maxArguments, PlanCache;
-
-
-static assert(maxNativeArguments == maxArguments);
 
 
 public final class Bytecode: imported!"snakebite.backends.backend".Backend {

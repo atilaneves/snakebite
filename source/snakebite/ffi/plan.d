@@ -21,7 +21,8 @@ private:
 // A plan is immutable once built, and holds no dmd types, so calling
 // through one touches nothing the frontend owns.
 public struct CallPlan {
-    import snakebite.ffi.abi: ArgumentPlan, Register, maxArguments;
+    import snakebite.ffi.abi: ArgumentPlan, Register;
+    import snakebite.ffi.limits: maxArguments;
 
     private enum FastPath {
         generic,
@@ -319,8 +320,9 @@ private CallPlan prepare(
 ) {
     import snakebite.ffi.abi:
         ArgumentPlan, Register, contextPrecedesHiddenReturnPointer,
-        maxArguments, needsHiddenReturnPointer, reversedDParameters,
+        needsHiddenReturnPointer, reversedDParameters,
         supported;
+    import snakebite.ffi.limits: maxArguments;
     import dmd.astenums: LINK, STC, VarArg;
     import dmd.mangle: mangleExact;
     import std.conv: text;

@@ -5,11 +5,13 @@ private:
 
 
 extern(C) void executeCallPlan(
-    const(void)*,
-    void*,
-    scope const(void*)*,
-    size_t,
+    const(void)* opaquePlan,
+    void* returnPlace,
+    scope const(void*)* arguments,
+    size_t argumentCount,
 );
+
+import snakebite.ffi.limits: maxArguments;
 
 
 // One argument a call instruction copies from the caller's frame into the
@@ -42,7 +44,6 @@ package struct CallSite {
 // past a compiled function's own frame size, which stays far short of
 // `size_t.max`.
 package enum discardResult = size_t.max;
-package enum maxNativeArguments = 16;
 
 
 package struct Instruction {
@@ -280,7 +281,7 @@ package const(Instruction)* opCall(
 
     const site = callSites[pc.source];
     if (site.nativePlan !is null) {
-        const(void)*[maxNativeArguments] arguments;
+        const(void)*[maxArguments] arguments;
         foreach (i, arg; site.args)
             arguments[i] = frame + arg.callerOffset;
         auto result = pc.destination == discardResult
