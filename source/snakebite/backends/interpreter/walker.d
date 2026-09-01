@@ -123,7 +123,7 @@ extern(C++) private final class Evaluator: Visitor {
         Statement, SwitchStatement, ThrowStatement, TryCatchStatement,
         TryFinallyStatement, UnrolledLoopStatement;
     import dmd.tokens: EXP;
-    import dmd.typesem: nextOf;
+    import dmd.typesem: isIntegral, nextOf;
 
     alias visit = Visitor.visit;
 
