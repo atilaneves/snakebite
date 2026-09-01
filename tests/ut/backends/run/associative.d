@@ -15,7 +15,6 @@ import ut.backends;
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("assocArrayLiteralWithRuntimeKeys." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -43,7 +42,6 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("structKeyedLookupComparesContents." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -87,3 +85,120 @@ static foreach (backend; Matrix!(
     }
 }
 
+// An index assignment on an associative array with a string key inserts
+// or overwrites that key's value, and a later index read of the same
+// key sees it.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("stringKeyedIndexAssignment." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[string] offsets;
+                offsets["magic"] = 0;
+                offsets["schema"] = 4;
+
+                assert(offsets.length == 2);
+                assert(offsets["magic"] == 0);
+                assert(offsets["schema"] == 4);
+            }
+        });
+    }
+}
+
+// `.keys` and `.values` each build a new array from the associative
+// array's current contents, in whatever order the table itself holds
+// them - the pairing between a key and its value is what a test can
+// pin, not the order.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("assocArrayKeysAndValues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[int] table = [1: 10, 2: 20, 3: 30];
+                int keySum;
+                int valueSum;
+
+                foreach (key; table.keys)
+                    keySum += key;
+
+                foreach (value; table.values)
+                    valueSum += value;
+
+                assert(keySum == 6);
+                assert(valueSum == 60);
+            }
+        });
+    }
+}
+
+// Indexing an associative array whose value is a struct yields a
+// reference to that struct's own storage in the table, so a field
+// assignment through the index, and a call to one of the struct's own
+// methods through the index, both mutate the value already in the
+// table rather than a copy of it.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("assocArrayIndexedValueFieldWriteAndMethodCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Span {
+                int offset;
+                int length;
+
+                int grow() {
+                    return length += 1;
+                }
+            }
+
+            void main() {
+                Span[string] spans;
+                spans["header"] = Span(0, 4);
+                assert(spans["header"].offset == 0);
+
+                spans["header"].offset = 8;
+                assert(spans["header"].offset == 8);
+                assert(spans["header"].length == 4);
+
+                spans["header"].grow();
+                assert(spans["header"].length == 5);
+            }
+        });
+    }
+}
+
+// A key whose type holds a dynamic array hashes and compares by the
+// array's contents, the same as any other struct key, so two separately
+// built arrays with the same elements are the same key.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("arrayKeyedLookupComparesContents." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct ArrayKey {
+                int[] xs;
+            }
+
+            void main() {
+                int[ArrayKey] counts;
+                counts[ArrayKey([1, 2])] = 1;
+
+                assert((ArrayKey([1, 2]) in counts) !is null);
+                assert(counts[ArrayKey([1, 2])] == 1);
+            }
+        });
+    }
+}

@@ -123,7 +123,7 @@ extern(C++) private final class Evaluator: Visitor {
         Statement, SwitchStatement, ThrowStatement, TryCatchStatement,
         TryFinallyStatement, UnrolledLoopStatement;
     import dmd.tokens: EXP;
-    import dmd.typesem: nextOf;
+    import dmd.typesem: isIntegral, nextOf;
 
     alias visit = Visitor.visit;
 
@@ -542,8 +542,11 @@ extern(C++) private final class Evaluator: Visitor {
         // the process symbol for every instantiated body so guest ownership
         // does not force a duplicate walk of code druntime already provides.
         const interpretsTemplate = isTemplate
-            && !hasNativeSymbol(function_);
-        const interprets = isGuest && !isTemplate || interpretsTemplate;
+            && (!hasNativeSymbol(function_)
+                || hasInterpretedDelegateArgument(callSite));
+        const interprets = isGuest && !isTemplate
+            || interpretsTemplate
+            || hasInterpretedDelegateArgument(callSite);
         if (!interprets) {
             const plan = callSite is null
                 ? &_plans.of(function_)
@@ -602,6 +605,46 @@ extern(C++) private final class Evaluator: Visitor {
         _gotoTarget = null;
         _switchStart = null;
         body_.accept(this);
+    }
+
+    // dmd lowers `foreach` over an associative array to a call to a
+    // druntime helper (e.g. `_aaApply2`) that invokes the loop body
+    // through a delegate parameter. That helper is native code, but the
+    // delegate it calls back into is the guest's loop body, whose
+    // closure a native ABI call cannot reach. Walking the helper's own
+    // body here, instead of calling it natively, keeps every call to the
+    // delegate going through this evaluator. Only a delegate whose
+    // declaration is itself guest-owned selects this: a native delegate
+    // argument of the same opApply shape (an unrelated library call, for
+    // instance) has no guest closure to reach and must still run
+    // natively, since this evaluator may not have its body at all.
+    private bool hasInterpretedDelegateArgument(CallExp callSite) {
+        if (callSite is null || callSite.arguments is null)
+            return false;
+
+        foreach (argument; *callSite.arguments) {
+            auto expression = argument;
+            while (auto cast_ = expression.isCastExp)
+                expression = cast_.e1;
+
+            FuncDeclaration delegateFunction;
+            if (auto funcExp = expression.isFuncExp)
+                delegateFunction = funcExp.fd;
+            else if (auto delegateExp = expression.isDelegateExp)
+                delegateFunction = delegateExp.func;
+
+            if (delegateFunction is null
+                    || !_program.isInterpreted(delegateFunction))
+                continue;
+
+            auto functionType = typeFunctionOf(delegateFunction);
+            if (functionType !is null
+                    && functionType.parameterList.length != 0
+                    && functionType.nextOf.isIntegral)
+                return true;
+        }
+
+        return false;
     }
 
     private const(CallPlan)* callPlanOf(
@@ -1173,6 +1216,12 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto type = expression.type;
         const facts = factsOf(type);
+
+        // DMD classifies pointers as integral for some type queries, but
+        // their value must be read as an address, not as a signed integer.
+        if (type.ty == Tpointer)
+            return asPointer(expression) !is null;
+
         if (facts.isIntegral)
             return asIntegral(expression, facts) != 0;
 
@@ -1184,13 +1233,6 @@ extern(C++) private final class Evaluator: Visitor {
         // oracle the suite compares against settles it.
         if (type.ty == Tarray)
             return evaluateArray(expression, facts).elements !is null;
-
-        // A pointer is true when it is not null, the same test `if (ptr)`
-        // means in ordinary compiled D - `__typeAttrs`, on the `~=`
-        // lowering's own chain, asks this of the block address it was
-        // handed to decide whether to consult the GC about it at all.
-        if (type.ty == Tpointer)
-            return asPointer(expression) !is null;
 
         throw new SnakebiteException(
             text("interpreter cannot evaluate `", expression.toString,
@@ -2301,10 +2343,10 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(LogicalExp expression) {
         import snakebite.nativelayout: storeIntegral;
 
-        const left = asIntegral(expression.e1) != 0;
+        const left = truthOf(expression.e1);
         const answer = expression.op == EXP.andAnd
-            ? left && asIntegral(expression.e2) != 0
-            : left || asIntegral(expression.e2) != 0;
+            ? left && truthOf(expression.e2)
+            : left || truthOf(expression.e2);
 
         storeIntegral(_place, answer ? 1 : 0, _facts.size);
     }
@@ -2326,6 +2368,23 @@ extern(C++) private final class Evaluator: Visitor {
 
         // DMD's `Type.nextOf` is not const-correct, so this cannot be const.
         auto type = expression.e1.type;
+        auto structType = type.isTypeStruct;
+        if (structType !is null) {
+            const facts = factsOf(type);
+            auto left = _frames.push(facts.size, facts.alignment);
+            auto right = _frames.push(facts.size, facts.alignment);
+            evaluate(expression.e1, type, facts, left.base);
+            evaluate(expression.e2, type, facts, right.base);
+            const equal = equalStruct(
+                structType.sym,
+                cast(const ubyte*) left.base,
+                cast(const ubyte*) right.base,
+            );
+            const answer = expression.op == EXP.equal ? equal : !equal;
+            storeIntegral(_place, answer ? 1 : 0, _facts.size);
+            return;
+        }
+
         if (type.ty == Tarray) {
             // DMD lowers arrays whose elements need semantic equality to a
             // call that performs it. A missing lowering is DMD's proof that
@@ -2353,7 +2412,9 @@ extern(C++) private final class Evaluator: Visitor {
         }
 
         bool equal;
-        if (type.ty == Tfloat32 || type.ty == Tfloat64)
+        if (type.ty == Tpointer)
+            equal = asPointer(expression.e1) == asPointer(expression.e2);
+        else if (type.ty == Tfloat32 || type.ty == Tfloat64)
             equal = asFloating(expression.e1) == asFloating(expression.e2);
         else if (factsOf(type).isIntegral)
             equal = asIntegral(expression.e1) == asIntegral(expression.e2);
@@ -2366,6 +2427,90 @@ extern(C++) private final class Evaluator: Visitor {
         const answer = expression.op == EXP.equal ? equal : !equal;
 
         storeIntegral(_place, answer ? 1 : 0, _facts.size);
+    }
+
+    private bool equalStruct(
+        StructDeclaration declaration,
+        const ubyte* left,
+        const ubyte* right,
+    ) {
+        import core.stdc.string: memcmp;
+        import snakebite.nativelayout: arrayLengthOffset,
+            arrayPointerOffset, loadIntegral;
+
+        foreach (field; declaration.fields) {
+            auto fieldType = field.type;
+            auto a = left + field.offset;
+            auto b = right + field.offset;
+            if (fieldType.ty == Tarray) {
+                const length = cast(size_t) loadIntegral(
+                    a + arrayLengthOffset, size_t.sizeof, false);
+                const otherLength = cast(size_t) loadIntegral(
+                    b + arrayLengthOffset, size_t.sizeof, false);
+                if (length != otherLength)
+                    return false;
+
+                const elements = *cast(const ubyte**)
+                    (a + arrayPointerOffset);
+                const otherElements = *cast(const ubyte**)
+                    (b + arrayPointerOffset);
+                const bytes = length * factsOf(fieldType.nextOf).size;
+                if (bytes != 0 && memcmp(
+                        elements, otherElements, bytes) != 0)
+                    return false;
+                continue;
+            }
+
+            auto nested = fieldType.isTypeStruct;
+            if (nested !is null) {
+                if (!equalStruct(
+                        nested.sym,
+                        a,
+                        b,
+                    ))
+                    return false;
+                continue;
+            }
+
+            // `==` on a float follows IEEE 754: `-0.0` equals `0.0`, and
+            // `nan` never equals itself. `memcmp`, comparing raw bits,
+            // disagrees with both, so a float field needs its own read
+            // and its own `==` rather than a byte compare.
+            if (fieldType.ty == Tfloat32) {
+                if (*cast(const float*) a != *cast(const float*) b)
+                    return false;
+                continue;
+            }
+            if (fieldType.ty == Tfloat64) {
+                if (*cast(const double*) a != *cast(const double*) b)
+                    return false;
+                continue;
+            }
+
+            const facts = factsOf(fieldType);
+            if (memcmp(a, b, facts.size) != 0)
+                return false;
+        }
+
+        return true;
+    }
+
+    // `is` on a struct is bitwise: dmd compares the whole object's raw
+    // bytes, padding included, the same as `memcmp(&a, &b, S.sizeof)`
+    // would. This differs from `==`, which recurses field by field and
+    // reads a dynamic array field by its contents - `is` reads that same
+    // field as its bare length and pointer, so two structs holding
+    // separately allocated but equal-content arrays are `==` but not
+    // `is`.
+    private bool identicalStruct(
+        StructDeclaration declaration,
+        const ubyte* left,
+        const ubyte* right,
+    ) {
+        import core.stdc.string: memcmp;
+
+        const facts = factsOf(declaration.type);
+        return memcmp(left, right, facts.size) == 0;
     }
 
     // `is`/`!is`. Over most types it means the same thing `==`/`!=` does,
@@ -2384,7 +2529,20 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto type = expression.e1.type;
         bool equal;
-        if (type.ty == Tclass)
+        auto structType = type.isTypeStruct;
+        if (structType !is null) {
+            const facts = factsOf(type);
+            auto left = _frames.push(facts.size, facts.alignment);
+            auto right = _frames.push(facts.size, facts.alignment);
+            evaluate(expression.e1, type, facts, left.base);
+            evaluate(expression.e2, type, facts, right.base);
+            equal = identicalStruct(
+                structType.sym,
+                cast(const ubyte*) left.base,
+                cast(const ubyte*) right.base,
+            );
+        }
+        else if (type.ty == Tclass)
             equal = classReferenceOf(expression.e1)
                 == classReferenceOf(expression.e2);
         else if (type.ty == Tpointer)
@@ -3245,6 +3403,8 @@ extern(C++) private final class Evaluator: Visitor {
 
             if (expression.member !is null)
                 constructStruct(expression, object);
+            else if (arguments !is null)
+                initializeStructArguments(expression, object);
 
             storeIntegral(_place, cast(size_t) object, _facts.size);
             return;
@@ -3502,6 +3662,27 @@ extern(C++) private final class Evaluator: Visitor {
         executeCall(constructor, null, frame.base, layout, null, true);
     }
 
+    private void initializeStructArguments(NewExp expression, ubyte* object) {
+        import std.conv: text;
+
+        auto declaration = expression.newtype.isTypeStruct.sym;
+        if (expression.arguments.length > declaration.fields.length)
+            throw new SnakebiteException(
+                text("interpreter cannot initialize `", expression.toString,
+                    "`: too many constructor arguments"),
+            );
+
+        foreach (i; 0 .. expression.arguments.length) {
+            auto field = declaration.fields[i];
+            evaluate(
+                (*expression.arguments)[i],
+                field.type,
+                factsOf(field.type),
+                object + field.offset,
+            );
+        }
+    }
+
     private void bindArguments(
         FuncDeclaration function_,
         Expressions* arguments,
@@ -3524,9 +3705,13 @@ extern(C++) private final class Evaluator: Visitor {
             auto argument = (*arguments)[i];
             auto parameter = layout.parameters[i];
             auto slot = frameBase + parameter.offset;
+
             void* address;
 
             void* argumentAddress() {
+                if (argument.type.ty == Tpointer
+                        && argument.type.nextOf.equals(parameterList[i].type))
+                    return asPointer(argument);
                 address = addressOf(argument);
                 return address;
             }
