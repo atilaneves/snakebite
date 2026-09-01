@@ -123,10 +123,8 @@ static foreach (backend; Matrix!(
 
 // A class method call is virtual, but dmd resolves the `CallExp` to the
 // statically known declaration and leaves dispatch to the backend. The
-// interpreter has no virtual dispatch, so running the resolved
-// declaration would silently devirtualize the call; it must refuse a
-// class method instead, even one that never reads `this`.
-@("method.virtualClass.refused.Interpreter")
+// interpreter must use the object's class vtable before executing it.
+@("method.virtualClass.dispatches.Interpreter")
 @Tags("Interpreter")
 unittest {
     import snakebite.frontend.compiler: parseSnippet;
@@ -140,21 +138,21 @@ unittest {
         }
 
         int viaClass() {
-            Talker talker;
+            auto talker = new Talker;
             return talker.answer();
         }
     });
     auto function_ = findFunction(module_, "viaClass");
 
     int result;
-    interpreter(module_).call(function_, &result, [])
-        .shouldThrow;
+    interpreter(module_).call(function_, &result, []);
+    result.should == 42;
 }
 
 // A class method call is virtual even when the receiver is stored in a base
-// class reference. The interpreter has no class dispatch yet, so it must not
-// run dmd's statically resolved base declaration for a derived object.
-@("method.virtualClassThroughBase.refused.Interpreter")
+// class reference. Dispatch must select the derived implementation rather
+// than run dmd's statically resolved base declaration.
+@("method.virtualClassThroughBase.dispatchesOverride.Interpreter")
 @Tags("Interpreter")
 unittest {
     import snakebite.frontend.compiler: parseSnippet;
@@ -181,8 +179,8 @@ unittest {
     auto function_ = findFunction(module_, "viaBase");
 
     int result;
-    interpreter(module_).call(function_, &result, [])
-        .shouldThrow;
+    interpreter(module_).call(function_, &result, []);
+    result.should == 2;
 }
 
 static foreach (backend; Matrix!(BytecodeUnconfirmed)) {

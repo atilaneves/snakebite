@@ -76,11 +76,17 @@ unittest {
         Plain make() {
             return new Plain;
         }
+
+        TypeInfo info() {
+            return typeid(Plain);
+        }
     });
     auto function_ = findFunction(module_, "make");
+    auto infoFunction = findFunction(module_, "info");
 
     Object value;
-    interpreter(module_).call(function_, &value, []);
+    auto backend = interpreter(module_);
+    backend.call(function_, &value, []);
 
     assert(value !is null);
     assert(
@@ -90,6 +96,9 @@ unittest {
 
     auto classInfo = value.classinfo;
     assert(classInfo !is null);
+    TypeInfo info;
+    backend.call(infoFunction, &info, []);
+    assert(classInfo is info, classInfo.name);
     assert(classInfo.name.endsWith(".Plain"), classInfo.name);
     assert(value.toString.endsWith(".Plain"));
 }
@@ -172,7 +181,6 @@ unittest {
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("interfaceDispatchFindsOverride." ~ backend.stringof)
     @Tags(backend.stringof)
