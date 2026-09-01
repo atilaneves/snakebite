@@ -18,7 +18,6 @@ import ut.backends;
 // before it could run through them.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("staticArray.rowAssignElementWriteAndEquality." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -54,7 +53,6 @@ static foreach (backend; Matrix!(
 // column's byte.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("staticArray.nestedElementReadAfterRowAssign." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -74,9 +72,18 @@ static foreach (backend; Matrix!(
 // bytes, not a reference: mutating a row through the copy leaves the
 // original's row untouched, the same guarantee already pinned for a
 // struct local (`structLocalAssignmentCopiesByValue`).
+//
+// dmd's own CTFE engine does not honour this for a static-array local
+// `=`: `enum` over an equivalent snippet at compile time shows `b = a`
+// aliasing rather than copying, so mutating `b` there also mutates `a`
+// - confirmed directly with a `pragma(msg, ...)` against dmd, not just
+// this backend. `Ctfe` calls that same engine, so it disagrees here on
+// purpose.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE engine aliases a static-array local on `=` " ~
+        "instead of copying it, unlike its runtime codegen"),
 )) {
     @("staticArray.localAssignmentCopiesByValue." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -99,7 +106,6 @@ static foreach (backend; Matrix!(
 // anything writes to it.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("staticArray.defaultInitIsZero." ~ backend.stringof)
     @Tags(backend.stringof)
