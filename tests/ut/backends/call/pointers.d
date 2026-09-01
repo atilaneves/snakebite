@@ -158,3 +158,54 @@ unittest {
             "interpreter cannot evaluate `(*p).b`: reading a bitfield is " ~
                 "not supported");
 }
+
+// `&factorial` on a module-level function is dmd's `SymOffExp` too, the
+// same node a local's address takes above - the difference is `var` names
+// a `FuncDeclaration`, not a `VarDeclaration`, so there is no frame slot to
+// find. The value it takes the address of is a plain function pointer (no
+// context word), unlike `&nested` on a nested function, which dmd instead
+// lowers to a `DelegateExp`. `factorial` is declared alongside `main`
+// rather than nested inside it, the same way `shouldBeStatusOf` renders any
+// top-level declaration, so its address is a plain function pointer both
+// natively and in the guest.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("pointers.functionPointer.moduleLevel.call." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            uint factorial(uint n) {
+                return n <= 1 ? 1 : n * factorial(n - 1);
+            }
+
+            int main() {
+                uint function(uint) fn = &factorial;
+                assert(fn(5) == 120);
+                return 0;
+            }
+        });
+    }
+}
+
+// A function pointer is an ordinary value once taken: passing it into
+// another function and calling it there reaches the same guest function as
+// calling it directly would.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("pointers.functionPointer.moduleLevel.passAsArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            uint answer() {
+                return 42;
+            }
+
+            uint invoke(uint function() fn) {
+                return fn();
+            }
+
+            int main() {
+                assert(invoke(&answer) == 42);
+                return 0;
+            }
+        });
+    }
+}
