@@ -91,7 +91,10 @@ extern(C++) private final class Evaluator: Visitor {
     import snakebite.backends.layout: FrameLayout;
     import dmd.dclass: ClassDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
-    import snakebite.ffi: CallPlan, PlanCache, maxArguments;
+    import snakebite.ffi:
+        CallPlan, CallResult, PlanCache, invokeCall,
+        maxArguments, rejectHostReferenceReturn, returnFromCall,
+        storeArgument;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
         isIntegralSize, storeValue, TypeFacts;
@@ -245,13 +248,6 @@ extern(C++) private final class Evaluator: Visitor {
     // While a switch walks its body, this skips statements before the case
     // selected by its condition or by a `goto case` transfer.
     private Statement _switchStart;
-    // Whether the currently executing function returns `ref`, set by
-    // `execute` from the function's own type. Checked by
-    // `visit(ReturnStatement)`: a `ref` return's `_place` is the address a
-    // `return` statement's lvalue names, not the value that lvalue holds,
-    // so the two need different code, and this is what tells them apart.
-    private bool _returnsRef;
-
     // `extern(D)`: `Program` holds a dynamic array, which is not a valid
     // member of an `extern(C++)` signature, and only `Visitor`'s `visit`
     // overloads need that linkage.
@@ -299,7 +295,6 @@ extern(C++) private final class Evaluator: Visitor {
         void*[] args,
     ) {
         import snakebite.frontend.compiler: withCompilerLock;
-        import std.conv: text;
 
         const parameterCount =
             function_.parameters is null ? 0 : function_.parameters.length;
@@ -309,27 +304,13 @@ extern(C++) private final class Evaluator: Visitor {
                     "interpreter backend",
             );
 
-        // A `ref` return hands the caller the *address* of the result, in
-        // a scratch buffer `visit(ReturnStatement)` always sizes for a
-        // pointer (`resolvedRefAddress` is where a guest `CallExp` reads
-        // that address back and copies through it). This is the host
-        // entry point, not a guest `CallExp`: `returnPlace` is storage
-        // the host itself owns, sized for the callee's return type -
-        // `int`, say - and `execute` would still write `size_t.sizeof`
-        // bytes of an address into it. `ffi/plan.d`'s `prepare` refuses a
-        // `ref` return for exactly this reason; this is the interpreter's
-        // own entry point, so it gets the same refusal.
-        if (typeFunctionOf(function_).isRef)
-            throw new SnakebiteException(
-                text("interpreter cannot call `", function_.toString,
-                    "` from the host: it returns by `ref`"),
-            );
+        rejectHostReferenceReturn(function_);
 
         withCompilerLock({
             auto layout = layoutOf(function_);
             auto frame = _frames.push(layout.size, layout.alignment);
 
-            execute(function_, returnPlace, frame.base, layout);
+            executeCall(function_, returnPlace, frame.base, layout);
         });
     }
 
@@ -426,19 +407,52 @@ extern(C++) private final class Evaluator: Visitor {
         return facts;
     }
 
-    // Runs `function_`'s body with its frame already reserved at
-    // `frameBase` - and its parameter slots already filled by the caller
-    // - evaluating its `return` expression into `returnPlace`. Every call
-    // this backend ever makes, whether the host called in directly or a
-    // guest `CallExp` reached it, passes through here exactly once, so
-    // this is where a call unsafe to run gets rejected.
-    private void execute(
+    // Runs one call through the FFI seam. The callee receives its frame
+    // already reserved and its parameter slots already filled. The call
+    // result adapter keeps the representation of `ref` results out of the
+    // evaluator; the raw runner below only executes the selected callee.
+    private CallResult executeCall(
         FuncDeclaration function_,
         void* returnPlace,
         ubyte* frameBase,
         const(FrameLayout)* layout,
         CallExp callSite = null,
         bool classConstructor = false,
+    ) {
+        const(void)*[maxArguments] slots;
+
+        scope void executeCallee(
+            scope void* place,
+            scope const(void*)[] arguments,
+        ) {
+            executeRaw(
+                function_, place, frameBase, layout, callSite,
+                classConstructor, arguments.ptr, arguments.length,
+            );
+        }
+
+        return invokeCall(
+            function_, returnPlace,
+            argumentSlots(slots, frameBase, layout),
+            &executeCallee,
+        );
+    }
+
+    // Runs `function_`'s body with its frame already reserved at
+    // `frameBase` - and its parameter slots already filled by the caller
+    // - evaluating its `return` expression into `returnPlace`. Every call
+    // this backend ever makes, whether the host called in directly or a
+    // guest `CallExp` reached it, passes through here exactly once, so
+    // this is where a call unsafe to run gets rejected.
+    private void executeRaw(
+        FuncDeclaration function_,
+        void* returnPlace,
+        ubyte* frameBase,
+        const(FrameLayout)* layout,
+        CallExp callSite = null,
+        bool classConstructor = false,
+        const(void*)* arguments,
+        size_t argumentCount,
     ) {
         import std.conv: text;
 
@@ -453,13 +467,10 @@ extern(C++) private final class Evaluator: Visitor {
             && function_.isInstantiated() !is null
             && function_.fbody !is null && !hasNativeSymbol(function_);
         if (!isGuest && !interpretsTemplate) {
-            const(void)*[maxArguments] slots;
             const plan = callSite is null
                 ? &_plans.of(function_)
                 : callPlanOf(callSite, function_);
-            plan.call(
-                returnPlace, argumentSlots(slots, frameBase, layout),
-            );
+            plan.call(returnPlace, arguments[0 .. argumentCount]);
             return;
         }
 
@@ -528,7 +539,6 @@ extern(C++) private final class Evaluator: Visitor {
         _pendingLoopLabel = null;
         _gotoTarget = null;
         _switchStart = null;
-        _returnsRef = typeFunctionOf(function_).isRef;
         body_.accept(this);
     }
 
@@ -577,7 +587,6 @@ extern(C++) private final class Evaluator: Visitor {
         private Identifier _pendingLoopLabel;
         private Statement _gotoTarget;
         private Statement _switchStart;
-        private bool _returnsRef;
 
         @disable this();
         @disable this(this);
@@ -598,7 +607,6 @@ extern(C++) private final class Evaluator: Visitor {
             _pendingLoopLabel = evaluator._pendingLoopLabel;
             _gotoTarget = evaluator._gotoTarget;
             _switchStart = evaluator._switchStart;
-            _returnsRef = evaluator._returnsRef;
         }
 
         ~this() {
@@ -616,7 +624,6 @@ extern(C++) private final class Evaluator: Visitor {
             _evaluator._pendingLoopLabel = _pendingLoopLabel;
             _evaluator._gotoTarget = _gotoTarget;
             _evaluator._switchStart = _switchStart;
-            _evaluator._returnsRef = _returnsRef;
         }
     }
 
@@ -823,34 +830,30 @@ extern(C++) private final class Evaluator: Visitor {
         if (_type.ty == Tvoid)
             return;
 
-        // A `ref` return hands the caller the address of `statement.exp`'s
-        // storage, not a copy of its value - `_place` here is the small
-        // scratch buffer `visit(CallExp)`/`refCallAddress` set up to hold
-        // exactly that address, sized for a pointer regardless of what
-        // `_facts.size` says the callee's own type is.
-        if (_returnsRef) {
-            import snakebite.nativelayout: storeIntegral;
-
-            storeIntegral(
-                _place, cast(size_t) addressOf(statement.exp), size_t.sizeof);
-            return;
+        void* referenceAddress() {
+            return addressOf(statement.exp);
         }
 
-        // `_type`/`_facts` are already this function's return type and
-        // its facts, set together on entry (`execute`) or by the last
-        // `evaluate` - so both branches below hand them to `expression`
-        // straight, with no fresh `factsOf` lookup.
-        if (_place !is null) {
-            evaluate(statement.exp, _type, _facts, _place);
-            return;
+        void evaluateValue() {
+            // `_type`/`_facts` are already this function's return type and
+            // its facts, set together on entry (`executeRaw`) or by the last
+            // `evaluate`, so this callback needs no fresh type lookup.
+            if (_place !is null) {
+                evaluate(statement.exp, _type, _facts, _place);
+                return;
+            }
+
+            // The caller discarded the result, but evaluating the expression
+            // can have effects, so it still runs - into a reservation on the
+            // frame stack, popped when it goes out of scope, not into a GC
+            // allocation.
+            auto frame = _frames.push(_facts.size, _facts.alignment);
+            evaluate(statement.exp, _type, _facts, frame.base);
         }
 
-        // The caller discarded the result, but evaluating the expression
-        // can have effects, so it still runs - into a reservation on the
-        // frame stack, popped when it goes out of scope, not into a GC
-        // allocation.
-        auto frame = _frames.push(_facts.size, _facts.alignment);
-        evaluate(statement.exp, _type, _facts, frame.base);
+        returnFromCall(
+            _function, _place, &referenceAddress, &evaluateValue,
+        );
     }
 
     override void visit(ExpStatement statement) {
@@ -3170,7 +3173,7 @@ extern(C++) private final class Evaluator: Visitor {
             );
         }
 
-        execute(constructor, null, frame.base, layout, null, true);
+        executeCall(constructor, null, frame.base, layout, null, true);
     }
 
     private void initializeDefault(
@@ -3321,21 +3324,10 @@ extern(C++) private final class Evaluator: Visitor {
     // arguments are the caller's expressions - so the callee starts with
     // its frame ready-made and never builds one.
     //
-    // A callee that returns `ref` hands back an address, not a value - the
-    // caller reads through it here rather than everywhere a call result is
-    // used, so this is the one place a `ref`-returning *guest* call is told
-    // apart from an ordinary one when its value, not its address, is
-    // wanted (see `addressOf`/`refCallAddress` for the other one). Two
-    // more places check the same `isRef`, for the opposite reason -
-    // refusing rather than running: `Evaluator.call`, the host entry
-    // point, since the host is never the guest `CallExp` this branch
-    // reads through, and `ffi/plan.d`'s `prepare`, since an
-    // `extern(C)`-declared `ref`-returning function has no guest body for
-    // this branch to run in the first place.
+    // Calls always go through the FFI call adapter. It copies a reference's
+    // value into `_place` for this ordinary expression path; `addressOf`
+    // uses `refCallAddress` when the expression itself is an lvalue.
     override void visit(CallExp expression) {
-        import core.stdc.string: memcpy;
-        import std.conv: text;
-
         auto function_ = expression.f;
         if (function_ is null)
             function_ = calleeOf(expression);
@@ -3378,15 +3370,7 @@ extern(C++) private final class Evaluator: Visitor {
             return;
         }
 
-        if (typeFunctionOf(function_).isRef) {
-            memcpy(
-                _place,
-                resolvedRefAddress(function_, frame.base, layout, expression),
-                _facts.size);
-            return;
-        }
-
-        execute(
+        executeCall(
             function_, _place, frame.base, layout, expression,
             function_.isCtorDeclaration() !is null,
         );
@@ -3614,41 +3598,27 @@ extern(C++) private final class Evaluator: Visitor {
             auto parameter = layout.parameters[i];
             auto slot = frame.base + parameter.offset;
 
-            if (parameter.isRef)
-                storeIntegral(
-                    slot, cast(size_t) addressOf(argument), size_t.sizeof);
-            else
+            void* argumentAddress() {
+                return addressOf(argument);
+            }
+
+            void evaluateArgument(void* place) {
                 evaluate(
-                    argument, parameterList[i].type, parameter.facts, slot);
+                    argument, parameterList[i].type, parameter.facts, place);
+            }
+
+            storeArgument(
+                function_, i, slot, &argumentAddress, &evaluateArgument,
+            );
         }
 
         return frame;
     }
 
-    // Runs a `ref`-returning `function_` to completion and reads back the
-    // address its `return` statement named: `execute` writes that address,
-    // as a pointer, into a scratch buffer sized for exactly that,
-    // regardless of what the callee's own return type's facts say.
-    private void* resolvedRefAddress(
-        FuncDeclaration function_,
-        ubyte* frameBase,
-        const(FrameLayout)* layout,
-        CallExp callSite = null,
-    ) {
-        import snakebite.nativelayout: loadIntegral;
-
-        align(size_t.sizeof) ubyte[size_t.sizeof] resultAddress = void;
-        execute(function_, resultAddress.ptr, frameBase, layout, callSite);
-        return cast(void*)
-            loadIntegral(resultAddress.ptr, size_t.sizeof, false);
-    }
-
-    // The address a `ref`-returning call hands back, for `addressOf` when
-    // the call itself is the lvalue - `pick(a, b, true) = 5;`'s left side,
-    // or a `ref` argument bound to another call's `ref` result. dmd only
-    // ever types-checks a call as an lvalue when it does return `ref`, so
-    // the check below is a defence against this interpreter reaching this
-    // path some other way, not a guest mistake any test here can trigger.
+    // The address a call hands back for `addressOf` when the call itself is
+    // the lvalue - `pick(a, b, true) = 5;`'s left side, or a `ref` argument
+    // bound to another call's `ref` result. The FFI call adapter validates
+    // that the result is a reference.
     private void* refCallAddress(CallExp expression) {
         import std.conv: text;
 
@@ -3659,15 +3629,11 @@ extern(C++) private final class Evaluator: Visitor {
                     expression.toString, "`"),
             );
 
-        if (!typeFunctionOf(function_).isRef)
-            throw new SnakebiteException(
-                text("interpreter cannot take the address of `",
-                    expression.toString, "`: it does not return `ref`"),
-            );
-
         auto layout = layoutOf(function_);
         auto frame = bindFrame(expression, function_, layout);
-        return resolvedRefAddress(function_, frame.base, layout, expression);
+        return executeCall(
+            function_, null, frame.base, layout, expression,
+        ).address;
     }
 
     // Evaluates `expression` into `type.size` bytes at `place`, then
