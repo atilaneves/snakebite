@@ -159,7 +159,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
         Statement, WhileStatement;
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
-        Arg, CallSite, discardResult, Function, Instruction, opAdd, opBitAnd,
+        Arg, AssertSite, CallSite, discardResult, Function, Instruction,
+        opAdd, opAssert, opBitAnd,
         opBitOr, opBitXor, opBranchFalse, opBranchTrue, opCall,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
         opConstant, opCopy, opDivideSigned, opDivideUnsigned, opEqual,
@@ -186,6 +187,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private Instruction[] _instructions;
     private long[] _constants;
     private CallSite[] _callSites;
+    private AssertSite[] _assertSites;
     private size_t _tempSize;
     private uint _tempAlignment;
     // Set once nothing after the statement just compiled can run: a
@@ -243,7 +245,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
         resolveBranches();
 
         return Function(
-            _instructions, _constants, _callSites, _tempSize, _tempAlignment,
+            _instructions, _constants, _callSites, _assertSites,
+            _tempSize, _tempAlignment,
         );
     }
 
@@ -411,6 +414,35 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
     private size_t conditionWidth(Expression condition) {
         return TypeFacts.of(condition.type).size;
+    }
+
+    // `assert(cond)`: evaluated the same way an `if`'s own condition is,
+    // then handed to `opAssert`, which throws a real `AssertError` at run
+    // time when it is false and otherwise falls through - the only two
+    // things D's own assertion semantics call for.
+    //
+    // dmd gives an `AssertExp` whose condition it can already prove false at
+    // compile time (`assert(0)`, `assert(false)`, `assert(1 == 2)`) the
+    // `noreturn` type for flow analysis, but that changes nothing about how
+    // this compiles: with asserts enabled - `useAssert == CHECKENABLE.off`
+    // is what turns one into a plain trap (dmd's own `HaltExp`, a different
+    // node this compiler never sees here) - it still throws the same
+    // `AssertError` at the same instant a call to `fail()` returning `false`
+    // would, so `opAssert` handles both without asking which one this is.
+    private void compileAssert(AssertExp expression) {
+        import std.conv: text;
+        import std.string: fromStringz;
+
+        const conditionOffset = compileCondition(expression.e1);
+        const width = conditionWidth(expression.e1);
+
+        const site = AssertSite(
+            text("bytecode: assertion failed: `", expression.e1.toString, "`"),
+            expression.loc.filename.fromStringz.idup,
+            expression.loc.linnum,
+        );
+        _assertSites ~= site;
+        emit(&opAssert, conditionOffset, _assertSites.length - 1, width);
     }
 
     // Only the branch taken at run time ever executes - the other one, if
@@ -838,6 +870,10 @@ extern(C++) private final class FunctionCompiler: Visitor {
     override void visit(EqualExp expression) {
         requireDestination(expression);
         compileComparison(expression, _destination);
+    }
+
+    override void visit(AssertExp expression) {
+        compileAssert(expression);
     }
 
     override void visit(NegExp expression) {

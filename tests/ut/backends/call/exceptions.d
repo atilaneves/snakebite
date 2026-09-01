@@ -4,7 +4,7 @@ module ut.backends.call.exceptions;
 import ut.backends;
 
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("assert.passes." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -27,6 +27,43 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
             "result",
         );
     }
+}
+
+// An assertion failure the guest never catches keeps unwinding out of
+// `Backend.call` as the very `AssertError` the VM built for it - no second,
+// backend-owned exception type stands in for it, so a caller catching
+// `Throwable` (the way `snakebite.backends.backend.run` does for an
+// escaping guest failure) sees the genuine object.
+@("assert.fails.unhandled.propagatesTheRealAssertError.Bytecode")
+@Tags("Bytecode")
+unittest {
+    import core.exception: AssertError;
+    import snakebite.backends.backend: Program;
+    import snakebite.backends.bytecode: Bytecode;
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        bool fail() {
+            return false;
+        }
+
+        int result() {
+            assert(fail());
+            return 1;
+        }
+    });
+    auto function_ = findFunction(module_, "result");
+    auto bytecode = new Bytecode(Program([module_]));
+
+    AssertError caught;
+    int value;
+    try
+        bytecode.call(function_, &value, []);
+    catch (AssertError error)
+        caught = error;
+
+    (caught !is null).shouldBeTrue;
 }
 
 static foreach (backend; Matrix!(
