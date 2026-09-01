@@ -101,6 +101,8 @@ package struct Instruction {
     //    `source`: the one thing a widening cast needs besides its own
     //    `destination`/`width` (the destination width) that neither
     //    already carries.
+    //  - a source offset's width, for floating-point conversions whose
+    //    destination and source widths can differ.
     //  - a resolved instruction address, cast to a `size_t`: `opJump`'s
     //    `destination`, and `opBranchFalse`/`opBranchTrue`'s `source`.
     //    The compiler patches every branch with a plain instruction
@@ -112,6 +114,7 @@ package struct Instruction {
     package size_t destination;
     package size_t source;
     package size_t width;
+    package size_t sourceWidth;
 }
 
 
@@ -598,6 +601,96 @@ package const(Instruction)* opMultiply(
     return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
+package const(Instruction)* opFloatAdd(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto place = frame + pc.destination;
+    if (pc.width == float.sizeof)
+        *cast(float*) place += *cast(const float*) (frame + pc.source);
+    else
+        *cast(double*) place += *cast(const double*) (frame + pc.source);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package const(Instruction)* opFloatSubtract(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto place = frame + pc.destination;
+    if (pc.width == float.sizeof)
+        *cast(float*) place -= *cast(const float*) (frame + pc.source);
+    else
+        *cast(double*) place -= *cast(const double*) (frame + pc.source);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package const(Instruction)* opFloatMultiply(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto place = frame + pc.destination;
+    if (pc.width == float.sizeof)
+        *cast(float*) place *= *cast(const float*) (frame + pc.source);
+    else
+        *cast(double*) place *= *cast(const double*) (frame + pc.source);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package const(Instruction)* opFloatDivide(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto place = frame + pc.destination;
+    if (pc.width == float.sizeof)
+        *cast(float*) place /= *cast(const float*) (frame + pc.source);
+    else
+        *cast(double*) place /= *cast(const double*) (frame + pc.source);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package const(Instruction)* opFloatModulo(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto place = frame + pc.destination;
+    if (pc.width == float.sizeof)
+        *cast(float*) place %= *cast(const float*) (frame + pc.source);
+    else
+        *cast(double*) place %= *cast(const double*) (frame + pc.source);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
 package const(Instruction)* opBitAnd(
     const(Instruction)* pc,
     ubyte* frame,
@@ -986,6 +1079,78 @@ package const(Instruction)* opFloatNotEqual(
         assertSites, frames);
 }
 
+package const(Instruction)* opFloatLessThan(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto place = frame + pc.destination;
+    const result = pc.width == float.sizeof
+        ? *cast(float*) place < *cast(const float*) (frame + pc.source)
+        : *cast(double*) place < *cast(const double*) (frame + pc.source);
+    *cast(ubyte*) place = result ? 1 : 0;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package const(Instruction)* opFloatLessOrEqual(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto place = frame + pc.destination;
+    const result = pc.width == float.sizeof
+        ? *cast(float*) place <= *cast(const float*) (frame + pc.source)
+        : *cast(double*) place <= *cast(const double*) (frame + pc.source);
+    *cast(ubyte*) place = result ? 1 : 0;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package const(Instruction)* opFloatGreaterThan(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto place = frame + pc.destination;
+    const result = pc.width == float.sizeof
+        ? *cast(float*) place > *cast(const float*) (frame + pc.source)
+        : *cast(double*) place > *cast(const double*) (frame + pc.source);
+    *cast(ubyte*) place = result ? 1 : 0;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package const(Instruction)* opFloatGreaterOrEqual(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto place = frame + pc.destination;
+    const result = pc.width == float.sizeof
+        ? *cast(float*) place >= *cast(const float*) (frame + pc.source)
+        : *cast(double*) place >= *cast(const double*) (frame + pc.source);
+    *cast(ubyte*) place = result ? 1 : 0;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
 
 // `-x` and `~x`: `destination` holds the one operand on entry and the
 // answer on exit; `source` is unused. Neither depends on the operand's
@@ -1003,6 +1168,24 @@ package const(Instruction)* opNegate(
     const a = loadUnsigned(place, pc.width);
     storeWidth(place, cast(long) (-a), pc.width);
     return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+}
+
+package const(Instruction)* opFloatNegate(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto place = frame + pc.destination;
+    if (pc.width == float.sizeof)
+        *cast(float*) place = -*cast(float*) place;
+    else
+        *cast(double*) place = -*cast(double*) place;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
 }
 
 package const(Instruction)* opComplement(
@@ -1092,6 +1275,96 @@ package const(Instruction)* opCastWidenUnsigned(
     const value = loadUnsigned(place, pc.source);
     storeWidth(place, cast(long) value, pc.width);
     return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+}
+
+package const(Instruction)* opIntegralToFloatSigned(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    const value = loadSigned(frame + pc.source, pc.sourceWidth);
+    if (pc.width == float.sizeof)
+        *cast(float*) (frame + pc.destination) = cast(float) value;
+    else
+        *cast(double*) (frame + pc.destination) = cast(double) value;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package const(Instruction)* opIntegralToFloatUnsigned(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    const value = loadUnsigned(frame + pc.source, pc.sourceWidth);
+    if (pc.width == float.sizeof)
+        *cast(float*) (frame + pc.destination) = cast(float) value;
+    else
+        *cast(double*) (frame + pc.destination) = cast(double) value;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package const(Instruction)* opFloatToIntegralSigned(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    const value = pc.sourceWidth == float.sizeof
+        ? cast(double) *cast(float*) (frame + pc.source)
+        : *cast(double*) (frame + pc.source);
+    storeWidth(frame + pc.destination, cast(long) value, pc.width);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package const(Instruction)* opFloatToIntegralUnsigned(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    const value = pc.sourceWidth == float.sizeof
+        ? cast(double) *cast(float*) (frame + pc.source)
+        : *cast(double*) (frame + pc.source);
+    storeWidth(frame + pc.destination, cast(long) cast(ulong) value, pc.width);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package const(Instruction)* opFloatWidthCast(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    const value = pc.sourceWidth == float.sizeof
+        ? cast(double) *cast(float*) (frame + pc.source)
+        : *cast(double*) (frame + pc.source);
+    if (pc.width == float.sizeof)
+        *cast(float*) (frame + pc.destination) = cast(float) value;
+    else
+        *cast(double*) (frame + pc.destination) = value;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
 }
 
 
