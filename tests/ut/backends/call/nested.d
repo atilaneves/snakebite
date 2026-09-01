@@ -177,28 +177,33 @@ static foreach (backend; Matrix!(
 // Taking `captureIt`'s address makes dmd move `x` to a heap-allocated
 // closure. Returning the delegate proves that the captured storage remains
 // available after the function that created it has returned.
-@("nested.staticChain.escapingCaptureOutlivesCreator.Interpreter")
-@Tags("Interpreter")
-unittest {
-    67.shouldBeRetOf!(
-        Interpreter,
-        q{
-        int delegate() makeCounter() {
-            int count = 5;
-            int next() {
-                return ++count;
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("nested.staticChain.escapingCaptureOutlivesCreator." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        67.shouldBeRetOf!(
+            backend,
+            q{
+            int delegate() makeCounter() {
+                int count = 5;
+                int next() {
+                    return ++count;
+                }
+
+                return &next;
             }
 
-            return &next;
-        }
-
-        int main() {
-            auto counter = makeCounter();
-            int first = counter();
-            int second = counter();
-            return first * 10 + second;
-        }
-        },
-        "main",
-    );
+            int main() {
+                auto counter = makeCounter();
+                int first = counter();
+                int second = counter();
+                return first * 10 + second;
+            }
+            },
+            "main",
+        );
+    }
 }

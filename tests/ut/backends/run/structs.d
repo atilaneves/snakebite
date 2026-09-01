@@ -49,23 +49,48 @@ static foreach (backend; Matrix!(
 // storage. An immutable field is initialized with a construct expression,
 // so this also checks that constructor initialization reaches the object
 // field rather than being rejected as an assignment.
-@("struct.new.constructorInitializesImmutableField.Interpreter")
-@Tags("Interpreter")
-unittest {
-    42.shouldBeRetOf!(Interpreter, q{
-        struct Value {
-            immutable int value;
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("struct.new.constructorInitializesImmutableField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            struct Value {
+                immutable int value;
 
-            this(int value) {
-                this.value = value;
+                this(int value) {
+                    this.value = value;
+                }
             }
-        }
 
-        int main() {
-            auto value = new Value(42);
-            return value.value;
-        }
-    }, "main");
+            int main() {
+                auto value = new Value(42);
+                return value.value;
+            }
+        }, "main");
+    }
+}
+
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("struct.new.constructorBindsRefParameter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        43.shouldBeRetOf!(backend, q{
+            struct Value {
+                int value;
+
+                this(ref int source) {
+                    ++source;
+                    value = source;
+                }
+            }
+
+            int main() {
+                int source = 42;
+                auto value = new Value(source);
+                return value.value;
+            }
+        }, "main");
+    }
 }
 
 // The members of an anonymous union occupy the same storage, so writing
@@ -158,6 +183,7 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
 // A struct literal writes each field at its own native offset, and a
 // plain field assignment overwrites only that field's own bytes, leaving
 // its siblings untouched.

@@ -90,7 +90,7 @@ import dmd.visitor: Visitor;
 // `Interpreter`-side cache to hold.
 extern(C++) private final class Evaluator: Visitor {
     import snakebite.backends.backend: Program;
-    import snakebite.backends.layout: FrameLayout;
+    import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
@@ -105,6 +105,7 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.astenums:
         Tarray, Tbool, Tclass, Tdelegate, Tfloat32, Tfloat64, Tnoreturn,
         Tint64, Tpointer, Tsarray, Tuns32, Tuns8, Tvoid;
+    import dmd.arraytypes: Expressions;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
     import dmd.func: FuncDeclaration;
@@ -193,29 +194,6 @@ extern(C++) private final class Evaluator: Visitor {
     private CallSitePlan[] _callPlans;
     private CallSitePlan _lastCallSitePlan;
 
-    // The native closure starts with its enclosing context pointer. The
-    // captured variables follow it at the offsets dmd uses for a closure
-    // object. Their slots are separate from the activation frame because a
-    // closure can outlive that frame.
-    private struct ClosureLayout {
-        private struct Slot {
-            size_t offset;
-            TypeFacts facts;
-            bool isRef;
-        }
-
-        private size_t size;
-        private uint alignment = 1;
-        private Slot[VarDeclaration] _slots;
-
-        private bool hasSlot(VarDeclaration variable) const {
-            return (variable in _slots) !is null;
-        }
-
-        private Slot slotOf(VarDeclaration variable) const {
-            return *(variable in _slots);
-        }
-    }
     // Every dmd `Type` this evaluator has ever asked dmd about, keyed by
     // the `Type` node itself: `Type.size`/`alignsize`/`isIntegral`/
     // `isUnsigned` are pure functions of the type, re-entering dmd's
@@ -433,32 +411,7 @@ extern(C++) private final class Evaluator: Visitor {
         if (auto cached = function_ in _closures)
             return cached;
 
-        import dmd.astenums: STC;
-        import snakebite.nativelayout:
-            alignUp, delegateValueSize;
-
-        ClosureLayout closure;
-        closure.size = size_t.sizeof;
-        closure.alignment = size_t.sizeof;
-
-        foreach (variable; function_.closureVars) {
-            const isRef = (variable.storage_class
-                & (STC.ref_ | STC.out_)) != 0;
-            const facts = variable.storage_class & STC.lazy_
-                ? TypeFacts(
-                    delegateValueSize, size_t.sizeof, false, false)
-                : isRef
-                    ? TypeFacts(size_t.sizeof, size_t.sizeof, false, false)
-                    : factsOf(variable.type);
-            const offset = alignUp(closure.size, facts.alignment);
-            closure._slots[variable] = ClosureLayout.Slot(
-                offset, facts, isRef);
-            closure.size = offset + facts.size;
-            if (facts.alignment > closure.alignment)
-                closure.alignment = facts.alignment;
-        }
-
-        _closures[function_] = closure;
+        _closures[function_] = ClosureLayout.of(function_);
         return function_ in _closures;
     }
 
@@ -469,8 +422,6 @@ extern(C++) private final class Evaluator: Visitor {
     ) {
         import core.stdc.string: memcpy, memset;
         import snakebite.nativelayout: storeIntegral;
-        import dmd.astenums: STC;
-
         const closureLayout = closureLayoutOf(function_);
         const padding = closureLayout.alignment - 1;
         auto allocation = new ubyte[](closureLayout.size + padding);
@@ -3501,24 +3452,15 @@ extern(C++) private final class Evaluator: Visitor {
             size_t.sizeof,
         );
 
-        auto parameters = typeFunctionOf(constructor).parameterList;
         auto arguments = expression.arguments;
-        const argumentCount = arguments is null ? 0 : arguments.length;
-        if (argumentCount != parameters.length)
-            throw new SnakebiteException(
-                text("interpreter: `", constructor.toString, "` expects ",
-                    parameters.length, " argument(s), got ", argumentCount),
-            );
 
-        foreach (i; 0 .. parameters.length) {
-            auto parameter = layout.parameters[i];
-            evaluate(
-                (*arguments)[i],
-                parameters[i].type,
-                parameter.facts,
-                frame.base + parameter.offset,
-            );
-        }
+        bindArguments(
+            constructor,
+            arguments,
+            expression.loc,
+            frame.base,
+            layout,
+        );
 
         executeCall(constructor, null, frame.base, layout, null, true);
     }
@@ -3544,26 +3486,72 @@ extern(C++) private final class Evaluator: Visitor {
             size_t.sizeof,
         );
 
-        auto parameters = typeFunctionOf(constructor).parameterList;
         auto arguments = expression.arguments;
-        const argumentCount = arguments is null ? 0 : arguments.length;
-        if (argumentCount != parameters.length)
-            throw new SnakebiteException(
-                text("interpreter: `", constructor.toString, "` expects ",
-                    parameters.length, " argument(s), got ", argumentCount),
-            );
 
-        foreach (i; 0 .. parameters.length) {
-            auto parameter = layout.parameters[i];
-            evaluate(
-                (*arguments)[i],
-                parameters[i].type,
-                parameter.facts,
-                frame.base + parameter.offset,
-            );
-        }
+        bindArguments(
+            constructor,
+            arguments,
+            expression.loc,
+            frame.base,
+            layout,
+        );
 
         executeCall(constructor, null, frame.base, layout, null, true);
+    }
+
+    private void bindArguments(
+        FuncDeclaration function_,
+        Expressions* arguments,
+        in Loc loc,
+        ubyte* frameBase,
+        const(FrameLayout)* layout,
+    ) {
+        import dmd.astenums: STC;
+        import std.conv: text;
+
+        auto parameterList = typeFunctionOf(function_).parameterList;
+        const argumentCount = arguments is null ? 0 : arguments.length;
+        if (argumentCount != parameterList.length)
+            throw new SnakebiteException(
+                text("interpreter: `", function_.toString, "` expects ",
+                    parameterList.length, " argument(s), got ", argumentCount),
+            );
+
+        foreach (i; 0 .. parameterList.length) {
+            auto argument = (*arguments)[i];
+            auto parameter = layout.parameters[i];
+            auto slot = frameBase + parameter.offset;
+            void* address;
+
+            void* argumentAddress() {
+                address = addressOf(argument);
+                return address;
+            }
+
+            void evaluateArgument(void* place) {
+                evaluate(
+                    argument,
+                    parameterList[i].storageClass & STC.lazy_
+                        ? argument.type : parameterList[i].type,
+                    parameter.facts,
+                    place,
+                );
+            }
+
+            parameter.call.store(
+                slot,
+                &argumentAddress,
+                &evaluateArgument,
+            );
+
+            if (parameterList[i].storageClass & STC.out_)
+                initializeDefault(
+                    parameterList[i].type,
+                    factsOf(parameterList[i].type),
+                    cast(ubyte*) address,
+                    loc,
+                );
+        }
     }
 
     private void initializeDefault(
@@ -3992,37 +3980,16 @@ extern(C++) private final class Evaluator: Visitor {
         }
 
         // Every argument is evaluated, even one the callee never reads,
-        // since evaluating an argument can have effects. The loop already
-        // has the positional index `i`, so it indexes `layout.parameters`
-        // directly instead of hashing a declaration through `offsetOf` and
-        // a type through `factsOf` - a parameter's type never changes
-        // between calls, so `layout.parameters[i].facts` is already its
-        // facts.
-        foreach (i; 0 .. parameterList.length) {
-            auto argument = (*arguments)[i];
-            auto parameter = layout.parameters[i];
-            auto slot = frame.base + parameter.offset;
-
-            if (parameter.isRef) {
-                auto address = cast(ubyte*) addressOf(argument);
-                storeIntegral(
-                    slot, cast(size_t) address, size_t.sizeof);
-                if (parameterList[i].storageClass & STC.out_)
-                    initializeDefault(
-                        parameterList[i].type,
-                        factsOf(parameterList[i].type),
-                        address,
-                        expression.loc,
-                    );
-            } else
-                evaluate(
-                    argument,
-                    parameterList[i].storageClass & STC.lazy_
-                        ? argument.type : parameterList[i].type,
-                    parameter.facts,
-                    slot,
-                );
-        }
+        // since evaluating an argument can have effects. The shared binder
+        // also preserves the native representation of `ref`, `out`, and
+        // `lazy` parameters for constructor calls.
+        bindArguments(
+            function_,
+            arguments,
+            expression.loc,
+            frame.base,
+            layout,
+        );
 
         return frame;
     }

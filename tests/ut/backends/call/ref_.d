@@ -32,40 +32,60 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // An `out` parameter starts as default-initialized caller storage. The
 // callee then writes that same storage, rather than a temporary parameter
 // slot, so the caller observes the result after the call.
-@("out.param.initializesCallerStorage.Interpreter")
-@Tags("Interpreter")
-unittest {
-    42.shouldBeRetOf!(Interpreter, q{
-        void set(out int value) {
-            value = 42;
-        }
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("out.param.initializesCallerStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            void set(out int value) {
+                value = 42;
+            }
 
-        int main() {
-            int value;
-            set(value);
-            return value;
-        }
-    }, "main");
+            int main() {
+                int value;
+                set(value);
+                return value;
+            }
+        }, "main");
+    }
 }
 
 // A `lazy` parameter is a delegate in the native ABI. Its expression runs
 // in the caller when the callee reads the parameter, not when the call is
 // bound.
-@("lazy.param.evaluatesAtRead.Interpreter")
-@Tags("Interpreter")
-unittest {
-    22.shouldBeRetOf!(Interpreter, q{
-        int evaluations;
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("lazy.param.evaluatesAtRead." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        22.shouldBeRetOf!(backend, q{
+            int read(lazy int value, ref int evaluations) {
+                ++evaluations;
+                return value;
+            }
 
-        int read(lazy int value) {
-            ++evaluations;
-            return value;
-        }
+            int main() {
+                int evaluations;
+                return read(++evaluations, evaluations) * 10 + evaluations;
+            }
+        }, "main");
+    }
+}
 
-        int main() {
-            return read(++evaluations) * 10 + evaluations;
-        }
-    }, "main");
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("lazy.param.evaluatesForEachRead." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        122.shouldBeRetOf!(backend, q{
+            int main() {
+                int evaluations;
+                int readTwice(lazy int value) {
+                    return value * 10 + value;
+                }
+
+                return readTwice(++evaluations) * 10 + evaluations;
+            }
+        }, "main");
+    }
 }
 
 // A `ref` parameter forwarded into a nested call: `bump`'s own `x` is

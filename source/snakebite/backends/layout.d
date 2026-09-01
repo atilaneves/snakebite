@@ -225,6 +225,61 @@ package struct FrameLayout {
     }
 }
 
+// One guest closure's native context layout: the enclosing context pointer
+// followed by the captured variables dmd stores in the closure object.
+// Shared between backends because the context has the same native shape
+// regardless of whether a tree walker or bytecode VM consumes it.
+package struct ClosureLayout {
+    import dmd.declaration: VarDeclaration;
+    import dmd.func: FuncDeclaration;
+    import snakebite.nativelayout:
+        alignUp, delegateValueSize, TypeFacts;
+
+    package struct Slot {
+        package size_t offset;
+        package TypeFacts facts;
+        package bool isRef;
+    }
+
+    package size_t size;
+    package uint alignment = 1;
+    private Slot[VarDeclaration] _slots;
+
+    package static ClosureLayout of(FuncDeclaration function_) {
+        import dmd.astenums: STC;
+
+        ClosureLayout closure;
+        closure.size = size_t.sizeof;
+        closure.alignment = size_t.sizeof;
+
+        foreach (variable; function_.closureVars) {
+            const isRef = (variable.storage_class
+                & (STC.ref_ | STC.out_)) != 0;
+            const facts = variable.storage_class & STC.lazy_
+                ? TypeFacts(
+                    delegateValueSize, size_t.sizeof, false, false)
+                : isRef
+                    ? TypeFacts(size_t.sizeof, size_t.sizeof, false, false)
+                    : TypeFacts.of(variable.type);
+            const offset = alignUp(closure.size, facts.alignment);
+            closure._slots[variable] = Slot(offset, facts, isRef);
+            closure.size = offset + facts.size;
+            if (facts.alignment > closure.alignment)
+                closure.alignment = facts.alignment;
+        }
+
+        return closure;
+    }
+
+    package bool hasSlot(VarDeclaration variable) const {
+        return (variable in _slots) !is null;
+    }
+
+    package Slot slotOf(VarDeclaration variable) const {
+        return *(variable in _slots);
+    }
+}
+
 import dmd.visitor: SemanticTimeTransitiveVisitor;
 
 // Decides which locals get a frame slot by walking the statement kinds a

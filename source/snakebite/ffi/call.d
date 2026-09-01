@@ -49,7 +49,7 @@ public struct CallAdapter {
             import dmd.astenums: STC;
 
             return Argument(
-                (parameter.storageClass & STC.ref_) != 0,
+                (parameter.storageClass & (STC.ref_ | STC.out_)) != 0,
             );
         }
 
