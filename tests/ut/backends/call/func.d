@@ -121,68 +121,6 @@ static foreach (backend; Matrix!(
     }
 }
 
-// A class method call is virtual, but dmd resolves the `CallExp` to the
-// statically known declaration and leaves dispatch to the backend. The
-// interpreter must use the object's class vtable before executing it.
-@("method.virtualClass.dispatches.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
-
-    auto module_ = parseSnippet(q{
-        class Talker {
-            int answer() {
-                return 42;
-            }
-        }
-
-        int viaClass() {
-            auto talker = new Talker;
-            return talker.answer();
-        }
-    });
-    auto function_ = findFunction(module_, "viaClass");
-
-    int result;
-    interpreter(module_).call(function_, &result, []);
-    result.should == 42;
-}
-
-// A class method call is virtual even when the receiver is stored in a base
-// class reference. Dispatch must select the derived implementation rather
-// than run dmd's statically resolved base declaration.
-@("method.virtualClassThroughBase.dispatchesOverride.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
-
-    auto module_ = parseSnippet(q{
-        class Base {
-            int answer() {
-                return 1;
-            }
-        }
-
-        class Derived : Base {
-            override int answer() {
-                return 2;
-            }
-        }
-
-        int viaBase() {
-            Base value = new Derived;
-            return value.answer();
-        }
-    });
-    auto function_ = findFunction(module_, "viaBase");
-
-    int result;
-    interpreter(module_).call(function_, &result, []);
-    result.should == 2;
-}
-
 static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("ret.double." ~ backend.stringof)
     @Tags(backend.stringof)

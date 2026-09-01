@@ -3025,6 +3025,9 @@ extern(C++) private final class Evaluator: Visitor {
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
     }
 
+    // Parsed guest classes have no emitted native ClassInfo. Build the
+    // native TypeInfo_Class metadata druntime needs for allocation and
+    // classinfo; guest virtual calls still use dmd declarations below.
     private TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
         if (declaration is ClassDeclaration.object)
             return typeid(Object);

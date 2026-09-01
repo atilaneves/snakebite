@@ -47,6 +47,10 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOf!(backend, q{
             class Base {
                 int base = 7;
+
+                int describe() {
+                    return base;
+                }
             }
 
             class Derived : Base {
@@ -55,12 +59,20 @@ static foreach (backend; Matrix!(
                 this(int value_) {
                     value = value_;
                 }
+
+                override int describe() {
+                    return base + value;
+                }
             }
 
             void main() {
                 auto derived = new Derived(42);
                 assert(derived.base == 7);
                 assert(derived.value == 42);
+
+                Base base = derived;
+                assert(derived.describe == 49);
+                assert(base.describe == 49);
             }
         });
     }
