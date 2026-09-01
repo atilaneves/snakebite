@@ -29,14 +29,6 @@ package struct Arg {
 // One call site: which compiled function it calls, the arguments to hand
 // it, and the width of the value it hands back (`0` for a `void` callee,
 // which `opCall` then never copies out of the scratch return buffer).
-//
-// `isAllocation` picks out the one other native shape `opCall` knows besides
-// a guest-declared `extern(C)` function: a druntime allocator call the
-// compiler itself synthesises for `new T[](n)`/an array literal, never one a
-// guest source declaration resolves to. `allocationBits` is the `GC.BlkAttr`
-// value that call's second argument passes, fixed by the compiler once per
-// call site from the element type it already knows, not read from any
-// frame.
 package struct CallSite {
     package const(Function)* callee;
     package Arg[] args;
