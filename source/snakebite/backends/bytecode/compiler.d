@@ -2210,12 +2210,10 @@ extern(C++) private final class FunctionCompiler: Visitor {
             return;
         }
 
-        // `float`/`double` compare unequal to themselves when they are NaN,
-        // so this reaches for the host's own float comparison
-        // (`opFloatEqual`/`opFloatNotEqual`) rather than the bit-pattern
-        // test every integral comparison uses - only `==`/`!=` are
-        // supported for now, since nothing in scope needs a floating
-        // ordering.
+        // Host floating-point operators preserve D's NaN and signed-zero
+        // semantics for equality and ordering. Integral equality instead
+        // compares the stored bits, which would make a NaN equal itself and
+        // positive and negative zero unequal.
         if (isFloatingType(expression.e1.type)) {
             Instruction.Handler floatHandler;
             with (EXP) switch (expression.op) {
