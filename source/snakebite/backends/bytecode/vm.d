@@ -53,6 +53,7 @@ package struct Instruction {
         void* returnPlace,
         scope const long[] constants,
         scope const CallSite[] callSites,
+        scope const AssertSite[] assertSites,
         FrameStack* frames,
     );
 
@@ -93,10 +94,22 @@ package struct Instruction {
 }
 
 
+// One `assert` site: the message and source location `opAssert` builds a
+// real `AssertError` from when its condition is false, resolved to plain
+// strings and a line number at compile time so this VM never has to reach
+// into dmd's own `Loc` to answer them.
+package struct AssertSite {
+    package string message;
+    package string file;
+    package size_t line;
+}
+
+
 package struct Function {
     package Instruction[] instructions;
     package long[] constants;
     package CallSite[] callSites;
+    package AssertSite[] assertSites;
     package size_t frameSize;
     package uint frameAlignment;
 }
@@ -128,7 +141,7 @@ package struct Vm {
         auto pc = function_.instructions.ptr;
         dispatch(
             pc, frame.base, returnPlace, function_.constants,
-            function_.callSites, &_frames,
+            function_.callSites, function_.assertSites, &_frames,
         );
     }
 }
@@ -197,6 +210,7 @@ private const(Instruction)* advance(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     const next = pc + 1;
@@ -211,11 +225,12 @@ private void dispatch(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     while (pc !is null)
         pc = pc.handler(
-            pc, frame, returnPlace, constants, callSites, frames);
+            pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 
@@ -234,6 +249,7 @@ package const(Instruction)* opConstant(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     storeWidth(frame + pc.destination, constants[pc.source], pc.width);
@@ -253,6 +269,7 @@ package const(Instruction)* opCopy(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     import core.stdc.string: memcpy;
@@ -260,6 +277,34 @@ package const(Instruction)* opCopy(
     memcpy(frame + pc.destination, frame + pc.source, pc.width);
     const next = pc + 1;
     return next;
+}
+
+
+// `assert(cond)`: when the `pc.width` bytes at `frame + pc.destination` are
+// nonzero, execution just continues. Otherwise this throws a real
+// `AssertError` - the same `Throwable` compiled D throws for a failing
+// assertion - built from `assertSites[pc.source]`, so a guest catch or an
+// unhandled failure both see the genuine object, never a second exception
+// type standing in for it. Each `opCall` this throw unwinds through pops
+// its own callee `Frame` via that struct's destructor (see
+// `snakebite.framestack`), so no explicit cleanup is needed here.
+package const(Instruction)* opAssert(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    if (loadUnsigned(frame + pc.destination, pc.width) != 0)
+        return advance(pc, frame, returnPlace, constants, callSites,
+            assertSites, frames);
+
+    import core.exception: AssertError;
+
+    const site = assertSites[pc.source];
+    throw new AssertError(site.message, site.file, site.line);
 }
 
 
@@ -275,6 +320,7 @@ package const(Instruction)* opCall(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     import core.stdc.string: memcpy;
@@ -313,7 +359,7 @@ package const(Instruction)* opCall(
     auto calleePc = callee.instructions.ptr;
     dispatch(
         calleePc, calleeFrame.base, returnDestination, callee.constants,
-        callee.callSites, frames,
+        callee.callSites, callee.assertSites, frames,
     );
 
     if (pc.destination != discardResult && site.returnWidth != 0)
@@ -334,6 +380,7 @@ package const(Instruction)* opReturn(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) @nogc nothrow {
     import core.stdc.string: memcpy;
@@ -350,6 +397,7 @@ package const(Instruction)* opReturnVoid(
     void*,
     scope const long[],
     scope const CallSite[],
+    scope const AssertSite[],
     FrameStack*,
 ) @nogc nothrow {
     return null;
@@ -365,6 +413,7 @@ package const(Instruction)* opJump(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     const target = cast(const(Instruction)*) pc.destination;
@@ -383,6 +432,7 @@ package const(Instruction)* opBranchFalse(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     if (loadUnsigned(frame + pc.destination, pc.width) == 0) {
@@ -390,7 +440,7 @@ package const(Instruction)* opBranchFalse(
         return target;
     }
 
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 
@@ -402,6 +452,7 @@ package const(Instruction)* opBranchTrue(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     if (loadUnsigned(frame + pc.destination, pc.width) != 0) {
@@ -409,7 +460,7 @@ package const(Instruction)* opBranchTrue(
         return target;
     }
 
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 
@@ -426,13 +477,14 @@ package const(Instruction)* opAdd(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a + b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opSubtract(
@@ -441,13 +493,14 @@ package const(Instruction)* opSubtract(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a - b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opMultiply(
@@ -456,13 +509,14 @@ package const(Instruction)* opMultiply(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a * b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opBitAnd(
@@ -471,13 +525,14 @@ package const(Instruction)* opBitAnd(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a & b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opBitOr(
@@ -486,13 +541,14 @@ package const(Instruction)* opBitOr(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a | b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opBitXor(
@@ -501,13 +557,14 @@ package const(Instruction)* opBitXor(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a ^ b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opShiftLeft(
@@ -516,13 +573,14 @@ package const(Instruction)* opShiftLeft(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a << b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 // `>>` on an unsigned left operand, and `>>>` whatever the left operand's
@@ -533,13 +591,14 @@ package const(Instruction)* opShiftRightLogical(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a >> b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 // `>>` on a signed left operand: the vacated high bits copy the sign bit
@@ -554,13 +613,14 @@ package const(Instruction)* opShiftRightArithmetic(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadSigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, a >> b, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 // Division and modulo, unlike every other binary opcode above, answer
@@ -576,13 +636,14 @@ package const(Instruction)* opDivideSigned(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadSigned(place, pc.width);
     const b = loadSigned(frame + pc.source, pc.width);
     storeWidth(place, a / b, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opModuloSigned(
@@ -591,13 +652,14 @@ package const(Instruction)* opModuloSigned(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadSigned(place, pc.width);
     const b = loadSigned(frame + pc.source, pc.width);
     storeWidth(place, a % b, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opDivideUnsigned(
@@ -606,13 +668,14 @@ package const(Instruction)* opDivideUnsigned(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a / b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opModuloUnsigned(
@@ -621,13 +684,14 @@ package const(Instruction)* opModuloUnsigned(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     storeWidth(place, cast(long) (a % b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 
@@ -644,13 +708,14 @@ package const(Instruction)* opLessThanSigned(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadSigned(place, pc.width);
     const b = loadSigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a < b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opLessThanUnsigned(
@@ -659,13 +724,14 @@ package const(Instruction)* opLessThanUnsigned(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a < b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opLessOrEqualSigned(
@@ -674,13 +740,14 @@ package const(Instruction)* opLessOrEqualSigned(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadSigned(place, pc.width);
     const b = loadSigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a <= b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opLessOrEqualUnsigned(
@@ -689,13 +756,14 @@ package const(Instruction)* opLessOrEqualUnsigned(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a <= b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opGreaterThanSigned(
@@ -704,13 +772,14 @@ package const(Instruction)* opGreaterThanSigned(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadSigned(place, pc.width);
     const b = loadSigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a > b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opGreaterThanUnsigned(
@@ -719,13 +788,14 @@ package const(Instruction)* opGreaterThanUnsigned(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a > b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opGreaterOrEqualSigned(
@@ -734,13 +804,14 @@ package const(Instruction)* opGreaterOrEqualSigned(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadSigned(place, pc.width);
     const b = loadSigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a >= b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opGreaterOrEqualUnsigned(
@@ -749,13 +820,14 @@ package const(Instruction)* opGreaterOrEqualUnsigned(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a >= b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 // `==`/`!=`: both operands share one type by the time the compiler emits
@@ -767,13 +839,14 @@ package const(Instruction)* opEqual(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a == b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opNotEqual(
@@ -782,13 +855,14 @@ package const(Instruction)* opNotEqual(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     const b = loadUnsigned(frame + pc.source, pc.width);
     *cast(ubyte*) place = (a != b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 
@@ -801,12 +875,13 @@ package const(Instruction)* opNegate(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     storeWidth(place, cast(long) (-a), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 package const(Instruction)* opComplement(
@@ -815,12 +890,13 @@ package const(Instruction)* opComplement(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     storeWidth(place, cast(long) (~a), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 // `!x`: true when `x` is zero. `destination` holds the operand, at
@@ -831,12 +907,13 @@ package const(Instruction)* opLogicalNot(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     *cast(ubyte*) place = (a == 0) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 // `cast(bool) x`: true when `x` is nonzero - dmd classifies `bool` as an
@@ -848,12 +925,13 @@ package const(Instruction)* opCastToBool(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const a = loadUnsigned(place, pc.width);
     *cast(ubyte*) place = (a != 0) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 // Widens the `pc.source`-byte operand already at `destination` to fill
@@ -870,12 +948,13 @@ package const(Instruction)* opCastWidenSigned(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const value = loadSigned(place, pc.source);
     storeWidth(place, value, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
 // As `opCastWidenSigned`, filling the new high bits with zero instead.
@@ -885,10 +964,11 @@ package const(Instruction)* opCastWidenUnsigned(
     void* returnPlace,
     scope const long[] constants,
     scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
     const value = loadUnsigned(place, pc.source);
     storeWidth(place, cast(long) value, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, frames);
+    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }

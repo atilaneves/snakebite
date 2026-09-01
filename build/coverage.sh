@@ -9,7 +9,7 @@ cd "$(git -C "$(dirname -- "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 command -v kcov > /dev/null
 
 if [[ ! -f build.ninja ]]; then
-    dub run reggae --compiler="${DC:-ldc}" -- -b ninja
+    dub run "reggae@~>0.14.0" --compiler="${DC:-ldc}" -- -b ninja
 fi
 ninja bin/ut
 
