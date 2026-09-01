@@ -4,7 +4,7 @@ module snakebite.backends.bytecode.compiler;
 private:
 
 import dmd.visitor: Visitor;
-import object: TypeInfo, TypeInfo_Array;
+import object: TypeInfo, TypeInfo_Array, TypeInfo_Class;
 import snakebite.ffi: maxArguments, PlanCache;
 
 
@@ -213,6 +213,16 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             Tint32, Tint64, Tuns8, Tuns16, Tuns32, Tuns64, Twchar;
         import dmd.typesem: nextOf;
 
+        if (type.vtinfo !is null) {
+            auto address = _plans.resolve(type.vtinfo.ident.toString);
+            if (address !is null)
+                return cast(TypeInfo) address;
+        }
+
+        import dmd.astenums: Tclass;
+        if (type.ty == Tclass)
+            return cast(TypeInfo) cast() TypeInfo_Class.find(type.toString);
+
         if (type.ty == Tarray) {
             auto info = new TypeInfo_Array;
             info.value = runtimeTypeInfo(type.nextOf);
@@ -239,6 +249,27 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             case Tfloat64: return typeid(double);
             default: return null;
         }
+    }
+
+    private TypeInfo_Class runtimeClassInfo(
+        imported!"dmd.mtype".Type type,
+    ) {
+        import dmd.astenums: Tclass;
+        import std.conv: text;
+
+        if (type.ty != Tclass)
+            throw new SnakebiteException(text(
+                "bytecode compiler cannot compile a non-class catch type `",
+                type.toString, "`",
+            ));
+
+        auto info = cast(TypeInfo_Class) cast() runtimeTypeInfo(type);
+        if (info is null)
+            throw new SnakebiteException(text(
+                "bytecode compiler cannot resolve catch type `",
+                type.toString, "`",
+            ));
+        return info;
     }
 
     // `function_`'s compiled form, compiling it - and, transitively,
@@ -353,10 +384,11 @@ extern(C++) private final class FunctionCompiler: Visitor {
     import dmd.statement:
         CompoundStatement, ContinueStatement, ExpStatement, ForStatement,
         IfStatement, ImportStatement, ReturnStatement, ScopeStatement,
-        Statement, UnrolledLoopStatement, WhileStatement;
+        Statement, TryCatchStatement, UnrolledLoopStatement, WhileStatement;
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
-        Arg, AssertSite, CallSite, discardResult, Function, Instruction,
+        Arg, AssertSite, CallSite, discardResult, ExceptionHandler, Function,
+        Instruction,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
@@ -394,6 +426,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private long[] _constants;
     private CallSite[] _callSites;
     private AssertSite[] _assertSites;
+    private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
     // Set once nothing after the statement just compiled can run: a
@@ -416,6 +449,14 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private struct LoopContext {
         size_t continueTarget = size_t.max;
         size_t[] pendingContinueJumps;
+    }
+
+    private struct PendingExceptionHandler {
+        TypeInfo_Class type;
+        size_t bodyStart;
+        size_t bodyEnd;
+        size_t handler;
+        size_t catchOffset;
     }
     private LoopContext[] _loops;
     private size_t _destination;
@@ -462,10 +503,30 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
         resolveBranches();
 
+        ExceptionHandler[] exceptionHandlers;
+        foreach (pending; _exceptionHandlers) {
+            if (pending.handler >= _instructions.length)
+                throw rejection(_function, _function.loc,
+                    "an empty catch handler");
+
+            exceptionHandlers ~= ExceptionHandler(
+                pending.type,
+                instructionAt(pending.bodyStart),
+                instructionAt(pending.bodyEnd),
+                instructionAt(pending.handler),
+                pending.catchOffset,
+            );
+        }
+
         return Function(
             _instructions, _constants, _callSites, _assertSites,
+            exceptionHandlers,
             _tempSize, _tempAlignment,
         );
+    }
+
+    private const(Instruction)* instructionAt(in size_t index) const {
+        return cast(const(Instruction)*) (_instructions.ptr + index);
     }
 
     private void emit(
@@ -577,6 +638,40 @@ extern(C++) private final class FunctionCompiler: Visitor {
     }
 
     override void visit(ImportStatement statement) {
+    }
+
+    override void visit(TryCatchStatement statement) {
+        const bodyStart = _instructions.length;
+        compileStatement(statement._body);
+        const bodyFinished = _finished;
+        const bodyEnd = _instructions.length;
+
+        size_t skipHandlers = size_t.max;
+        if (!bodyFinished) {
+            skipHandlers = _instructions.length;
+            emit(&opJump, 0, 0, 0);
+        }
+
+        bool allHandlersFinished = true;
+        foreach (catch_; *statement.catches) {
+            const handler = _instructions.length;
+            const catchOffset = catch_.var is null
+                ? size_t.max
+                : _layout.offsetOf(catch_.var);
+            auto type = _bytecode.runtimeClassInfo(catch_.type);
+            _exceptionHandlers ~= PendingExceptionHandler(
+                type, bodyStart, bodyEnd, handler, catchOffset,
+            );
+
+            _finished = false;
+            compileStatement(catch_.handler);
+            allHandlersFinished &= _finished;
+        }
+
+        if (skipHandlers != size_t.max)
+            _instructions[skipHandlers].destination = _instructions.length;
+
+        _finished = bodyFinished && allHandlersFinished;
     }
 
     override void visit(ReturnStatement statement) {
@@ -1574,8 +1669,26 @@ extern(C++) private final class FunctionCompiler: Visitor {
         requireDestination(expression);
 
         auto field = expression.var.isVarDeclaration;
-        if (field is null || field.isBitFieldDeclaration !is null
-                || !isPlainOldStruct(expression.e1.type))
+        if (field is null || field.isBitFieldDeclaration !is null)
+            return visit(cast(Expression) expression);
+
+        import dmd.astenums: Tclass;
+        if (expression.e1.type.ty == Tclass) {
+            const facts = TypeFacts.of(field.type);
+            if (!isSupportedFacts(facts, field.type))
+                return visit(cast(Expression) expression);
+
+            const objectOffset = reserveTemp(pointerFacts);
+            evalInto(expression.e1, objectOffset, size_t.sizeof);
+            const fieldOffset = reserveTemp(pointerFacts);
+            emit(&opConstant, fieldOffset,
+                addConstant(cast(long) field.offset), size_t.sizeof);
+            emit(&opAdd, objectOffset, fieldOffset, size_t.sizeof);
+            emit(&opLoadIndirect, _destination, objectOffset, _width);
+            return;
+        }
+
+        if (!isPlainOldStruct(expression.e1.type))
             return visit(cast(Expression) expression);
 
         const baseFacts = TypeFacts.of(expression.e1.type);
