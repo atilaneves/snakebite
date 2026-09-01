@@ -414,6 +414,37 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `first`'s backing block is reachable only through a frame slot that
+// outlives every one of the many further allocations the loop below makes -
+// nothing else in the program still references it. A backend that does not
+// root array storage a VM activation is the only thing pointing at would
+// let the collector reclaim it once enough further allocation pressure
+// makes a collection run, and the loop would then read back garbage instead
+// of the values written before it started.
+static foreach (backend; Matrix!()) {
+    @("arrays.new.survivesFurtherAllocations." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        6.shouldBeRetOf!(
+            backend,
+            q{
+                int survivesFurtherAllocations() {
+                    int[] first = [1, 2, 3];
+
+                    int[] junk = null;
+                    for (int i = 0; i < 50_000; i = i + 1) {
+                        junk = new int[](64);
+                        junk[0] = i;
+                    }
+
+                    return first[0] + first[1] + first[2];
+                }
+            },
+            "survivesFurtherAllocations",
+        );
+    }
+}
+
 static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     @("arrays.new.nestedStruct.zeroInitialises." ~ backend.stringof)
     @Tags(backend.stringof)
