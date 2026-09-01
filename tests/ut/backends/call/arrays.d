@@ -322,6 +322,26 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!()) {
+    @("arrays.literal.returnedThroughGuestCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        6.shouldBeRetOf!(
+            backend,
+            q{
+                int[] make() {
+                    return [1, 2, 3];
+                }
+                int total() {
+                    int[] a = make();
+                    return a[0] + a[1] + a[2];
+                }
+            },
+            "total",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
     @("arrays.literal.single." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

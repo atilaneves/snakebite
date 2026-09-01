@@ -381,11 +381,11 @@ package const(Instruction)* opCall(
             arg.width,
         );
 
-    // Sized for the widest integral this VM lays out - a scratch return
-    // buffer that outlives the callee's own frame, unlike one carved from
-    // it, since `opCall` reads back out of it after `calleeFrame` has
-    // already popped.
-    ubyte[8] returnScratch = void;
+    // Sized for the widest value this VM ever returns - a dynamic array's
+    // two words - a scratch return buffer that outlives the callee's own
+    // frame, unlike one carved from it, since `opCall` reads back out of
+    // it after `calleeFrame` has already popped.
+    ubyte[16] returnScratch = void;
     void* returnDestination = site.returnWidth == 0 ? null : returnScratch.ptr;
 
     auto calleePc = callee.instructions.ptr;
