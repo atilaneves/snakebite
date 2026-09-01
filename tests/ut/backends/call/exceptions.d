@@ -30,92 +30,140 @@ static foreach (backend; Matrix!()) {
 }
 
 // An assertion failure the guest never catches keeps unwinding out of
-// `Backend.call` as the very `AssertError` the VM built for it - no second,
-// backend-owned exception type stands in for it, so a caller catching it
-// sees the genuine object.
-@("assert.fails.unhandled.propagatesTheRealAssertError.Bytecode")
-@Tags("Bytecode")
-unittest {
-    import core.exception: AssertError;
-    import snakebite.backends.backend: Program;
-    import snakebite.backends.bytecode: Bytecode;
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
+// `Backend.call` as the very `AssertError` the backend built for it - no
+// second, backend-owned exception type stands in for it, so a caller
+// catching it sees the genuine object.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a failing assertion into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "Interpreter.call wraps an unhandled guest throw in its private " ~
+        "GuestException instead of letting the original AssertError " ~
+        "escape - a real gap, not yet fixed"),
+)) {
+    @("assert.fails.unhandled.propagatesTheRealAssertError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import core.exception: AssertError;
 
-    auto module_ = parseSnippet(q{
-        bool fail() {
-            return false;
+        enum code = q{
+            bool fail() {
+                return false;
+            }
+
+            int result() {
+                assert(fail());
+                return 1;
+            }
+        };
+
+        AssertError caught;
+        int value;
+
+        static if (is(backend == Native)) {
+            mixin(code);
+            try
+                value = result();
+            catch (AssertError error)
+                caught = error;
+        } else {
+            import snakebite.backends.backend: Program;
+            import snakebite.frontend.compiler: parseSnippet;
+            import snakebite.frontend.dmd.functions: findFunction;
+
+            auto module_ = parseSnippet(code);
+            auto function_ = findFunction(module_, "result");
+            auto instance = new backend(Program([module_]));
+
+            try
+                instance.call(function_, &value, []);
+            catch (AssertError error)
+                caught = error;
         }
 
-        int result() {
-            assert(fail());
-            return 1;
-        }
-    });
-    auto function_ = findFunction(module_, "result");
-    auto bytecode = new Bytecode(Program([module_]));
-
-    AssertError caught;
-    int value;
-    try
-        bytecode.call(function_, &value, []);
-    catch (AssertError error)
-        caught = error;
-
-    (caught !is null).shouldBeTrue;
+        (caught !is null).shouldBeTrue;
+    }
 }
 
 // A failure several guest activations deep must not corrupt calls that
-// come after it. A later, unrelated call on the same `Bytecode` is the
-// observable proof: it must compute the right answer, as if the failing
-// call had never run.
-@("assert.fails.unhandled.unwindsNestedActivationsCleanly.Bytecode")
-@Tags("Bytecode")
-unittest {
-    import core.exception: AssertError;
-    import snakebite.backends.backend: Program;
-    import snakebite.backends.bytecode: Bytecode;
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
+// come after it. A later, unrelated call on the same backend instance is
+// the observable proof: it must compute the right answer, as if the
+// failing call had never run.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a failing assertion into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "Interpreter.call wraps an unhandled guest throw in its private " ~
+        "GuestException instead of letting the original AssertError " ~
+        "escape - a real gap, not yet fixed"),
+)) {
+    @("assert.fails.unhandled.unwindsNestedActivationsCleanly." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import core.exception: AssertError;
 
-    auto module_ = parseSnippet(q{
-        bool fail() {
-            return false;
+        enum code = q{
+            bool fail() {
+                return false;
+            }
+
+            int deepest() {
+                assert(fail());
+                return 0;
+            }
+
+            int middle() {
+                return deepest() + 1;
+            }
+
+            int outermost() {
+                return middle() + 1;
+            }
+
+            int tripleFour() {
+                return 4 * 3;
+            }
+        };
+
+        AssertError caught;
+        int discarded;
+
+        static if (is(backend == Native)) {
+            mixin(code);
+
+            try
+                discarded = outermost();
+            catch (AssertError error)
+                caught = error;
+
+            (caught !is null).shouldBeTrue;
+
+            const tripled = tripleFour();
+            tripled.shouldEqual(12);
+        } else {
+            import snakebite.backends.backend: Program;
+            import snakebite.frontend.compiler: parseSnippet;
+            import snakebite.frontend.dmd.functions: findFunction;
+
+            auto module_ = parseSnippet(code);
+            auto outermost = findFunction(module_, "outermost");
+            auto tripleFour = findFunction(module_, "tripleFour");
+            auto instance = new backend(Program([module_]));
+
+            try
+                instance.call(outermost, &discarded, []);
+            catch (AssertError error)
+                caught = error;
+
+            (caught !is null).shouldBeTrue;
+
+            int tripled;
+            instance.call(tripleFour, &tripled, []);
+            tripled.shouldEqual(12);
         }
-
-        int deepest() {
-            assert(fail());
-            return 0;
-        }
-
-        int middle() {
-            return deepest() + 1;
-        }
-
-        int outermost() {
-            return middle() + 1;
-        }
-
-        int tripleFour() {
-            return 4 * 3;
-        }
-    });
-    auto outermost = findFunction(module_, "outermost");
-    auto tripleFour = findFunction(module_, "tripleFour");
-    auto bytecode = new Bytecode(Program([module_]));
-
-    AssertError caught;
-    int discarded;
-    try
-        bytecode.call(outermost, &discarded, []);
-    catch (AssertError error)
-        caught = error;
-
-    (caught !is null).shouldBeTrue;
-
-    int tripled;
-    bytecode.call(tripleFour, &tripled, []);
-    tripled.shouldEqual(12);
+    }
 }
 
 static foreach (backend; Matrix!(
