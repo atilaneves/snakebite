@@ -275,8 +275,8 @@ package const(Instruction)* opCopy(
 // `AssertError` - the same `Throwable` compiled D throws for a failing
 // assertion - built from `assertSites[pc.source]`, so a guest catch or an
 // unhandled failure both see the genuine object, never a second exception
-// type standing in for it. Each `dispatch` frame this throw unwinds through
-// pops its own `Frame` via that struct's destructor (see
+// type standing in for it. Each `opCall` this throw unwinds through pops
+// its own callee `Frame` via that struct's destructor (see
 // `snakebite.framestack`), so no explicit cleanup is needed here.
 package const(Instruction)* opAssert(
     const(Instruction)* pc,

@@ -31,9 +31,8 @@ static foreach (backend; Matrix!()) {
 
 // An assertion failure the guest never catches keeps unwinding out of
 // `Backend.call` as the very `AssertError` the VM built for it - no second,
-// backend-owned exception type stands in for it, so a caller catching
-// `Throwable` (the way `snakebite.backends.backend.run` does for an
-// escaping guest failure) sees the genuine object.
+// backend-owned exception type stands in for it, so a caller catching it
+// sees the genuine object.
 @("assert.fails.unhandled.propagatesTheRealAssertError.Bytecode")
 @Tags("Bytecode")
 unittest {
@@ -66,13 +65,10 @@ unittest {
     (caught !is null).shouldBeTrue;
 }
 
-// A failure several guest activations deep must pop every one of them on
-// its way out - each nested call's own `opCall` handler pushed one onto the
-// VM's shared frame stack - so that stack is exactly as empty afterwards as
-// if the failing call had never run. A later, unrelated call on the same
-// `Bytecode`, reusing that same frame stack, is the observable proof: it
-// only computes the right answer if nothing the failed call reserved is
-// still sitting on it.
+// A failure several guest activations deep must not corrupt calls that
+// come after it. A later, unrelated call on the same `Bytecode` is the
+// observable proof: it must compute the right answer, as if the failing
+// call had never run.
 @("assert.fails.unhandled.unwindsNestedActivationsCleanly.Bytecode")
 @Tags("Bytecode")
 unittest {
