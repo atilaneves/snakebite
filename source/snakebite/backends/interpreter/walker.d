@@ -103,15 +103,16 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
     import dmd.func: FuncDeclaration;
+    import dmd.identifier: Identifier;
     import dmd.init: ExpInitializer;
     import dmd.location: Loc;
     import dmd.mtype: Type;
     import dmd.statement:
         BreakStatement, CaseStatement, Catch, CompoundStatement,
-        ContinueStatement, DefaultStatement, ExpStatement, ForStatement,
-        GotoCaseStatement, GotoDefaultStatement, IfStatement,
-        ImportStatement, ReturnStatement, ScopeStatement, Statement,
-        SwitchStatement, ThrowStatement, TryCatchStatement,
+        ContinueStatement, DefaultStatement, DoStatement, ExpStatement,
+        ForStatement, GotoCaseStatement, GotoDefaultStatement, IfStatement,
+        ImportStatement, LabelStatement, ReturnStatement, ScopeStatement,
+        Statement, SwitchStatement, ThrowStatement, TryCatchStatement,
         TryFinallyStatement, UnrolledLoopStatement;
     import dmd.tokens: EXP;
 
@@ -225,9 +226,19 @@ extern(C++) private final class Evaluator: Visitor {
     // Set until the nearest loop consumes it, so enclosing compounds stop
     // before they execute the statements that `continue` skips.
     private bool _continued;
+    // The label named by the pending continue, or null for an unlabelled
+    // continue. A labelled continue stays set while it crosses loops until
+    // the loop with that label consumes it.
+    private Identifier _continueLabel;
     // Set until the nearest loop or switch consumes it. A switch needs the
     // same transfer as a loop because `break` exits either construct.
     private bool _break;
+    // The label named by the pending break, or null for an unlabelled break.
+    // Labelled breaks stay set until their LabelStatement consumes them.
+    private Identifier _breakLabel;
+    // A label stays pending while its wrapped statement is entered. The
+    // wrapped loop takes it, even when dmd put a scope block between them.
+    private Identifier _pendingLoopLabel;
     // A `goto case` or `goto default` leaves the current statement sequence
     // before the switch resumes it at its resolved target.
     private Statement _gotoTarget;
@@ -511,6 +522,12 @@ extern(C++) private final class Evaluator: Visitor {
         _function = function_;
         _returned = false;
         _continued = false;
+        _continueLabel = null;
+        _break = false;
+        _breakLabel = null;
+        _pendingLoopLabel = null;
+        _gotoTarget = null;
+        _switchStart = null;
         _returnsRef = typeFunctionOf(function_).isRef;
         body_.accept(this);
     }
@@ -554,7 +571,10 @@ extern(C++) private final class Evaluator: Visitor {
         private FuncDeclaration _function;
         private bool _returned;
         private bool _continued;
+        private Identifier _continueLabel;
         private bool _break;
+        private Identifier _breakLabel;
+        private Identifier _pendingLoopLabel;
         private Statement _gotoTarget;
         private Statement _switchStart;
         private bool _returnsRef;
@@ -572,7 +592,10 @@ extern(C++) private final class Evaluator: Visitor {
             _function = evaluator._function;
             _returned = evaluator._returned;
             _continued = evaluator._continued;
+            _continueLabel = evaluator._continueLabel;
             _break = evaluator._break;
+            _breakLabel = evaluator._breakLabel;
+            _pendingLoopLabel = evaluator._pendingLoopLabel;
             _gotoTarget = evaluator._gotoTarget;
             _switchStart = evaluator._switchStart;
             _returnsRef = evaluator._returnsRef;
@@ -587,7 +610,10 @@ extern(C++) private final class Evaluator: Visitor {
             _evaluator._function = _function;
             _evaluator._returned = _returned;
             _evaluator._continued = _continued;
+            _evaluator._continueLabel = _continueLabel;
             _evaluator._break = _break;
+            _evaluator._breakLabel = _breakLabel;
+            _evaluator._pendingLoopLabel = _pendingLoopLabel;
             _evaluator._gotoTarget = _gotoTarget;
             _evaluator._switchStart = _switchStart;
             _evaluator._returnsRef = _returnsRef;
@@ -835,15 +861,26 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(BreakStatement statement) {
-        if (statement.ident !is null)
-            throw new SnakebiteException(
-                "interpreter cannot execute a labelled `break` statement",
-            );
-
         _break = true;
+        _breakLabel = statement.ident;
+    }
+
+    override void visit(LabelStatement statement) {
+        auto previousLabel = _pendingLoopLabel;
+        _pendingLoopLabel = statement.ident;
+        scope (exit) _pendingLoopLabel = previousLabel;
+
+        if (statement.statement !is null)
+            statement.statement.accept(this);
+
+        if (_breakLabel is statement.ident) {
+            _break = false;
+            _breakLabel = null;
+        }
     }
 
     override void visit(SwitchStatement statement) {
+        _pendingLoopLabel = null;
         const condition = asIntegral(statement.condition);
         Statement selected;
         if (statement.cases !is null)
@@ -875,7 +912,11 @@ extern(C++) private final class Evaluator: Visitor {
                 return;
 
             if (_break) {
-                _break = false;
+                if (_breakLabel is null) {
+                    _break = false;
+                    return;
+                }
+
                 return;
             }
 
@@ -989,16 +1030,30 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(ForStatement statement) {
+        auto loopLabel = _pendingLoopLabel;
+        _pendingLoopLabel = null;
+
         while (statement.condition is null || truthOf(statement.condition)) {
             if (statement._body !is null) {
                 statement._body.accept(this);
                 if (_returned || _gotoTarget !is null)
                     return;
                 if (_break) {
-                    _break = false;
+                    if (_breakLabel is null) {
+                        _break = false;
+                        return;
+                    }
+
                     return;
                 }
-                _continued = false;
+                if (_continued) {
+                    if (_continueLabel !is null
+                            && _continueLabel !is loopLabel)
+                        return;
+
+                    _continued = false;
+                    _continueLabel = null;
+                }
             }
 
             if (statement.increment !is null)
@@ -1006,13 +1061,43 @@ extern(C++) private final class Evaluator: Visitor {
         }
     }
 
-    override void visit(ContinueStatement statement) {
-        if (statement.ident !is null)
-            throw new SnakebiteException(
-                "interpreter cannot execute a labelled `continue` statement",
-            );
+    override void visit(DoStatement statement) {
+        auto loopLabel = _pendingLoopLabel;
+        _pendingLoopLabel = null;
 
+        while (true) {
+            if (statement._body !is null)
+                statement._body.accept(this);
+
+            if (_returned || _gotoTarget !is null)
+                return;
+
+            if (_break) {
+                if (_breakLabel is null) {
+                    _break = false;
+                    return;
+                }
+
+                return;
+            }
+
+            if (_continued) {
+                if (_continueLabel !is null
+                        && _continueLabel !is loopLabel)
+                    return;
+
+                _continued = false;
+                _continueLabel = null;
+            }
+
+            if (!truthOf(statement.condition))
+                return;
+        }
+    }
+
+    override void visit(ContinueStatement statement) {
         _continued = true;
+        _continueLabel = statement.ident;
     }
 
     private bool truthOf(Expression expression) {

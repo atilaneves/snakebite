@@ -76,6 +76,89 @@ unittest {
 }
 
 
+@("loop.doWhileBreaksAndContinues.Interpreter")
+@Tags("Interpreter")
+unittest {
+    8.shouldBeRetOf!(
+        Interpreter,
+        q{
+            int result() {
+                int i;
+                int sum;
+
+                do {
+                    ++i;
+
+                    if (i == 2)
+                        continue;
+
+                    if (i == 5)
+                        break;
+
+                    sum += i;
+                } while (i < 6);
+
+                return sum;
+            }
+        },
+        "result",
+    );
+}
+
+
+@("loop.labelledBreakExitsOuterLoop.Interpreter")
+@Tags("Interpreter")
+unittest {
+    2.shouldBeRetOf!(
+        Interpreter,
+        q{
+            int result() {
+                int count;
+
+            outer:
+                for (int i; i < 2; ++i) {
+                    for (int j; j < 2; ++j) {
+                        ++count;
+                        if (i == 0 && j == 1)
+                            break outer;
+                    }
+                }
+
+                return count;
+            }
+        },
+        "result",
+    );
+}
+
+
+@("loop.labelledContinueRepeatsOuterLoop.Interpreter")
+@Tags("Interpreter")
+unittest {
+    6.shouldBeRetOf!(
+        Interpreter,
+        q{
+            int result() {
+                int count;
+
+            outer:
+                for (int i; i < 3; ++i) {
+                    for (int j; j < 4; ++j) {
+                        if (j == i + 1)
+                            continue outer;
+
+                        ++count;
+                    }
+                }
+
+                return count;
+            }
+        },
+        "result",
+    );
+}
+
+
 @("unrolledLoop.staticForeachRunsInOrder.Interpreter")
 @Tags("Interpreter")
 unittest {
