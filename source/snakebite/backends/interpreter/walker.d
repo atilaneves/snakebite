@@ -108,14 +108,13 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.arraytypes: Expressions;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
+    import dmd.expressionsem: toInteger;
     import dmd.func: FuncDeclaration;
+    import dmd.funcsem: isVirtualMethod;
     import dmd.identifier: Identifier;
     import dmd.init: ExpInitializer;
     import dmd.location: Loc;
     import dmd.mtype: Type;
-    import dmd.typesem: nextOf;
-    import dmd.expressionsem: toInteger;
-    import dmd.funcsem: isVirtualMethod;
     import dmd.statement:
         BreakStatement, CaseStatement, Catch, CompoundStatement,
         ContinueStatement, DefaultStatement, DoStatement, ExpStatement,
@@ -124,6 +123,7 @@ extern(C++) private final class Evaluator: Visitor {
         Statement, SwitchStatement, ThrowStatement, TryCatchStatement,
         TryFinallyStatement, UnrolledLoopStatement;
     import dmd.tokens: EXP;
+    import dmd.typesem: nextOf;
 
     alias visit = Visitor.visit;
 
