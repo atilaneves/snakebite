@@ -43,3 +43,33 @@ static foreach (backend; Matrix!(
     }
 }
 
+// An enum declared inside a function body has no run-time effect of its
+// own: semantic analysis has already resolved its members to constants,
+// so casting bytes to the enum type and comparing against its members
+// exercises only that folding, not the declaration statement.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+)) {
+    @("localEnumDeclarationIsANoOp." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                enum Direction : ubyte {
+                    north = 0,
+                    south = 1,
+                }
+
+                ubyte[] raw = [0, 1];
+                size_t index;
+
+                Direction first = cast(Direction) raw[index++];
+                Direction second = cast(Direction) raw[index++];
+
+                assert(first == Direction.north);
+                assert(second == Direction.south);
+            }
+        });
+    }
+}
+
