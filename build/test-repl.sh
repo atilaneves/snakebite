@@ -2,8 +2,7 @@
 set -euo pipefail
 cd "$(git -C "$(dirname -- "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 
-dub run reggae --compiler=ldc -- -b ninja
-ninja bin/sb
+dub build -c sb
 
 # `test_interactive_error_label_is_red` needs the interpreter to render a
 # failed comparison assertion with its runtime values (`1 != 2`), the way
