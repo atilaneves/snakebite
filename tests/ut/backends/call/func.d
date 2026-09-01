@@ -42,7 +42,6 @@ static foreach (backend; Matrix!()) {
 
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run mutable struct methods through interpreter frames"),
 )) {
@@ -117,6 +116,35 @@ static foreach (backend; Matrix!(
                 }
             },
             "filled",
+        );
+    }
+
+    @("struct.thisAndRefField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(
+            backend,
+            q{
+                struct Counter {
+                    int value;
+
+                    void set(int next) {
+                        this.value = next;
+                    }
+
+                    ref int slot() {
+                        return this.value;
+                    }
+                }
+
+                int drive() {
+                    auto counter = Counter();
+                    counter.set(3);
+                    counter.slot() = 7;
+                    return counter.value;
+                }
+            },
+            "drive",
         );
     }
 }
