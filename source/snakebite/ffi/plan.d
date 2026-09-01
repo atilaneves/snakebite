@@ -370,8 +370,8 @@ private CallPlan prepare(
         // whatever `type.nextOf` says, so the return is a pointer and
         // never needs the hidden pointer a large returned *value* would.
         // The caller gets the address and reads the value through it -
-        // the same convention the interpreter's own `ref`-returning
-        // calls use (`resolvedRefAddress` in `interpreter/walker.d`).
+        // the call adapter in `ffi.call` applies this same convention to
+        // interpreted and native callees.
         const returnsRef = type.isRef != 0;
         plan._hiddenReturnPointer =
             !returnsRef && needsHiddenReturnPointer(type.nextOf);

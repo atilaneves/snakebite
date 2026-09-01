@@ -2,7 +2,7 @@ module ut.ffi.plan;
 
 
 import ut;
-import snakebite.ffi: PlanCache;
+import snakebite.ffi: PlanCache, invokeCall;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 
@@ -178,6 +178,30 @@ unittest {
     cache.of(function_).call(&address, []);
 
     (*address).should == 1234;
+}
+
+
+@("called.refResult")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(C) ref int snakebite_ut_cell();
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_cell");
+    assert(function_ !is null, "No `snakebite_ut_cell` in the program");
+
+    PlanCache cache;
+    void invoke(
+        scope void* returnPlace,
+        scope const(void*)[] arguments,
+    ) {
+        cache.of(function_).call(returnPlace, arguments);
+    }
+
+    int value;
+    auto result = invokeCall(function_, &value, [], &invoke);
+
+    value.should == 1234;
+    result.address.should == cast(void*) &_cell;
 }
 
 
