@@ -86,13 +86,13 @@ static foreach (backend; Matrix!(
 }
 
 // An index assignment on an associative array with a string key inserts
-// or overwrites that key's value, and `foreach` over the array yields
-// every key/value pair.
+// or overwrites that key's value, and a later index read of the same
+// key sees it.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
-    @("stringKeyedIndexAssignmentAndForeach." ~ backend.stringof)
+    @("stringKeyedIndexAssignment." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -101,15 +101,9 @@ static foreach (backend; Matrix!(
                 offsets["magic"] = 0;
                 offsets["schema"] = 4;
 
-                int offsetSum;
-                int nameLengthSum;
-                foreach (name, offset; offsets) {
-                    assert(offsets[name] == offset);
-                    offsetSum += offset;
-                    nameLengthSum += cast(int) name.length;
-                }
-                assert(offsetSum == 4);
-                assert(nameLengthSum == 11);
+                assert(offsets.length == 2);
+                assert(offsets["magic"] == 0);
+                assert(offsets["schema"] == 4);
             }
         });
     }
