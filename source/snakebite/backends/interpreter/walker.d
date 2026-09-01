@@ -473,9 +473,9 @@ extern(C++) private final class Evaluator: Visitor {
         // declaration. Constructors are the one class method this backend
         // executes directly: construction has selected that declaration,
         // and the object is not yet available through a virtual reference.
-        auto aggregate = function_.isThis();
+        auto aggregate = function_.isThis;
         if (aggregate !is null && aggregate.isStructDeclaration is null
-                && !classConstructor)
+                && callSite is null && !classConstructor)
             throw new SnakebiteException(
                 text("interpreter cannot call `", function_.toString,
                     "`: its class `this` is not bound"),
@@ -2624,6 +2624,16 @@ extern(C++) private final class Evaluator: Visitor {
                     "`: only `typeid` of a resolved type is supported"),
             );
 
+        auto classType = type.isTypeClass;
+        if (classType !is null && isRootOwnedClass(classType.sym)) {
+            storeIntegral(
+                _place,
+                cast(size_t) cast(void*) classRuntimeInfo(classType.sym),
+                _facts.size,
+            );
+            return;
+        }
+
         auto name = type.vtinfo.ident.toString;
         countForeignNameLookup;
         auto address = _plans.resolve(name);
@@ -2941,25 +2951,14 @@ extern(C++) private final class Evaluator: Visitor {
                 );
 
             auto declaration = cast(ClassDeclaration) classType.sym;
-            const alignment = declaration.alignsize == 0
-                ? 1 : declaration.alignsize;
-            const padding = alignment - 1;
-            if (declaration.structsize > size_t.max - padding)
+            auto runtime = classRuntimeInfo(declaration);
+            auto object = cast(ubyte*) cast(void*) runtime.create;
+            if (object is null)
                 throw new SnakebiteException(
                     text("interpreter cannot allocate `",
-                        expression.toString, "`: its alignment padding " ~
-                        "overflows `size_t`"),
+                        expression.toString, "`: druntime returned null"),
                 );
 
-            auto allocation = new ubyte[](declaration.structsize + padding);
-            _allocations ~= allocation;
-            const start = -cast(size_t) allocation.ptr
-                & (alignment - 1);
-            auto object = cast(ubyte*) allocation.ptr + start;
-
-            import core.stdc.string: memset;
-            memset(object, 0, declaration.structsize);
-            *cast(void**) object = classRuntimeInfo(declaration).vtbl.ptr;
             initializeClass(declaration, object, expression.loc);
             _classes[object] = declaration;
 
@@ -3026,6 +3025,9 @@ extern(C++) private final class Evaluator: Visitor {
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
     }
 
+    // Parsed guest classes have no emitted native ClassInfo. Build the
+    // native TypeInfo_Class metadata druntime needs for allocation and
+    // classinfo; guest virtual calls still use dmd declarations below.
     private TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
         if (declaration is ClassDeclaration.object)
             return typeid(Object);
@@ -3034,17 +3036,10 @@ extern(C++) private final class Evaluator: Visitor {
             if (runtime.declaration is declaration)
                 return runtime.typeInfo;
 
-        import std.conv: text;
-
-        if (hasGuestVirtualDispatch(declaration))
-            throw new SnakebiteException(
-                text("interpreter cannot construct `",
-                    declaration.toPrettyChars,
-                    "`: guest virtual/interface dispatch is not supported"),
-            );
-
         TypeInfo_Class baseInfo;
-        if (declaration.baseClass is null
+        if (declaration.isInterfaceDeclaration !is null)
+            baseInfo = null;
+        else if (declaration.baseClass is null
                 || declaration.baseClass is ClassDeclaration.object)
             baseInfo = typeid(Object);
         else if (declaration.baseClass is ClassDeclaration.throwable)
@@ -3063,13 +3058,34 @@ extern(C++) private final class Evaluator: Visitor {
             baseInfo = classRuntimeInfo(declaration.baseClass);
 
         auto typeInfo = new TypeInfo_Class;
+        typeInfo.m_flags = cast(TypeInfo_Class.ClassFlags) 0;
         typeInfo.name = cast(string) declaration.toPrettyChars.toDString;
         typeInfo.base = baseInfo;
-        typeInfo.vtbl = new void*[baseInfo.vtbl.length];
-        typeInfo.vtbl[] = baseInfo.vtbl[];
+        const baseVtableLength = baseInfo is null ? 0 : baseInfo.vtbl.length;
+        const vtableLength = declaration.vtbl.length > baseVtableLength
+            ? declaration.vtbl.length : baseVtableLength;
+        typeInfo.vtbl = new void*[vtableLength];
+        if (baseInfo !is null)
+            typeInfo.vtbl[0 .. baseVtableLength] = baseInfo.vtbl[];
         typeInfo.vtbl[0] = cast(void*) typeInfo;
-        typeInfo.m_init = new byte[](declaration.structsize);
-        *cast(void**) typeInfo.m_init.ptr = typeInfo.vtbl.ptr;
+        if (declaration.isInterfaceDeclaration is null) {
+            typeInfo.m_init = new byte[](declaration.structsize);
+            *cast(void**) typeInfo.m_init.ptr = typeInfo.vtbl.ptr;
+        }
+
+        if (declaration.interfaces.length != 0) {
+            import object: Interface;
+
+            typeInfo.interfaces.length = declaration.interfaces.length;
+            foreach (i, base; declaration.interfaces) {
+                auto interfaceInfo = classRuntimeInfo(base.sym);
+                typeInfo.interfaces[i] = Interface(
+                    interfaceInfo,
+                    interfaceInfo.vtbl,
+                    base.offset,
+                );
+            }
+        }
 
         _classRuntime ~= GuestClassRuntime(
             declaration,
@@ -3079,17 +3095,12 @@ extern(C++) private final class Evaluator: Visitor {
         return typeInfo;
     }
 
-    private bool hasGuestVirtualDispatch(ClassDeclaration declaration) {
-        if (declaration.interfaces.length != 0)
-            return true;
-        if (declaration.baseClass is null
-                || declaration.baseClass is ClassDeclaration.object)
-            return false;
-        if (declaration.vtbl.length != declaration.baseClass.vtbl.length)
-            return true;
-        foreach (i; 0 .. declaration.vtbl.length)
-            if (declaration.vtbl[i] !is declaration.baseClass.vtbl[i])
+    private bool isRootOwnedClass(ClassDeclaration declaration) const {
+        const module_ = declaration.getModule;
+        foreach (rootModule; _program.rootModules)
+            if (module_ is rootModule)
                 return true;
+
         return false;
     }
 
@@ -3329,12 +3340,43 @@ extern(C++) private final class Evaluator: Visitor {
         if (function_ is null)
             function_ = calleeOf(expression);
 
-        // Whether this call needs a `this` or a static chain it cannot
-        // provide is `execute`'s check, not this one - it runs there for
-        // every call this backend makes, not only ones that arrive as a
-        // guest `CallExp`.
+        void* classReceiver;
+        auto aggregate = function_.isThis;
+        if (aggregate !is null && aggregate.isClassDeclaration !is null) {
+            auto dot = expression.e1.isDotVarExp;
+            auto receiver = dot is null ? expression.e1 : dot.e1;
+            classReceiver = classReferenceOf(receiver);
+            if (classReceiver is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot call `", expression.toString,
+                        "`: its class receiver is null"),
+                );
+
+            // `super.f()` is statically bound. Every other virtual class
+            // call uses the declaration of the object held by the receiver,
+            // not the declaration dmd selected from its static type.
+            if (receiver.isSuperExp is null)
+                function_ = virtualFunction(function_, classReceiver);
+        }
+
         auto layout = layoutOf(function_);
-        auto frame = bindFrame(expression, function_, layout);
+        auto frame = bindFrame(
+            expression,
+            function_,
+            layout,
+            classReceiver,
+        );
+
+        auto nativeVirtual = nativeVirtualAddress(function_, classReceiver);
+        if (nativeVirtual !is null) {
+            const(void)*[maxArguments] slots;
+            _plans.of(function_).callAt(
+                nativeVirtual,
+                _place,
+                argumentSlots(slots, frame.base, layout),
+            );
+            return;
+        }
 
         if (typeFunctionOf(function_).isRef) {
             memcpy(
@@ -3348,6 +3390,60 @@ extern(C++) private final class Evaluator: Visitor {
             function_, _place, frame.base, layout, expression,
             function_.isCtorDeclaration() !is null,
         );
+    }
+
+    private void* nativeVirtualAddress(
+        FuncDeclaration staticFunction,
+        void* receiver,
+    ) {
+        if (receiver is null || receiver in _classes
+                || !staticFunction.isVirtualMethod)
+            return null;
+
+        const index = staticFunction.vtblIndex;
+        if (index < 0)
+            return null;
+
+        auto vtable = *cast(void***) receiver;
+        return vtable[index];
+    }
+
+    private FuncDeclaration virtualFunction(
+        FuncDeclaration staticFunction,
+        void* receiver,
+    ) {
+        if (!staticFunction.isVirtualMethod)
+            return staticFunction;
+
+        auto actual = receiver in _classes;
+        if (actual is null)
+            return staticFunction;
+
+        // Const makes DMD's vtable entries const, but this function must
+        // return the mutable declaration that the evaluator executes.
+        auto declaration = *actual;
+        const staticClass = staticFunction.isThis.isClassDeclaration;
+        if (staticClass is null)
+            return staticFunction;
+
+        if (staticClass.isInterfaceDeclaration !is null) {
+            import dmd.funcsem: overrides;
+
+            foreach (symbol; declaration.vtbl) {
+                auto candidate = symbol.isFuncDeclaration;
+                if (candidate !is null
+                        && candidate.overrides(staticFunction))
+                    return candidate;
+            }
+            return staticFunction;
+        }
+
+        const index = staticFunction.vtblIndex;
+        if (index >= 0 && cast(size_t) index < declaration.vtbl.length)
+            if (auto candidate = declaration.vtbl[index].isFuncDeclaration)
+                return candidate;
+
+        return staticFunction;
     }
 
     // The callee of a call dmd left unresolved: one reached through a
@@ -3425,6 +3521,7 @@ extern(C++) private final class Evaluator: Visitor {
         CallExp expression,
         FuncDeclaration function_,
         const(FrameLayout)* layout,
+        void* classReceiver = null,
     ) {
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
@@ -3447,23 +3544,20 @@ extern(C++) private final class Evaluator: Visitor {
         // kinds: a method's `this`, and a nested function's static
         // chain. Which one this callee has is what `isThis` says.
         if (function_.vthis !is null) {
-            if (function_.isThis() !is null) {
+            if (function_.isThis !is null) {
                 auto dot = expression.e1.isDotVarExp;
                 const classDeclaration =
-                    cast(ClassDeclaration) function_.isThis().isClassDeclaration;
+                    cast(ClassDeclaration) function_.isThis.isClassDeclaration;
                 if (classDeclaration !is null) {
-                    if (dot !is null)
-                        storeIntegral(
-                            frame.base + layout.hiddenThis.parameter.offset,
-                            cast(size_t) classReferenceOf(dot.e1),
-                            size_t.sizeof,
+                    if (classReceiver is null)
+                        classReceiver = classReferenceOf(
+                            dot is null ? expression.e1 : dot.e1,
                         );
-                    else
-                        storeIntegral(
-                            frame.base + layout.hiddenThis.parameter.offset,
-                            cast(size_t) classReferenceOf(expression.e1),
-                            size_t.sizeof,
-                        );
+                    storeIntegral(
+                        frame.base + layout.hiddenThis.parameter.offset,
+                        cast(size_t) classReceiver,
+                        size_t.sizeof,
+                    );
                 } else if (dot is null)
                     throw new SnakebiteException(
                         text("interpreter cannot call `", function_.toString,

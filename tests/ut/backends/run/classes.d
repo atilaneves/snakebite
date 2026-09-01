@@ -7,9 +7,49 @@ module ut.backends.run.classes;
 
 
 import ut.backends;
-import snakebite.frontend.compiler: parseSnippet;
+import snakebite.backends.backend: Program;
+import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.string: endsWith;
+
+
+public final class HostDispatchObject: Object {
+    public override size_t toHash() @trusted nothrow {
+        return 42;
+    }
+}
+
+
+public Object hostDispatchObject() {
+    return new HostDispatchObject;
+}
+
+
+@("hostCreatedObjectUsesVirtualGuestDispatch.Interpreter")
+@Tags(Interpreter.stringof)
+unittest {
+    auto modules = parseSnippets([
+        q{
+            module host_dispatch_root;
+            import ut.backends.run.classes: hostDispatchObject;
+
+            size_t answer() {
+                return hostDispatchObject().toHash;
+            }
+        },
+        q{
+            module ut.backends.run.classes;
+            Object hostDispatchObject();
+        },
+    ]);
+    auto function_ = findFunction(modules[0], "answer");
+    auto backend = new Interpreter(Program([modules[0]]));
+
+    size_t result;
+    backend.call(function_, &result, []);
+
+    result.should == 42;
+}
 
 
 // `shared` is a qualifier, not a distinct class: the shared type's
@@ -47,6 +87,10 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOf!(backend, q{
             class Base {
                 int base = 7;
+
+                int describe() {
+                    return base;
+                }
             }
 
             class Derived : Base {
@@ -55,12 +99,50 @@ static foreach (backend; Matrix!(
                 this(int value_) {
                     value = value_;
                 }
+
+                override int describe() {
+                    return base + value;
+                }
             }
 
             void main() {
                 auto derived = new Derived(42);
                 assert(derived.base == 7);
                 assert(derived.value == 42);
+
+                Base base = derived;
+                assert(derived.describe == 49);
+                assert(base.describe == 49);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("interfaceDispatchFindsCovariantOverride." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface Factory {
+                Object make();
+            }
+
+            class Product: Object {
+            }
+
+            class ProductFactory: Factory {
+                override Product make() {
+                    return new Product;
+                }
+            }
+
+            void main() {
+                Factory factory = new ProductFactory;
+                assert(factory.make !is null);
             }
         });
     }
@@ -76,11 +158,17 @@ unittest {
         Plain make() {
             return new Plain;
         }
+
+        TypeInfo info() {
+            return typeid(Plain);
+        }
     });
     auto function_ = findFunction(module_, "make");
+    auto infoFunction = findFunction(module_, "info");
 
     Object value;
-    interpreter(module_).call(function_, &value, []);
+    auto backend = interpreter(module_);
+    backend.call(function_, &value, []);
 
     assert(value !is null);
     assert(
@@ -90,6 +178,9 @@ unittest {
 
     auto classInfo = value.classinfo;
     assert(classInfo !is null);
+    TypeInfo info;
+    backend.call(infoFunction, &info, []);
+    assert(classInfo is info, classInfo.name);
     assert(classInfo.name.endsWith(".Plain"), classInfo.name);
     assert(value.toString.endsWith(".Plain"));
 }
@@ -172,7 +263,6 @@ unittest {
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("interfaceDispatchFindsOverride." ~ backend.stringof)
     @Tags(backend.stringof)
