@@ -292,6 +292,58 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `is` on structs compares raw bytes, so a dynamic array field is
+// compared as its length and pointer, not its contents - unlike `==`,
+// which walks into the array and compares elements.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("structIdentityComparesArrayFieldByReference." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int[] xs;
+            }
+
+            void main() {
+                auto a = [1, 2, 3];
+                auto s1 = S(a);
+                auto s2 = S(a.dup);
+
+                assert(s1 == s2);
+                assert(!(s1 is s2));
+                assert(s1 is s1);
+            }
+        });
+    }
+}
+
+// `==` on structs walks into each field and compares it the way `==`
+// compares that field's own type on its own - a float field follows IEEE
+// 754, where `-0.0` equals `0.0` and `double.nan` never equals itself,
+// unlike a raw byte compare.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("structEqualityComparesFloatFieldByIeeeRules." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                double value;
+            }
+
+            void main() {
+                assert(S(0.0) == S(-0.0));
+                assert(!(S(double.nan) == S(double.nan)));
+            }
+        });
+    }
+}
+
 // A whole struct element is stored and loaded through the array's own
 // indirection - `opStoreIndirect`/`opLoadIndirect` moving `struct.sizeof`
 // bytes at once, the same as a scalar element's own single word - and
