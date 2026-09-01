@@ -251,9 +251,10 @@ import dmd.visitor: Visitor;
 extern(C++) private final class LocalsCollector: Visitor {
     import dmd.expression: Expression;
     import dmd.statement:
-        Catch, CompoundStatement, ExpStatement, ForStatement, IfStatement,
-        ImportStatement, ReturnStatement, ScopeStatement, Statement,
-        TryCatchStatement, TryFinallyStatement, UnrolledLoopStatement;
+        Catch, CompoundStatement, DoStatement, ExpStatement, ForStatement,
+        IfStatement, ImportStatement, LabelStatement, ReturnStatement,
+        ScopeStatement, Statement, TryCatchStatement, TryFinallyStatement,
+        UnrolledLoopStatement;
 
     alias visit = Visitor.visit;
 
@@ -305,6 +306,16 @@ extern(C++) private final class LocalsCollector: Visitor {
     override void visit(ForStatement statement) {
         if (statement._body !is null)
             statement._body.accept(this);
+    }
+
+    override void visit(DoStatement statement) {
+        if (statement._body !is null)
+            statement._body.accept(this);
+    }
+
+    override void visit(LabelStatement statement) {
+        if (statement.statement !is null)
+            statement.statement.accept(this);
     }
 
     // Both branches are walked even though at most one of them runs: this
