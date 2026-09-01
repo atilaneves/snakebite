@@ -68,6 +68,43 @@ static foreach (backend; Matrix!(
     }
 }
 
+// `a[i][j] = v` runs the two `next()` calls in the order `dmd -run`
+// itself picks for a nested static-array index write: the inner
+// (rightmost) index first, the outer (leftmost) index second, landing
+// on `a[1][0]` rather than the source order `a[0][1]`. This was
+// checked against `dmd -run` directly before writing the test, since
+// `next()`'s return value only reveals which call happened first, not
+// which bracket it was written in. dmd's own CTFE engine picks the
+// opposite order for the same expression (confirmed with `static
+// assert` over an `enum`) - a divergence between dmd's two evaluators,
+// not a bug in either of this project's backends, so `Ctfe` disagrees
+// here on purpose.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE engine evaluates a[i][j]'s indices in the opposite " ~
+        "order from its runtime codegen for the same expression"),
+)) {
+    @("staticArray.nestedElementWriteIndexEvaluationOrder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int n;
+                int next() { return n++; }
+
+                int[2][2] a;
+                a[next()][next()] = 5;
+
+                assert(a[1][0] == 5);
+                assert(a[0][1] == 0);
+                assert(a[0][0] == 0);
+                assert(a[1][1] == 0);
+            }
+        });
+    }
+}
+
 // Assigning one static-array local to another copies every element's
 // bytes, not a reference: mutating a row through the copy leaves the
 // original's row untouched, the same guarantee already pinned for a
