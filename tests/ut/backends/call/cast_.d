@@ -270,6 +270,99 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
+// The bytecode compiler's own type switch recognises only `float` and
+// `double` as floating types - `real` has no case there at all, so a
+// program using it cannot be compiled for that backend.
+private alias RealOmit = Omit!(Bytecode, Because.unconfirmed,
+    "the bytecode compiler recognises only `float`/`double` as floating "
+        ~ "types, not `real`");
+
+// `real` widening to `double`: exact, since `double` is narrower than
+// `real` but the operand here fits in both. The operand comes from a
+// call because dmd folds a cast of a literal during semantic analysis.
+static foreach (backend; Matrix!(RealOmit)) {
+    @("cast.realToDouble." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.5.shouldBeRetOf!(
+            backend,
+            q{
+                real value() {
+                    return 1.5L;
+                }
+
+                double converted() {
+                    return cast(double) value();
+                }
+            },
+            "converted",
+        );
+    }
+}
+
+// `real` narrowing to `float`, and back again to `real`. `1.5` is exact
+// at every one of the three widths, so the round trip does not depend on
+// rounding.
+static foreach (backend; Matrix!(RealOmit)) {
+    @("cast.realToFloat." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.5f.shouldBeRetOf!(
+            backend,
+            q{
+                real value() {
+                    return 1.5L;
+                }
+
+                float converted() {
+                    return cast(float) value();
+                }
+            },
+            "converted",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(RealOmit)) {
+    @("cast.doubleToReal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.5L.shouldBeRetOf!(
+            backend,
+            q{
+                double value() {
+                    return 1.5;
+                }
+
+                real converted() {
+                    return cast(real) value();
+                }
+            },
+            "converted",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(RealOmit)) {
+    @("cast.floatToReal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.5L.shouldBeRetOf!(
+            backend,
+            q{
+                float value() {
+                    return 1.5f;
+                }
+
+                real converted() {
+                    return cast(real) value();
+                }
+            },
+            "converted",
+        );
+    }
+}
+
 // dmd classifies `bool` as `integral | unsigned`, so a naive integral
 // narrowing takes the operand's low byte instead of comparing it against
 // zero. `256`'s low byte is `0`, which a truncating implementation would

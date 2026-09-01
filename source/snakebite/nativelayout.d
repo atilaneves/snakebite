@@ -181,7 +181,7 @@ public void storeValue(
     void* place,
 ) {
     import core.stdc.string: memset;
-    import dmd.astenums: Tarray, Tfloat32, Tfloat64;
+    import dmd.astenums: Tarray, Tfloat32, Tfloat64, Tfloat80;
     import dmd.expressionsem: toInteger, toReal;
     import dmd.typesem: nextOf;
     import std.conv: text;
@@ -230,6 +230,14 @@ public void storeValue(
 
     if (type.ty == Tfloat64) {
         *cast(double*) place = cast(double) value.toReal;
+        return;
+    }
+
+    // `real` is dmd's own constant-folding type - `toReal` already returns
+    // one - so this is a plain store, unlike the `float`/`double` cases
+    // above, which narrow it.
+    if (type.ty == Tfloat80) {
+        *cast(real*) place = value.toReal;
         return;
     }
 

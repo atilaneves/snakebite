@@ -567,6 +567,187 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 }
 
 
+// The bytecode compiler's own type switch recognises only `float` and
+// `double` as floating types - `real` has no case there at all, so a
+// program using it cannot be compiled for that backend.
+private alias RealOmit = Omit!(Bytecode, Because.unconfirmed,
+    "the bytecode compiler recognises only `float`/`double` as floating "
+        ~ "types, not `real`");
+
+// The four orderings over `real`, each pinned on both sides of its
+// boundary the same way the integral versions above are. Every operand
+// comes from a call so dmd cannot fold the comparison away.
+static foreach (backend; Matrix!(RealOmit)) {
+    @("compare.real.lessThan.true." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                real small() {
+                    return 1.0L;
+                }
+
+                real big() {
+                    return 2.0L;
+                }
+
+                bool less() {
+                    return small() < big();
+                }
+            },
+            "less",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(RealOmit)) {
+    @("compare.real.lessThan.false." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        false.shouldBeRetOf!(
+            backend,
+            q{
+                real small() {
+                    return 1.0L;
+                }
+
+                real big() {
+                    return 2.0L;
+                }
+
+                bool less() {
+                    return big() < small();
+                }
+            },
+            "less",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(RealOmit)) {
+    @("compare.real.lessOrEqual.equal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                real one() {
+                    return 1.0L;
+                }
+
+                real uno() {
+                    return 1.0L;
+                }
+
+                bool notMore() {
+                    return one() <= uno();
+                }
+            },
+            "notMore",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(RealOmit)) {
+    @("compare.real.greaterThan.true." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                real small() {
+                    return 1.0L;
+                }
+
+                real big() {
+                    return 2.0L;
+                }
+
+                bool more() {
+                    return big() > small();
+                }
+            },
+            "more",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(RealOmit)) {
+    @("compare.real.greaterOrEqual.equal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                real one() {
+                    return 1.0L;
+                }
+
+                real uno() {
+                    return 1.0L;
+                }
+
+                bool notLess() {
+                    return one() >= uno();
+                }
+            },
+            "notLess",
+        );
+    }
+}
+
+// Positive and negative zero have different bit patterns but compare
+// equal, the same rule `compare.floatingEquality` pins for `float`/
+// `double`.
+static foreach (backend; Matrix!(RealOmit)) {
+    @("compare.real.equal.signedZero." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                real positiveZero() {
+                    return 0.0L;
+                }
+
+                real negativeZero() {
+                    return -0.0L;
+                }
+
+                bool eq() {
+                    return positiveZero() == negativeZero();
+                }
+            },
+            "eq",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(RealOmit)) {
+    @("compare.real.notEqual.true." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                real one() {
+                    return 1.0L;
+                }
+
+                real two() {
+                    return 2.0L;
+                }
+
+                bool neq() {
+                    return one() != two();
+                }
+            },
+            "neq",
+        );
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("logical.and.true." ~ backend.stringof)
     @Tags(backend.stringof)
