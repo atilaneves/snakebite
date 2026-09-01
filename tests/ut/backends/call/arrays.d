@@ -582,25 +582,60 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A runtime `.length` assignment lowers to druntime's type-specific
-// `_d_arraysetlengthT` template. The guest is interpreted, so its template
-// instance needs either native code or its synthesized D body. Writing and
-// reading the last element proves that the runtime growth really happened.
-@("arrays.length.runtime.ushort.Interpreter")
-@Tags("Interpreter")
-unittest {
-    1_034.shouldBeRetOf!(
-        Interpreter,
-        q{
-            int growWords() {
-                ushort[] words;
-                words.length = 3;
-                words[2] = 1_031;
-                return cast(int) words.length + words[2];
+// A runtime `.length` assignment lowers to a native druntime call
+// `_d_arraysetlengthT`. Writing and reading the last element proves that
+// the runtime growth really happened.
+static foreach (backend; Matrix!()) {
+    @("arrays.length.runtime.ushort." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1_034.shouldBeRetOf!(
+            backend,
+            q{
+                int growWords() {
+                    ushort[] words;
+                    words.length = 3;
+                    words[2] = 1_031;
+                    return cast(int) words.length + words[2];
+                }
+            },
+            "growWords",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.slice.bounded.dynamicArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        350.shouldBeRetOf!(
+            backend,
+            q{
+                int tail() {
+                    int[] values = [10, 20, 30, 40];
+                    size_t dataSize = 1;
+                    int[] slice = values[dataSize .. $];
+                    return cast(int) slice.length * 100 + slice[0] +
+                        slice[1];
+                }
+            },
+            "tail",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.slice.bounded.outOfBounds." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] values = [10, 20, 30, 40];
+                int[] invalid = values[3 .. 5];
+                assert(invalid.length == 1);
             }
-        },
-        "growWords",
-    );
+        });
+    }
 }
 
 // A literal assigned to a `static` slice is built once, on whichever call
