@@ -144,6 +144,70 @@ static foreach (backend; Matrix!(
             "kindaMain",
         );
     }
+
+    @("locals.staticPlainAssignment." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        9.shouldBeRetOf!(
+            backend,
+            q{
+                int assign() {
+                    static int value = 3;
+                    value = 9;
+                    return value;
+                }
+            },
+            "assign",
+        );
+    }
+
+    @("locals.staticPostincrement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        34.shouldBeRetOf!(
+            backend,
+            q{
+                int increment() {
+                    static int value = 3;
+                    auto before = value++;
+                    return before * 10 + value;
+                }
+            },
+            "increment",
+        );
+    }
+
+    @("locals.staticDynamicArrayAppend." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        17.shouldBeRetOf!(
+            backend,
+            q{
+                int append() {
+                    static int[] values;
+                    values ~= 7;
+                    return cast(int) values.length * 10 + values[0];
+                }
+            },
+            "append",
+        );
+    }
+
+    @("locals.staticStringInitialiser." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(3).shouldBeRetOf!(
+            backend,
+            q{
+                size_t length() {
+                    static string value = "abc";
+                    return value.length;
+                }
+            },
+            "length",
+        );
+    }
+
 }
 
 @("locals.staticPersistsAcrossBackendCalls.Bytecode")
