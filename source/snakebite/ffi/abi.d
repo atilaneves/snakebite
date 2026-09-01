@@ -138,7 +138,7 @@ public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type type) {
 private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
     import dmd.astenums:
         Taarray, Tclass, Tfloat32, Tfloat64, Tpointer, Tvoid;
-    import dmd.typesem: size;
+    import dmd.typesem: isIntegral, isUnsigned, size;
     import std.algorithm: min;
 
     ArgumentPlan plan;
@@ -229,7 +229,8 @@ private void classify(
     import dmd.astenums:
         Tarray, Tclass, Tcomplex32, Tcomplex64, Tdelegate, Tfloat32,
         Tfloat64, Tpointer, Tsarray;
-    import dmd.typesem: size;
+    import dmd.expressionsem: toInteger;
+    import dmd.typesem: alignsize, isIntegral, nextOf, size;
 
     if (memory)
         return;

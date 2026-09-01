@@ -3,7 +3,7 @@ description "Backends for the D programming language"
 copyright "Copyright © 2026, atila"
 license "BSL-1.0"
 
-dependency "dmd:frontend" version="~>2.112.0"
+dependency "dmd:frontend" version="~>2.113.0"
 dependency ":dmd-backend-vendor" version="*"
 
 // When bumping dmd:frontend, re-run scripts/vendor-dmd-backend.sh to

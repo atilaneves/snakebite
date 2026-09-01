@@ -208,6 +208,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         import dmd.astenums:
             Tarray, Tbool, Tchar, Tdchar, Tfloat32, Tfloat64, Tint8, Tint16,
             Tint32, Tint64, Tuns8, Tuns16, Tuns32, Tuns64, Twchar;
+        import dmd.typesem: nextOf;
 
         if (type.ty == Tarray) {
             auto info = new TypeInfo_Array;
@@ -245,6 +246,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // at it too.
     package const(Function)* compileFunction(FuncDeclaration function_) {
         import dmd.astenums: STC, Tvoid;
+        import dmd.typesem: nextOf;
         import snakebite.backends.layout: FrameLayout;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import snakebite.nativelayout: TypeFacts;
@@ -351,6 +353,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
         opModuloUnsigned, opMultiply, opNegate, opNotEqual, opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
         opStoreIndirect, opSubtract, opZero;
+    import dmd.expressionsem: toInteger;
+    import dmd.typesem: nextOf;
     import snakebite.backends.layout: FrameLayout;
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout: alignUp, isIntegralSize, TypeFacts;
