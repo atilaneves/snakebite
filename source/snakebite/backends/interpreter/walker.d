@@ -1811,10 +1811,14 @@ extern(C++) private final class Evaluator: Visitor {
         // its own - druntime's own append hooks declare both kinds in
         // their own bodies, the same way an `import` inside a function
         // body binds a name with nothing left to execute (see
-        // `visit(ImportStatement)`). `Ctfe`, this interpreter's sibling
-        // backend, needs no special case of its own for either: it runs
-        // dmd's own `dinterpret.d`, which already knows a body can hold
-        // both. Any future backend that walks a body's AST itself,
+        // `visit(ImportStatement)`). A local `enum Direction : ubyte
+        // { north, south }` is the same story: semantic analysis has
+        // already folded every member into a constant, so a cast to
+        // `Direction` or a read of `Direction.north` never reaches this
+        // declaration at all. `Ctfe`, this interpreter's sibling
+        // backend, needs no special case of its own for any of these: it
+        // runs dmd's own `dinterpret.d`, which already knows a body can
+        // hold them. Any future backend that walks a body's AST itself,
         // rather than handing it to dmd's engine, inherits the same
         // need.
         // A nested function declaration - `int lookup(string key) { ... }`
@@ -1826,7 +1830,8 @@ extern(C++) private final class Evaluator: Visitor {
         if (expression.declaration.isStructDeclaration !is null
                 || expression.declaration.isAliasDeclaration !is null
                 || expression.declaration.isTemplateDeclaration !is null
-                || expression.declaration.isFuncDeclaration !is null)
+                || expression.declaration.isFuncDeclaration !is null
+                || expression.declaration.isEnumDeclaration !is null)
             return;
 
         auto variable = expression.declaration.isVarDeclaration;
