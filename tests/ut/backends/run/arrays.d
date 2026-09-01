@@ -138,7 +138,6 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("appendingDcharEncodesUtf8." ~ backend.stringof)
     @Tags(backend.stringof)

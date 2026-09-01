@@ -103,8 +103,9 @@ extern(C++) private final class Evaluator: Visitor {
         Error, Exception, Throwable, TypeInfo_Class, TypeInfo_Struct;
     import dmd.root.string: toDString;
     import dmd.astenums:
-        Tarray, Tbool, Tclass, Tdelegate, Tfloat32, Tfloat64, Tfloat80,
-        Tnoreturn, Tint64, Tpointer, Tsarray, Tuns32, Tuns8, Tvoid;
+        Tarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32, Tfloat64,
+        Tfloat80, Tnoreturn, Tint64, Tpointer, Tsarray, Tuns32, Tuns8,
+        Tvoid, Twchar;
     import dmd.arraytypes: Expressions;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
@@ -3911,6 +3912,50 @@ extern(C++) private final class Evaluator: Visitor {
             );
 
         expression.lowering.accept(this);
+    }
+
+    // `~=` appending a `dchar` (`CatDcharAssignExp`, `EXP.concatenateDcharAssign`)
+    // takes neither of the two paths above: dmd's semantic pass
+    // (`expressionsem.d`'s `CatAssignExp.visit`) builds `.lowering` only for
+    // `EXP.concatenateAssign` and `EXP.concatenateElemAssign`, leaving this
+    // case's `.lowering` null and its UTF encoding plus the append itself
+    // entirely to glue-layer codegen (`e2ir.d`'s `visitCatAssign`), which
+    // calls `_d_arrayappendcd` (`char[]`) or `_d_arrayappendwd` (`wchar[]`)
+    // directly by linker symbol - never through an AST `CallExp` any visitor
+    // could walk. This resolves and calls that same compiled hook a real
+    // build would, the same way `TypeidExp` resolves a symbol with no
+    // `FuncDeclaration` of its own, rather than reimplementing the
+    // UTF-8/UTF-16 encoding here.
+    override void visit(CatDcharAssignExp expression) {
+        import core.stdc.string: memcpy;
+        import std.conv: text;
+
+        auto elementType = expression.e1.type.nextOf;
+        const name = elementType.ty == Tchar ? "_d_arrayappendcd"
+            : elementType.ty == Twchar ? "_d_arrayappendwd"
+            : null;
+        if (name is null)
+            throw new SnakebiteException(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: appending a `dchar` to `", expression.e1.type.toString,
+                    "` is neither `char[]` nor `wchar[]`"),
+            );
+
+        countForeignNameLookup;
+        auto hook = _plans.resolve(name);
+        if (hook is null)
+            throw new SnakebiteException(
+                text("interpreter cannot resolve the symbol `", name,
+                    "` for `", expression.toString,
+                    "`: it is not in this process"),
+            );
+
+        alias ArrayAppendDchar = extern(C) void[] function(void*, dchar);
+        auto appendDchar = cast(ArrayAppendDchar) hook;
+        auto array = addressOf(expression.e1);
+        appendDchar(array, cast(dchar) asIntegral(expression.e2));
+
+        memcpy(_place, array, _facts.size);
     }
 
     // An associative-array literal has no glue-layer codegen of its own to
