@@ -94,11 +94,29 @@ public struct TypeFacts {
     public uint alignment;
     public bool isIntegral;
     public bool isUnsigned;
+    // Whether `type` is a dynamic array (`T[]`) - the native `{length,
+    // pointer}` pair, always `arrayValueSize` bytes regardless of `T`. A
+    // caller that only moves a value between slots (`opCopy`/`opConstant`,
+    // parameter passing, a return) needs nothing more than this and `size`
+    // to do so correctly; only a caller that indexes into the array needs
+    // `elementSize` as well.
+    public bool isDynamicArray;
+    // The element type's own size, meaningful only when `isDynamicArray` is
+    // `true` - what indexing has to multiply an index by to find an
+    // element's byte offset from the array's own pointer word.
+    public size_t elementSize;
 
     // The facts for `type`, read from dmd exactly once by the caller
     // that builds this.
     public static TypeFacts of(Type type) {
+        import dmd.astenums: Tarray;
         import dmd.typesem: size;
+
+        if (type.ty == Tarray)
+            return TypeFacts(
+                arrayValueSize, size_t.alignof, false, false, true,
+                type.nextOf.size,
+            );
 
         return TypeFacts(
             type.size,

@@ -37,7 +37,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.length." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -57,7 +57,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.index." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -75,7 +75,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.dollar." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -95,7 +95,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.dollar.nested." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -123,7 +123,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.truth.null." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -144,7 +144,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.truth.literal." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -244,7 +244,79 @@ unittest {
         .shouldThrow;
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+// Bytecode does not yet have guest try/catch (see the `RangeError` test
+// above, omitted for Bytecode), so an out-of-range index still escapes as
+// the host-level `AssertError` a bounds check throws. That escape must
+// carry its own site - the index expression's own message and source
+// location - not a VM-internal array bounds violation and not some other
+// assert site's message.
+@("arrays.index.outOfRange.throws.attributedAssertError.Bytecode")
+@Tags("Bytecode")
+unittest {
+    import core.exception: AssertError;
+    import snakebite.backends.backend: Program;
+    import snakebite.backends.bytecode: Bytecode;
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        int oob() {
+            int[] a = [1, 2, 3];
+            long i = 5;
+            return a[i];
+        }
+    });
+    auto function_ = findFunction(module_, "oob");
+    auto instance = new Bytecode(Program([module_]));
+
+    AssertError caught;
+    int result;
+    try
+        instance.call(function_, &result, []);
+    catch (AssertError error)
+        caught = error;
+
+    (caught !is null).shouldBeTrue;
+    caught.msg.shouldEqual("bytecode: index out of bounds: `cast(ulong)i`");
+}
+
+// The same bounds check, but with an unrelated assertion earlier in the
+// same function - one that passes, so it never itself throws. The failure
+// must still name the index expression, not the passing assertion's own
+// message and line.
+@("arrays.index.outOfRange.attributesToTheIndexNotAnUnrelatedAssert.Bytecode")
+@Tags("Bytecode")
+unittest {
+    import core.exception: AssertError;
+    import snakebite.backends.backend: Program;
+    import snakebite.backends.bytecode: Bytecode;
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        int misattributed() {
+            long x = 1;
+            assert(x == 1);
+            int[] a = [1];
+            long i = 9;
+            return a[i];
+        }
+    });
+    auto function_ = findFunction(module_, "misattributed");
+    auto instance = new Bytecode(Program([module_]));
+
+    AssertError caught;
+    int result;
+    try
+        instance.call(function_, &result, []);
+    catch (AssertError error)
+        caught = error;
+
+    (caught !is null).shouldBeTrue;
+    caught.msg.shouldEqual("bytecode: index out of bounds: `cast(ulong)i`");
+}
+
+static foreach (backend; Matrix!()) {
     @("arrays.literal.index." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -261,7 +333,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.literal.length." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -278,7 +350,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.literal.nonConstantElements." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -299,7 +371,49 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
+    @("arrays.literal.selfReferentialAssign." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // `a = [a[1], a[0]]` evaluates its elements against `a`'s old
+        // value. An implementation that writes the new length/pointer
+        // into `a`'s slot before evaluating the elements would have each
+        // element read back through the new, not-yet-initialised block.
+        65.shouldBeRetOf!(
+            backend,
+            q{
+                int flipped() {
+                    int[] a = [5, 6];
+                    a = [a[1], a[0]];
+                    return a[0] * 10 + a[1];
+                }
+            },
+            "flipped",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.literal.returnedThroughGuestCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        6.shouldBeRetOf!(
+            backend,
+            q{
+                int[] make() {
+                    return [1, 2, 3];
+                }
+                int total() {
+                    int[] a = make();
+                    return a[0] + a[1] + a[2];
+                }
+            },
+            "total",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
     @("arrays.literal.single." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -316,7 +430,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.literal.empty.length." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -333,7 +447,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.new.runtimeLength.initialiseAndWrite." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -354,7 +468,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.new.uint.initialiseAndWrite." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -375,7 +489,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("arrays.new.scalar.nativeLayouts.initialiseAndWrite." ~
         backend.stringof)
     @Tags(backend.stringof)
@@ -411,6 +525,37 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
                 assert(doubles[1] == -2.5);
             }
         });
+    }
+}
+
+// `first`'s backing block is reachable only through a frame slot that
+// outlives every one of the many further allocations the loop below makes -
+// nothing else in the program still references it. A backend that does not
+// root array storage a VM activation is the only thing pointing at would
+// let the collector reclaim it once enough further allocation pressure
+// makes a collection run, and the loop would then read back garbage instead
+// of the values written before it started.
+static foreach (backend; Matrix!()) {
+    @("arrays.new.survivesFurtherAllocations." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        6.shouldBeRetOf!(
+            backend,
+            q{
+                int survivesFurtherAllocations() {
+                    int[] first = [1, 2, 3];
+
+                    int[] junk = null;
+                    for (int i = 0; i < 50_000; i = i + 1) {
+                        junk = new int[](64);
+                        junk[0] = i;
+                    }
+
+                    return first[0] + first[1] + first[2];
+                }
+            },
+            "survivesFurtherAllocations",
+        );
     }
 }
 
