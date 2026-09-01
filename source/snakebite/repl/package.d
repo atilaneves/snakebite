@@ -8,6 +8,17 @@ private:
 // on, and any input still waiting for a closing brace. Declarations from
 // earlier cells stay visible to later ones because every accepted cell's
 // source is kept and resubmitted, in full, with the next one.
+//
+// Known limitation: a fresh `Backend` is built from that resubmitted
+// source on every accepted cell (there is no incremental-parse API to
+// add a new cell's declarations to the existing `dmd.dmodule.Module`
+// instead), so a mutation an earlier cell made is not visible later -
+// `int x = 1;` then `++x` prints `2`, but a later `x` prints `1`,
+// because the reparse re-runs `x`'s initializer on a new backend rather
+// than reading the old one's mutated storage. Declarations themselves
+// still accumulate correctly; only runtime mutation of that state does
+// not survive a cell boundary. Tracked in
+// https://github.com/atilaneves/snakebite/issues/154.
 public struct Repl {
     private imported!"snakebite.repl.cli".ReplBackendName _backendName;
     private string[] _importPaths;
@@ -118,7 +129,15 @@ public struct Repl {
             return SubmitResult(SubmitResult.Kind.error, throwable.msg.idup);
         }
 
-        accept(fullSource, module_, backend);
+        // An expression cell declares nothing later cells need to see -
+        // `source` is an expression, not valid module-level syntax on its
+        // own - and the synthetic `__snakebite_repl_eval_N__` wrapper that
+        // ran it is never called again. Keeping it in `_accumulatedSource`
+        // would only grow every future reparse with dead code, so the
+        // session's accumulated declarations are left untouched; only the
+        // cell counter and pending-input state advance.
+        ++_cellCount;
+        _pendingInput = null;
 
         return display.length == 0
             ? SubmitResult.init
@@ -153,6 +172,13 @@ public struct Repl {
         // (writing straight to stderr) during the parse above; keeping it
         // in the accumulated buffer would fire it again on every future
         // cell, so it is dropped instead of accepted.
+        //
+        // Only the standalone form is caught: `pragma(msg, "a"); int x;`
+        // stays in the buffer as part of `source` and so re-fires on
+        // every later reparse. The acceptance spec only requires the
+        // standalone form to be handled; covering pragmas embedded in a
+        // larger declaration cell is tracked in
+        // https://github.com/atilaneves/snakebite/issues/154.
         if (isStandalonePragmaMessageStatement(source)) {
             ++_cellCount;
             _pendingInput = null;
@@ -274,15 +300,22 @@ private bool isUnderAnyPath(
     in string[] paths,
 ) {
     import std.algorithm.searching: startsWith;
-    import std.path: absolutePath, buildNormalizedPath;
+    import std.path: absolutePath, buildNormalizedPath, dirSeparator;
     import std.string: fromStringz;
 
     const sourcePath = module_.srcfile.toString.fromStringz.idup
         .absolutePath.buildNormalizedPath;
 
-    foreach (path; paths)
-        if (sourcePath.startsWith(path.absolutePath.buildNormalizedPath))
+    foreach (path; paths) {
+        const normalizedPath = path.absolutePath.buildNormalizedPath;
+        // A bare prefix match would also claim a sibling directory whose
+        // name merely starts with `path` (`-I /a/b` matching `/a/bc`), so
+        // the source must equal the path itself or sit under it as a
+        // whole directory component.
+        if (sourcePath == normalizedPath
+            || sourcePath.startsWith(normalizedPath ~ dirSeparator))
             return true;
+    }
 
     return false;
 }

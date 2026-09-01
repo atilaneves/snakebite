@@ -36,7 +36,7 @@ public int main(string[] args) {
     }
 
     if (parsed.options.hasCommand)
-        return submit(repl, parsed.options.command) ? 0 : 1;
+        return runOneShotCommand(repl, parsed.options.command);
 
     if (parsed.options.files.length != 0 && !parsed.options.liveAfterFiles)
         return 0;
@@ -176,6 +176,22 @@ private bool submit(ref imported!"snakebite.repl".Repl repl, in string line) {
 }
 
 
+// `-c`'s exit status is not the loop-continuation question `keepGoing`
+// answers (that treats `:q` as the one case that stops looping); it is
+// whether the command failed. Success and `:q` both exit 0, an error
+// exits 1, matching what a caller scripting `sb -c` expects to test.
+private int runOneShotCommand(
+    ref imported!"snakebite.repl".Repl repl,
+    in string command,
+) {
+    import snakebite.repl: SubmitResult;
+
+    const result = repl.submit(command);
+    renderResult(result);
+    return result.kind == SubmitResult.Kind.error ? 1 : 0;
+}
+
+
 private struct SubmitOutcome {
     public bool keepGoing;
     public imported!"std.datetime.stopwatch".Duration elapsed;
@@ -188,15 +204,25 @@ private SubmitOutcome submitTimed(
 ) {
     import snakebite.repl: SubmitResult;
     import std.datetime.stopwatch: StopWatch;
-    import std.stdio: writeln;
 
     StopWatch stopwatch;
     stopwatch.start;
     const result = repl.submit(line);
     const elapsed = stopwatch.peek;
 
+    renderResult(result);
+
+    return SubmitOutcome(result.kind != SubmitResult.Kind.quit, elapsed);
+}
+
+
+private void renderResult(in imported!"snakebite.repl".SubmitResult result) {
+    import snakebite.repl: SubmitResult;
+    import std.stdio: writeln;
+
     final switch (result.kind) with (SubmitResult.Kind) {
         case none:
+        case quit:
             break;
         case value:
             writeln(result.text);
@@ -204,11 +230,7 @@ private SubmitOutcome submitTimed(
         case error:
             writeln(errorDiagnostic(result.text));
             break;
-        case quit:
-            return SubmitOutcome(false, elapsed);
     }
-
-    return SubmitOutcome(true, elapsed);
 }
 
 
