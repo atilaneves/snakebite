@@ -128,38 +128,6 @@ static foreach (backend; Matrix!(
     }
 }
 
-// Interpreter-only by nature: the behaviour under test is the interpreter's
-// own refusal of a construct it does not support, which no other backend
-// has. The `switch` runs fine everywhere else.
-@("tryCatchThrowable.doesNotCatchInterpreterFailure.Interpreter")
-@Tags("Interpreter")
-unittest {
-    void run() {
-        2.shouldBeRetOf!(
-            Interpreter,
-            q{
-                int result() {
-                    try {
-                        switch (1) {
-                            case 1:
-                                break;
-
-                            default:
-                                break;
-                        }
-                    } catch(Throwable) {
-                        return 1;
-                    }
-                    return 2;
-                }
-            },
-            "result",
-        );
-    }
-
-    run.shouldThrow;
-}
-
 @("failureMessage.fromClassField.survivesArrayAppend.Interpreter")
 @Tags("Interpreter")
 unittest {

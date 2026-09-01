@@ -9,6 +9,77 @@ module ut.backends.run.control;
 import ut.backends;
 
 
+// An ordinary switch selects one case, falls through until `break`, and
+// takes `default` when no case matches.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+)) {
+    @("switchDispatchesAndFallsThrough." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int matched;
+                int fellThrough;
+
+                foreach (value; [0u, 1u, 3u]) {
+                    switch (value) {
+                    case 0:
+                        matched += 10;
+                        break;
+                    case 1:
+                        matched += 20;
+                        break;
+                    default:
+                        fellThrough += value;
+                        break;
+                    }
+                }
+
+                assert(matched == 30);
+                assert(fellThrough == 3);
+
+                switch (4) {
+                case 0:
+                    assert(false);
+                default:
+                    break;
+                }
+            }
+        });
+    }
+}
+
+// A string switch is lowered by dmd to a call to druntime's `__switch`, so
+// the interpreter must route that call through the normal native boundary.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+)) {
+    @("switchOnStringUsesDruntime." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int score(string value) {
+                switch (value) {
+                case "red":
+                    return 10;
+                case "green":
+                    return 20;
+                default:
+                    return 0;
+                }
+            }
+
+            void main() {
+                assert(score("red") == 10);
+                assert(score("green") == 20);
+                assert(score("blue") == 0);
+            }
+        });
+    }
+}
+
+
 // `goto` to a label inside the same catch skips the statements between,
 // so they have no effect.
 static foreach (backend; Matrix!(
@@ -53,8 +124,6 @@ static foreach (backend; Matrix!(
 // running from there, so every body on the path contributes.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("gotoCaseAndDefaultFallThrough." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -118,8 +187,6 @@ static foreach (backend; Matrix!(
 // each case running its own body rather than falling into another's.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("finalSwitchDispatchesEveryEnumMember." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -154,6 +221,36 @@ static foreach (backend; Matrix!(
                 assert(weight(pick(0)) == 10);
                 assert(weight(pick(1)) == 20);
                 assert(weight(pick(2)) == 30);
+            }
+        });
+    }
+}
+
+// A case range and a case list each select one shared case body.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+)) {
+    @("switchSupportsCaseRangesAndLists." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int classify(int value) {
+                switch (value) {
+                case 0: .. case 3:
+                    return 10;
+                case 5, 7:
+                    return 20;
+                default:
+                    return 30;
+                }
+            }
+
+            void main() {
+                assert(classify(0) == 10);
+                assert(classify(3) == 10);
+                assert(classify(5) == 20);
+                assert(classify(7) == 20);
+                assert(classify(4) == 30);
             }
         });
     }
@@ -212,4 +309,3 @@ static foreach (backend; Matrix!(
         });
     }
 }
-

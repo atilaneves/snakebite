@@ -107,10 +107,12 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.location: Loc;
     import dmd.mtype: Type;
     import dmd.statement:
-        Catch, CompoundStatement, ContinueStatement, ExpStatement,
-        ForStatement, IfStatement, ImportStatement, ReturnStatement,
-        ScopeStatement, Statement, TryCatchStatement, TryFinallyStatement,
-        ThrowStatement, UnrolledLoopStatement;
+        BreakStatement, CaseStatement, Catch, CompoundStatement,
+        ContinueStatement, DefaultStatement, ExpStatement, ForStatement,
+        GotoCaseStatement, GotoDefaultStatement, IfStatement,
+        ImportStatement, ReturnStatement, ScopeStatement, Statement,
+        SwitchStatement, ThrowStatement, TryCatchStatement,
+        TryFinallyStatement, UnrolledLoopStatement;
     import dmd.tokens: EXP;
 
     alias visit = Visitor.visit;
@@ -223,6 +225,15 @@ extern(C++) private final class Evaluator: Visitor {
     // Set until the nearest loop consumes it, so enclosing compounds stop
     // before they execute the statements that `continue` skips.
     private bool _continued;
+    // Set until the nearest loop or switch consumes it. A switch needs the
+    // same transfer as a loop because `break` exits either construct.
+    private bool _break;
+    // A `goto case` or `goto default` leaves the current statement sequence
+    // before the switch resumes it at its resolved target.
+    private Statement _gotoTarget;
+    // While a switch walks its body, this skips statements before the case
+    // selected by its condition or by a `goto case` transfer.
+    private Statement _switchStart;
     // Whether the currently executing function returns `ref`, set by
     // `execute` from the function's own type. Checked by
     // `visit(ReturnStatement)`: a `ref` return's `_place` is the address a
@@ -543,6 +554,9 @@ extern(C++) private final class Evaluator: Visitor {
         private FuncDeclaration _function;
         private bool _returned;
         private bool _continued;
+        private bool _break;
+        private Statement _gotoTarget;
+        private Statement _switchStart;
         private bool _returnsRef;
 
         @disable this();
@@ -558,6 +572,9 @@ extern(C++) private final class Evaluator: Visitor {
             _function = evaluator._function;
             _returned = evaluator._returned;
             _continued = evaluator._continued;
+            _break = evaluator._break;
+            _gotoTarget = evaluator._gotoTarget;
+            _switchStart = evaluator._switchStart;
             _returnsRef = evaluator._returnsRef;
         }
 
@@ -570,6 +587,9 @@ extern(C++) private final class Evaluator: Visitor {
             _evaluator._function = _function;
             _evaluator._returned = _returned;
             _evaluator._continued = _continued;
+            _evaluator._break = _break;
+            _evaluator._gotoTarget = _gotoTarget;
+            _evaluator._switchStart = _switchStart;
             _evaluator._returnsRef = _returnsRef;
         }
     }
@@ -685,8 +705,15 @@ extern(C++) private final class Evaluator: Visitor {
 
         foreach (child; *statement.statements) {
             if (child !is null) {
+                if (_switchStart !is null) {
+                    if (child is _switchStart)
+                        _switchStart = null;
+                    else if (!containsSwitchTarget(child))
+                        continue;
+                }
                 child.accept(this);
-                if (_returned || _continued)
+                if (_returned || _continued || _break
+                        || _gotoTarget !is null)
                     return;
             }
         }
@@ -698,11 +725,43 @@ extern(C++) private final class Evaluator: Visitor {
 
         foreach (child; *statement.statements) {
             if (child !is null) {
+                if (_switchStart !is null) {
+                    if (child is _switchStart)
+                        _switchStart = null;
+                    else if (!containsSwitchTarget(child))
+                        continue;
+                }
                 child.accept(this);
-                if (_returned || _continued)
+                if (_returned || _continued || _break
+                        || _gotoTarget !is null)
                     return;
             }
         }
+    }
+
+    private bool containsSwitchTarget(Statement statement) {
+        while (statement !is null) {
+            if (statement is _switchStart)
+                return true;
+
+            if (auto case_ = statement.isCaseStatement)
+                statement = case_.statement;
+            else if (auto scope_ = statement.isScopeStatement)
+                statement = scope_.statement;
+            else if (auto compound = statement.isCompoundStatement) {
+                if (compound.statements is null)
+                    return false;
+
+                foreach (child; *compound.statements)
+                    if (child !is null && containsSwitchTarget(child))
+                        return true;
+                return false;
+            }
+            else
+                return false;
+        }
+
+        return false;
     }
 
     // `{ ... }` is a `ScopeStatement` wrapping the `CompoundStatement` (or
@@ -775,6 +834,100 @@ extern(C++) private final class Evaluator: Visitor {
         runForEffect(statement.exp);
     }
 
+    override void visit(BreakStatement statement) {
+        if (statement.ident !is null)
+            throw new SnakebiteException(
+                "interpreter cannot execute a labelled `break` statement",
+            );
+
+        _break = true;
+    }
+
+    override void visit(SwitchStatement statement) {
+        const condition = asIntegral(statement.condition);
+        Statement selected;
+        if (statement.cases !is null)
+            foreach (case_; *statement.cases) {
+                if (asIntegral(case_.exp) == condition) {
+                    selected = case_;
+                    break;
+                }
+            }
+
+        if (selected is null)
+            selected = statement.sdefault;
+        if (selected is null)
+            return;
+
+        auto previousStart = _switchStart;
+        auto previousTarget = _gotoTarget;
+        scope (exit) {
+            _switchStart = previousStart;
+            _gotoTarget = previousTarget;
+        }
+
+        while (true) {
+            _switchStart = selected;
+            _gotoTarget = null;
+            statement._body.accept(this);
+
+            if (_returned || _continued)
+                return;
+
+            if (_break) {
+                _break = false;
+                return;
+            }
+
+            auto target = _gotoTarget;
+            if (target is null)
+                return;
+
+            bool belongs;
+            if (target is statement.sdefault)
+                belongs = true;
+            else if (statement.cases !is null)
+                foreach (case_; *statement.cases)
+                    if (target is case_) {
+                        belongs = true;
+                        break;
+                    }
+
+            if (!belongs)
+                return;
+
+            selected = target;
+        }
+    }
+
+    override void visit(CaseStatement statement) {
+        if (statement.statement !is null)
+            statement.statement.accept(this);
+    }
+
+    override void visit(DefaultStatement statement) {
+        if (statement.statement !is null)
+            statement.statement.accept(this);
+    }
+
+    override void visit(GotoCaseStatement statement) {
+        if (statement.cs is null)
+            throw new SnakebiteException(
+                "interpreter cannot execute an unresolved `goto case`",
+            );
+
+        _gotoTarget = statement.cs;
+    }
+
+    override void visit(GotoDefaultStatement statement) {
+        if (statement.sw is null || statement.sw.sdefault is null)
+            throw new SnakebiteException(
+                "interpreter cannot execute an unresolved `goto default`",
+            );
+
+        _gotoTarget = statement.sw.sdefault;
+    }
+
     override void visit(ThrowStatement statement) {
         throwGuest(statement.exp);
     }
@@ -839,8 +992,12 @@ extern(C++) private final class Evaluator: Visitor {
         while (statement.condition is null || truthOf(statement.condition)) {
             if (statement._body !is null) {
                 statement._body.accept(this);
-                if (_returned)
+                if (_returned || _gotoTarget !is null)
                     return;
+                if (_break) {
+                    _break = false;
+                    return;
+                }
                 _continued = false;
             }
 
