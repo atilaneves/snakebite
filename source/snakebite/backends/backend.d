@@ -9,29 +9,10 @@ private:
 // dub-aware driver asks dub for import paths and flags and builds one of
 // these.
 public struct Program {
-    // The program's entry point, and who wrote it. `func` is null when the
-    // program has no `main` at all, which is not an error: a bare directory
-    // of `.d` files can be a library.
+    // `func` is null when the program has no `main`, which is not an error: a
+    // bare directory of `.d` files can be a library.
     struct Main {
-        // What a backend may do with this `main`.
-        //
-        // A `main` a human wrote is the program. Running anything else
-        // instead changes what the program does, so no backend may
-        // substitute it: it runs, or the backend fails.
-        //
-        // dub's generated test root is not the program. dub writes it
-        // outside the project - into its own cache, so the module is in no
-        // source tree the user has - purely as scaffolding whose contract is
-        // "run every unittest". Any driver that runs every unittest honours
-        // that contract, so a backend may stand in for it; `run` does, for
-        // every backend.
-        enum Kind {
-            program,
-            dubTestRunner,
-        }
-
         imported!"dmd.func".FuncDeclaration func;
-        Kind kind;
     }
 
     imported!"dmd.dmodule".Module[] rootModules;
@@ -39,10 +20,7 @@ public struct Program {
     Main main;
 
     // The entry point is found the way a compiled build finds it: the first
-    // root module declaring a module-level `main`. The module that declares
-    // it also says which kind it is - dub names its generated test root
-    // `dub_test_root`, and nothing else may claim that name, since dub owns
-    // it in every project it generates one for.
+    // root module declaring a module-level `main`.
     this(imported!"dmd.dmodule".Module[] rootModules) {
         import snakebite.frontend.dmd.functions:
             findFunction,
@@ -55,12 +33,7 @@ public struct Program {
         foreach (module_; rootModules) {
             auto found = findFunction(module_, "main");
             if (found !is null) {
-                main = Main(
-                    found,
-                    module_.ident.toString == "dub_test_root"
-                        ? Main.Kind.dubTestRunner
-                        : Main.Kind.program,
-                );
+                main = Main(found);
                 break;
             }
         }
@@ -130,17 +103,10 @@ public abstract class Backend {
 // once on top of `call`, and return the exit status. A `Throwable` that
 // escapes is handled as druntime would handle it: printed, exit status 1.
 public int run(Backend backend, Program program) {
-    alias Kind = Program.Main.Kind;
-
     if (runModuleConstructors(backend, program.moduleConstructors))
         return 1;
 
-    final switch (program.main.kind) {
-        case Kind.program:
-            return runMain(backend, program.main.func);
-        case Kind.dubTestRunner:
-            return runUnittests(backend, program.rootModules);
-    }
+    return runMain(backend, program.main.func);
 }
 
 // Constructors that require code from a dependency image cannot run in the
@@ -185,6 +151,7 @@ private int runMain(
     imported!"dmd.func".FuncDeclaration main_,
 ) {
     import dmd.astenums: Tvoid;
+    import dmd.typesem: nextOf;
 
     if (main_ is null)
         return 0;
@@ -194,31 +161,6 @@ private int runMain(
     return failing(() {
         backend.call(main_, isVoid ? null : &status, []);
     }) ? 1 : status;
-}
-
-// Stand in for dub's generated test root by doing what it stands on:
-// druntime's own default runner. `_d_run_main` calls `runModuleUnitTests`
-// (rt.dmain2) before `main` is ever entered, and that walks `ModuleInfo`
-// calling each module's generated `__modtest`, which runs every unittest in
-// the module - nested ones included, not just the module-level ones dub's
-// `-betterC` branch reaches through `__traits(getUnitTests)`. The order is
-// druntime's: module by module, declaration by declaration.
-//
-// A failing unittest stops the run and fails the process, as druntime does.
-// Nothing is printed on success: that message belongs to dub's `main`, not
-// to the runner, and printing it would need I/O no backend has to have.
-private int runUnittests(
-    Backend backend,
-    imported!"dmd.dmodule".Module[] rootModules,
-) {
-    import snakebite.frontend.dmd.functions: findUnittests;
-
-    foreach (module_; rootModules)
-        foreach (unittest_; findUnittests(module_))
-            if (failing(() { backend.call(unittest_, null, []); }))
-                return 1;
-
-    return 0;
 }
 
 // Runs one guest call, reporting an escaping `Throwable` the way druntime

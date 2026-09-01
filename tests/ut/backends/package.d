@@ -201,7 +201,7 @@ public template shouldBeRetOf(
         in string file = __FILE__,
         in size_t line = __LINE__,
     ) {
-        import dmd.typesem: size;
+        import dmd.typesem: nextOf, size;
 
         enum call = callExpression!(functionName, Args);
 

@@ -229,7 +229,10 @@ private Project loadProject(in Options options) {
 
     auto stopWatch = StopWatch(AutoStart.yes);
     auto parsed = parseRootModules(
-        project.sources.files, project.sources.importPaths, flags,
+        project.sources.files,
+        project.sources.importPaths,
+        flags,
+        project.sources.sourceOverrides,
     );
     project.frontend = stopWatch.peek;
 

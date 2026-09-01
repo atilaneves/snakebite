@@ -80,6 +80,7 @@ void printTable(in BackendReport[] reports) {
             "cmp min", "cmp med", "cmp σ", "RAM",
         ],
     ];
+    rows ~= [""];
     foreach (report; reports) {
         string passCell = passCellText(report);
         // A backend claiming a clean run while the oracle itself failed is

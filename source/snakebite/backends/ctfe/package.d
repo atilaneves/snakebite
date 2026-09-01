@@ -50,6 +50,7 @@ private void writeResult(
     void* returnPlace,
 ) {
     import dmd.astenums: Tvoid;
+    import dmd.typesem: nextOf;
     import snakebite.nativelayout: storeValue;
 
     auto type = function_.type.nextOf;
@@ -78,6 +79,7 @@ private InterpretResult interpret(
     import dmd.expression: CallExp, VarExp;
     import dmd.globals: global;
     import dmd.location: Loc;
+    import dmd.typesem: nextOf;
     import snakebite.frontend.compiler:
         diagnosticMessage,
         resetErrors,
@@ -107,6 +109,7 @@ private InterpretResult interpret(
 // built up at compile time (as `std.conv.text` does) is an `ArrayLiteralExp`
 // of character elements.
 private string stringValue(imported!"dmd.expression".Expression expression) {
+    import dmd.expressionsem: toInteger;
     import std.conv: text;
 
     if (auto literal = expression.isStringExp)

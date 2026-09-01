@@ -336,6 +336,7 @@ private CallPlan prepare(
     import snakebite.ffi.limits: maxArguments;
     import dmd.astenums: LINK, STC, VarArg;
     import dmd.mangle: mangleExact;
+    import dmd.typesem: nextOf;
     import std.conv: text;
     import std.string: fromStringz;
 

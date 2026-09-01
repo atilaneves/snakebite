@@ -110,7 +110,7 @@ public struct TypeFacts {
     // that builds this.
     public static TypeFacts of(Type type) {
         import dmd.astenums: Tarray;
-        import dmd.typesem: size;
+        import dmd.typesem: alignsize, isIntegral, isUnsigned, nextOf, size;
 
         if (type.ty == Tarray)
             return TypeFacts(
@@ -182,6 +182,8 @@ public void storeValue(
 ) {
     import core.stdc.string: memset;
     import dmd.astenums: Tarray, Tfloat32, Tfloat64;
+    import dmd.expressionsem: toInteger, toReal;
+    import dmd.typesem: nextOf;
     import std.conv: text;
 
     // `null` is all-zero bytes whatever it is stored as - a pointer, a

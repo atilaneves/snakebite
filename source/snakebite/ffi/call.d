@@ -71,6 +71,7 @@ public struct CallAdapter {
     public static CallAdapter of(
         imported!"dmd.func".FuncDeclaration function_,
     ) {
+        import dmd.typesem: nextOf;
         import snakebite.nativelayout: TypeFacts;
 
         // dmd's function-type accessors are mutable, even for a read-only
