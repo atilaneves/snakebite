@@ -548,6 +548,8 @@ extern(C++) private final class Evaluator: Visitor {
             || interpretsTemplate
             || hasInterpretedDelegateArgument(callSite);
         if (!interprets) {
+            rejectInterpretedFunctionPointerArgument(
+                function_, arguments, argumentCount);
             const plan = callSite is null
                 ? &_plans.of(function_)
                 : callPlanOf(callSite, function_);
@@ -605,6 +607,65 @@ extern(C++) private final class Evaluator: Visitor {
         _gotoTarget = null;
         _switchStart = null;
         body_.accept(this);
+    }
+
+    // `visit(SymOffExp)`/`visit(FuncExp)` store a guest function pointer's
+    // value as the `FuncDeclaration` itself, since this backend has no
+    // machine code of its own for an interpreted function - `calleeOf`
+    // resolves that stand-in back on every call this evaluator makes. A
+    // call routed to real native code instead (`function_` here has no
+    // guest body to walk) hands its arguments to the FFI seam as opaque
+    // bytes, which marshals a function-pointer argument's bits unchanged
+    // into a register; if those bits are one of this backend's
+    // declaration stand-ins rather than an executable address, the native
+    // callee jumps to it and the host segfaults with no diagnostic.
+    // Checked once here, at the one place every native call's arguments
+    // are about to leave this evaluator for good, rather than in every
+    // caller that might produce such a value.
+    //
+    // Only a function-pointer-typed parameter is inspected: any other
+    // parameter's bytes might legitimately contain the same bit pattern
+    // (an `int` happening to equal some declaration's address, say)
+    // without meaning a function pointer at all.
+    private void rejectInterpretedFunctionPointerArgument(
+        FuncDeclaration function_,
+        const(void*)* arguments,
+        size_t argumentCount,
+    ) {
+        import snakebite.nativelayout: loadIntegral;
+        import std.conv: text;
+
+        auto type = function_.type.isTypeFunction;
+        if (type is null)
+            return;
+
+        size_t index = function_.vthis !is null ? 1 : 0;
+        foreach (i; 0 .. type.parameterList.length) {
+            if (index >= argumentCount)
+                return;
+
+            const argumentIndex = index++;
+            auto pointer = type.parameterList[i].type.isTypePointer;
+            if (pointer is null || pointer.next.isTypeFunction is null)
+                continue;
+
+            const raw = loadIntegral(
+                arguments[argumentIndex], size_t.sizeof, false);
+            if (raw == 0)
+                continue;
+
+            auto candidate = cast(FuncDeclaration) cast(void*) raw;
+            if (!_program.isInterpreted(candidate))
+                continue;
+
+            throw new SnakebiteException(
+                text("interpreter cannot call `", function_.toString,
+                    "` with `", candidate.toString, "` as a function "
+                    ~ "pointer argument: calling an interpreted function "
+                    ~ "back from native code is not yet supported "
+                    ~ "(see issue #9)"),
+            );
+        }
     }
 
     // dmd lowers `foreach` over an associative array to a call to a
@@ -3022,8 +3083,32 @@ extern(C++) private final class Evaluator: Visitor {
     // frame - the frame stack never moves what it has already handed
     // out - so this is just that address, stored as a `size_t` the same
     // way any other pointer value is.
+    //
+    // `&someModuleLevelFunction` reaches this node too, with `var` a
+    // `FuncDeclaration` instead: dmd only lowers a nested function's
+    // address to a `DelegateExp` (a nested function may need its
+    // enclosing frame or closure as context), never a module-level one,
+    // so a plain function pointer here has no context word to carry. This
+    // backend has no machine code for an interpreted function, so, exactly
+    // as `visit(FuncExp)` already does for a function pointer, the
+    // function word is the declaration itself, and `calleeOf` resolves it
+    // back when the pointer is called.
     override void visit(SymOffExp expression) {
         import snakebite.nativelayout: storeIntegral;
+
+        if (auto function_ = expression.var.isFuncDeclaration) {
+            // A function has no fields for `offset` to select between: dmd
+            // never emits a non-zero offset alongside a `FuncDeclaration`
+            // `var`, so this stand-in scheme (see above) has nowhere to
+            // apply an offset to. Asserted rather than silently ignored,
+            // so a dmd change that starts doing so is caught here instead
+            // of producing a function pointer value that is quietly wrong.
+            assert(expression.offset == 0,
+                "SymOffExp naming a function has a non-zero offset");
+            storeIntegral(
+                _place, cast(size_t) cast(void*) function_, _facts.size);
+            return;
+        }
 
         const address =
             cast(size_t) slotOf(expression, expression.var) + expression.offset;
@@ -4124,11 +4209,19 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     // The callee of a call dmd left unresolved: one reached through a
-    // value rather than a name, which for this interpreter means a
-    // delegate. The value's function word is the declaration
-    // `visit(FuncExp)` stored, read back here. Its context word is passed
-    // directly into the callee's hidden context slot, since the delegate
-    // may be called after the function that created it has returned.
+    // value rather than a name, which for this interpreter means either a
+    // delegate or a plain function pointer. Either way the function word
+    // holds the declaration `visit(FuncExp)`/`visit(SymOffExp)` stored,
+    // read back here. A delegate's context word is passed directly into
+    // the callee's hidden context slot, since the delegate may be called
+    // after the function that created it has returned; a function pointer
+    // has no context word, so it never carries one.
+    //
+    // dmd lowers `fn(args)` on a function-pointer-typed `fn` to
+    // `(*fn)(args)`, so the call's `e1` is a `PtrExp` whose own type is the
+    // pointed-to `Tfunction`, not `Tpointer` - `deref.e1` is the pointer
+    // expression itself, read with `asPointer` the same way any other
+    // dereference reads what it points at.
     private Callee calleeOf(CallExp expression) {
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize,
@@ -4136,6 +4229,17 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         auto callee = expression.e1;
+        if (auto deref = callee.isPtrExp) {
+            auto function_ = cast(FuncDeclaration) asPointer(deref.e1);
+            if (function_ is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot call `", expression.toString,
+                        "`: the function pointer is null"),
+                );
+
+            return Callee(function_, null, false);
+        }
+
         if (callee.type.ty != Tdelegate)
             throw new SnakebiteException(
                 text("interpreter cannot call an unresolved function: `",

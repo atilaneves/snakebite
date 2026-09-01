@@ -158,3 +158,139 @@ unittest {
             "interpreter cannot evaluate `(*p).b`: reading a bitfield is " ~
                 "not supported");
 }
+
+// `&factorial` on a module-level function is dmd's `SymOffExp` too, the
+// same node a local's address takes above - the difference is `var` names
+// a `FuncDeclaration`, not a `VarDeclaration`, so there is no frame slot to
+// find. The value it takes the address of is a plain function pointer (no
+// context word), unlike `&nested` on a nested function, which dmd instead
+// lowers to a `DelegateExp`. `factorial` is declared alongside `main`
+// rather than nested inside it, the same way `shouldBeStatusOf` renders any
+// top-level declaration, so its address is a plain function pointer both
+// natively and in the guest.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("pointers.functionPointer.moduleLevel.call." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            uint factorial(uint n) {
+                return n <= 1 ? 1 : n * factorial(n - 1);
+            }
+
+            int main() {
+                uint function(uint) fn = &factorial;
+                assert(fn(5) == 120);
+                return 0;
+            }
+        });
+    }
+}
+
+// A function pointer is an ordinary value once taken: passing it into
+// another function and calling it there reaches the same guest function as
+// calling it directly would.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("pointers.functionPointer.moduleLevel.passAsArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            uint answer() {
+                return 42;
+            }
+
+            uint invoke(uint function() fn) {
+                return fn();
+            }
+
+            int main() {
+                assert(invoke(&answer) == 42);
+                return 0;
+            }
+        });
+    }
+}
+
+// A guest function pointer travels as `visit(SymOffExp)`'s stand-in - the
+// `FuncDeclaration` itself, since this backend has no machine code of its
+// own for an interpreted function (see the comment there). That stand-in
+// is only ever resolved back by this evaluator's own `calleeOf`, on a call
+// this evaluator itself makes. Handed instead to genuinely native code
+// through the FFI seam - `qsort`'s comparator argument here - the bits
+// leave as an ordinary function pointer value and native code jumps to
+// them directly.
+//
+// Native compiles `compare` to real machine code, so the same program runs
+// correctly there: `qsort` calls it back and the array comes out sorted.
+// The interpreter has no machine code to jump to, so it cannot let this
+// reach `qsort` at all; that is pinned separately below, in
+// `pointers.functionPointer.nativeCallback.refused.Interpreter`, since
+// `shouldBeRetOf` cannot express "throws on this backend, succeeds on
+// that one" in a single assertion.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+    Omit!(Interpreter, Because.diverges,
+        "pinned in " ~
+        "pointers.functionPointer.nativeCallback.refused.Interpreter: " ~
+        "a guest function pointer reaching native code through FFI is " ~
+        "refused loudly instead of segfaulting the host, until issue " ~
+        "#9 gives the interpreter a real native callback mechanism"),
+)) {
+    @("pointers.functionPointer.nativeCallback." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                extern(C) int compare(scope const void* a, scope const void* b) {
+                    return *cast(const int*) a - *cast(const int*) b;
+                }
+
+                int answer() {
+                    import core.stdc.stdlib: qsort;
+
+                    int[3] xs = [3, 1, 2];
+                    qsort(xs.ptr, xs.length, int.sizeof, &compare);
+                    return xs[0];
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+// The sibling of the Matrix test above, for the one backend it could not
+// express: the interpreter refuses to hand `qsort` a function pointer it
+// cannot itself turn back into machine code, with a message naming the
+// gap (issue #9) instead of segfaulting the host. Confirmed by running
+// this before the guard existed: the host died with no diagnostic, which
+// `shouldThrowWithMessage` cannot observe from inside the same process -
+// the guard exists precisely so this test can assert anything at all.
+@("pointers.functionPointer.nativeCallback.refused.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        extern(C) int compare(scope const void* a, scope const void* b) {
+            return *cast(const int*) a - *cast(const int*) b;
+        }
+
+        int answer() {
+            import core.stdc.stdlib: qsort;
+
+            int[3] xs = [3, 1, 2];
+            qsort(xs.ptr, xs.length, int.sizeof, &compare);
+            return xs[0];
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+
+    int result;
+    interpreter(module_).call(function_, &result, [])
+        .shouldThrowWithMessage(
+            "interpreter cannot call `qsort` with `compare` as a function " ~
+                "pointer argument: calling an interpreted function back " ~
+                "from native code is not yet supported (see issue #9)");
+}
