@@ -45,6 +45,54 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A struct allocated with `new` runs its constructor in the allocated
+// storage. An immutable field is initialized with a construct expression,
+// so this also checks that constructor initialization reaches the object
+// field rather than being rejected as an assignment.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("struct.new.constructorInitializesImmutableField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            struct Value {
+                immutable int value;
+
+                this(int value) {
+                    this.value = value;
+                }
+            }
+
+            int main() {
+                auto value = new Value(42);
+                return value.value;
+            }
+        }, "main");
+    }
+}
+
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("struct.new.constructorBindsRefParameter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        43.shouldBeRetOf!(backend, q{
+            struct Value {
+                int value;
+
+                this(ref int source) {
+                    ++source;
+                    value = source;
+                }
+            }
+
+            int main() {
+                int source = 42;
+                auto value = new Value(source);
+                return value.value;
+            }
+        }, "main");
+    }
+}
+
 // The members of an anonymous union occupy the same storage, so writing
 // through one member changes what is read back through another.
 static foreach (backend; Matrix!(
@@ -276,4 +324,3 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
-

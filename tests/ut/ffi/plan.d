@@ -2,7 +2,7 @@ module ut.ffi.plan;
 
 
 import ut;
-import snakebite.ffi: PlanCache, invokeCall;
+import snakebite.ffi: CallAdapter, PlanCache;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 
@@ -198,7 +198,9 @@ unittest {
     }
 
     int value;
-    auto result = invokeCall(function_, &value, [], &invoke);
+    auto result = CallAdapter.of(function_).invoke(
+        &value, [], &invoke,
+    );
 
     value.should == 1234;
     result.address.should == cast(void*) &_cell;

@@ -52,8 +52,9 @@ This means there is no need to marshall or unmarshall when doing FFI.
 
 ## Github
 
+- Use `gh` to create PRs.
 - Label PR comments as from an agent (identify which one).
-- Open new PRs in the browser.
+- Open new PRs in the browser with `xdg-open`.
 - Check for local worktrees before using `gh` to look at diffs etc.
 - When you create or update a PR, check to see if it can be merged and
   fix any conflicts, don't wait to be told to do so.

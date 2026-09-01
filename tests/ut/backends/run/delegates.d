@@ -65,7 +65,6 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("nestedFunctionDelegateCarriesItsFrame." ~ backend.stringof)
     @Tags(backend.stringof)
