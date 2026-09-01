@@ -2153,7 +2153,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
         import dmd.astenums: Tarray, Tpointer;
 
         if (expression.e1.type.ty == Tarray)
-            return compileDynamicArrayComparison(expression, destOffset);
+            return compileScalarDynamicArrayComparison(expression, destOffset);
 
         const operandFacts = TypeFacts.of(expression.e1.type);
 
@@ -2223,11 +2223,11 @@ extern(C++) private final class FunctionCompiler: Visitor {
             emit(&opCopy, destOffset, leftOffset, 1);
     }
 
-    // A dynamic array's native value contains a length and a data pointer;
-    // the pointer is not part of value equality. The loop keeps the length
-    // available after its equality test and reuses scalar handlers so float
-    // elements follow value semantics instead of raw bit comparison.
-    private void compileDynamicArrayComparison(
+    // rt-simple compares arrays whose elements are integral or float/double.
+    // Keeping this check at the compiler seam rejects struct, nested-array,
+    // and pointer equality instead of giving them incorrect bytewise semantics.
+    // The loop uses the native array layout and scalar comparison handlers.
+    private void compileScalarDynamicArrayComparison(
         BinExp expression, in size_t destOffset,
     ) {
         import dmd.tokens: EXP;

@@ -540,7 +540,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // last element, so a length-only comparison also fails. Empty and non-empty
 // arrays cover the length check without reading a null data pointer.
 static foreach (backend; Matrix!()) {
-    @("compare.dynamicArrayEquality." ~ backend.stringof)
+    @("compare.scalarDynamicArrayEquality.contents." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         true.shouldBeRetOf!(
@@ -574,13 +574,20 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// rt-simple instantiates array round trips for exactly these six scalar
+// element types. Listing all six here keeps the supported scope explicit.
 static foreach (backend; Matrix!()) {
-    @("compare.dynamicArrayEquality.elementTypes." ~ backend.stringof)
+    @("compare.scalarDynamicArrayEquality.rtSimpleElementTypes."
+        ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         true.shouldBeRetOf!(
             backend,
             q{
+                ubyte[] ubytes() {
+                    return [17, 31, 47];
+                }
+
                 ushort[] ushorts() {
                     return [17, 31, 47];
                 }
@@ -610,7 +617,8 @@ static foreach (backend; Matrix!()) {
                 }
 
                 bool compareElementTypes() {
-                    return ushorts() == ushorts()
+                    return ubytes() == ubytes()
+                        && ushorts() == ushorts()
                         && ints() == ints()
                         && longs() == longs()
                         && floats() == floats()
