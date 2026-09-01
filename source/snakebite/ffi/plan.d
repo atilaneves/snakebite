@@ -63,6 +63,15 @@ public struct CallPlan {
         void* returnPlace,
         scope const(void*)[] arguments,
     ) const {
+        callAt(_address, returnPlace, arguments);
+    }
+
+    // Calls another function with this plan's prepared ABI shape.
+    pragma(inline, true) public void callAt(
+        const(void)* address,
+        void* returnPlace,
+        scope const(void*)[] arguments,
+    ) const {
         import std.conv: text;
 
         if (_fastPath == FastPath.integer32ToInteger32) {
@@ -74,11 +83,11 @@ public struct CallPlan {
             alias Int32Function = extern(C) int function(int);
             // Separate branches avoid a result temporary in the hot path.
             if (returnPlace !is null)
-                *cast(int*) returnPlace = (cast(Int32Function) _address)(
+                *cast(int*) returnPlace = (cast(Int32Function) address)(
                     *cast(const int*) arguments[0],
                 );
             else
-                (cast(Int32Function) _address)(
+                (cast(Int32Function) address)(
                     *cast(const int*) arguments[0],
                 );
             return;
@@ -90,10 +99,11 @@ public struct CallPlan {
                     " argument(s), got ", arguments.length),
             );
 
-        callGeneric(returnPlace, arguments);
+        callGeneric(address, returnPlace, arguments);
     }
 
     private void callGeneric(
+        const(void)* address,
         void* returnPlace,
         scope const(void*)[] arguments,
     ) const {
@@ -186,7 +196,7 @@ public struct CallPlan {
             foreach (i; firstExplicit .. arguments.length)
                 load(i);
 
-        const result = invoke(cast(void*) _address,
+        const result = invoke(cast(void*) address,
             words[0 .. slot], kinds[0 .. slot], _return);
 
         // A hidden-pointer return already left its bytes at `returnPlace`

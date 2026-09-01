@@ -7,9 +7,49 @@ module ut.backends.run.classes;
 
 
 import ut.backends;
-import snakebite.frontend.compiler: parseSnippet;
+import snakebite.backends.backend: Program;
+import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.string: endsWith;
+
+
+public final class HostDispatchObject: Object {
+    public override size_t toHash() @trusted nothrow {
+        return 42;
+    }
+}
+
+
+public Object hostDispatchObject() {
+    return new HostDispatchObject;
+}
+
+
+@("hostCreatedObjectUsesVirtualGuestDispatch.Interpreter")
+@Tags(Interpreter.stringof)
+unittest {
+    auto modules = parseSnippets([
+        q{
+            module host_dispatch_root;
+            import ut.backends.run.classes: hostDispatchObject;
+
+            size_t answer() {
+                return hostDispatchObject().toHash;
+            }
+        },
+        q{
+            module ut.backends.run.classes;
+            Object hostDispatchObject();
+        },
+    ]);
+    auto function_ = findFunction(modules[0], "answer");
+    auto backend = new Interpreter(Program([modules[0]]));
+
+    size_t result;
+    backend.call(function_, &result, []);
+
+    result.should == 42;
+}
 
 
 // `shared` is a qualifier, not a distinct class: the shared type's
@@ -73,6 +113,36 @@ static foreach (backend; Matrix!(
                 Base base = derived;
                 assert(derived.describe == 49);
                 assert(base.describe == 49);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("interfaceDispatchFindsCovariantOverride." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface Factory {
+                Object make();
+            }
+
+            class Product: Object {
+            }
+
+            class ProductFactory: Factory {
+                override Product make() {
+                    return new Product;
+                }
+            }
+
+            void main() {
+                Factory factory = new ProductFactory;
+                assert(factory.make !is null);
             }
         });
     }
