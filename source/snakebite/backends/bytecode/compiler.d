@@ -1598,9 +1598,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
     }
 
     // A pointer-sized temporary: the shape every address this compiler
-    // computes at run time - an array element's, a `static`'s own, an
-    // allocation's result - shares, whatever the value living behind it
-    // eventually is.
+    // computes at run time - an array element's, an allocation's result -
+    // shares, whatever the value living behind it eventually is.
     private TypeFacts pointerFacts() {
         return TypeFacts(size_t.sizeof, size_t.sizeof, false, true);
     }
