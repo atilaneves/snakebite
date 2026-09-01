@@ -2150,7 +2150,10 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // `bool` - and the comparison opcode leaves its answer in the first
     // of those, copied out to `destOffset` only when it differs.
     private void compileComparison(BinExp expression, in size_t destOffset) {
-        import dmd.astenums: Tpointer;
+        import dmd.astenums: Tarray, Tpointer;
+
+        if (expression.e1.type.ty == Tarray)
+            return compileDynamicArrayComparison(expression, destOffset);
 
         const operandFacts = TypeFacts.of(expression.e1.type);
 
@@ -2218,6 +2221,115 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
         if (destOffset != leftOffset)
             emit(&opCopy, destOffset, leftOffset, 1);
+    }
+
+    // A dynamic array's native value contains a length and a data pointer;
+    // the pointer is not part of value equality. The loop keeps the length
+    // available after its equality test and reuses scalar handlers so float
+    // elements follow value semantics instead of raw bit comparison.
+    private void compileDynamicArrayComparison(
+        BinExp expression, in size_t destOffset,
+    ) {
+        import dmd.tokens: EXP;
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset, arrayValueSize;
+
+        if (expression.op != EXP.equal && expression.op != EXP.notEqual)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+        const isNotEqual = expression.op == EXP.notEqual;
+
+        auto arrayFacts = TypeFacts.of(expression.e1.type);
+        auto elementType = expression.e1.type.nextOf;
+        auto elementFacts = TypeFacts.of(elementType);
+        const elementIsIntegral = elementFacts.isIntegral
+            && isIntegralSize(elementFacts.size);
+        if (!arrayFacts.isDynamicArray
+                || (!elementIsIntegral && !isFloatingType(elementType)))
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const leftOffset = reserveTemp(arrayFacts);
+        evalInto(expression.e1, leftOffset, arrayValueSize);
+        const rightOffset = reserveTemp(arrayFacts);
+        evalInto(expression.e2, rightOffset, arrayValueSize);
+
+        const lengthOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, lengthOffset,
+            leftOffset + arrayLengthOffset, size_t.sizeof);
+        const lengthsEqualOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, lengthsEqualOffset, lengthOffset, size_t.sizeof);
+        emit(&opEqual, lengthsEqualOffset,
+            rightOffset + arrayLengthOffset, size_t.sizeof);
+        const differentLengthBranch = _instructions.length;
+        emit(&opBranchFalse, lengthsEqualOffset, 0, 1);
+
+        const indexOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, indexOffset, addConstant(0), size_t.sizeof);
+        const oneOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, oneOffset, addConstant(1), size_t.sizeof);
+
+        const loopStart = _instructions.length;
+        const loopConditionOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, loopConditionOffset, indexOffset, size_t.sizeof);
+        emit(&opLessThanUnsigned, loopConditionOffset, lengthOffset,
+            size_t.sizeof);
+        const finishedBranch = _instructions.length;
+        emit(&opBranchFalse, loopConditionOffset, 0, 1);
+
+        const elementByteOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, elementByteOffset, indexOffset, size_t.sizeof);
+        const elementSizeOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, elementSizeOffset,
+            addConstant(cast(long) elementFacts.size), size_t.sizeof);
+        emit(&opMultiply, elementByteOffset, elementSizeOffset,
+            size_t.sizeof);
+
+        const leftElementAddress = reserveTemp(pointerFacts);
+        emit(&opCopy, leftElementAddress,
+            leftOffset + arrayPointerOffset, size_t.sizeof);
+        emit(&opAdd, leftElementAddress, elementByteOffset, size_t.sizeof);
+        const rightElementAddress = reserveTemp(pointerFacts);
+        emit(&opCopy, rightElementAddress,
+            rightOffset + arrayPointerOffset, size_t.sizeof);
+        emit(&opAdd, rightElementAddress, elementByteOffset, size_t.sizeof);
+
+        const leftElement = reserveTemp(elementFacts);
+        emit(&opLoadIndirect, leftElement, leftElementAddress,
+            elementFacts.size);
+        const rightElement = reserveTemp(elementFacts);
+        emit(&opLoadIndirect, rightElement, rightElementAddress,
+            elementFacts.size);
+        if (elementIsIntegral)
+            emit(&opEqual, leftElement, rightElement,
+                elementFacts.size);
+        else
+            emit(&opFloatEqual, leftElement, rightElement,
+                elementFacts.size);
+        const differentElementBranch = _instructions.length;
+        emit(&opBranchFalse, leftElement, 0, 1);
+
+        emit(&opAdd, indexOffset, oneOffset, size_t.sizeof);
+        emit(&opJump, loopStart, 0, 0);
+
+        const equalIndex = _instructions.length;
+        if (isNotEqual)
+            emit(&opConstant, destOffset, addConstant(0), 1);
+        else
+            emit(&opConstant, destOffset, addConstant(1), 1);
+        const finishJump = _instructions.length;
+        emit(&opJump, 0, 0, 0);
+
+        const differentIndex = _instructions.length;
+        _instructions[differentLengthBranch].source = differentIndex;
+        _instructions[differentElementBranch].source = differentIndex;
+        if (isNotEqual)
+            emit(&opConstant, destOffset, addConstant(1), 1);
+        else
+            emit(&opConstant, destOffset, addConstant(0), 1);
+        const finishIndex = _instructions.length;
+        _instructions[finishedBranch].source = equalIndex;
+        _instructions[finishJump].destination = finishIndex;
     }
 
     private Instruction.Handler comparisonHandler(
