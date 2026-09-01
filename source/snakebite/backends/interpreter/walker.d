@@ -3022,8 +3022,24 @@ extern(C++) private final class Evaluator: Visitor {
     // frame - the frame stack never moves what it has already handed
     // out - so this is just that address, stored as a `size_t` the same
     // way any other pointer value is.
+    //
+    // `&someModuleLevelFunction` reaches this node too, with `var` a
+    // `FuncDeclaration` instead: dmd only lowers a nested function's
+    // address to a `DelegateExp` (a nested function may need its
+    // enclosing frame or closure as context), never a module-level one,
+    // so a plain function pointer here has no context word to carry. This
+    // backend has no machine code for an interpreted function, so, exactly
+    // as `visit(FuncExp)` already does for a function pointer, the
+    // function word is the declaration itself, and `calleeOf` resolves it
+    // back when the pointer is called.
     override void visit(SymOffExp expression) {
         import snakebite.nativelayout: storeIntegral;
+
+        if (auto function_ = expression.var.isFuncDeclaration) {
+            storeIntegral(
+                _place, cast(size_t) cast(void*) function_, _facts.size);
+            return;
+        }
 
         const address =
             cast(size_t) slotOf(expression, expression.var) + expression.offset;
@@ -4124,11 +4140,19 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     // The callee of a call dmd left unresolved: one reached through a
-    // value rather than a name, which for this interpreter means a
-    // delegate. The value's function word is the declaration
-    // `visit(FuncExp)` stored, read back here. Its context word is passed
-    // directly into the callee's hidden context slot, since the delegate
-    // may be called after the function that created it has returned.
+    // value rather than a name, which for this interpreter means either a
+    // delegate or a plain function pointer. Either way the function word
+    // holds the declaration `visit(FuncExp)`/`visit(SymOffExp)` stored,
+    // read back here. A delegate's context word is passed directly into
+    // the callee's hidden context slot, since the delegate may be called
+    // after the function that created it has returned; a function pointer
+    // has no context word, so it never carries one.
+    //
+    // dmd lowers `fn(args)` on a function-pointer-typed `fn` to
+    // `(*fn)(args)`, so the call's `e1` is a `PtrExp` whose own type is the
+    // pointed-to `Tfunction`, not `Tpointer` - `deref.e1` is the pointer
+    // expression itself, read with `asPointer` the same way any other
+    // dereference reads what it points at.
     private Callee calleeOf(CallExp expression) {
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize,
@@ -4136,6 +4160,17 @@ extern(C++) private final class Evaluator: Visitor {
         import std.conv: text;
 
         auto callee = expression.e1;
+        if (auto deref = callee.isPtrExp) {
+            auto function_ = cast(FuncDeclaration) asPointer(deref.e1);
+            if (function_ is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot call `", expression.toString,
+                        "`: the function pointer is null"),
+                );
+
+            return Callee(function_, null, false);
+        }
+
         if (callee.type.ty != Tdelegate)
             throw new SnakebiteException(
                 text("interpreter cannot call an unresolved function: `",
