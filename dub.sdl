@@ -24,6 +24,7 @@ configuration "unittest" {
     // already links, druntime template instantiations included, so the
     // executable's own symbols must be visible to `dlsym`.
     lflags "--export-dynamic" platform="linux"
+    lflags "-lffi" platform="linux"
 
     mainSourceFile "tests/main.d"
     sourcePaths "tests"
@@ -40,6 +41,7 @@ configuration "acceptance-test" {
     targetName "at"
     targetPath "bin"
     lflags "--export-dynamic" platform="linux"
+    lflags "-lffi" platform="linux"
 
     mainSourceFile "acceptance/main.d"
     sourcePaths "acceptance"
@@ -55,6 +57,7 @@ configuration "bench" {
     targetName "bench"
     targetPath "bin"
     lflags "--export-dynamic" platform="linux"
+    lflags "-lffi" platform="linux"
 
     mainSourceFile "bench/main.d"
     sourcePaths "bench"

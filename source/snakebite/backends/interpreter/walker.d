@@ -17,6 +17,25 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     // thin adapter onto it.
     private Evaluator _evaluator;
 
+    private struct CallbackContext {
+        Interpreter backend;
+        FuncDeclaration function_;
+    }
+
+    private static extern(C) void invokeCallback(
+        void* context,
+        void* returnPlace,
+        void** arguments,
+        size_t argumentCount,
+    ) {
+        auto callback = cast(CallbackContext*) context;
+        callback.backend.call(
+            callback.function_,
+            returnPlace,
+            arguments[0 .. argumentCount],
+        );
+    }
+
     public this(const Program program) {
         super(program);
         _evaluator = new Evaluator(program);
@@ -34,6 +53,49 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         string result;
         call(function_, &result, []);
         return result;
+    }
+
+    public imported!"snakebite.ffi.callback".Callback callback(
+        FuncDeclaration function_,
+    ) {
+        import dmd.astenums: Tfloat64, Tint32;
+        import std.conv: text;
+
+        auto type = function_.type.isTypeFunction;
+        if (type is null || type.parameterList.length != 1)
+            throw new SnakebiteException(
+                "interpreter callback requires one argument",
+            );
+
+        auto parameter = type.parameterList[0].type;
+        auto target = callbackTarget(function_);
+        if (parameter.ty == Tint32 && type.nextOf.ty == Tint32)
+            return imported!"snakebite.ffi.callback".Callback(
+                target,
+                imported!"snakebite.ffi.callback".CallbackSignature.intToInt,
+            );
+
+        if (parameter.ty == Tfloat64 && type.nextOf.ty == Tfloat64)
+            return imported!"snakebite.ffi.callback".Callback(
+                target,
+                imported!"snakebite.ffi.callback".CallbackSignature
+                    .doubleToDouble,
+            );
+
+        throw new SnakebiteException(
+            text("interpreter callback does not support `",
+                function_.toString, "`"),
+        );
+    }
+
+    public imported!"snakebite.ffi.callback".CallbackTarget
+        callbackTarget(FuncDeclaration function_)
+    {
+        auto context = new CallbackContext(this, function_);
+        return imported!"snakebite.ffi.callback".CallbackTarget(
+            &invokeCallback,
+            cast(void*) context,
+        );
     }
 
     version(unittest)
@@ -245,8 +307,8 @@ extern(C++) private final class Evaluator: Visitor {
 
     // Runs `function_` against a fresh top-level frame, mirroring the
     // `Backend.call` contract: `returnPlace` is where the result goes
-    // (`null` if the caller does not want it), `args` are host-to-guest
-    // arguments (not yet supported). `extern(D)`: a dynamic array
+    // (`null` if the caller does not want it), and `args` are native-layout
+    // host-to-guest arguments. `extern(D)`: a dynamic array
     // parameter is not valid on an `extern(C++)` method, and this one is
     // never called from C++ - only `Visitor`'s `visit` overloads need
     // that linkage.
@@ -284,35 +346,47 @@ extern(C++) private final class Evaluator: Visitor {
         import snakebite.frontend.compiler: withCompilerLock;
         import std.conv: text;
 
-        const parameterCount =
-            function_.parameters is null ? 0 : function_.parameters.length;
-        if (args.length != 0 || parameterCount != 0)
+        const parameterCount = typeFunctionOf(function_)
+            .parameterList.length;
+        if (args.length != parameterCount)
             throw new SnakebiteException(
-                "host-to-guest arguments not yet supported by the " ~
-                    "interpreter backend",
-            );
-
-        // A `ref` return hands the caller the *address* of the result, in
-        // a scratch buffer `visit(ReturnStatement)` always sizes for a
-        // pointer (`resolvedRefAddress` is where a guest `CallExp` reads
-        // that address back and copies through it). This is the host
-        // entry point, not a guest `CallExp`: `returnPlace` is storage
-        // the host itself owns, sized for the callee's return type -
-        // `int`, say - and `execute` would still write `size_t.sizeof`
-        // bytes of an address into it. `ffi/plan.d`'s `prepare` refuses a
-        // `ref` return for exactly this reason; this is the interpreter's
-        // own entry point, so it gets the same refusal.
-        if (typeFunctionOf(function_).isRef)
-            throw new SnakebiteException(
-                text("interpreter cannot call `", function_.toString,
-                    "` from the host: it returns by `ref`"),
+                text("interpreter call to `", function_.toString,
+                    "` takes ", parameterCount, " argument(s), got ",
+                    args.length),
             );
 
         withCompilerLock({
             auto layout = layoutOf(function_);
-            auto frame = _frames.push(layout.size, layout.alignment);
+            if (layout.hiddenThis.variable !is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot call `", function_.toString,
+                        "` from the host: it has a hidden context"),
+                );
 
-            execute(function_, returnPlace, frame.base, layout);
+            // A `ref` return hands the caller the *address* of the result,
+            // in a scratch buffer `visit(ReturnStatement)` always sizes
+            // for a pointer (`resolvedRefAddress` is where a guest
+            // `CallExp` reads that address back and copies through it).
+            // This is the host entry point, not a guest `CallExp`:
+            // `returnPlace` is storage the host itself owns, sized for the
+            // callee's return type - `int`, say - and `execute` would still
+            // write `size_t.sizeof` bytes of an address into it.
+            // `ffi/plan.d`'s `prepare` refuses a `ref` return for exactly
+            // this reason; this is the interpreter's own entry point, so
+            // it gets the same refusal.
+            if (typeFunctionOf(function_).isRef)
+                throw new SnakebiteException(
+                    text("interpreter cannot call `", function_.toString,
+                        "` from the host: it returns by `ref`"),
+                );
+
+            auto frame = _frames.push(layout.size, layout.alignment);
+            bindHostArguments(frame.base, layout, args);
+
+            try
+                execute(function_, returnPlace, frame.base, layout);
+            catch (GuestException exception)
+                throw exception._guest;
         });
     }
 
@@ -549,6 +623,7 @@ extern(C++) private final class Evaluator: Visitor {
     // plus a `scope(exit)` line per field growing at the call site.
     private static struct CallStateGuard {
         private Evaluator _evaluator;
+
         private Type _type;
         private TypeFacts _facts;
         private void* _place;
@@ -610,6 +685,28 @@ extern(C++) private final class Evaluator: Visitor {
             slots[count++] = frameBase + parameter.offset;
 
         return slots[0 .. count];
+    }
+
+    extern(D) private void bindHostArguments(
+        ubyte* frameBase,
+        const(FrameLayout)* layout,
+        void*[] arguments,
+    ) {
+        import core.stdc.string: memcpy;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+
+        foreach (i, parameter; layout.parameters) {
+            auto destination = frameBase + parameter.offset;
+            if (parameter.isRef) {
+                storeIntegral(
+                    destination,
+                    loadIntegral(arguments[i], size_t.sizeof, false),
+                    size_t.sizeof,
+                );
+            } else if (parameter.facts.size != 0) {
+                memcpy(destination, arguments[i], parameter.facts.size);
+            }
+        }
     }
 
     override void visit(Statement statement) {

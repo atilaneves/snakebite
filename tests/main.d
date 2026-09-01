@@ -41,6 +41,7 @@ int main(string[] args) {
         "ut.backends.program",
         "ut.ffi.plan",
         "ut.ffi.symbol",
+        "ut.ffi.callback",
         "ut.framestack",
         "ut.bench.report",
     );

@@ -4,5 +4,5 @@ int main(string[] args) {
 
     initialize(Snippets.yes);
 
-    return args.runTests!("at.ffi.cost");
+    return args.runTests!("at.ffi.cost", "at.ffi.callback");
 }
