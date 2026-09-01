@@ -20,8 +20,12 @@ if [[ ! -f "$builddir/build.ninja" ]]; then
     # Absolute paths: reggae bakes these arguments into the generated
     # regeneration rule, which ninja runs from inside $builddir, where
     # relative paths would no longer resolve.
+    # No --dub-config: the project's reggaefile.d (root) drives this
+    # build and references configs other than bench (ut, sb, at), so
+    # all dub configs must be probed or reggae crashes looking up a
+    # config the restricted set doesn't contain.
     dub run "reggae@~>0.14.0" --compiler=ldc -- -b ninja -C "$PWD/$builddir" \
-        --dub-config=bench --dub-build-type=release --dc="$compiler" "$PWD"
+        --dub-build-type=release --dc="$compiler" "$PWD"
 fi
 
 ninja -C "$builddir" bench
