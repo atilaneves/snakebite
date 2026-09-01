@@ -25,6 +25,16 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // once and never relocates, unlike an associative array's own
     // storage, which can rehash as more entries go in.
     private Function*[FuncDeclaration] _compiled;
+    // One `GC.malloc` block per `static`/`__gshared` variable this compiler
+    // has ever met, allocated once on first reference and never moved or
+    // freed for this backend's own lifetime - a compiled function bakes the
+    // block's address straight into its own bytecode as a constant (see
+    // `visit(VarExp)`/`compileAssign`), so the address has to stay good for
+    // as long as that bytecode can still run. Rooted individually because
+    // nothing else references the block: no frame slot, no other GC-scanned
+    // field, ever holds this pointer - only a `long` inside a `Function`'s
+    // own `constants`, which the collector has no reason to treat as one.
+    private void*[imported!"dmd.declaration".VarDeclaration] _staticAddresses;
 
     public this(const Program program) {
         super(program);
@@ -62,6 +72,41 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
     package bool hasNativeSymbol(FuncDeclaration function_) {
         return _plans.hasNativeSymbol(function_);
+    }
+
+    // `variable`'s own persistent storage, allocated the first time any
+    // function's compilation reaches a reference to it and reused by every
+    // function compiled after - one block per variable for this backend's
+    // whole life, never one per call and never one per compiled function,
+    // the same one `static this()`'s writes and `main`'s later reads must
+    // agree on.
+    package void* staticAddressOf(
+        imported!"dmd.declaration".VarDeclaration variable,
+    ) {
+        import core.memory: GC;
+        import core.stdc.string: memset;
+        import snakebite.nativelayout: storeValue, TypeFacts;
+
+        if (auto found = variable in _staticAddresses)
+            return *found;
+
+        const facts = TypeFacts.of(variable.type);
+        auto block = GC.malloc(facts.size);
+        memset(block, 0, facts.size);
+        GC.addRoot(block);
+        _staticAddresses[variable] = block;
+
+        // Not every dataseg declaration has an explicit initialiser
+        // (`__gshared int trace;` does not), but dmd still installs an
+        // `ExpInitializer` holding the type's own default value the same
+        // way it does for a local (see `compileDeclaration`'s own doc) -
+        // this only skips the write for the rarer case of no initializer
+        // at all, not for an implicit zero.
+        if (variable._init !is null)
+            if (auto expInitializer = variable._init.isExpInitializer)
+                storeValue(variable.type, facts, expInitializer.exp, block);
+
+        return block;
     }
 
     // `function_`'s compiled form, compiling it - and, transitively,
@@ -157,16 +202,17 @@ extern(C++) private final class FunctionCompiler: Visitor {
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
         Arg, AssertSite, CallSite, discardResult, Function, Instruction,
-        opAdd, opAssert, opBitAnd,
-        opBitOr, opBitXor, opBranchFalse, opBranchTrue, opCall,
+        opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
+        opBranchTrue, opCall,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
         opConstant, opCopy, opDivideSigned, opDivideUnsigned, opEqual,
         opGreaterOrEqualSigned, opGreaterOrEqualUnsigned, opGreaterThanSigned,
         opGreaterThanUnsigned, opJump, opLessOrEqualSigned,
         opLessOrEqualUnsigned, opLessThanSigned, opLessThanUnsigned,
-        opLogicalNot, opModuloSigned, opModuloUnsigned, opMultiply,
-        opNegate, opNotEqual, opReturn, opReturnVoid, opShiftLeft,
-        opShiftRightArithmetic, opShiftRightLogical, opSubtract;
+        opLoadIndirect, opLogicalNot, opModuloSigned, opModuloUnsigned,
+        opMultiply, opNegate, opNotEqual, opReturn, opReturnVoid,
+        opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
+        opStoreIndirect, opSubtract;
     import snakebite.backends.layout: FrameLayout;
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout: alignUp, isIntegralSize, TypeFacts;
@@ -259,6 +305,19 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private size_t addConstant(in long value) {
         _constants ~= value;
         return _constants.length - 1;
+    }
+
+    // A pointer-sized temporary holding `variable`'s own persistent
+    // storage's address, ready for `opLoadIndirect`/`opStoreIndirect` to
+    // read or write through. The address itself never changes once
+    // `staticAddressOf` first hands it out, so this can always bake it in
+    // as a plain constant rather than recomputing it.
+    private size_t compileStaticAddress(VarDeclaration variable) {
+        const address = cast(long) _bytecode.staticAddressOf(variable);
+        const offset = reserveTemp(
+            TypeFacts(size_t.sizeof, size_t.sizeof, false, true));
+        emit(&opConstant, offset, addConstant(address), size_t.sizeof);
+        return offset;
     }
 
     // Grows this compiled function's own frame past whatever `_layout`
@@ -646,7 +705,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private void compileAssign(AssignExp expression, in size_t destOffset) {
         auto varExp = expression.e1.isVarExp;
         auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg || _layout.isRef(variable))
+        if (variable is null || _layout.isRef(variable))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -654,6 +713,25 @@ extern(C++) private final class FunctionCompiler: Visitor {
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
+
+        // A `static`/`__gshared` target has no frame slot at all - `evalInto`
+        // still evaluates the right side into one of its own, but the write
+        // itself goes through the address `compileStaticAddress` bakes in,
+        // not `opCopy` into `_layout`'s storage. It has no postfix
+        // self-reference case to worry about either: a local's own slot can
+        // collide with a postfix operand's, forcing the temporary below, but
+        // a `static` write and a `static` postfix read never share the one
+        // frame slot that collision is about.
+        if (variable.isDataseg) {
+            const addressOffset = compileStaticAddress(variable);
+            const valueOffset = reserveTemp(facts);
+            evalInto(expression.e2, valueOffset, facts.size);
+            emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
+
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, facts.size);
+            return;
+        }
 
         const targetOffset = _layout.offsetOf(variable);
 
@@ -807,8 +885,18 @@ extern(C++) private final class FunctionCompiler: Visitor {
     override void visit(VarExp expression) {
         requireDestination(expression);
         auto variable = expression.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg || _layout.isRef(variable))
+        if (variable is null || _layout.isRef(variable))
             return visit(cast(Expression) expression);
+
+        if (variable.isDataseg) {
+            const facts = TypeFacts.of(variable.type);
+            if (!facts.isIntegral || !isIntegralSize(facts.size))
+                return visit(cast(Expression) expression);
+
+            const addressOffset = compileStaticAddress(variable);
+            emit(&opLoadIndirect, _destination, addressOffset, _width);
+            return;
+        }
 
         const source = _layout.offsetOf(variable);
         if (source != _destination)
@@ -817,6 +905,13 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
     override void visit(CallExp expression) {
         compileCall(expression, _destination);
+    }
+
+    // `assert(x)`, run at statement level for its effect alone - it has no
+    // value for anything to read, so unlike every other expression here,
+    // this ignores `_destination` rather than requiring one.
+    override void visit(AssertExp expression) {
+        compileAssert(expression);
     }
 
     override void visit(AssignExp expression) {
@@ -867,10 +962,6 @@ extern(C++) private final class FunctionCompiler: Visitor {
     override void visit(EqualExp expression) {
         requireDestination(expression);
         compileComparison(expression, _destination);
-    }
-
-    override void visit(AssertExp expression) {
-        compileAssert(expression);
     }
 
     override void visit(NegExp expression) {

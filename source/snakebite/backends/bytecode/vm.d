@@ -29,11 +29,31 @@ package struct Arg {
 // One call site: which compiled function it calls, the arguments to hand
 // it, and the width of the value it hands back (`0` for a `void` callee,
 // which `opCall` then never copies out of the scratch return buffer).
+//
+// `isAllocation` picks out the one other native shape `opCall` knows besides
+// a guest-declared `extern(C)` function: a druntime allocator call the
+// compiler itself synthesises for `new T[](n)`/an array literal, never one a
+// guest source declaration resolves to. `allocationBits` is the `GC.BlkAttr`
+// value that call's second argument passes, fixed by the compiler once per
+// call site from the element type it already knows, not read from any
+// frame.
 package struct CallSite {
     package const(Function)* callee;
     package Arg[] args;
     package size_t returnWidth;
+    // A declared `extern(C)` guest callee's prepared FFI call, opaque to
+    // this module - see `snakebite.ffi.plan.CallPlan`. `null` for a
+    // guest-declared function's call site.
     package const(void)* nativePlan;
+    // The other native shape `opCall` knows besides a `nativePlan` call: a
+    // druntime allocator call the compiler synthesises for `new T[](n)`/an
+    // array literal, never one a guest source declaration resolves to.
+    // `allocationBits` is the `GC.BlkAttr` value that call's second
+    // argument passes, fixed by the compiler once per call site from the
+    // element type it already knows, not read from any frame.
+    package void* nativeAddress;
+    package bool isAllocation;
+    package uint allocationBits;
 }
 
 
@@ -326,6 +346,18 @@ package const(Instruction)* opCall(
     import core.stdc.string: memcpy;
 
     const site = callSites[pc.source];
+    if (site.isAllocation) {
+        assert(site.args.length == 1);
+        assert(site.returnWidth == (void*).sizeof);
+        alias Allocate =
+            extern(C) void* function(size_t, uint, const(void)*);
+        auto size = *cast(const size_t*) (frame + site.args[0].callerOffset);
+        auto block = (cast(Allocate) site.nativeAddress)(
+            size, site.allocationBits, null);
+        if (pc.destination != discardResult)
+            *cast(void**) (frame + pc.destination) = block;
+        return pc + 1;
+    }
     if (site.nativePlan !is null) {
         const(void)*[maxArguments] arguments;
         foreach (i, arg; site.args)
@@ -971,4 +1003,45 @@ package const(Instruction)* opCastWidenUnsigned(
     const value = loadUnsigned(place, pc.source);
     storeWidth(place, cast(long) value, pc.width);
     return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+}
+
+
+// Reads `pc.width` bytes from the address held at `frame + pc.source` -
+// a dynamic array's element, at an address the compiler computed from its
+// pointer word and an index - and writes them to `frame + pc.destination`.
+package const(Instruction)* opLoadIndirect(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    import core.stdc.string: memcpy;
+
+    auto address = *cast(void**) (frame + pc.source);
+    memcpy(frame + pc.destination, address, pc.width);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+
+// As `opLoadIndirect`, the other way: writes `pc.width` bytes from `frame +
+// pc.source` to the address held at `frame + pc.destination`.
+package const(Instruction)* opStoreIndirect(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    import core.stdc.string: memcpy;
+
+    auto address = *cast(void**) (frame + pc.destination);
+    memcpy(address, frame + pc.source, pc.width);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
 }
