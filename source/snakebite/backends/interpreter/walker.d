@@ -3,6 +3,8 @@ module snakebite.backends.interpreter.walker;
 
 private:
 
+import std.conv: text;
+
 
 // Walks dmd's AST directly. The one invariant: a result is never boxed
 // into a host-side representation - every expression is evaluated
