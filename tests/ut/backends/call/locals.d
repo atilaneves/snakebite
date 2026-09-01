@@ -2,6 +2,9 @@ module ut.backends.call.locals;
 
 
 import ut.backends;
+import snakebite.backends.backend: Program;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
 
 
 @("locals.voidInitializerPerformsNoValueEvaluation.Interpreter")
@@ -92,9 +95,6 @@ static foreach (backend; Matrix!()) {
 @("locals.dynamicArrayInitialisesAcrossCalls.Interpreter")
 @Tags("Interpreter")
 unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
-
     auto module_ = parseSnippet(q{
         size_t appendOne() {
             string[] messages;
@@ -149,10 +149,6 @@ static foreach (backend; Matrix!(
 @("locals.staticPersistsAcrossBackendCalls.Bytecode")
 @Tags("Bytecode")
 unittest {
-    import snakebite.backends.backend: Program;
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
-
     auto module_ = parseSnippet(q{
         int next() {
             static int value;
