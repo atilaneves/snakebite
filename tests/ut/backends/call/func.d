@@ -155,6 +155,7 @@ static foreach (backend; Matrix!(
             backend,
             q{
                 struct Counter {
+                    int padding;
                     int value;
 
                     void set(int next) {
@@ -165,7 +166,7 @@ static foreach (backend; Matrix!(
                 int drive() {
                     auto counter = Counter();
                     counter.set(9);
-                    return counter.value;
+                    return counter.padding + counter.value;
                 }
             },
             "drive",
