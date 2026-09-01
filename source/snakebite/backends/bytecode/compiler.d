@@ -1093,6 +1093,36 @@ extern(C++) private final class FunctionCompiler: Visitor {
             emit(&opCopy, destOffset, targetOffset, facts.size);
     }
 
+    private bool isThisField(VarDeclaration variable) const {
+        auto aggregate = variable.toParent2;
+        auto thisAggregate = _function.isThis;
+        return thisAggregate !is null
+            && thisAggregate.isStructDeclaration !is null
+            && aggregate is thisAggregate;
+    }
+
+    private size_t hiddenThisOffset(VarDeclaration variable = null) {
+        auto hiddenThis = variable is null
+            ? cast() _layout.hiddenThis.variable
+            : variable;
+        if (hiddenThis is null || !_layout.isRef(hiddenThis))
+            throw rejection(_function, _function.loc, "a struct `this`");
+
+        return _layout.offsetOf(hiddenThis);
+    }
+
+    private size_t compileThisFieldAddress(VarDeclaration field) {
+        const addressOffset = hiddenThisOffset;
+        if (field.offset == 0)
+            return addressOffset;
+
+        const fieldOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, fieldOffset,
+            addConstant(cast(long) field.offset), size_t.sizeof);
+        emit(&opAdd, fieldOffset, addressOffset, size_t.sizeof);
+        return fieldOffset;
+    }
+
     // `*p = value` in every guise this compiler reaches it through: a `ref`
     // variable's own target, or a `ref`-returning call's own result.
     // `compileAddress` already knows how to compile either lvalue's
@@ -1648,13 +1678,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
     override void visit(ThisExp expression) {
         requireDestination(expression);
 
-        auto variable = expression.var is null
-            ? cast() _layout.hiddenThis.variable
-            : expression.var;
-        if (variable is null || !_layout.isRef(variable))
-            return visit(cast(Expression) expression);
-
-        emit(&opLoadIndirect, _destination, _layout.offsetOf(variable),
+        emit(&opLoadIndirect, _destination,
+            hiddenThisOffset(expression.var),
             _width);
     }
 
@@ -2542,14 +2567,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
                 auto dot = expression.e1.isDotVarExp;
                 if (dot !is null)
                     thisOffset = compileAddress(dot.e1);
-                else if (_layout.hiddenThis.variable !is null
-                        && _layout.isRef(
-                            cast() _layout.hiddenThis.variable))
-                    thisOffset = _layout.offsetOf(
-                        cast() _layout.hiddenThis.variable);
                 else
-                    throw rejection(_function, expression.loc,
-                        expressionText(expression));
+                    thisOffset = hiddenThisOffset;
             }
 
             args ~= Arg(
@@ -2703,13 +2722,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
             }
         }
 
-        if (auto thisExp = expression.isThisExp) {
-            auto variable = thisExp.var is null
-                ? cast() _layout.hiddenThis.variable
-                : thisExp.var;
-            if (variable !is null && _layout.isRef(variable))
-                return _layout.offsetOf(variable);
-        }
+        if (auto thisExp = expression.isThisExp)
+            return hiddenThisOffset(thisExp.var);
 
         if (auto dot = expression.isDotVarExp) {
             auto field = dot.var.isVarDeclaration;
@@ -2748,30 +2762,6 @@ extern(C++) private final class FunctionCompiler: Visitor {
         }
 
         throw rejection(_function, expression.loc, expressionText(expression));
-    }
-
-    private bool isThisField(VarDeclaration variable) const {
-        auto aggregate = variable.toParent2;
-        auto thisAggregate = _function.isThis;
-        return thisAggregate !is null
-            && thisAggregate.isStructDeclaration !is null
-            && aggregate is thisAggregate;
-    }
-
-    private size_t compileThisFieldAddress(VarDeclaration field) {
-        auto variable = cast() _layout.hiddenThis.variable;
-        if (variable is null || !_layout.isRef(variable))
-            throw rejection(_function, _function.loc, "a struct field");
-
-        const addressOffset = _layout.offsetOf(variable);
-        if (field.offset == 0)
-            return addressOffset;
-
-        const fieldOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, fieldOffset,
-            addConstant(cast(long) field.offset), size_t.sizeof);
-        emit(&opAdd, fieldOffset, addressOffset, size_t.sizeof);
-        return fieldOffset;
     }
 
     // `variable`'s own address, as a run-time pointer value left in a
