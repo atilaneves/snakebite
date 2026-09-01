@@ -206,6 +206,19 @@ extern(C++) private final class Evaluator: Visitor {
     // `_layouts`: a `Type` such as `int` is dmd's own shared, interned
     // instance, so the same entry serves every function that mentions it.
     private Cache!(Type, TypeFacts) _typeFacts;
+    // A struct constructor call's rvalue temporary, from the node dmd
+    // built for it to the frame slot this evaluator gave it. Such a
+    // temporary is a `StructLiteralExp` that dmd's lowering visits twice
+    // - once as the constructor's hidden `this` (default-initialized,
+    // then the constructor's own writes land in it), once more as the
+    // resulting value a `CommaExp` names - and both visits must reach the
+    // same slot, or the second would overwrite the constructor's work
+    // with the literal's own default fields. An entry lives only as long
+    // as the `CommaExp` that produced it is still being evaluated: it is
+    // removed once that expression is done with it, since the same node
+    // runs again, and needs a fresh slot, on every later call to the
+    // function that contains it.
+    private void*[StructLiteralExp] _structLiteralSlots;
     // The most recently asked-about `Type` and its facts: dmd interns
     // basic types, so a loop revisiting the same `int` node hits this
     // every time - a pointer compare instead of an AA hash lookup - and
@@ -2057,8 +2070,25 @@ extern(C++) private final class Evaluator: Visitor {
         // the right side names the resulting lvalue.
         if (auto comma = target.isCommaExp) {
             runForEffect(comma.e1);
-            return addressOf(comma.e2);
+            auto address = addressOf(comma.e2);
+            if (auto literal = comma.e2.isStructLiteralExp)
+                _structLiteralSlots.remove(literal);
+            return address;
         }
+
+        // A struct constructor call used as an rvalue - a temporary passed
+        // straight into a `ref`-taking parameter, with no variable of its
+        // own - is this node: dmd's lowering runs the constructor on it
+        // through the preceding `CommaExp.e1`, with this same node as the
+        // constructor's hidden `this`, before naming it here as the
+        // result. `_structLiteralSlots` is what makes both visits land on
+        // the same slot: the first one (whichever runs first, ordinarily
+        // the constructor's `this` binding) reserves it and default-
+        // initializes the literal's fields into it, and every later visit
+        // of the same node just returns that address, so the constructor's
+        // writes are still there when the `CommaExp` names the result.
+        if (auto literal = target.isStructLiteralExp)
+            return structLiteralAddress(literal);
 
         // An assignment used as an lvalue first performs the assignment,
         // then names the storage on its left. DMD uses this form for a
@@ -2091,8 +2121,20 @@ extern(C++) private final class Evaluator: Visitor {
         if (auto assignment = target.isAssignExp)
             return assignmentResultAddress(assignment);
 
-        if (auto call = target.isCallExp)
-            return refCallAddress(call);
+        // A call with no lvalue of its own - it returns its result by
+        // value, not by `ref` - still needs an address when its result is
+        // a struct passed on as another constructor's by-address argument.
+        // `refCallAddress` only applies to a `ref`-returning call, whose
+        // result already lives in the callee's own storage; a value
+        // return has no storage of its own until this makes one.
+        if (auto call = target.isCallExp) {
+            auto function_ = call.f;
+            auto type = function_ is null
+                ? null : function_.type.isTypeFunction;
+            return type !is null && !type.isRef
+                ? valueCallAddress(call, function_)
+                : refCallAddress(call);
+        }
 
         if (auto length = target.isArrayLengthExp) {
             import snakebite.nativelayout: arrayLengthOffset;
@@ -3991,6 +4033,25 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(CommaExp expression) {
+        // A struct constructor call's rvalue temporary (see
+        // `structLiteralAddress`) may already have its fields written by
+        // the constructor `expression.e1` runs - visiting the literal
+        // again here, the ordinary way, would instead overwrite them with
+        // the literal's own default fields. Routing through the same
+        // slot and copying its bytes into `_place` keeps the constructor's
+        // writes; every other `CommaExp` shape is unaffected, since
+        // `structLiteralAddress` only ever does what `expression.e2.accept`
+        // would have anyway when nothing bound the literal's address first.
+        if (auto literal = expression.e2.isStructLiteralExp) {
+            import core.stdc.string: memcpy;
+
+            runForEffect(expression.e1);
+            auto address = structLiteralAddress(literal);
+            _structLiteralSlots.remove(literal);
+            memcpy(_place, address, _facts.size);
+            return;
+        }
+
         runForEffect(expression.e1);
         expression.e2.accept(this);
     }
@@ -4313,6 +4374,43 @@ extern(C++) private final class Evaluator: Visitor {
         return executeCall(
             function_, null, frame.base, layout, expression,
         ).address;
+    }
+
+    // The address of a call's own return value, for `addressOf` when the
+    // call returns by value rather than by `ref` - a function returning a
+    // struct that another constructor call takes by address, with no
+    // variable of its own to hold it. A frame slot sized for the return
+    // type stands in for that missing variable, and the call fills it the
+    // same way it would fill any other destination.
+    private void* valueCallAddress(
+        CallExp expression,
+        FuncDeclaration function_,
+    ) {
+        const facts = factsOf(expression.type);
+        auto result = _frames.push(facts.size, facts.alignment);
+
+        auto layout = layoutOf(function_);
+        auto frame = bindFrame(expression, function_, layout);
+        executeCall(function_, result.base, frame.base, layout, expression);
+        return result.base;
+    }
+
+    // A struct constructor call's rvalue temporary reaches its frame slot
+    // here, whichever of its two visits (the constructor's hidden `this`,
+    // or the `CommaExp` naming the result) runs first - see
+    // `_structLiteralSlots`. The first visit reserves the slot and default-
+    // initializes the literal's own fields into it, exactly as a plain
+    // struct literal would into `_place`; the constructor that runs next
+    // (in `CommaExp.e1`) then writes its own fields on top.
+    private void* structLiteralAddress(StructLiteralExp literal) {
+        if (auto existing = literal in _structLiteralSlots)
+            return *existing;
+
+        const facts = factsOf(literal.type);
+        auto result = _frames.push(facts.size, facts.alignment);
+        _structLiteralSlots[literal] = result.base;
+        evaluate(literal, literal.type, facts, result.base);
+        return result.base;
     }
 
     // Evaluates `expression` into `type.size` bytes at `place`, then
