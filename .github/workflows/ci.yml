@@ -42,6 +42,12 @@ jobs:
         with:
           version: "0.11.32"
 
+      # The REPL links GNU readline for interactive line editing.
+      - name: Install libreadline
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libreadline-dev
+
       - name: Run CI
         run: build/ci.sh
 

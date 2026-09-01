@@ -12,4 +12,5 @@ build/check-bytecode-vm.sh
 ninja bin/ut
 bin/ut
 build/acceptance.sh
+build/repl.sh
 build/benches.sh
