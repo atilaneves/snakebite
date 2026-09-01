@@ -244,6 +244,78 @@ unittest {
         .shouldThrow;
 }
 
+// Bytecode does not yet have guest try/catch (see the `RangeError` test
+// above, omitted for Bytecode), so an out-of-range index still escapes as
+// the host-level `AssertError` a bounds check throws. That escape must
+// carry its own site - the index expression's own message and source
+// location - not a VM-internal array bounds violation and not some other
+// assert site's message.
+@("arrays.index.outOfRange.throws.attributedAssertError.Bytecode")
+@Tags("Bytecode")
+unittest {
+    import core.exception: AssertError;
+    import snakebite.backends.backend: Program;
+    import snakebite.backends.bytecode: Bytecode;
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        int oob() {
+            int[] a = [1, 2, 3];
+            long i = 5;
+            return a[i];
+        }
+    });
+    auto function_ = findFunction(module_, "oob");
+    auto instance = new Bytecode(Program([module_]));
+
+    AssertError caught;
+    int result;
+    try
+        instance.call(function_, &result, []);
+    catch (AssertError error)
+        caught = error;
+
+    (caught !is null).shouldBeTrue;
+    caught.msg.shouldEqual("bytecode: index out of bounds: `cast(ulong)i`");
+}
+
+// The same bounds check, but with an unrelated assertion earlier in the
+// same function - one that passes, so it never itself throws. The failure
+// must still name the index expression, not the passing assertion's own
+// message and line.
+@("arrays.index.outOfRange.attributesToTheIndexNotAnUnrelatedAssert.Bytecode")
+@Tags("Bytecode")
+unittest {
+    import core.exception: AssertError;
+    import snakebite.backends.backend: Program;
+    import snakebite.backends.bytecode: Bytecode;
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        int misattributed() {
+            long x = 1;
+            assert(x == 1);
+            int[] a = [1];
+            long i = 9;
+            return a[i];
+        }
+    });
+    auto function_ = findFunction(module_, "misattributed");
+    auto instance = new Bytecode(Program([module_]));
+
+    AssertError caught;
+    int result;
+    try
+        instance.call(function_, &result, []);
+    catch (AssertError error)
+        caught = error;
+
+    (caught !is null).shouldBeTrue;
+    caught.msg.shouldEqual("bytecode: index out of bounds: `cast(ulong)i`");
+}
+
 static foreach (backend; Matrix!()) {
     @("arrays.literal.index." ~ backend.stringof)
     @Tags(backend.stringof)

@@ -1619,6 +1619,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
         IndexExp expression, in TypeFacts arrayFacts,
     ) {
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+        import std.conv: text;
+        import std.string: fromStringz;
 
         const arrayOffset = reserveTemp(arrayFacts);
         evalInto(expression.e1, arrayOffset, arrayFacts.size);
@@ -1641,7 +1643,15 @@ extern(C++) private final class FunctionCompiler: Visitor {
         emit(&opCopy, boundsOffset, indexOffset, size_t.sizeof);
         emit(&opLessThanUnsigned, boundsOffset,
             arrayOffset + arrayLengthOffset, size_t.sizeof);
-        emit(&opAssert, boundsOffset, 0, 1);
+
+        const site = AssertSite(
+            text("bytecode: index out of bounds: `", expression.e2.toString,
+                "`"),
+            expression.loc.filename.fromStringz.idup,
+            expression.loc.linnum,
+        );
+        _assertSites ~= site;
+        emit(&opAssert, boundsOffset, _assertSites.length - 1, 1);
 
         const elementSizeOffset = reserveTemp(pointerFacts);
         emit(&opConstant, elementSizeOffset,
