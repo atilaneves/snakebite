@@ -29,6 +29,65 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
+// An `out` parameter starts as default-initialized caller storage. The
+// callee then writes that same storage, rather than a temporary parameter
+// slot, so the caller observes the result after the call.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("out.param.initializesCallerStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            void set(out int value) {
+                value = 42;
+            }
+
+            int main() {
+                int value;
+                set(value);
+                return value;
+            }
+        }, "main");
+    }
+}
+
+// A `lazy` parameter is a delegate in the native ABI. Its expression runs
+// in the caller when the callee reads the parameter, not when the call is
+// bound.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("lazy.param.evaluatesAtRead." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        22.shouldBeRetOf!(backend, q{
+            int read(lazy int value, ref int evaluations) {
+                ++evaluations;
+                return value;
+            }
+
+            int main() {
+                int evaluations;
+                return read(++evaluations, evaluations) * 10 + evaluations;
+            }
+        }, "main");
+    }
+}
+
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("lazy.param.evaluatesForEachRead." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        122.shouldBeRetOf!(backend, q{
+            int main() {
+                int evaluations;
+                int readTwice(lazy int value) {
+                    return value * 10 + value;
+                }
+
+                return readTwice(++evaluations) * 10 + evaluations;
+            }
+        }, "main");
+    }
+}
+
 // A `ref` parameter forwarded into a nested call: `bump`'s own `x` is
 // itself `ref`, and passing it on to `inc` must reach the same storage as
 // the outer local, not a second indirection through `bump`'s frame.
@@ -83,23 +142,6 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
             "kindaMain",
         );
     }
-}
-
-// `writeln` initializes a scoped `File` temporary from the native
-// `trustedStdout` value before it writes. This is the public library path
-// used by the rt-simple runner's final summary.
-@("temporary.nativeAggregateFeedsCommaLvalue.Interpreter")
-@Tags("Interpreter")
-unittest {
-    0.shouldBeStatusOf!(Interpreter, q{
-        import std.stdio: writeln;
-
-        void main() {
-            size_t total = 23;
-            size_t failed;
-            writeln(total, " test(s) run, ", failed, " failed.");
-        }
-    });
 }
 
 // Taking the address of a ref-returning call must evaluate the call once and

@@ -230,7 +230,11 @@ private bool failing(scope void delegate() call) {
     try
         call();
     catch (Throwable throwable) {
-        fprintf(stderr, "%s\n", throwable.msg.toStringz);
+        fprintf(stderr, "%s\nat %s:%llu\n",
+            throwable.msg.toStringz,
+            throwable.file.toStringz,
+            throwable.line,
+        );
         return true;
     }
 

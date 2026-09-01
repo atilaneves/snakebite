@@ -271,7 +271,8 @@ public struct PlanCache {
             return *cached;
 
         version(unittest) ++_nativeSymbolLookups;
-        const found = resolve(mangleExact(function_).fromStringz) !is null;
+        const name = mangleExact(function_).fromStringz;
+        const found = resolve(name) !is null;
         _nativeSymbols[function_] = found;
         return found;
     }
@@ -420,12 +421,22 @@ private CallPlan prepare(
             // argument is one pointer register whatever
             // `parameterList[i].type` - the *pointee* type - would
             // classify as.
-            const isRef = (type.parameterList[i].storageClass & STC.ref_) != 0;
+            const storageClass = type.parameterList[i].storageClass;
+            const isRef = (storageClass & (STC.ref_ | STC.out_)) != 0;
             const argument = isRef
                 ? ArgumentPlan(
                     [Register(Register.Kind.pointer, 8), Register.init], 1,
                     false,
                 )
+                : storageClass & STC.lazy_
+                    ? ArgumentPlan(
+                        [
+                            Register(Register.Kind.pointer, 8),
+                            Register(Register.Kind.pointer, 8),
+                        ],
+                        2,
+                        false,
+                    )
                 : ArgumentPlan.of(type.parameterList[i].type);
             words += argument.count;
             if (words > maxArguments)
