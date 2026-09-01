@@ -33,6 +33,16 @@ private bool isFloatingType(imported!"dmd.mtype".Type type) {
     return type.ty == Tfloat32 || type.ty == Tfloat64;
 }
 
+// A pointer-sized temporary's facts: the shape every address this compiler
+// computes at run time - a `ref` binding, an array element's, an
+// allocation's result - shares, whatever the value living behind it
+// eventually is.
+private imported!"snakebite.nativelayout".TypeFacts pointerFactsOf() {
+    import snakebite.nativelayout: TypeFacts;
+
+    return TypeFacts(size_t.sizeof, size_t.sizeof, false, true);
+}
+
 // An array element type this compiler can lay out: every integral width it
 // already accepts elsewhere, plus `float`/`double`, which have no `.init`
 // this compiler can write any other way but zero.
@@ -155,18 +165,26 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         auto functionType = typeFunctionOf(function_);
         auto returnType = function_.type.nextOf;
         const isVoidReturn = returnType !is null && returnType.ty == Tvoid;
-        const returnFacts = isVoidReturn ? TypeFacts.init : TypeFacts.of(returnType);
-        if (!isVoidReturn && !isSupportedFacts(returnFacts))
+        // A `ref` return hands the caller the returned storage's own
+        // address rather than a copy of its value - see `compileReturn` and
+        // `compileAddress` - so the frame slot a caller reads it into is
+        // one pointer wide regardless of what the returned type itself
+        // would otherwise need, the same convention `snakebite.ffi.plan`
+        // already uses for a native `ref`-returning callee.
+        const isRefReturn = functionType.isRef;
+        const pointeeFacts = isVoidReturn ? TypeFacts.init : TypeFacts.of(returnType);
+        if (!isVoidReturn && !isSupportedFacts(pointeeFacts))
             throw rejection(function_, function_.loc, text(
                 "a `", returnType is null ? "auto" : returnType.toString,
                 "` return",
             ));
+        const returnFacts = isRefReturn ? pointerFactsOf : pointeeFacts;
 
         foreach (i; 0 .. functionType.parameterList.length) {
             auto parameter = functionType.parameterList[i];
-            if (parameter.storageClass & (STC.out_ | STC.lazy_ | STC.ref_))
+            if (parameter.storageClass & (STC.out_ | STC.lazy_))
                 throw rejection(function_, function_.loc,
-                    "a `ref`/`out`/`lazy` parameter");
+                    "an `out`/`lazy` parameter");
 
             const facts = TypeFacts.of(parameter.type);
             if (!isSupportedFacts(facts))
@@ -192,8 +210,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         auto placeholder = new Function;
         _compiled[function_] = placeholder;
 
-        scope compiler =
-            new FunctionCompiler(this, function_, layout, returnFacts, isVoidReturn);
+        scope compiler = new FunctionCompiler(
+            this, function_, layout, returnFacts, isVoidReturn, isRefReturn);
         *placeholder = compiler.build(body_);
 
         return placeholder;
@@ -210,6 +228,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 // ever handed back through `FrameLayout` itself.
 extern(C++) private final class FunctionCompiler: Visitor {
     import dmd.declaration: VarDeclaration;
+    import dmd.init: ExpInitializer;
     import dmd.expression;
     import dmd.func: FuncDeclaration;
     import dmd.statement:
@@ -223,7 +242,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
         opBranchTrue, opCall,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
         opConstant, opCopy, opDivideSigned, opDivideUnsigned, opEqual,
-        opFloatEqual, opFloatNotEqual, opGreaterOrEqualSigned,
+        opFloatEqual, opFloatNotEqual, opFrameAddress, opGreaterOrEqualSigned,
         opGreaterOrEqualUnsigned, opGreaterThanSigned, opGreaterThanUnsigned,
         opJump, opLessOrEqualSigned, opLessOrEqualUnsigned, opLessThanSigned,
         opLessThanUnsigned, opLoadIndirect, opLogicalNot, opModuloSigned,
@@ -243,6 +262,12 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private const FrameLayout _layout;
     private TypeFacts _returnFacts;
     private bool _isVoidReturn;
+    // Whether this function returns by `ref`: `compileReturn` then compiles
+    // its own returned storage's address instead of its value, and a
+    // caller's own `opCall` result slot holds that address rather than a
+    // copy - see `compileAddress`'s own `CallExp` case, the one place that
+    // address is read back out.
+    private bool _isRefReturn;
 
     private Instruction[] _instructions;
     private long[] _constants;
@@ -291,12 +316,14 @@ extern(C++) private final class FunctionCompiler: Visitor {
         in FrameLayout layout,
         in TypeFacts returnFacts,
         in bool isVoidReturn,
+        in bool isRefReturn,
     ) {
         _bytecode = bytecode;
         _function = function_;
         _layout = layout;
         _returnFacts = returnFacts;
         _isVoidReturn = isVoidReturn;
+        _isRefReturn = isRefReturn;
         _tempSize = layout.size;
         _tempAlignment = layout.alignment;
     }
@@ -458,6 +485,12 @@ extern(C++) private final class FunctionCompiler: Visitor {
         // is discarded the same way the interpreter discards it.
         if (_isVoidReturn || statement.exp is null) {
             emit(&opReturnVoid, 0, 0, 0);
+            return;
+        }
+
+        if (_isRefReturn) {
+            const addressOffset = compileAddress(statement.exp);
+            emit(&opReturn, 0, addressOffset, size_t.sizeof);
             return;
         }
 
@@ -725,7 +758,35 @@ extern(C++) private final class FunctionCompiler: Visitor {
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
+        // `foreach (ref value; values) ...` declares `value` afresh each
+        // iteration, bound to `values[i]`'s own storage - the same `ref`
+        // local shape a `ref int x = y;` written by hand has. Its own
+        // slot holds `y`'s address, not `y`'s value, so this stores the
+        // address `compileAddress` computes rather than evaluating the
+        // initialiser as a value the way a by-value local's is.
+        if (_layout.isRef(variable)) {
+            const addressOffset = compileAddress(initializerValueOf(expInitializer));
+            emit(&opCopy, offset, addressOffset, size_t.sizeof);
+            return;
+        }
+
         evalInto(expInitializer.exp, offset, facts.size);
+    }
+
+    // A `ref` local's `ExpInitializer` holds a full `value = target`
+    // assignment (a `ConstructExp`, dmd's node for initialising storage the
+    // guest has not touched yet) rather than bare `target` the way a
+    // by-value local's does - `compileAddress` wants `target` alone, the
+    // right side that names the storage to bind to. Unwrapped the same way
+    // `snakebite.backends.layout`'s own `collectDeclarations` already does
+    // for the temporaries `~=`'s lowering leaves the same way.
+    private Expression initializerValueOf(ExpInitializer expInitializer) {
+        auto value = expInitializer.exp;
+        if (auto construct = value.isConstructExp)
+            return construct.e2;
+        if (auto blit = value.isBlitExp)
+            return blit.e2;
+        return value;
     }
 
     // A plain `=` to a local or parameter. `destOffset` is where the
@@ -736,9 +797,16 @@ extern(C++) private final class FunctionCompiler: Visitor {
         if (auto indexTarget = expression.e1.isIndexExp)
             return compileIndexAssign(expression, indexTarget, destOffset);
 
+        // `pick(a, b, true) = 5;`: the call's own return is `ref`, an
+        // lvalue naming whichever of its own arguments it picked, not a
+        // value of its own - the same address `compileAddress`'s own
+        // `CallExp` case already knows how to compile.
+        if (auto callTarget = expression.e1.isCallExp)
+            return compileIndirectAssign(expression, callTarget, destOffset);
+
         auto varExp = expression.e1.isVarExp;
         auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg || _layout.isRef(variable))
+        if (variable is null || variable.isDataseg)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -746,6 +814,9 @@ extern(C++) private final class FunctionCompiler: Visitor {
         if (!isSupportedFacts(facts))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
+
+        if (_layout.isRef(variable))
+            return compileIndirectAssign(expression, varExp, destOffset);
 
         const targetOffset = _layout.offsetOf(variable);
 
@@ -768,6 +839,29 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
         if (destOffset != discardResult && destOffset != targetOffset)
             emit(&opCopy, destOffset, targetOffset, facts.size);
+    }
+
+    // `*p = value` in every guise this compiler reaches it through: a `ref`
+    // variable's own target, or a `ref`-returning call's own result.
+    // `compileAddress` already knows how to compile either lvalue's
+    // address; this only adds the store once that address is in hand, the
+    // same split `visit(IndexExp)`/`compileIndexAssign` already share for
+    // an array element.
+    private void compileIndirectAssign(
+        AssignExp expression, Expression target, in size_t destOffset,
+    ) {
+        const facts = TypeFacts.of(expression.e1.type);
+        if (!isSupportedFacts(facts))
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const addressOffset = compileAddress(target);
+        const valueOffset = reserveTemp(facts);
+        evalInto(expression.e2, valueOffset, facts.size);
+        emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
+
+        if (destOffset != discardResult)
+            emit(&opCopy, destOffset, valueOffset, facts.size);
     }
 
     // `arr[i] = value`. Struct-typed elements are out of scope here (they
@@ -810,7 +904,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     ) {
         auto varExp = expression.e1.isVarExp;
         auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg || _layout.isRef(variable))
+        if (variable is null || variable.isDataseg)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -824,9 +918,27 @@ extern(C++) private final class FunctionCompiler: Visitor {
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        const varOffset = _layout.offsetOf(variable);
         const rightOffset = reserveTemp(facts);
         evalInto(expression.e2, rightOffset, facts.size);
+
+        // A `ref` target's own slot holds its storage's address, not the
+        // storage: the current value is read through it into a temporary,
+        // combined there, and written back the same way - `opCopy` on the
+        // slot itself would combine into the address, not the value it
+        // points at.
+        if (_layout.isRef(variable)) {
+            const refOffset = _layout.offsetOf(variable);
+            const valueOffset = reserveTemp(facts);
+            emit(&opLoadIndirect, valueOffset, refOffset, facts.size);
+            emit(handler, valueOffset, rightOffset, facts.size);
+            emit(&opStoreIndirect, refOffset, valueOffset, facts.size);
+
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, facts.size);
+            return;
+        }
+
+        const varOffset = _layout.offsetOf(variable);
         emit(handler, varOffset, rightOffset, facts.size);
 
         if (destOffset != discardResult && destOffset != varOffset)
@@ -882,6 +994,163 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
         auto handler = expression.op == EXP.plusPlus ? &opAdd : &opSubtract;
         emit(handler, varOffset, stepOffset, facts.size);
+    }
+
+    // `arr ~= x;`/`arr ~= other;`: dmd's semantic pass, not this compiler,
+    // decides which of druntime's own growth hooks the guest needs -
+    // `_d_arrayappendcTX` for one element, `_d_arrayappendT` for a whole
+    // slice - and leaves the resolved `FuncDeclaration` reachable on
+    // `expression.lowering`'s own call node (`CatAssignExp.lowering` in
+    // dmd's `expressionsem.d`). `findLoweredCallee` only reads that
+    // declaration back out; the arguments this compiler passes it are
+    // built fresh from `expression.e1`/`e2` themselves; the appended
+    // storage always grows through that real, already-compiled druntime
+    // call, never a private growth algorithm of this compiler's own.
+    private void compileCatAssign(CatAssignExp expression, in size_t destOffset) {
+        import dmd.tokens: EXP;
+
+        auto hook = findLoweredCallee(expression.lowering);
+        if (hook is null)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        if (expression.op == EXP.concatenateElemAssign)
+            return compileElementAppend(expression, hook, destOffset);
+
+        if (expression.op == EXP.concatenateAssign)
+            return compileSliceAppend(expression, hook, destOffset);
+
+        throw rejection(_function, expression.loc, expressionText(expression));
+    }
+
+    private FuncDeclaration findLoweredCallee(Expression expression) {
+        if (expression is null)
+            return null;
+
+        if (auto call = expression.isCallExp)
+            return call.f;
+
+        if (auto comma = expression.isCommaExp) {
+            if (auto found = findLoweredCallee(comma.e1))
+                return found;
+            return findLoweredCallee(comma.e2);
+        }
+
+        return null;
+    }
+
+    // `arr ~= x;`: grows `arr` by one element through `_d_arrayappendcTX`,
+    // passed `arr`'s own address so the growth it may have to do - a new,
+    // larger block, when the old one has no room left to extend in place -
+    // lands back in `arr` itself, then writes `x` into the slot that
+    // growth made. `x` is evaluated *before* the call: `arr ~= arr[$-1] +
+    // 1` reads the pre-growth `$`, the same order dmd's own lowering
+    // already forces by extracting `x` into a temporary ahead of the call
+    // for exactly this reason (`extractSideEffect` in `expressionsem.d`).
+    private void compileElementAppend(
+        CatAssignExp expression, FuncDeclaration hook, in size_t destOffset,
+    ) {
+        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+
+        const arrayFacts = TypeFacts.of(expression.e1.type);
+        if (!arrayFacts.isDynamicArray)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        auto elementType = expression.e1.type.nextOf;
+        const elementFacts = TypeFacts.of(elementType);
+        // `messages ~= "failure";` appends a whole `string` as one element
+        // of a `string[]` - the element itself is a dynamic array, not a
+        // scalar `isSupportedElementFacts` accepts elsewhere (a literal or
+        // `new T[](n)`'s own per-element default fill, which both need a
+        // single `long`-sized constant this two-word case cannot be).
+        // `opStoreIndirect` only ever memcpies the element's own bytes, so
+        // a two-word element is exactly as supported here as a one-word
+        // one.
+        if (!isSupportedElementFacts(elementFacts, elementType)
+                && !elementFacts.isDynamicArray)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const valueOffset = reserveTemp(elementFacts);
+        evalInto(expression.e2, valueOffset, elementFacts.size);
+
+        const arrayAddressOffset = compileAddress(expression.e1);
+
+        const oneOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, oneOffset, addConstant(1), size_t.sizeof);
+
+        auto plan = &_bytecode._plans.of(hook);
+        _callSites ~= CallSite(
+            null,
+            [
+                Arg(arrayAddressOffset, 0, size_t.sizeof),
+                Arg(oneOffset, 0, size_t.sizeof),
+            ],
+            0,
+            cast(const(void)*) plan,
+        );
+        emit(&opCall, discardResult, _callSites.length - 1, 0);
+
+        const grownOffset = reserveTemp(arrayFacts);
+        emit(&opLoadIndirect, grownOffset, arrayAddressOffset, arrayFacts.size);
+
+        const elementSizeOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, elementSizeOffset,
+            addConstant(cast(long) elementFacts.size), size_t.sizeof);
+
+        const byteOffsetOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, byteOffsetOffset, grownOffset + arrayLengthOffset,
+            size_t.sizeof);
+        emit(&opSubtract, byteOffsetOffset, oneOffset, size_t.sizeof);
+        emit(&opMultiply, byteOffsetOffset, elementSizeOffset, size_t.sizeof);
+
+        const elementAddressOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, elementAddressOffset, grownOffset + arrayPointerOffset,
+            size_t.sizeof);
+        emit(&opAdd, elementAddressOffset, byteOffsetOffset, size_t.sizeof);
+
+        emit(&opStoreIndirect, elementAddressOffset, valueOffset,
+            elementFacts.size);
+
+        if (destOffset != discardResult)
+            emit(&opCopy, destOffset, grownOffset, arrayFacts.size);
+    }
+
+    // `arr ~= other;`: grows `arr` in place through `_d_arrayappendT`,
+    // which copies `other`'s own elements into the room it made - this
+    // compiler never touches an element itself, the same as the single-
+    // element form above hands the element write to `opStoreIndirect`
+    // rather than druntime.
+    private void compileSliceAppend(
+        CatAssignExp expression, FuncDeclaration hook, in size_t destOffset,
+    ) {
+        const arrayFacts = TypeFacts.of(expression.e1.type);
+        const otherFacts = TypeFacts.of(expression.e2.type);
+        if (!arrayFacts.isDynamicArray || !otherFacts.isDynamicArray)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const otherOffset = reserveTemp(otherFacts);
+        evalInto(expression.e2, otherOffset, otherFacts.size);
+
+        const arrayAddressOffset = compileAddress(expression.e1);
+
+        auto plan = &_bytecode._plans.of(hook);
+        _callSites ~= CallSite(
+            null,
+            [
+                Arg(arrayAddressOffset, 0, size_t.sizeof),
+                Arg(otherOffset, 0, otherFacts.size),
+            ],
+            0,
+            cast(const(void)*) plan,
+        );
+        emit(&opCall, discardResult, _callSites.length - 1, 0);
+
+        if (destOffset != discardResult)
+            emit(&opLoadIndirect, destOffset, arrayAddressOffset,
+                arrayFacts.size);
     }
 
     // Compiles `expression`'s value into `frame[destOffset .. destOffset +
@@ -975,7 +1244,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     override void visit(VarExp expression) {
         requireDestination(expression);
         auto variable = expression.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg || _layout.isRef(variable))
+        if (variable is null || variable.isDataseg)
             return visit(cast(Expression) expression);
 
         // `$` inside an index has no frame slot of its own - dmd hands out
@@ -989,8 +1258,51 @@ extern(C++) private final class FunctionCompiler: Visitor {
         }
 
         const source = _layout.offsetOf(variable);
+
+        // A `ref` variable's own slot holds the address of the storage it
+        // is bound to, not the storage itself - reading it means reading
+        // through that address instead of the slot's own bytes, the one
+        // place every plain variable read resolves this.
+        if (_layout.isRef(variable)) {
+            emit(&opLoadIndirect, _destination, source, _width);
+            return;
+        }
+
         if (source != _destination)
             emit(&opCopy, _destination, source, _width);
+    }
+
+    // `&variable`: dmd folds this straight into a `SymOffExp` naming the
+    // variable and a byte offset into it, rather than wrapping a `VarExp`
+    // in a general `AddrExp` - the address a `ref` return's own ternary
+    // (`cond ? &a : &b`) is built from. A field offset (`offset != 0`) is
+    // out of scope; only a whole variable's own address is supported.
+    override void visit(SymOffExp expression) {
+        requireDestination(expression);
+        auto variable = expression.var.isVarDeclaration;
+        if (variable is null || variable.isDataseg || expression.offset != 0)
+            return visit(cast(Expression) expression);
+
+        const addressOffset = addressOfVariable(variable);
+        if (addressOffset != _destination)
+            emit(&opCopy, _destination, addressOffset, size_t.sizeof);
+    }
+
+    // The general `&expression` node: dmd only folds `&variable` into a
+    // `SymOffExp` above when the variable is *not* itself `ref`
+    // (`optimize.d`'s own `visitAddr`) - `&a` for a `ref` parameter `a`
+    // stays this node instead, since its meaning is different: `a`'s own
+    // slot already holds the address `&a` names, not a further
+    // indirection into a pointer-to-pointer. `compileAddress` already
+    // answers that same question for every lvalue this compiler reaches
+    // through `ref` binding, so this is nothing more than that answer
+    // copied to `_destination`.
+    override void visit(AddrExp expression) {
+        requireDestination(expression);
+
+        const addressOffset = compileAddress(expression.e1);
+        if (addressOffset != _destination)
+            emit(&opCopy, _destination, addressOffset, size_t.sizeof);
     }
 
     // `arr.length`: the array's own length word, read straight out of its
@@ -1011,6 +1323,24 @@ extern(C++) private final class FunctionCompiler: Visitor {
         const arrayOffset = reserveTemp(facts);
         evalInto(expression.e1, arrayOffset, facts.size);
         emit(&opCopy, _destination, arrayOffset + arrayLengthOffset, _width);
+    }
+
+    // `arr[]`: dmd's own `foreach` lowering over an array takes a bare
+    // whole-array slice of it before iterating, to fix the range being
+    // walked against mutation of the original variable during the loop.
+    // A dynamic array's whole slice is the same two words as the array
+    // itself, so this is nothing more than evaluating `e1` again; a
+    // bounded slice (`arr[a .. b]`) is out of scope, since nothing this
+    // compiler lowers writes one.
+    override void visit(SliceExp expression) {
+        requireDestination(expression);
+
+        const facts = TypeFacts.of(expression.e1.type);
+        if (!facts.isDynamicArray
+                || expression.lwr !is null || expression.upr !is null)
+            return visit(cast(Expression) expression);
+
+        evalInto(expression.e1, _destination, _width);
     }
 
     // `arr[i]`, read as a value. `compileElementAddress` does the shared
@@ -1081,6 +1411,13 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
     override void visit(BinAssignExp expression) {
         compileCompoundAssign(expression, _destination);
+    }
+
+    // `~=`: more specific than `BinAssignExp`, whose own base class this
+    // is (`CatElemAssignExp`/`CatDcharAssignExp` in turn derive from this),
+    // so this takes priority over `visit(BinAssignExp)` for all three.
+    override void visit(CatAssignExp expression) {
+        compileCatAssign(expression, _destination);
     }
 
     override void visit(PostExp expression) {
@@ -1523,11 +1860,16 @@ extern(C++) private final class FunctionCompiler: Visitor {
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
+            // A `ref` return hands back its target's address in the
+            // return register, whatever the pointee's own facts are - the
+            // same convention `snakebite.ffi.plan` already prepares for a
+            // native callee (see `CallPlan.prepare`'s own `returnsRef`).
+            const isRefCallee = type.isRef;
             auto returnType = type.next;
             const isVoidCallee = returnType is null || returnType.ty == Tvoid;
-            const returnFacts = isVoidCallee
-                ? TypeFacts.init
-                : TypeFacts.of(returnType);
+            const returnFacts = isRefCallee
+                ? pointerFacts
+                : isVoidCallee ? TypeFacts.init : TypeFacts.of(returnType);
             if (isVoidCallee && destOffset != discardResult)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
@@ -1535,9 +1877,16 @@ extern(C++) private final class FunctionCompiler: Visitor {
             Arg[] args;
             foreach (i; 0 .. parameterCount) {
                 auto parameter = type.parameterList[i];
-                if (parameter.storageClass & (STC.out_ | STC.lazy_ | STC.ref_))
+                if (parameter.storageClass & (STC.out_ | STC.lazy_))
                     throw rejection(_function, expression.loc,
                         expressionText(expression));
+
+                if (parameter.storageClass & STC.ref_) {
+                    const argumentOffset =
+                        compileAddress((*expression.arguments)[i]);
+                    args ~= Arg(argumentOffset, 0, size_t.sizeof);
+                    continue;
+                }
 
                 const facts = TypeFacts.of(parameter.type);
                 const argumentOffset = reserveTemp(facts);
@@ -1567,7 +1916,20 @@ extern(C++) private final class FunctionCompiler: Visitor {
         Arg[] args;
         foreach (i; 0 .. parameterCount) {
             auto parameter = calleeLayout.parameters[i];
-            if (!isSupportedFacts(parameter.facts) || parameter.isRef)
+
+            // A `ref` parameter's own `facts` are the pointer slot's,
+            // never `isSupportedFacts` on their own terms (`isIntegral`
+            // is `false` for them) - the pointee's own facts are what
+            // that check is for, and `Bytecode.compileFunction` already
+            // made it of the callee's declared parameter type.
+            if (parameter.isRef) {
+                const argumentOffset =
+                    compileAddress((*expression.arguments)[i]);
+                args ~= Arg(argumentOffset, parameter.offset, size_t.sizeof);
+                continue;
+            }
+
+            if (!isSupportedFacts(parameter.facts))
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
@@ -1579,12 +1941,18 @@ extern(C++) private final class FunctionCompiler: Visitor {
             args ~= Arg(argumentOffset, parameter.offset, parameter.facts.size);
         }
 
+        // A `ref` return hands the caller the callee's own returned
+        // storage's address - `compileAddress`'s `CallExp` case is the one
+        // place that address is read back out, and `compileIndirectAssign`
+        // is the one place it is written through.
+        const isRefCallee = calleeType.isRef;
         auto calleeReturnType = calleeType.next;
         const isVoidCallee =
             calleeReturnType is null || calleeReturnType.ty == Tvoid;
-        const returnFacts =
-            isVoidCallee ? TypeFacts.init : TypeFacts.of(calleeReturnType);
-        if (!isVoidCallee && !isSupportedFacts(returnFacts))
+        const returnFacts = isRefCallee
+            ? pointerFacts
+            : isVoidCallee ? TypeFacts.init : TypeFacts.of(calleeReturnType);
+        if (!isRefCallee && !isVoidCallee && !isSupportedFacts(returnFacts))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
         if (isVoidCallee && destOffset != discardResult)
@@ -1597,11 +1965,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
         emit(&opCall, destOffset, siteIndex, 0);
     }
 
-    // A pointer-sized temporary: the shape every address this compiler
-    // computes at run time - an array element's, an allocation's result -
-    // shares, whatever the value living behind it eventually is.
     private TypeFacts pointerFacts() {
-        return TypeFacts(size_t.sizeof, size_t.sizeof, false, true);
+        return pointerFactsOf;
     }
 
     // Where `expression`'s element actually lives: `expression.e1`'s own
@@ -1664,6 +2029,79 @@ extern(C++) private final class FunctionCompiler: Visitor {
         emit(&opAdd, addressOffset, indexOffset, size_t.sizeof);
 
         return addressOffset;
+    }
+
+    // Where `expression`'s own storage lives, as a run-time pointer value
+    // left in a fresh temporary - the one operation `ref` binding (a `ref`
+    // parameter's argument, a `ref` local's initialiser, a `ref` return's
+    // own expression) and `~=`'s `ref` argument to druntime all reduce to.
+    //
+    // A plain variable's address is its frame slot's own address, computed
+    // fresh by `opFrameAddress` since the frame this compiled function runs
+    // in only exists at run time. A `ref` variable's slot already holds the
+    // address it is bound to - the same reach `visit(VarExp)` makes to read
+    // through it - so that slot's own offset already answers the question
+    // without a further instruction. An indexed element's address is
+    // `compileElementAddress`'s own job, already shared with a load and a
+    // store. A `ref`-returning call's result is likewise already an
+    // address once `compileCall` compiles it into a pointer-sized slot -
+    // see `_isRefReturn` in `compileReturn`.
+    private size_t compileAddress(Expression expression) {
+        if (auto varExp = expression.isVarExp) {
+            auto variable = varExp.var.isVarDeclaration;
+            if (variable !is null && !variable.isDataseg)
+                return addressOfVariable(variable);
+        }
+
+        if (auto indexExp = expression.isIndexExp) {
+            const arrayFacts = TypeFacts.of(indexExp.e1.type);
+            if (arrayFacts.isDynamicArray)
+                return compileElementAddress(indexExp, arrayFacts);
+        }
+
+        if (auto callExp = expression.isCallExp) {
+            import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+            if (callExp.f !is null && typeFunctionOf(callExp.f).isRef) {
+                const offset = reserveTemp(pointerFacts);
+                compileCall(callExp, offset);
+                return offset;
+            }
+        }
+
+        // `*(cond ? &a : &b)`: dmd wraps a `ref` return's own conditional
+        // expression this way (see `_isRefReturn` in `compileReturn`) -
+        // `expression.e1` is itself a pointer-typed value (a ternary of
+        // addresses, an ordinary expression `evalInto` already knows how
+        // to compile through `visit(SymOffExp)`/`visit(CondExp)`), and the
+        // address `*p` names is exactly `p`'s own value, not a further
+        // indirection.
+        if (auto ptrExp = expression.isPtrExp) {
+            const offset = reserveTemp(pointerFacts);
+            evalInto(ptrExp.e1, offset, size_t.sizeof);
+            return offset;
+        }
+
+        throw rejection(_function, expression.loc, expressionText(expression));
+    }
+
+    // `variable`'s own address, as a run-time pointer value left in a
+    // fresh temporary: a `ref` variable's slot already holds the address
+    // it is bound to, so that slot's own offset already answers the
+    // question; a value variable's address is its frame slot's own
+    // address, computed fresh by `opFrameAddress` since the frame this
+    // compiled function runs in only exists at run time. Shared by
+    // `compileAddress`'s own `VarExp` case and `visit(SymOffExp)`, dmd's
+    // own node for `&variable` written directly rather than through a
+    // `VarExp`.
+    private size_t addressOfVariable(VarDeclaration variable) {
+        if (_layout.isRef(variable))
+            return _layout.offsetOf(variable);
+
+        const offset = reserveTemp(pointerFacts);
+        emit(&opFrameAddress, offset, _layout.offsetOf(variable),
+            size_t.sizeof);
+        return offset;
     }
 
     // Calls druntime's allocator for `size` bytes and leaves the resulting

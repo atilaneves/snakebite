@@ -6,7 +6,7 @@ import ut.backends;
 
 // The simplest `ref` round trip: the callee mutates the parameter twice,
 // and both mutations land on the caller's own local, not a copy of it.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("ref.param.mutatedByCallee." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -32,7 +32,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // A `ref` parameter forwarded into a nested call: `bump`'s own `x` is
 // itself `ref`, and passing it on to `inc` must reach the same storage as
 // the outer local, not a second indirection through `bump`'s frame.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("ref.param.passesThroughNestedCall." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -62,7 +62,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // A `ref` return is an lvalue: assigning through the call itself changes
 // whichever of the two arguments it picked, and the caller's own local -
 // not a copy the call handed back - is what changed.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("ref.return.assignableThroughCall." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -165,7 +165,7 @@ static foreach (backend; Matrix!(
 // of string literals and a whole-slice assignment, the only slice
 // operations the interpreter supports today; `ArrayLiteralExp` and
 // `CatAssignExp` are out of scope here.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("ref.param.wholeSliceThroughReference." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

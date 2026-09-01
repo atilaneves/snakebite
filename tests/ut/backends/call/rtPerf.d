@@ -82,6 +82,55 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// The real `kernel.loop` benchmark in `examples/rt-perf` - a `ref` foreach
+// over a runtime-length array to fill it, then a plain-value foreach over
+// it repeated inside an integer-range foreach, reproduced here so the
+// backend matrix runs the same loop shape `bench`'s own driver measures.
+static foreach (backend; Matrix!()) {
+    @("rtPerf.kernelLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        (5UL * 4_498_500UL).shouldBeRetOf!(
+            backend,
+            q{
+                ulong kernelLoop() {
+                    auto buf = new uint[](3_000);
+                    foreach (i, ref b; buf)
+                        b = cast(uint) i;
+
+                    ulong sum;
+                    foreach (_; 0 .. 5)
+                        foreach (b; buf)
+                            sum += b;
+
+                    return sum;
+                }
+            },
+            "kernelLoop",
+        );
+    }
+}
+
+// The real `kernel.append` benchmark in `examples/rt-perf` - repeated
+// single-element `~=` inside an integer-range foreach, growing well past
+// any capacity a first allocation could have reserved.
+static foreach (backend; Matrix!()) {
+    @("rtPerf.kernelAppend." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ubyte[] bytes;
+                foreach (i; 0 .. 1_500)
+                    bytes ~= cast(ubyte) i;
+
+                assert(bytes.length == 1_500);
+                assert(bytes[1_499] == cast(ubyte) 1_499);
+            }
+        });
+    }
+}
+
 // The real `countPrimes` in `examples/rt-perf` - a runtime-length `new
 // bool[](n)`, element load/store, and nested `for` loops with `continue`.
 static foreach (backend; Matrix!()) {

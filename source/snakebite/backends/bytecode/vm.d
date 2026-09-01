@@ -1061,6 +1061,26 @@ package const(Instruction)* opLoadIndirect(
 }
 
 
+// Writes `frame + pc.source` itself - not the bytes stored there, the
+// address of that slot - to `frame + pc.destination`, always `size_t.sizeof`
+// bytes: the one place this VM turns a frame slot into a value a `ref`
+// binding, a `~=`'s `ref` argument to druntime, or a `ref` return can carry
+// around and dereference later through `opLoadIndirect`/`opStoreIndirect`.
+package const(Instruction)* opFrameAddress(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    *cast(void**) (frame + pc.destination) = frame + pc.source;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+
 // As `opLoadIndirect`, the other way: writes `pc.width` bytes from `frame +
 // pc.source` to the address held at `frame + pc.destination`.
 package const(Instruction)* opStoreIndirect(
