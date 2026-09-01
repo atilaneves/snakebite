@@ -4,6 +4,7 @@ module snakebite.backends.bytecode.compiler;
 private:
 
 import dmd.visitor: Visitor;
+import object: TypeInfo, TypeInfo_Array;
 import snakebite.ffi: maxArguments, PlanCache;
 
 
@@ -30,7 +31,10 @@ private bool isSupportedFacts(
     in imported!"snakebite.nativelayout".TypeFacts facts,
     imported!"dmd.mtype".Type type,
 ) {
-    return isSupportedFacts(facts) || isPlainOldStruct(type);
+    import dmd.astenums: Tpointer;
+
+    return isSupportedFacts(facts) || type.ty == Tpointer
+        || isPlainOldStruct(type);
 }
 
 // Whether this compiler can treat `type` as plain bytes it never has to
@@ -47,7 +51,7 @@ private bool isSupportedFacts(
 // zeroing its bytes (see `opZero`), the same way `nativelayout.storeValue`
 // already special-cases a zero-init struct's own `.init` elsewhere.
 private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: STC, Tarray;
+    import dmd.astenums: STC, Tarray, Tpointer;
     import snakebite.nativelayout: isIntegralSize, TypeFacts;
 
     auto structType = type.isTypeStruct;
@@ -74,7 +78,7 @@ private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
             continue;
         }
 
-        if (field.type.ty == Tarray)
+        if (field.type.ty == Tarray || field.type.ty == Tpointer)
             continue;
 
         const facts = TypeFacts.of(field.type);
@@ -143,6 +147,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // the same `Resolver` `_plans` already owns, so this costs nothing new
     // besides the one symbol lookup.
     private void* _allocatorAddress;
+    private TypeInfo[] _typeInfoRoots;
 
     public this(const Program program) {
         super(program);
@@ -197,6 +202,39 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         }
 
         return _allocatorAddress;
+    }
+
+    private TypeInfo runtimeTypeInfo(imported!"dmd.mtype".Type type) {
+        import dmd.astenums:
+            Tarray, Tbool, Tchar, Tdchar, Tfloat32, Tfloat64, Tint8, Tint16,
+            Tint32, Tint64, Tuns8, Tuns16, Tuns32, Tuns64, Twchar;
+
+        if (type.ty == Tarray) {
+            auto info = new TypeInfo_Array;
+            info.value = runtimeTypeInfo(type.nextOf);
+            if (info.value is null)
+                return null;
+            _typeInfoRoots ~= info;
+            return info;
+        }
+
+        switch (type.ty) {
+            case Tbool: return typeid(bool);
+            case Tchar: return typeid(char);
+            case Twchar: return typeid(wchar);
+            case Tdchar: return typeid(dchar);
+            case Tint8: return typeid(byte);
+            case Tint16: return typeid(short);
+            case Tint32: return typeid(int);
+            case Tint64: return typeid(long);
+            case Tuns8: return typeid(ubyte);
+            case Tuns16: return typeid(ushort);
+            case Tuns32: return typeid(uint);
+            case Tuns64: return typeid(ulong);
+            case Tfloat32: return typeid(float);
+            case Tfloat64: return typeid(double);
+            default: return null;
+        }
     }
 
     // `function_`'s compiled form, compiling it - and, transitively,
@@ -577,6 +615,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // it, not the array's own full size.
     private size_t compileCondition(Expression condition) {
         import snakebite.nativelayout: arrayPointerOffset;
+        import dmd.astenums: Tpointer;
 
         const facts = TypeFacts.of(condition.type);
         if (facts.isDynamicArray) {
@@ -585,10 +624,21 @@ extern(C++) private final class FunctionCompiler: Visitor {
             return arrayOffset + arrayPointerOffset;
         }
 
+        if (condition.type.ty == Tpointer)
+            return compilePointerCondition(condition, facts);
+
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             throw rejection(_function, condition.loc,
                 expressionText(condition));
 
+        const offset = reserveTemp(facts);
+        evalInto(condition, offset, facts.size);
+        return offset;
+    }
+
+    private size_t compilePointerCondition(
+        Expression condition, in TypeFacts facts,
+    ) {
         const offset = reserveTemp(facts);
         evalInto(condition, offset, facts.size);
         return offset;
@@ -795,12 +845,13 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // gave it - `int sum = 0;` is a `DeclarationExp` here, the same as in
     // the interpreter.
     private void compileDeclaration(DeclarationExp expression) {
-        // A function-local struct declaration binds a name to a type
-        // dmd's semantic pass has already resolved every use of - nothing
-        // runs when it is "declared" here, the same way an `import`
-        // inside a function body binds a name with nothing left to
-        // execute (see `visit(ImportStatement)`).
-        if (expression.declaration.isStructDeclaration !is null)
+        // These declarations bind names for the semantic pass but have no
+        // runtime action, the same way an `import` inside a function body
+        // does.
+        if (expression.declaration.isStructDeclaration !is null
+                || expression.declaration.isAliasDeclaration !is null
+                || expression.declaration.isTemplateDeclaration !is null
+                || expression.declaration.isFuncDeclaration !is null)
             return;
 
         auto variable = expression.declaration.isVarDeclaration;
@@ -1105,7 +1156,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private void compilePost(PostExp expression, in size_t destOffset) {
         auto varExp = expression.e1.isVarExp;
         auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg || _layout.isRef(variable))
+        if (variable is null || variable.isDataseg)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -1115,6 +1166,23 @@ extern(C++) private final class FunctionCompiler: Visitor {
                 expressionText(expression));
 
         const varOffset = _layout.offsetOf(variable);
+
+        if (_layout.isRef(variable)) {
+            const valueOffset = reserveTemp(facts);
+            emit(&opLoadIndirect, valueOffset, varOffset, facts.size);
+
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, facts.size);
+
+            const stepOffset = reserveTemp(facts);
+            evalInto(expression.e2, stepOffset, facts.size);
+
+            auto handler = expression.op == EXP.plusPlus
+                ? &opAdd : &opSubtract;
+            emit(handler, valueOffset, stepOffset, facts.size);
+            emit(&opStoreIndirect, varOffset, valueOffset, facts.size);
+            return;
+        }
 
         if (destOffset != discardResult)
             emit(&opCopy, destOffset, varOffset, facts.size);
@@ -1210,15 +1278,31 @@ extern(C++) private final class FunctionCompiler: Visitor {
         const oneOffset = reserveTemp(pointerFacts);
         emit(&opConstant, oneOffset, addConstant(1), size_t.sizeof);
 
-        auto plan = &_bytecode._plans.of(hook);
+        const(Function)* callee;
+        const(void)* nativePlan;
+        size_t arrayParameterOffset;
+        size_t countParameterOffset;
+        const compilesTemplate = hook.isInstantiated() !is null
+            && hook.fbody !is null && !_bytecode.hasNativeSymbol(hook);
+        if (compilesTemplate) {
+            import snakebite.backends.layout: FrameLayout;
+
+            callee = _bytecode.compileFunction(hook);
+            auto layout = FrameLayout.of(hook);
+            arrayParameterOffset = layout.parameters[0].offset;
+            countParameterOffset = layout.parameters[1].offset;
+        } else {
+            nativePlan = cast(const(void)*) &_bytecode._plans.of(hook);
+        }
+
         _callSites ~= CallSite(
-            null,
+            callee,
             [
-                Arg(arrayAddressOffset, 0, size_t.sizeof),
-                Arg(oneOffset, 0, size_t.sizeof),
+                Arg(arrayAddressOffset, arrayParameterOffset, size_t.sizeof),
+                Arg(oneOffset, countParameterOffset, size_t.sizeof),
             ],
             0,
-            cast(const(void)*) plan,
+            nativePlan,
         );
         emit(&opCall, discardResult, _callSites.length - 1, 0);
 
@@ -1528,9 +1612,41 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // bounded slice (`arr[a .. b]`) is out of scope, since nothing this
     // compiler lowers writes one.
     override void visit(SliceExp expression) {
+        import dmd.astenums: Tpointer;
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset;
+
         requireDestination(expression);
 
         const facts = TypeFacts.of(expression.e1.type);
+        if (expression.e1.type.ty == Tpointer
+                && expression.upr !is null) {
+            const pointerOffset = reserveTemp(facts);
+            evalInto(expression.e1, pointerOffset, facts.size);
+
+            const lowOffset = reserveTemp(pointerFacts);
+            if (expression.lwr is null)
+                emit(&opConstant, lowOffset, addConstant(0), size_t.sizeof);
+            else
+                evalOperandInto(expression.lwr, lowOffset, size_t.sizeof);
+
+            const highOffset = reserveTemp(pointerFacts);
+            evalOperandInto(expression.upr, highOffset, size_t.sizeof);
+            emit(&opSubtract, highOffset, lowOffset, size_t.sizeof);
+            emit(&opCopy, _destination + arrayLengthOffset, highOffset,
+                size_t.sizeof);
+
+            const elementFacts = TypeFacts.of(expression.e1.type.nextOf);
+            const elementSizeOffset = reserveTemp(pointerFacts);
+            emit(&opConstant, elementSizeOffset,
+                addConstant(cast(long) elementFacts.size), size_t.sizeof);
+            emit(&opMultiply, lowOffset, elementSizeOffset, size_t.sizeof);
+            emit(&opAdd, pointerOffset, lowOffset, size_t.sizeof);
+            emit(&opCopy, _destination + arrayPointerOffset, pointerOffset,
+                size_t.sizeof);
+            return;
+        }
+
         if (!facts.isDynamicArray
                 || expression.lwr !is null || expression.upr !is null)
             return visit(cast(Expression) expression);
@@ -1576,10 +1692,17 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // share that same representation.
     override void visit(NullExp expression) {
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+        import dmd.astenums: Tpointer;
 
         requireDestination(expression);
 
         const facts = TypeFacts.of(expression.type);
+        if (expression.type.ty == Tpointer) {
+            emit(&opConstant, _destination,
+                addConstant(0), facts.size);
+            return;
+        }
+
         if (!facts.isDynamicArray)
             return visit(cast(Expression) expression);
 
@@ -1589,7 +1712,40 @@ extern(C++) private final class FunctionCompiler: Visitor {
             addConstant(0), size_t.sizeof);
     }
 
+    override void visit(TypeidExp expression) {
+        import dmd.dtemplate: isType;
+        import std.conv: text;
+
+        requireDestination(expression);
+
+        auto type = isType(expression.obj);
+        if (type is null || type.vtinfo is null)
+            throw rejection(_function, expression.loc,
+                text("`", expression.toString,
+                    "` without resolved type information"));
+
+        auto address = _bytecode._plans.resolve(
+            type.vtinfo.ident.toString);
+        if (address is null)
+            address = cast(void*) _bytecode.runtimeTypeInfo(type);
+        if (address is null)
+            throw rejection(_function, expression.loc,
+                text("unresolved `", expression.toString, "`"));
+
+        emit(&opConstant, _destination,
+            addConstant(cast(long) cast(size_t) address), _width);
+    }
+
     override void visit(CallExp expression) {
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+        if (_destination != discardResult && expression.f !is null
+                && typeFunctionOf(expression.f).isRef) {
+            const addressOffset = compileAddress(expression);
+            emit(&opLoadIndirect, _destination, addressOffset, _width);
+            return;
+        }
+
         compileCall(expression, _destination);
     }
 
@@ -1653,6 +1809,11 @@ extern(C++) private final class FunctionCompiler: Visitor {
     }
 
     override void visit(EqualExp expression) {
+        requireDestination(expression);
+        compileComparison(expression, _destination);
+    }
+
+    override void visit(IdentityExp expression) {
         requireDestination(expression);
         compileComparison(expression, _destination);
     }
@@ -1754,6 +1915,41 @@ extern(C++) private final class FunctionCompiler: Visitor {
         BinExp expression, in size_t destOffset, in size_t width,
         Instruction.Handler handler,
     ) {
+        import dmd.astenums: Tpointer;
+
+        if (expression.type.ty == Tpointer) {
+            if (handler !is &opAdd && handler !is &opSubtract)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            Expression pointerOperand = expression.e1.type.ty == Tpointer
+                ? expression.e1 : expression.e2;
+            Expression integralOperand = pointerOperand is expression.e1
+                ? expression.e2 : expression.e1;
+            if (pointerOperand.type.ty != Tpointer) {
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+            }
+
+            const pointerFacts = TypeFacts.of(pointerOperand.type);
+            const integralFacts = TypeFacts.of(integralOperand.type);
+            if (!integralFacts.isIntegral
+                    || !isIntegralSize(integralFacts.size))
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const leftOffset = reserveTemp(pointerFacts);
+            evalInto(pointerOperand, leftOffset, pointerFacts.size);
+            const rightOffset = reserveTemp(pointerFacts);
+            evalOperandInto(integralOperand, rightOffset,
+                pointerFacts.size);
+            emit(handler, leftOffset, rightOffset, pointerFacts.size);
+
+            if (destOffset != leftOffset)
+                emit(&opCopy, destOffset, leftOffset, width);
+            return;
+        }
+
         const facts = TypeFacts.of(expression.type);
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             throw rejection(_function, expression.loc,
@@ -1815,7 +2011,31 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // `bool` - and the comparison opcode leaves its answer in the first
     // of those, copied out to `destOffset` only when it differs.
     private void compileComparison(BinExp expression, in size_t destOffset) {
+        import dmd.astenums: Tpointer;
+
         const operandFacts = TypeFacts.of(expression.e1.type);
+
+        if (expression.e1.type.ty == Tpointer) {
+            Instruction.Handler pointerHandler;
+            with (EXP) switch (expression.op) {
+                case equal, identity: pointerHandler = &opEqual; break;
+                case notEqual, notIdentity: pointerHandler = &opNotEqual;
+                    break;
+                default:
+                    throw rejection(_function, expression.loc,
+                        expressionText(expression));
+            }
+
+            const leftOffset = reserveTemp(operandFacts);
+            evalInto(expression.e1, leftOffset, operandFacts.size);
+            const rightOffset = reserveTemp(operandFacts);
+            evalInto(expression.e2, rightOffset, operandFacts.size);
+            emit(pointerHandler, leftOffset, rightOffset, operandFacts.size);
+
+            if (destOffset != leftOffset)
+                emit(&opCopy, destOffset, leftOffset, 1);
+            return;
+        }
 
         // `float`/`double` compare unequal to themselves when they are NaN,
         // so this reaches for the host's own float comparison
@@ -1994,14 +2214,50 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private void compileCast(
         CastExp expression, in size_t destOffset, in size_t width,
     ) {
+        import std.conv: text;
+
         auto sourceType = expression.e1.type;
         auto destType = expression.type;
 
         const sourceFacts = TypeFacts.of(sourceType);
+        const destFacts = TypeFacts.of(destType);
+        import dmd.astenums: Tpointer;
+
+        if (sourceType.ty == Tpointer && destType.ty == Tpointer
+                && width == sourceFacts.size)
+            return evalInto(expression.e1, destOffset, width);
+
+        if (sourceType.ty == Tpointer && destFacts.isDynamicArray) {
+            const addressOffset = reserveTemp(pointerFacts);
+            evalInto(expression.e1, addressOffset, sourceFacts.size);
+            emit(&opLoadIndirect, destOffset, addressOffset,
+                destFacts.size);
+            return;
+        }
+
+        if (sourceFacts.isDynamicArray && destType.ty == Tpointer
+                && destType.nextOf !is null
+                && sourceType.nextOf.equals(destType.nextOf)) {
+            import snakebite.nativelayout: arrayPointerOffset;
+
+            const arrayOffset = reserveTemp(sourceFacts);
+            evalInto(expression.e1, arrayOffset, sourceFacts.size);
+            emit(&opCopy, destOffset, arrayOffset + arrayPointerOffset,
+                size_t.sizeof);
+            return;
+        }
+
+        if (sourceFacts.isDynamicArray && destFacts.isDynamicArray
+                && width == sourceFacts.size) {
+            evalInto(expression.e1, destOffset, width);
+            return;
+        }
+
         if (!sourceFacts.isIntegral || !isIntegralSize(sourceFacts.size)
-                || !TypeFacts.of(destType).isIntegral)
+                || !destFacts.isIntegral)
             throw rejection(_function, expression.loc,
-                expressionText(expression));
+                text("a cast from `", sourceType.toString, "` to `",
+                    destType.toString, "`"));
 
         import dmd.astenums: Tbool;
 

@@ -655,6 +655,20 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+@("arrays.append.elementThroughIndexedSlice.Bytecode")
+@Tags("Bytecode")
+unittest {
+    2.shouldBeRetOf!(Bytecode, q{
+        int appended() {
+            int[] inner = [1];
+            int[][] arrays;
+            arrays ~= inner;
+            arrays[0] ~= 2;
+            return arrays[0][1];
+        }
+    }, "appended");
+}
+
 static foreach (backend; Matrix!()) {
     @("arrays.append.element.length." ~ backend.stringof)
     @Tags(backend.stringof)

@@ -29,6 +29,21 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("ref.param.postincrement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(backend, q{
+            void increment(ref int value) { value++; }
+            int kindaMain() {
+                int value = 1;
+                increment(value);
+                return value;
+            }
+        }, "kindaMain");
+    }
+}
+
 // A `ref` parameter forwarded into a nested call: `bump`'s own `x` is
 // itself `ref`, and passing it on to `inc` must reach the same storage as
 // the outer local, not a second indirection through `bump`'s frame.
@@ -82,6 +97,17 @@ static foreach (backend; Matrix!()) {
             },
             "kindaMain",
         );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("ref.return.readAsValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(backend, q{
+            ref int pick(ref int value) { return value; }
+            int kindaMain() { int value = 2; return pick(value); }
+        }, "kindaMain");
     }
 }
 
