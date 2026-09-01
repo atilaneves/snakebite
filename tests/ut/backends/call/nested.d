@@ -100,6 +100,38 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("nested.recursiveGuestCall.fibonacci." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(
+            backend,
+            q{
+                int fibonacci(int n) {
+                    if (n < 2)
+                        return n;
+                    return fibonacci(n - 1) + fibonacci(n - 2);
+                }
+
+                int tak(int x, int y, int z) {
+                    if (x <= y)
+                        return y;
+                    return tak(
+                        tak(x - 1, y, z),
+                        tak(y - 1, z, x),
+                        tak(z - 1, x, y),
+                    );
+                }
+
+                int main() {
+                    return fibonacci(12) == 144 && tak(6, 4, 2) == 6
+                        ? 0 : 1;
+                }
+            },
+        );
+    }
+}
+
 // A delegate that captures nothing never reads its context word, so
 // `call`, a function with no static chain of its own to `main`, must
 // still be able to run it - the delegate's own body needs nothing from
