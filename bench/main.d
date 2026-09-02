@@ -7,8 +7,9 @@
 // per-backend numbers. Each backend then runs the whole program through
 // `Backend.run` - the backend does whatever compiled D would do, the
 // harness never collects or runs tests itself - and the table reports the
-// verdict, run-time statistics, the backend's own compile time (for
-// backends that have a compile step) and resident memory growth. A `dmd`
+// verdict, total time from the parsed AST through backend setup, compilation,
+// and execution, the compilation part of that time (for backends that have a
+// compile step), and resident memory growth. A `dmd`
 // row (bench.oracle) benchmarks the real workflow as subprocesses and
 // doubles as the correctness oracle.
 module bench.main;
@@ -315,7 +316,7 @@ private BackendReport benchmark(BackendType)(
             report.hasCompile = compilationAfter.hasCompiler;
             if (report.hasCompile)
                 compileTimes ~= compilationElapsed;
-            times ~= elapsed - compilationElapsed;
+            times ~= elapsed;
             report.updateTestCounts(result.output);
         }
     }
