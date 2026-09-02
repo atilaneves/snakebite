@@ -28,7 +28,7 @@ configuration "unittest" {
     mainSourceFile "tests/main.d"
     sourcePaths "tests"
     sourcePaths "bench"
-    sourceFiles "bench/main.d"
+    excludedSourceFiles "bench/main.d"
     importPaths "tests"
     importPaths "."
 
@@ -72,5 +72,4 @@ configuration "bench" {
     mainSourceFile "bench/main.d"
     sourcePaths "bench"
     importPaths "."
-    versions "BenchMain"
 }

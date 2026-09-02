@@ -1,7 +1,7 @@
 module ut.bench.timing;
 
 
-import bench.main: benchmark;
+import bench.benchmark: benchmark;
 import snakebite.backends: Backends, Program;
 import snakebite.frontend.compiler: parseSnippets;
 import std.conv: text;
@@ -26,9 +26,9 @@ unittest {
             1,
         );
 
-        report.passed.shouldBeTrue;
+        report.passed.should == true;
         if (report.hasCompile)
             (report.runTime.minimum >= report.compileTime.minimum)
-                .shouldBeTrue;
+                .should == true;
     }}
 }
