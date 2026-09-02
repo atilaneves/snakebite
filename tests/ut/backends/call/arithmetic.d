@@ -370,11 +370,11 @@ unittest {
 
     long quotient;
     interpreter(module_).call(findFunction(module_, "quotient"), &quotient, []);
-    quotient.shouldEqual(long.min);
+    quotient.should == long.min;
 
     long remainder;
     interpreter(module_).call(findFunction(module_, "remainder"), &remainder, []);
-    remainder.shouldEqual(0);
+    remainder.should == 0;
 }
 
 static foreach (backend; Matrix!()) {

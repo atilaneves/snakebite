@@ -12,9 +12,9 @@ unittest {
 
     report.updateTestCounts("22 test(s) run, 0 failed.\n");
 
-    report.haveCounts.shouldBeTrue;
-    report.passCount.shouldEqual(22);
-    report.totalCount.shouldEqual(22);
+    report.haveCounts.should == true;
+    report.passCount.should == 22;
+    report.totalCount.should == 22;
 }
 
 
@@ -24,9 +24,9 @@ unittest {
 
     const statistics = timingStatistics([3.msecs, 1.msecs, 2.msecs]);
 
-    statistics.minimum.shouldEqual(1.msecs);
-    statistics.median.shouldEqual(2.msecs);
-    statistics.sigma.shouldEqual(1.msecs);
+    statistics.minimum.should == 1.msecs;
+    statistics.median.should == 2.msecs;
+    statistics.sigma.should == 1.msecs;
 }
 
 
@@ -34,9 +34,9 @@ unittest {
 unittest {
     import bench.report: milliseconds;
 
-    milliseconds(1.hnsecs).shouldEqual("0.1 us");
-    milliseconds(dur!"usecs"(1)).shouldEqual("1.0 us");
-    milliseconds(1.msecs).shouldEqual("1.0 ms");
+    milliseconds(1.hnsecs).should == "0.1 us";
+    milliseconds(dur!"usecs"(1)).should == "1.0 us";
+    milliseconds(1.msecs).should == "1.0 ms";
 }
 
 
@@ -53,6 +53,6 @@ unittest {
         );
     });
 
-    result.status.shouldEqual(summary.length);
-    result.output.canFind(summary).shouldBeTrue;
+    result.status.should == summary.length;
+    result.output.canFind(summary).should == true;
 }
