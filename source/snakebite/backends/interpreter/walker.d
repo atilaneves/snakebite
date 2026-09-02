@@ -240,6 +240,19 @@ extern(C++) private final class Evaluator: Visitor {
     // The bytes behind `_temporaries`. Only temporaries live here; every
     // guest call frame stays on `_frames`.
     private FrameStack _temporaryFrames;
+    // Where the innermost full expression currently being evaluated
+    // started reserving temporaries - every site that records a
+    // `_temporaries.length` mark (see above) also parks it here for the
+    // duration of that full expression, restoring the enclosing value
+    // before returning. `structLiteralAddress` searches only
+    // `_temporaries[_temporariesFloor .. $]`: a full expression nested
+    // inside this one (a constructor's body making its own call, not
+    // excluding a call back into the very function that is mid-
+    // construction of the same literal) raises the floor for its own
+    // duration, so it can never match a `StructLiteralExp` node whose
+    // entry belongs to an activation further out on the call stack -
+    // only the pairing within its own full expression is visible to it.
+    private size_t _temporariesFloor;
     // The most recently asked-about `Type` and its facts: dmd interns
     // basic types, so a loop revisiting the same `int` node hits this
     // every time - a pointer compare instead of an AA hash lookup - and
@@ -368,7 +381,11 @@ extern(C++) private final class Evaluator: Visitor {
             // The statement visitors release every temporary at the end
             // of its full expression; this is the backstop that keeps a
             // temporary from surviving into the next top-level call.
-            scope(exit) releaseTemporariesSince(0);
+            const previousFloor = raiseTemporariesFloor(0);
+            scope(exit) {
+                releaseTemporariesSince(0);
+                _temporariesFloor = previousFloor;
+            }
             executeCall(function_, returnPlace, frame.base, layout);
         });
     }
@@ -1039,7 +1056,11 @@ extern(C++) private final class Evaluator: Visitor {
             return;
 
         const mark = _temporaries.length;
-        scope(exit) releaseTemporariesSince(mark);
+        const previousFloor = raiseTemporariesFloor(mark);
+        scope(exit) {
+            releaseTemporariesSince(mark);
+            _temporariesFloor = previousFloor;
+        }
 
         void* referenceAddress() {
             return addressOf(statement.exp);
@@ -1081,7 +1102,11 @@ extern(C++) private final class Evaluator: Visitor {
     // releases whatever was reserved by then.
     private void runFullExpression(Expression expression) {
         const mark = _temporaries.length;
-        scope(exit) releaseTemporariesSince(mark);
+        const previousFloor = raiseTemporariesFloor(mark);
+        scope(exit) {
+            releaseTemporariesSince(mark);
+            _temporariesFloor = previousFloor;
+        }
         runForEffect(expression);
     }
 
@@ -1090,7 +1115,11 @@ extern(C++) private final class Evaluator: Visitor {
     // soon as its truth is known.
     private bool conditionHolds(Expression condition) {
         const mark = _temporaries.length;
-        scope(exit) releaseTemporariesSince(mark);
+        const previousFloor = raiseTemporariesFloor(mark);
+        scope(exit) {
+            releaseTemporariesSince(mark);
+            _temporariesFloor = previousFloor;
+        }
         return truthOf(condition);
     }
 
@@ -1118,7 +1147,11 @@ extern(C++) private final class Evaluator: Visitor {
         Statement selected;
         {
             const mark = _temporaries.length;
-            scope(exit) releaseTemporariesSince(mark);
+            const previousFloor = raiseTemporariesFloor(mark);
+            scope(exit) {
+                releaseTemporariesSince(mark);
+                _temporariesFloor = previousFloor;
+            }
             const condition = asIntegral(statement.condition);
             if (statement.cases !is null)
                 foreach (case_; *statement.cases) {
@@ -1209,7 +1242,11 @@ extern(C++) private final class Evaluator: Visitor {
 
     override void visit(ThrowStatement statement) {
         const mark = _temporaries.length;
-        scope(exit) releaseTemporariesSince(mark);
+        const previousFloor = raiseTemporariesFloor(mark);
+        scope(exit) {
+            releaseTemporariesSince(mark);
+            _temporariesFloor = previousFloor;
+        }
         throwGuest(statement.exp);
     }
 
@@ -4618,13 +4655,17 @@ extern(C++) private final class Evaluator: Visitor {
     // Recursion can revisit the same node before the outer visit's slot
     // is released - a constructor whose body calls back into the
     // function that is itself mid-construction of this same literal (see
-    // the re-entrancy test in `structs.d`). Searching from the most
-    // recent reservation finds the innermost activation's slot rather
-    // than an outer, still-live one; the inner slot is released with the
-    // full expression of some statement in the reentered function, so
-    // the outer one resurfaces before the outer activation looks again.
+    // the re-entrancy test in `structs.d`). Without `_temporariesFloor`,
+    // a plain search over every entry would find the outer, still-live
+    // slot instead of reserving a fresh one for the inner activation, and
+    // the two activations would clobber each other's fields. Bounding
+    // the search to `_temporariesFloor .. $` keeps each activation's
+    // pairing within its own full expression: the outer entry sits below
+    // the floor the inner activation's full expression raised, so it is
+    // invisible until that inner full expression ends and lowers the
+    // floor again.
     private void* structLiteralAddress(StructLiteralExp literal) {
-        foreach_reverse (ref temporary; _temporaries)
+        foreach_reverse (ref temporary; _temporaries[_temporariesFloor .. $])
             if (temporary.node is literal)
                 return temporary.base;
 
@@ -4647,6 +4688,18 @@ extern(C++) private final class Evaluator: Visitor {
         auto base = _temporaryFrames.reserve(size, alignment);
         _temporaries ~= Temporary(node, mark, base);
         return base;
+    }
+
+    // Raises `_temporariesFloor` to `mark` for the duration of one full
+    // expression - see `_temporariesFloor`. Every site that records a
+    // `_temporaries.length` mark calls this right after recording it,
+    // and restores the returned, enclosing floor in the same
+    // `scope(exit)` that calls `releaseTemporariesSince` with the same
+    // mark.
+    private size_t raiseTemporariesFloor(in size_t mark) {
+        const previousFloor = _temporariesFloor;
+        _temporariesFloor = mark;
+        return previousFloor;
     }
 
     // Releases every temporary reserved since `mark` - the end of the

@@ -727,7 +727,10 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // call site that is mid-construction of it - the same
 // `Whole(2, Part(n))` syntax node, revisited before its outer activation
 // is done with it. The interpreter must give the inner activation its
-// own frame slot rather than serve it the outer, still-live one.
+// own frame slot rather than serve it the outer, still-live one:
+// `stamp` is written before the recursive call and checked afterward,
+// so an inner activation sharing the outer's slot would clobber `stamp`
+// and fail the assert inside the constructor.
 //
 // `make` is a delegate variable, assigned only after `Part` and `Whole`
 // are declared, rather than an ordinary function declared below them:
@@ -755,10 +758,13 @@ static foreach (backend; Matrix!(
             size_t delegate(size_t) make;
 
             struct Part {
+                size_t stamp;
                 size_t count;
 
                 this(size_t n) {
+                    stamp = n + 10;
                     count = n == 0 ? 0 : make(n - 1) + 1;
+                    assert(stamp == n + 10);
                 }
             }
 
