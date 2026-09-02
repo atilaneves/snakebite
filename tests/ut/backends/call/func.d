@@ -67,7 +67,12 @@ static foreach (backend; Matrix!(
             "empty",
         );
     }
+}
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run mutable struct methods through interpreter frames"),
+)) {
     @("struct.decerealiser.constructorArray." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -94,7 +99,12 @@ static foreach (backend; Matrix!(
             "supplied",
         );
     }
+}
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run mutable struct methods through interpreter frames"),
+)) {
     @("struct.mutableMethod.dynamicArrayField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -118,7 +128,12 @@ static foreach (backend; Matrix!(
             "filled",
         );
     }
+}
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run mutable struct methods through interpreter frames"),
+)) {
     @("struct.thisAndRefField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -147,7 +162,12 @@ static foreach (backend; Matrix!(
             "drive",
         );
     }
+}
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run mutable struct methods through interpreter frames"),
+)) {
     @("struct.implicitFieldAssign." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
