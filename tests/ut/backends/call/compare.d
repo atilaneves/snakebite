@@ -574,9 +574,10 @@ static foreach (backend; Matrix!()) {
 
 // Equal contents in distinct allocations prevent pointer equality from
 // standing in for D's element equality. The third array differs only in its
-// last element, so a length-only comparison also fails.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
-    @("compare.dynamicArrayEquality." ~ backend.stringof)
+// last element, so a length-only comparison also fails. Empty and non-empty
+// arrays cover the length check without reading a null data pointer.
+static foreach (backend; Matrix!()) {
+    @("compare.scalarDynamicArrayEquality.contents." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         true.shouldBeRetOf!(
@@ -594,11 +595,95 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
                     return [17, 31, 48];
                 }
 
+                ubyte[] empty() {
+                    return [];
+                }
+
                 bool compareArrays() {
-                    return first() == same() && first() != different();
+                    return first() == same()
+                        && first() != different()
+                        && empty() != first()
+                        && empty() == empty();
                 }
             },
             "compareArrays",
+        );
+    }
+}
+
+// rt-simple instantiates array round trips for exactly these six scalar
+// element types. Listing all six here keeps the supported scope explicit.
+static foreach (backend; Matrix!()) {
+    @("compare.scalarDynamicArrayEquality.rtSimpleElementTypes."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                ubyte[] ubytes() {
+                    return [17, 31, 47];
+                }
+
+                ushort[] ushorts() {
+                    return [17, 31, 47];
+                }
+
+                int[] ints() {
+                    return [17, 31, 47];
+                }
+
+                long[] longs() {
+                    return [17, 31, 47];
+                }
+
+                float[] floats() {
+                    return [17.0f, 31.0f, 47.0f];
+                }
+
+                double[] doubles() {
+                    return [17.0, 31.0, 47.0];
+                }
+
+                float[] positiveFloatZero() {
+                    return [0.0f];
+                }
+
+                float[] negativeFloatZero() {
+                    return [-0.0f];
+                }
+
+                bool compareElementTypes() {
+                    return ubytes() == ubytes()
+                        && ushorts() == ushorts()
+                        && ints() == ints()
+                        && longs() == longs()
+                        && floats() == floats()
+                        && doubles() == doubles()
+                        && positiveFloatZero() == negativeFloatZero();
+                }
+            },
+            "compareElementTypes",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("compare.scalarDynamicArrayEquality.nan." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                double[] nanArray() {
+                    return [double.nan];
+                }
+
+                bool nanDoesNotEqualItself() {
+                    return nanArray() != nanArray();
+                }
+            },
+            "nanDoesNotEqualItself",
         );
     }
 }
