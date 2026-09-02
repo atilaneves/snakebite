@@ -34,7 +34,8 @@ private bool isSupportedFacts(
 ) {
     import dmd.astenums: Tpointer;
 
-    return isSupportedFacts(facts) || type.ty == Tpointer
+    return isSupportedFacts(facts) || isFloatingType(type)
+        || type.ty == Tpointer
         || isPlainOldStruct(type);
 }
 
@@ -376,8 +377,13 @@ extern(C++) private final class FunctionCompiler: Visitor {
         opBranchTrue, opCall,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
         opConstant, opCopy, opDivideSigned, opDivideUnsigned, opEqual,
-        opFloatEqual, opFloatNotEqual, opFrameAddress, opGreaterOrEqualSigned,
+        opFloatAdd, opFloatDivide, opFloatEqual, opFloatGreaterOrEqual,
+        opFloatGreaterThan, opFloatLessOrEqual, opFloatLessThan,
+        opFloatModulo, opFloatMultiply, opFloatNegate, opFloatNotEqual,
+        opFloatSubtract, opFloatToIntegralSigned, opFloatToIntegralUnsigned,
+        opFloatWidthCast, opFrameAddress, opGreaterOrEqualSigned,
         opGreaterOrEqualUnsigned, opGreaterThanSigned, opGreaterThanUnsigned,
+        opIntegralToFloatSigned, opIntegralToFloatUnsigned,
         opJump, opLessOrEqualSigned, opLessOrEqualUnsigned, opLessThanSigned,
         opLessThanUnsigned, opLoadIndirect, opLogicalNot, opModuloSigned,
         opModuloUnsigned, opMultiply, opNegate, opNotEqual, opRangeError,
@@ -518,8 +524,10 @@ extern(C++) private final class FunctionCompiler: Visitor {
         in size_t destination,
         in size_t source,
         in size_t width,
+        in size_t sourceWidth = 0,
     ) {
-        _instructions ~= Instruction(handler, destination, source, width);
+        _instructions ~= Instruction(
+            handler, destination, source, width, sourceWidth);
     }
 
     private size_t addConstant(in long value) {
@@ -2220,6 +2228,19 @@ extern(C++) private final class FunctionCompiler: Visitor {
         }
 
         const facts = TypeFacts.of(expression.type);
+        if (isFloatingType(expression.type)) {
+            const leftOffset = reserveTemp(facts);
+            evalInto(expression.e1, leftOffset, facts.size);
+            const rightOffset = reserveTemp(facts);
+            evalInto(expression.e2, rightOffset, facts.size);
+            emit(floatingBinaryHandler(expression), leftOffset, rightOffset,
+                facts.size);
+
+            if (destOffset != leftOffset)
+                emit(&opCopy, destOffset, leftOffset, width);
+            return;
+        }
+
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
@@ -2232,6 +2253,19 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
         if (destOffset != leftOffset)
             emit(&opCopy, destOffset, leftOffset, width);
+    }
+
+    private Instruction.Handler floatingBinaryHandler(BinExp expression) {
+        with (EXP) switch (expression.op) {
+            case add: return &opFloatAdd;
+            case min: return &opFloatSubtract;
+            case mul: return &opFloatMultiply;
+            case div: return &opFloatDivide;
+            case mod: return &opFloatModulo;
+            default:
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+        }
     }
 
     // Evaluates `operand` for use as one side of a binary opcode that
@@ -2306,15 +2340,18 @@ extern(C++) private final class FunctionCompiler: Visitor {
             return;
         }
 
-        // `float`/`double` compare unequal to themselves when they are NaN,
-        // so this reaches for the host's own float comparison
-        // (`opFloatEqual`/`opFloatNotEqual`) rather than the bit-pattern
-        // test every integral comparison uses - only `==`/`!=` are
-        // supported for now, since nothing in scope needs a floating
-        // ordering.
+        // Host floating-point operators preserve D's NaN and signed-zero
+        // semantics for equality and ordering. Integral equality instead
+        // compares the stored bits, which would make a NaN equal itself and
+        // positive and negative zero unequal.
         if (isFloatingType(expression.e1.type)) {
             Instruction.Handler floatHandler;
             with (EXP) switch (expression.op) {
+                case lessThan: floatHandler = &opFloatLessThan; break;
+                case lessOrEqual: floatHandler = &opFloatLessOrEqual; break;
+                case greaterThan: floatHandler = &opFloatGreaterThan; break;
+                case greaterOrEqual:
+                    floatHandler = &opFloatGreaterOrEqual; break;
                 case equal: floatHandler = &opFloatEqual; break;
                 case notEqual: floatHandler = &opFloatNotEqual; break;
                 default:
@@ -2382,6 +2419,16 @@ extern(C++) private final class FunctionCompiler: Visitor {
         Instruction.Handler handler,
     ) {
         const facts = TypeFacts.of(expression.type);
+        if (isFloatingType(expression.type)) {
+            if (handler !is &opNegate)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            evalInto(expression.e1, destOffset, width);
+            emit(&opFloatNegate, destOffset, 0, width);
+            return;
+        }
+
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
@@ -2491,6 +2538,53 @@ extern(C++) private final class FunctionCompiler: Visitor {
         const sourceFacts = TypeFacts.of(sourceType);
         const destFacts = TypeFacts.of(destType);
         import dmd.astenums: Tpointer;
+
+        if (isFloatingType(destType)) {
+            if (isFloatingType(sourceType)) {
+                if (sourceFacts.size == destFacts.size)
+                    return evalInto(expression.e1, destOffset, width);
+
+                const sourceOffset = sourceFacts.size > destFacts.size
+                    ? reserveTemp(sourceFacts) : destOffset;
+                evalInto(expression.e1, sourceOffset, sourceFacts.size);
+                emit(&opFloatWidthCast, destOffset, sourceOffset, destFacts.size,
+                    sourceFacts.size);
+                return;
+            }
+
+            if (!sourceFacts.isIntegral
+                    || !isIntegralSize(sourceFacts.size))
+                throw rejection(_function, expression.loc,
+                    text("a cast from `", sourceType.toString, "` to `",
+                        destType.toString, "`"));
+
+            const sourceOffset = reserveTemp(sourceFacts);
+            evalInto(expression.e1, sourceOffset, sourceFacts.size);
+            emit(
+                sourceFacts.isUnsigned
+                    ? &opIntegralToFloatUnsigned
+                    : &opIntegralToFloatSigned,
+                destOffset, sourceOffset, destFacts.size, sourceFacts.size,
+            );
+            return;
+        }
+
+        if (isFloatingType(sourceType)) {
+            if (!destFacts.isIntegral || !isIntegralSize(destFacts.size))
+                throw rejection(_function, expression.loc,
+                    text("a cast from `", sourceType.toString, "` to `",
+                        destType.toString, "`"));
+
+            const sourceOffset = reserveTemp(sourceFacts);
+            evalInto(expression.e1, sourceOffset, sourceFacts.size);
+            emit(
+                destFacts.isUnsigned
+                    ? &opFloatToIntegralUnsigned
+                    : &opFloatToIntegralSigned,
+                destOffset, sourceOffset, destFacts.size, sourceFacts.size,
+            );
+            return;
+        }
 
         if (sourceType.ty == Tpointer && destType.ty == Tpointer
                 && width == sourceFacts.size)

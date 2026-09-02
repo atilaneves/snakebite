@@ -32,6 +32,43 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!()) {
+    @("compare.floatingOrdering." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                float lowFloat() {
+                    return -1.5f;
+                }
+
+                float highFloat() {
+                    return 2.5f;
+                }
+
+                double lowDouble() {
+                    return -4.5;
+                }
+
+                double highDouble() {
+                    return 3.5;
+                }
+
+                bool ordered() {
+                    return lowFloat() < highFloat()
+                        && lowFloat() <= highFloat()
+                        && highFloat() > lowFloat()
+                        && highFloat() >= lowFloat()
+                        && lowDouble() < highDouble()
+                        && highDouble() >= lowDouble();
+                }
+            },
+            "ordered",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
     @("compare.lessThan.false." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -502,7 +539,7 @@ static foreach (backend; Matrix!()) {
 
 // Positive and negative zero have different bit patterns but compare equal.
 // Calls supply every operand so the frontend cannot fold the comparisons.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("compare.floatingEquality." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
