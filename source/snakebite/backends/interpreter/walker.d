@@ -228,13 +228,30 @@ extern(C++) private final class Evaluator: Visitor {
         // Set for a struct constructor's hidden `this`, so a second visit
         // of the same `StructLiteralExp` (see `structLiteralAddress`)
         // can find it again; `null` for a value-call temporary, which
-        // nothing ever looks back up by node.
+        // nothing ever looks back up by node, and for a named expression
+        // temporary (`edtor` below).
         StructLiteralExp node;
         // Where `_temporaryFrames` stood before this reservation:
         // releasing back to it gives back this temporary's bytes and
-        // every reservation made after them.
+        // every reservation made after them. A named expression temporary
+        // reserves no bytes of its own - it already has an ordinary frame
+        // slot from `layoutOf`, like any other local - so its `mark` is
+        // just wherever `_temporaryFrames` already stood, a no-op release.
         FrameStack.Mark mark;
         ubyte* base;
+        // Set instead of `base`/`node` for a temporary dmd gave its own
+        // named `VarDeclaration` rather than an anonymous slot: a struct
+        // with a destructor used as a call receiver with no variable of
+        // its own (`Tracked(args).method()`) is one such case - dmd's
+        // semantic pass names it (`__slTracke4` and the like) precisely so
+        // something can call its destructor later, but only builds the
+        // call itself (`VarDeclaration.edtor`) rather than inserting it as
+        // an explicit AST node the way a statement-level local's scope-exit
+        // destructor is (an explicit `try`/`finally`, already handled by
+        // `visit(TryFinallyStatement)` with no help from here). Running
+        // this expression is exactly running that same, dmd-built
+        // destructor call - never a hand-rolled field-by-field teardown.
+        Expression edtor;
     }
     private Temporary[] _temporaries;
     // The bytes behind `_temporaries`. Only temporaries live here; every
@@ -2001,10 +2018,31 @@ extern(C++) private final class Evaluator: Visitor {
                 cast(size_t) addressOf(value),
                 size_t.sizeof,
             );
-            return;
-        }
+        } else
+            evaluate(value, variable.type, slot);
 
-        evaluate(value, variable.type, slot);
+        registerPendingDestructorIfTemporary(variable);
+    }
+
+    // A statement-level local's own scope-exit destructor call is already
+    // an explicit AST node dmd's semantic pass wrapped its enclosing block
+    // in (`try { ... } finally { local.__xdtor(); }`), which
+    // `visit(TryFinallyStatement)` already runs with no help from here.
+    // `STC.temp` marks the other case: a variable dmd itself introduced
+    // mid-expression to hold a struct-with-a-destructor rvalue that would
+    // otherwise have no variable of its own to hang a destructor call on
+    // (`addDtorHook` in dmd's `expressionsem.d`, e.g. `Tracked(...).method()`
+    // becoming `(Tracked __slTracked1 = Tracked(...); , __slTracked1)`).
+    // dmd builds that destructor call the same way, but only records it as
+    // `VarDeclaration.edtor` rather than an explicit AST node, since the
+    // variable's scope is the enclosing full expression, not a block this
+    // interpreter already walks - so it is registered here instead, to run
+    // when that full expression's statement releases its temporaries.
+    private void registerPendingDestructorIfTemporary(VarDeclaration variable) {
+        import dmd.astenums: STC;
+
+        if ((variable.storage_class & STC.temp) && variable.edtor !is null)
+            registerPendingDestructor(variable.edtor);
     }
 
     // DMD lowers dynamic-array length assignment to a native druntime call
@@ -2093,13 +2131,31 @@ extern(C++) private final class Evaluator: Visitor {
 
         auto declaration = structType.sym;
         // A non-zero `.init` needs field initializers that this bytewise
-        // evaluator does not run for omitted fields.
+        // evaluator does not run for omitted fields. A postblit or a
+        // destructor is fine: dmd's own semantic pass already emits the
+        // raw byte copy (`BlitExp`/`ConstructExp`, still handled bytewise
+        // below) and the call to `sd.postblit`/`sd.dtor` as separate,
+        // explicit AST nodes - an ordinary method call this interpreter
+        // already runs like any other - so nothing here has to run either
+        // lifecycle hook itself. A copy constructor is a different guest
+        // feature this interpreter does not support yet, so it still
+        // refuses.
+        // `hasIdentityAssign`/`hasBlitAssign` are set whenever dmd builds
+        // the `opAssign` a postblit or a destructor needs on its own
+        // (clone.d's `buildOpAssign`), not only for a guest-written one -
+        // so a struct with either lifecycle hook has both flags set purely
+        // as that hook's byproduct. Gating on them only when neither hook
+        // is present still refuses a struct whose only reason for having
+        // one is a genuinely guest-written `opAssign`, which this
+        // interpreter does not run.
+        const hasElaborateAssign = declaration.postblit is null
+            && declaration.dtor is null
+            && (declaration.hasIdentityAssign || declaration.hasBlitAssign);
         if (!declaration.zeroInit
                 || declaration.isUnionDeclaration !is null
                 || declaration.enclosing !is null
-                || declaration.postblit !is null || declaration.hasCopyCtor
-                || declaration.dtor !is null
-                || declaration.hasIdentityAssign || declaration.hasBlitAssign)
+                || declaration.hasCopyCtor
+                || hasElaborateAssign)
             return false;
 
         foreach (field; declaration.fields) {
@@ -2122,6 +2178,15 @@ extern(C++) private final class Evaluator: Visitor {
             // without this the size/integrality check below would
             // reject it.
             if (field.type.ty == Tarray)
+                continue;
+
+            // A pointer field is a plain machine word with no copy hook
+            // of its own either - `Type.isIntegral` is `false` for
+            // `Tpointer` (a pointer is not an arithmetic type), so
+            // without this the check below would reject it the same way
+            // it would reject a field whose width this evaluator has no
+            // native layout for.
+            if (field.type.ty == Tpointer)
                 continue;
 
             const facts = factsOf(field.type);
@@ -4645,8 +4710,17 @@ extern(C++) private final class Evaluator: Visitor {
     ) {
         const mark = _temporaryFrames.mark;
         auto base = _temporaryFrames.reserve(size, alignment);
-        _temporaries ~= Temporary(node, mark, base);
+        _temporaries ~= Temporary(node, mark, base, null);
         return base;
+    }
+
+    // Registers `variable`'s own dmd-built destructor call
+    // (`VarDeclaration.edtor`) to run at the end of the current full
+    // expression, alongside every anonymous temporary - see
+    // `registerPendingDestructor`'s caller, `visit(DeclarationExp)`, for
+    // which variables this applies to and why.
+    private void registerPendingDestructor(Expression edtor) {
+        _temporaries ~= Temporary(null, _temporaryFrames.mark, null, edtor);
     }
 
     // Releases every temporary reserved since `mark` - the end of the
@@ -4654,9 +4728,19 @@ extern(C++) private final class Evaluator: Visitor {
     // rvalue temporary. Every caller records its mark before anything can
     // reserve a temporary and releases with `scope(exit)`, so a guest
     // throw from any point of the evaluation releases the same set.
+    //
+    // Destructors run first, in reverse creation order (the same order a
+    // scope's own local variables are destroyed in, and the order native D
+    // uses for temporaries within one full expression too), and only then
+    // is the memory behind them given back - a destructor's body may still
+    // read the fields it is tearing down.
     private void releaseTemporariesSince(in size_t mark) {
         if (_temporaries.length <= mark)
             return;
+
+        foreach_reverse (ref temporary; _temporaries[mark .. $])
+            if (temporary.edtor !is null)
+                runForEffect(temporary.edtor);
 
         _temporaryFrames.release(_temporaries[mark].mark);
         _temporaries.length = mark;

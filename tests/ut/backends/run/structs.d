@@ -920,3 +920,193 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A postblit runs once on the copy from an lvalue into a fresh variable:
+// dmd's semantic pass rewrites `Tracked copy = source;` into a blit of
+// `source`'s bytes onto `copy` followed by an explicit call to
+// `Tracked.postblit` with `copy` as `this` (`(copy = source).postblit()`),
+// so this is an ordinary struct-typed variable declaration and an
+// ordinary method call once a struct with a postblit is no longer refused
+// outright.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("postblitRunsOnceOnCopyIntoVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* postblits;
+
+                this(this) {
+                    ++*postblits;
+                }
+            }
+
+            void main() {
+                int postblits = 0;
+                Tracked source = Tracked(&postblits);
+                Tracked copy = source;
+                assert(postblits == 1);
+            }
+        });
+    }
+}
+
+// D destroys an rvalue temporary at the end of the full expression that
+// created it, even when nothing ever consumes the value: this temporary's
+// only use is `.get()`, called on the constructor-call rvalue itself, and
+// its destructor still runs once the statement using it is done.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("destructorRunsAtFullExpressionEndForUnconsumedTemporary." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* dtors;
+
+                ~this() {
+                    ++*dtors;
+                }
+
+                int get() {
+                    return 42;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                auto value = Tracked(&dtors).get();
+                assert(dtors == 1);
+                assert(value == 42);
+            }
+        });
+    }
+}
+
+// The `TrackerHolder`/`LifetimeTracker` shape from the ct-full corpus
+// (issue #142): a postblit runs exactly once when a field is constructed
+// by copying an lvalue, and not at all when the field is constructed
+// directly from an rvalue - a struct literal or a function's returned
+// value - since there is nothing to copy from in either of those cases.
+// The scope-exit destructor calls dmd inserts for `source`/`copied` and
+// for `moved`/`constructed` account for every increment of `dtors`.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("postblitAndDestructorThroughFieldCopyMoveAndDirectConstruction." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct LifetimeTracker {
+                int* postblits;
+                int* dtors;
+
+                this(this) {
+                    ++*postblits;
+                }
+
+                ~this() {
+                    ++*dtors;
+                }
+            }
+
+            struct TrackerHolder {
+                int tag;
+                LifetimeTracker tracker;
+            }
+
+            LifetimeTracker makeTracker(int* postblits, int* dtors) {
+                return LifetimeTracker(postblits, dtors);
+            }
+
+            void main() {
+                int postblits = 0;
+                int dtors = 0;
+
+                {
+                    LifetimeTracker source =
+                        LifetimeTracker(&postblits, &dtors);
+                    TrackerHolder copied = TrackerHolder(1, source);
+
+                    assert(postblits == 1);
+                    assert(dtors == 0);
+                }
+
+                assert(dtors == 2);
+
+                postblits = 0;
+                dtors = 0;
+
+                {
+                    TrackerHolder moved =
+                        TrackerHolder(2, makeTracker(&postblits, &dtors));
+                    TrackerHolder constructed = TrackerHolder(
+                        3, LifetimeTracker(&postblits, &dtors));
+
+                    assert(postblits == 0);
+                    assert(dtors == 0);
+                }
+
+                assert(dtors == 2);
+            }
+        });
+    }
+}
+
+// A guest throw partway through evaluating a call's arguments: the first
+// argument's temporary (the constructor-call rvalue `Tracked` bound to
+// `.get()`'s hidden `this`) is already fully constructed by the time the
+// second argument's call throws, and native D still runs its destructor
+// once as the whole expression unwinds - the temporary is not silently
+// leaked just because nothing ever consumed its value.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("destructorRunsForAlreadyConstructedTemporaryOnThrowMidExpression." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* dtors;
+
+                ~this() {
+                    ++*dtors;
+                }
+
+                int get() {
+                    return 42;
+                }
+            }
+
+            int take(int a, int b) {
+                return a + b;
+            }
+
+            int throwing() {
+                throw new Exception("boom");
+            }
+
+            void main() {
+                int dtors = 0;
+                bool caught;
+                try {
+                    take(Tracked(&dtors).get(), throwing());
+                } catch (Exception e) {
+                    caught = true;
+                }
+                assert(caught);
+                assert(dtors == 1);
+            }
+        });
+    }
+}
