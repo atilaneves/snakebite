@@ -399,3 +399,530 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A non-trivial constructor call passed straight as an argument is an
+// rvalue with no variable of its own. dmd's field-wise constructor for the
+// outer struct still takes this argument by address (the same lowering a
+// `ref` parameter gets), so the interpreter must give the temporary a
+// frame slot before the inner constructor runs, rather than reject it for
+// having no lvalue to take the address of. The scalar argument before it
+// checks that binding the temporary does not depend on it being the first
+// argument evaluated.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("structCtorCallArgumentAfterScalarArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Part {
+                size_t count;
+                ubyte first;
+
+                this(ubyte[] bytes) {
+                    count = bytes.length;
+                    first = bytes[0];
+                }
+            }
+
+            struct Whole {
+                ubyte tag;
+                Part part;
+            }
+
+            void main() {
+                ubyte[] payload = [9, 7, 6];
+                auto whole = Whole(2, Part(payload));
+
+                assert(whole.tag == 2);
+                assert(whole.part.count == 3);
+                assert(whole.part.first == 9);
+            }
+        });
+    }
+}
+
+// As above, with the temporary constructor call before the scalar
+// argument - the outer struct's field order should not matter to how the
+// temporary's storage is found.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("structCtorCallArgumentBeforeScalarArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Part {
+                size_t count;
+                ubyte first;
+
+                this(ubyte[] bytes) {
+                    count = bytes.length;
+                    first = bytes[0];
+                }
+            }
+
+            struct Whole {
+                Part part;
+                ubyte tag;
+            }
+
+            void main() {
+                ubyte[] payload = [9, 7, 6];
+                auto whole = Whole(Part(payload), 2);
+
+                assert(whole.part.count == 3);
+                assert(whole.part.first == 9);
+                assert(whole.tag == 2);
+            }
+        });
+    }
+}
+
+// A constructor-call temporary nested inside another constructor-call
+// temporary: the outer struct's own field-wise constructor takes its
+// `Middle` argument by address the same way, and `Middle`'s in turn takes
+// `Part` by address, so both levels of temporary need a frame slot before
+// their constructor runs.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("nestedStructCtorCallArguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Part {
+                size_t count;
+                ubyte first;
+
+                this(ubyte[] bytes) {
+                    count = bytes.length;
+                    first = bytes[0];
+                }
+            }
+
+            struct Middle {
+                Part part;
+            }
+
+            struct Outer {
+                ubyte tag;
+                Middle middle;
+            }
+
+            void main() {
+                ubyte[] payload = [9, 7, 6];
+                auto whole = Outer(2, Middle(Part(payload)));
+
+                assert(whole.middle.part.count == 3);
+                assert(whole.middle.part.first == 9);
+            }
+        });
+    }
+}
+
+// A function call that itself returns a struct by value, used as a
+// constructor argument: the call has no lvalue either, and the interpreter
+// must materialize its return value into a frame slot to hand its address
+// to the outer constructor.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("functionReturningStructAsCtorCallArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Part {
+                size_t count;
+                ubyte first;
+
+                this(ubyte[] bytes) {
+                    count = bytes.length;
+                    first = bytes[0];
+                }
+            }
+
+            struct Whole {
+                ubyte tag;
+                Part part;
+            }
+
+            Part makePart(ubyte[] bytes) {
+                return Part(bytes);
+            }
+
+            void main() {
+                ubyte[] payload = [9, 7, 6];
+                auto whole = Whole(2, makePart(payload));
+
+                assert(whole.part.count == 3);
+                assert(whole.part.first == 9);
+            }
+        });
+    }
+}
+
+// A ternary between two constructor calls, used as a constructor argument:
+// only the branch actually taken ever runs, so only its temporary needs a
+// frame slot - the other branch's temporary is never constructed.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("ternaryBetweenStructCtorCallsAsCtorCallArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Part {
+                size_t count;
+                ubyte first;
+
+                this(ubyte[] bytes) {
+                    count = bytes.length;
+                    first = bytes[0];
+                }
+            }
+
+            struct Whole {
+                ubyte tag;
+                Part part;
+            }
+
+            void main() {
+                ubyte[] longer = [9, 7, 6];
+                ubyte[] shorter = [1, 2];
+                bool pickLonger = longer.length > shorter.length;
+                auto whole = Whole(
+                    2, pickLonger ? Part(longer) : Part(shorter),
+                );
+
+                assert(whole.part.count == 3);
+                assert(whole.part.first == 9);
+            }
+        });
+    }
+}
+
+// A constructor call as the return expression of an `auto ref` lambda: the
+// lambda's own return place is the temporary's eventual home, but the
+// constructor's hidden `this` is bound before that return place is filled,
+// so this exercises the same rvalue-materialization path with no
+// surrounding struct constructor at all.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("structCtorCallReturnedFromAutoRefLambda." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Reading {
+                int amount;
+
+                this(int amount) {
+                    this.amount = amount;
+                }
+            }
+
+            auto wrapReading(V)(auto ref V value) {
+                return () { return Reading(value); }();
+            }
+
+            void main() {
+                int measured = 5;
+                auto reading = wrapReading(measured);
+
+                assert(reading.amount == measured);
+            }
+        });
+    }
+}
+
+// A constructor call nested inside another constructor call's argument,
+// where the inner constructor's own body calls an ordinary function
+// before it is done. The interpreter reserves the inner temporary's
+// frame slot before that ordinary call runs, and the slot must still be
+// there - not reused for the ordinary call's own frame - when the
+// constructor resumes writing to it afterward.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("structCtorCallBodyCallsAnotherFunctionBeforeFinishing." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            size_t helper(size_t n) {
+                return n + 100;
+            }
+
+            struct Part {
+                size_t count;
+                size_t extra;
+
+                this(size_t n) {
+                    count = n;
+                    extra = helper(99);
+                }
+            }
+
+            struct Whole {
+                ubyte tag;
+                Part part;
+            }
+
+            void main() {
+                auto whole = Whole(2, Part(7));
+
+                assert(whole.part.count == 7);
+                assert(whole.part.extra == 199);
+                assert(whole.tag == 2);
+            }
+        });
+    }
+}
+
+// A constructor that throws partway through, caught by its caller: the
+// temporary frame slot the interpreter reserved for the hidden `this`
+// must still be released, or it leaks for the rest of the run. A later,
+// unrelated recursive call is run afterward to disturb the frame stack
+// where that leaked slot would have been, and the same construction is
+// then repeated to check its zero-initialization was not skipped by a
+// stale cache entry from the failed attempt.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("structCtorCallThrowDoesNotLeakItsSlot." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Part {
+                size_t count;
+                size_t sometimes;
+
+                this(size_t n) {
+                    if (n == 0)
+                        throw new Exception("zero");
+                    count = n;
+                    if (n > 100)
+                        sometimes = n;
+                }
+            }
+
+            struct Whole {
+                ubyte tag;
+                Part part;
+            }
+
+            size_t make(size_t n) {
+                auto w = Whole(2, Part(n));
+                return w.part.sometimes;
+            }
+
+            size_t scribble(
+                size_t a, size_t b, size_t c, size_t d, size_t depth,
+            ) {
+                if (depth == 0)
+                    return a;
+                return scribble(a, b, c, d, depth - 1);
+            }
+
+            void main() {
+                try {
+                    make(0);
+                    assert(false);
+                } catch (Exception e) {}
+
+                scribble(0xDEAD, 0xDEAD, 0xDEAD, 0xDEAD, 20);
+
+                assert(make(5) == 0);
+            }
+        });
+    }
+}
+
+// A constructor's own body recursively calls back into the very same
+// call site that is mid-construction of it - the same
+// `Whole(2, Part(n))` syntax node, revisited before its outer activation
+// is done with it. The interpreter must give the inner activation its
+// own frame slot rather than serve it the outer, still-live one:
+// `stamp` is written before the recursive call and checked afterward,
+// so an inner activation sharing the outer's slot would clobber `stamp`
+// and fail the assert inside the constructor.
+//
+// `make` is a delegate variable, assigned only after `Part` and `Whole`
+// are declared, rather than an ordinary function declared below them:
+// `shouldBeRetOf`'s own native comparison mixes this snippet into a
+// function body to run it as compiled D, and a nested function cannot
+// forward-reference another nested function the way two module-level
+// declarations can. Referring to an already-visible variable sidesteps
+// that, without changing what the interpreter is being asked to do -
+// call back into the same construction site while it is still running.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE refuses to read a mutable static variable - `make` is " ~
+        "exactly that in the guest, where this snippet is a module and " ~
+        "`make` a module-level variable. The trampoline exists so the " ~
+        "constructor can call back into a declaration the harness's " ~
+        "native arm - which mixes this snippet into a function body, " ~
+        "where nested functions cannot forward-reference each other - " ~
+        "can still express"),
+)) {
+    @("structCtorCallReentersItsOwnConstructionSite." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.shouldBeRetOf!(backend, q{
+            size_t delegate(size_t) make;
+
+            struct Part {
+                size_t stamp;
+                size_t count;
+
+                this(size_t n) {
+                    stamp = n + 10;
+                    count = n == 0 ? 0 : make(n - 1) + 1;
+                    assert(stamp == n + 10);
+                }
+            }
+
+            struct Whole {
+                ubyte tag;
+                Part part;
+            }
+
+            int main() {
+                make = (size_t n) {
+                    auto w = Whole(2, Part(n));
+                    return w.part.count;
+                };
+
+                return cast(int) make(3);
+            }
+        }, "main");
+    }
+}
+
+// A method called on a constructor-call rvalue, where the method's own
+// body makes a further guest call. D keeps the rvalue temporary alive
+// until the end of the full expression, so `this` must still hold the
+// constructor's writes when the method reads `payload` - even though the
+// helper call in between reserves and fills a frame of its own.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("structCtorRvalueMethodBodyCallsHelper." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            long helper(long a, long b, long c, long d) {
+                return a + b + c + d;
+            }
+
+            struct Part {
+                long payload;
+
+                this(long payload) {
+                    this.payload = payload;
+                }
+
+                long describe() {
+                    // The helper call comes first and `payload` is read
+                    // after it returns, so the temporary holding `this`
+                    // must survive the helper's own frame coming and
+                    // going.
+                    return helper(4, 3, 2, 0) + payload;
+                }
+            }
+
+            void main() {
+                assert(Part(3000).describe() == 3009);
+            }
+        });
+    }
+}
+
+// A guest throw while an outer constructor call is still binding its
+// arguments: the inner `Q` temporary exists by the time `mayThrow`
+// throws, and the whole expression is abandoned. The temporary must be
+// released cleanly on that unwinding path, and a later construction must
+// then work as if the failed one never happened.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("structCtorArgumentThrowDuringOuterArgumentBinding." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            long mayThrow(long n) {
+                if (n == 0)
+                    throw new Exception("zero");
+                return n;
+            }
+
+            struct Q {
+                long a;
+                long b;
+
+                this(long a, long b) {
+                    this.a = a;
+                    this.b = b;
+                }
+            }
+
+            struct W {
+                long tag;
+                Q q;
+                long total;
+
+                this(long tag, Q q) {
+                    this.tag = tag;
+                    this.q = q;
+                    // A guest call after the field writes: its frame must
+                    // not land on top of the temporary this constructor
+                    // is writing `this` into, so the fields must still be
+                    // intact when `total` sums them afterward.
+                    this.total = mayThrow(1) + this.tag + this.q.a
+                        + this.q.b;
+                }
+            }
+
+            // One function makes both attempts, so the second call runs
+            // the very same construction expression the first call
+            // abandoned mid-argument-binding.
+            long make(long tag, long a, long b) {
+                auto w = W(tag, Q(a, mayThrow(b)));
+                return w.tag + w.q.a + w.q.b + w.total;
+            }
+
+            void main() {
+                bool caught;
+                try {
+                    make(2, 1, 0);
+                } catch (Exception e) {
+                    caught = true;
+                }
+                assert(caught);
+
+                assert(make(3, 4, 5) == 25);
+            }
+        });
+    }
+}
+
+// Reading a field straight off a value-returning call, hundreds of
+// thousands of times: each iteration materializes a 4KiB temporary for
+// the call's result, and D destroys it at the end of that iteration's
+// full expression. A temporary that instead survives the statement leaks
+// its reservation every iteration and exhausts the frame stack well
+// before the loop is done.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed,
+        "not run: 300000 CTFE iterations, each copying a 4KiB struct, " ~
+        "take longer than a unit test can afford"),
+)) {
+    @("structValueCallFieldReadsDoNotExhaustFrameStack." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Big {
+                long[511] pad;
+                long count;
+            }
+
+            Big makeBig(long n) {
+                Big b;
+                b.count = n;
+                return b;
+            }
+
+            void main() {
+                long total;
+                foreach (i; 0 .. 300_000)
+                    total += makeBig(i).count;
+                assert(total == 299_999L * 300_000 / 2);
+            }
+        });
+    }
+}
