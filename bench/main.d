@@ -18,7 +18,7 @@ module bench.main;
 import bench.report: BackendReport;
 import bench.measurement: BackendRound, measureBackend;
 import bench.sources: SourceSet;
-import core.time: Duration, MonoTime;
+import core.time: Duration;
 
 
 struct Options {
@@ -287,13 +287,20 @@ private BackendReport benchmark(BackendType)(
     // `run` is a free function over `Backend.call`; UFCS keeps the call
     // site reading like the interface method it used to be.
     import snakebite.backends.backend: run;
+    import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.stdio: write;
 
     const residentBefore = residentSetBytes;
     BackendType backend;
 
+    auto elapsed(scope void delegate() operation) {
+        auto stopWatch = StopWatch(AutoStart.yes);
+        operation();
+        return stopWatch.peek;
+    }
+
     auto report = measureBackend(
-        () => MonoTime.currTime,
+        &elapsed,
         () { backend = new BackendType(project.program); },
         () => backend.compilationStatistics,
         () {

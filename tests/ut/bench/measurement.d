@@ -2,7 +2,7 @@ module ut.bench.measurement;
 
 
 import bench.measurement: BackendRound, measureBackend;
-import core.time: Duration, MonoTime, dur, msecs;
+import core.time: Duration, dur, msecs;
 import snakebite.backends.backend: CompilationStatistics;
 import ut;
 
@@ -10,38 +10,12 @@ import ut;
 @("reports.includeTotalTime")
 unittest {
     string[] events;
-    size_t clockIndex;
-    auto timestamps = [ // const causes a delegate-result type error here.
-        MonoTime.zero,
-        MonoTime.zero + 15.msecs,
-        MonoTime.zero + 30.msecs,
-        MonoTime.zero + 45.msecs,
-        MonoTime.zero + 60.msecs,
-        MonoTime.zero + 75.msecs,
-        MonoTime.zero + 90.msecs,
-        MonoTime.zero + 105.msecs,
-        MonoTime.zero + 120.msecs,
-        MonoTime.zero + 135.msecs,
-        MonoTime.zero + 150.msecs,
-        MonoTime.zero + 165.msecs,
-        MonoTime.zero + 180.msecs,
-        MonoTime.zero + 195.msecs,
-        MonoTime.zero + 210.msecs,
-        MonoTime.zero + 225.msecs,
-        MonoTime.zero + 240.msecs,
-        MonoTime.zero + 255.msecs,
-        MonoTime.zero + 270.msecs,
-        MonoTime.zero + 285.msecs,
-        MonoTime.zero + 300.msecs,
-        MonoTime.zero + 315.msecs,
-        MonoTime.zero + 330.msecs,
-        MonoTime.zero + 345.msecs,
-    ];
     size_t statisticsIndex;
 
-    auto clock() {
-        events ~= "clock";
-        return timestamps[clockIndex++];
+    auto elapsed(scope void delegate() operation) {
+        events ~= "elapsed";
+        operation();
+        return 15.msecs;
     }
 
     auto construct() {
@@ -65,7 +39,7 @@ unittest {
 
     auto measure(in uint warmup, in uint runs) {
         return measureBackend(
-            &clock,
+            &elapsed,
             &construct,
             &statistics,
             &run,
@@ -91,6 +65,6 @@ unittest {
     repeated.totalCount.shouldEqual(1);
 
     events[0 .. 6].shouldEqual([
-        "clock", "construct", "statistics", "run", "clock", "statistics",
+        "elapsed", "construct", "statistics", "run", "statistics", "elapsed",
     ]);
 }

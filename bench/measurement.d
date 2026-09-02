@@ -2,7 +2,7 @@ module bench.measurement;
 
 
 import bench.report: BackendReport, timingStatistics, updateTestCounts;
-import core.time: Duration, MonoTime;
+import core.time: Duration;
 import snakebite.backends.backend: CompilationStatistics;
 
 
@@ -13,7 +13,7 @@ struct BackendRound {
 
 
 BackendReport measureBackend(
-    scope MonoTime delegate() clock,
+    scope Duration delegate(scope void delegate() operation) elapsed,
     scope void delegate() construct,
     scope CompilationStatistics delegate() compilationStatistics,
     scope BackendRound delegate() run,
@@ -31,12 +31,15 @@ BackendReport measureBackend(
     Duration[] times;
     Duration[] compileTimes;
     foreach (index; 0 .. warmup + runs) {
-        const before = clock();
-        construct();
-        const compilationBefore = compilationStatistics();
-        const result = run();
-        const elapsed = clock() - before;
-        const compilationAfter = compilationStatistics();
+        CompilationStatistics compilationBefore;
+        CompilationStatistics compilationAfter;
+        BackendRound result;
+        const elapsedTime = elapsed({
+            construct();
+            compilationBefore = compilationStatistics();
+            result = run();
+            compilationAfter = compilationStatistics();
+        });
         if (index >= warmup) {
             output(result.output);
             report.passed = report.passed && result.status == 0;
@@ -45,7 +48,7 @@ BackendReport measureBackend(
             if (report.hasCompile)
                 compileTimes ~=
                     compilationAfter.duration - compilationBefore.duration;
-            times ~= elapsed;
+            times ~= elapsedTime;
             report.updateTestCounts(result.output);
         }
     }
