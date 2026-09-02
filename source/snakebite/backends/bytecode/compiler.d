@@ -2152,8 +2152,9 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private void compileComparison(BinExp expression, in size_t destOffset) {
         import dmd.astenums: Tarray, Tpointer;
 
-        if (expression.e1.type.ty == Tarray)
-            return compileScalarDynamicArrayComparison(expression, destOffset);
+        if (expression.e1.type.ty == Tarray
+                && expression.e2.type.ty == Tarray)
+            return compileDynamicArrayEquality(expression, destOffset);
 
         const operandFacts = TypeFacts.of(expression.e1.type);
 
@@ -2223,10 +2224,11 @@ extern(C++) private final class FunctionCompiler: Visitor {
             emit(&opCopy, destOffset, leftOffset, 1);
     }
 
-    // rt-simple compares arrays whose elements are integral or float/double.
-    // Keep the check here so unsupported element types are rejected instead
-    // of receiving incorrect bytewise semantics.
-    private void compileScalarDynamicArrayComparison(
+    // The bytecode backend supports equality for dynamic arrays whose
+    // elements are integral or float/double. Keep the check here so
+    // unsupported element types are rejected instead of receiving incorrect
+    // bytewise semantics.
+    private void compileDynamicArrayEquality(
         BinExp expression, in size_t destOffset,
     ) {
         import dmd.tokens: EXP;
@@ -2263,6 +2265,30 @@ extern(C++) private final class FunctionCompiler: Visitor {
         const differentLengthBranch = _instructions.length;
         emit(&opBranchFalse, lengthsEqualOffset, 0, 1);
 
+        const differentElementBranch = compileDynamicArrayElementsEqual(
+            leftOffset, rightOffset, lengthsEqualOffset, elementFacts,
+            elementIsIntegral,
+        );
+
+        emit(&opConstant, destOffset, addConstant(1), 1);
+        const invertIndex = _instructions.length;
+        if (isNotEqual)
+            emit(&opLogicalNot, destOffset, 0, 1);
+
+        _instructions[differentLengthBranch].source = invertIndex;
+        _instructions[differentElementBranch].source = invertIndex;
+    }
+
+    private size_t compileDynamicArrayElementsEqual(
+        in size_t leftOffset,
+        in size_t rightOffset,
+        in size_t lengthsEqualOffset,
+        in TypeFacts elementFacts,
+        in bool elementIsIntegral,
+    ) {
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset;
+
         const indexOffset = reserveTemp(pointerFacts);
         emit(&opConstant, indexOffset, addConstant(0), size_t.sizeof);
         const oneOffset = reserveTemp(pointerFacts);
@@ -2284,37 +2310,26 @@ extern(C++) private final class FunctionCompiler: Visitor {
             size_t.sizeof);
 
         const elementAddress = reserveTemp(pointerFacts);
-        emit(&opCopy, elementAddress,
-            leftOffset + arrayPointerOffset, size_t.sizeof);
-        emit(&opAdd, elementAddress, lengthsEqualOffset, size_t.sizeof);
-
-        const leftElement = reserveTemp(elementFacts);
-        emit(&opLoadIndirect, leftElement, elementAddress, elementFacts.size);
-
-        emit(&opCopy, elementAddress,
-            rightOffset + arrayPointerOffset, size_t.sizeof);
-        emit(&opAdd, elementAddress, lengthsEqualOffset, size_t.sizeof);
-
-        const rightElement = reserveTemp(elementFacts);
-        emit(&opLoadIndirect, rightElement, elementAddress,
-            elementFacts.size);
+        const elementOffsets = [
+            reserveTemp(elementFacts), reserveTemp(elementFacts),
+        ];
+        foreach (index, arrayOffset; [leftOffset, rightOffset]) {
+            emit(&opCopy, elementAddress,
+                arrayOffset + arrayPointerOffset, size_t.sizeof);
+            emit(&opAdd, elementAddress, lengthsEqualOffset, size_t.sizeof);
+            emit(&opLoadIndirect, elementOffsets[index], elementAddress,
+                elementFacts.size);
+        }
         emit(elementIsIntegral ? &opEqual : &opFloatEqual,
-            leftElement, rightElement, elementFacts.size);
+            elementOffsets[0], elementOffsets[1], elementFacts.size);
         const differentElementBranch = _instructions.length;
-        emit(&opBranchFalse, leftElement, 0, 1);
+        emit(&opBranchFalse, elementOffsets[0], 0, 1);
 
         emit(&opAdd, indexOffset, oneOffset, size_t.sizeof);
         emit(&opJump, loopStart, 0, 0);
 
-        const equalIndex = _instructions.length;
-        emit(&opConstant, destOffset, addConstant(1), 1);
-        const invertIndex = _instructions.length;
-        if (isNotEqual)
-            emit(&opLogicalNot, destOffset, 0, 1);
-
-        _instructions[differentLengthBranch].source = invertIndex;
-        _instructions[differentElementBranch].source = invertIndex;
-        _instructions[finishedBranch].source = equalIndex;
+        _instructions[finishedBranch].source = _instructions.length;
+        return differentElementBranch;
     }
 
     private Instruction.Handler comparisonHandler(

@@ -631,6 +631,26 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("compare.scalarDynamicArrayEquality.nan." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                double[] nanArray() {
+                    return [double.nan];
+                }
+
+                bool nanDoesNotEqualItself() {
+                    return nanArray() != nanArray();
+                }
+            },
+            "nanDoesNotEqualItself",
+        );
+    }
+}
+
 
 // The bytecode compiler's own type switch recognises only `float` and
 // `double` as floating types - `real` has no case there at all, so a
