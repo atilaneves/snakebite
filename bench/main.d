@@ -16,8 +16,9 @@ module bench.main;
 
 
 import bench.report: BackendReport;
+import bench.measurement: BackendRound, measureBackend;
 import bench.sources: SourceSet;
-import core.time: Duration;
+import core.time: Duration, MonoTime;
 
 
 struct Options {
@@ -283,47 +284,27 @@ private BackendReport benchmark(BackendType)(
     in uint runs,
 ) {
     import bench.capture: captureStdout;
-    import bench.report: timingStatistics, updateTestCounts;
     // `run` is a free function over `Backend.call`; UFCS keeps the call
     // site reading like the interface method it used to be.
     import snakebite.backends.backend: run;
-    import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.stdio: write;
 
-    BackendReport report;
-    report.name = name;
-    report.passed = true;
-
     const residentBefore = residentSetBytes;
+    BackendType backend;
 
-    // A failing backend's diagnostics go to stderr, repeated over warmup +
-    // measured runs. Noisy, but silencing them left failures with no
-    // explanation at all; the noise is the lesser evil.
-    Duration[] times;
-    Duration[] compileTimes;
-    foreach (round; 0 .. warmup + runs) {
-        auto stopWatch = StopWatch(AutoStart.yes);
-        auto backend = new BackendType(project.program);
-        const compilationBefore = backend.compilationStatistics;
-        const result = captureStdout(() => backend.run(project.program));
-        const elapsed = stopWatch.peek;
-        const compilationAfter = backend.compilationStatistics;
-        const compilationElapsed =
-            compilationAfter.duration - compilationBefore.duration;
-        if (round >= warmup) {
-            write(result.output);
-            report.passed = report.passed && result.status == 0;
-            report.hasCompile = compilationAfter.hasCompiler;
-            if (report.hasCompile)
-                compileTimes ~= compilationElapsed;
-            times ~= elapsed;
-            report.updateTestCounts(result.output);
-        }
-    }
-
-    report.runTime = timingStatistics(times);
-    if (report.hasCompile)
-        report.compileTime = timingStatistics(compileTimes);
+    auto report = measureBackend(
+        () => MonoTime.currTime,
+        () { backend = new BackendType(project.program); },
+        () => backend.compilationStatistics,
+        () {
+            const result = captureStdout(() => backend.run(project.program));
+            return BackendRound(result.status, result.output);
+        },
+        write,
+        name,
+        warmup,
+        runs,
+    );
 
     report.ramBytes = residentSetBytes - residentBefore;
     if (report.ramBytes < 0)

@@ -45,6 +45,7 @@ int main(string[] args) {
         "ut.ffi.symbol",
         "ut.framestack",
         "ut.bench.report",
+        "ut.bench.measurement",
         "ut.repl.cli",
         "ut.repl.cell",
         "ut.repl.session",

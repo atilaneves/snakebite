@@ -30,6 +30,7 @@ configuration "unittest" {
     importPaths "tests"
     sourceFiles "bench/report.d"
     sourceFiles "bench/capture.d"
+    sourceFiles "bench/measurement.d"
     importPaths "."
 
     dependency "unit-threaded" version="*"
