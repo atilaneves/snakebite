@@ -144,7 +144,11 @@ static foreach (backend; Matrix!(
             "kindaMain",
         );
     }
+}
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE can't mutate a static local"),
+)) {
     @("locals.staticPlainAssignment." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -160,7 +164,11 @@ static foreach (backend; Matrix!(
             "assign",
         );
     }
+}
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE can't mutate a static local"),
+)) {
     @("locals.staticPostincrement." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -176,7 +184,11 @@ static foreach (backend; Matrix!(
             "increment",
         );
     }
+}
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE can't mutate a static local"),
+)) {
     @("locals.staticDynamicArrayAppend." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -192,7 +204,11 @@ static foreach (backend; Matrix!(
             "append",
         );
     }
+}
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE can't mutate a static local"),
+)) {
     @("locals.staticStringInitialiser." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -207,7 +223,6 @@ static foreach (backend; Matrix!(
             "length",
         );
     }
-
 }
 
 @("locals.staticPersistsAcrossBackendCalls.Bytecode")
