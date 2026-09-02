@@ -377,7 +377,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
         opGreaterOrEqualUnsigned, opGreaterThanSigned, opGreaterThanUnsigned,
         opJump, opLessOrEqualSigned, opLessOrEqualUnsigned, opLessThanSigned,
         opLessThanUnsigned, opLoadIndirect, opLogicalNot, opModuloSigned,
-        opModuloUnsigned, opMultiply, opNegate, opNotEqual, opReturn,
+        opModuloUnsigned, opMultiply, opNegate, opNotEqual, opRangeError,
+        opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
         opStoreIndirect, opSubtract, opZero;
     import dmd.expressionsem: toInteger;
@@ -1747,13 +1748,12 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // whole-array slice of it before iterating, to fix the range being
     // walked against mutation of the original variable during the loop.
     // A dynamic array's whole slice is the same two words as the array
-    // itself, so this is nothing more than evaluating `e1` again; a
-    // bounded slice (`arr[a .. b]`) is out of scope, since nothing this
-    // compiler lowers writes one.
+    // itself, so it does not need the bounds work of a bounded slice.
     override void visit(SliceExp expression) {
         import dmd.astenums: Tpointer;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset;
+        import std.string: fromStringz;
 
         requireDestination(expression);
 
@@ -1786,11 +1786,81 @@ extern(C++) private final class FunctionCompiler: Visitor {
             return;
         }
 
-        if (!facts.isDynamicArray
-                || expression.lwr !is null || expression.upr !is null)
+        if (!facts.isDynamicArray)
             return visit(cast(Expression) expression);
 
-        evalInto(expression.e1, _destination, _width);
+        if (expression.lwr is null && expression.upr is null) {
+            evalInto(expression.e1, _destination, _width);
+            return;
+        }
+
+        const arrayOffset = reserveTemp(facts);
+        evalInto(expression.e1, arrayOffset, facts.size);
+
+        auto outerDollarVariable = _dollarVariable;
+        auto outerDollarOffset = _dollarOffset;
+        scope (exit) {
+            _dollarVariable = outerDollarVariable;
+            _dollarOffset = outerDollarOffset;
+        }
+        if (expression.lengthVar !is null) {
+            _dollarVariable = expression.lengthVar;
+            _dollarOffset = arrayOffset + arrayLengthOffset;
+        }
+
+        const lowOffset = reserveTemp(pointerFacts);
+        if (expression.lwr is null)
+            emit(&opConstant, lowOffset, addConstant(0), size_t.sizeof);
+        else
+            evalOperandInto(expression.lwr, lowOffset, size_t.sizeof);
+
+        const highOffset = reserveTemp(pointerFacts);
+        if (expression.upr is null)
+            emit(&opCopy, highOffset,
+                arrayOffset + arrayLengthOffset, size_t.sizeof);
+        else
+            evalOperandInto(expression.upr, highOffset, size_t.sizeof);
+
+        // D requires both bounds to be within the source array and the
+        // lower bound to come first. Check before pointer arithmetic so a
+        // bad slice cannot form an address outside the guest array.
+        const orderOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, orderOffset, lowOffset, size_t.sizeof);
+        emit(&opLessOrEqualUnsigned, orderOffset, highOffset, size_t.sizeof);
+        const site = AssertSite(
+            null,
+            expression.loc.filename.fromStringz.idup,
+            expression.loc.linnum,
+        );
+        _assertSites ~= site;
+        const siteIndex = _assertSites.length - 1;
+        emit(&opRangeError, orderOffset, siteIndex, 1);
+
+        emit(&opCopy, orderOffset, highOffset, size_t.sizeof);
+        emit(&opLessOrEqualUnsigned, orderOffset,
+            arrayOffset + arrayLengthOffset, size_t.sizeof);
+        emit(&opRangeError, orderOffset, siteIndex, 1);
+
+        emit(&opCopy, _destination + arrayLengthOffset,
+            highOffset, size_t.sizeof);
+        emit(&opSubtract, _destination + arrayLengthOffset,
+            lowOffset, size_t.sizeof);
+
+        const byteOffsetOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, byteOffsetOffset, lowOffset, size_t.sizeof);
+        const elementFacts = TypeFacts.of(expression.e1.type.nextOf);
+        const elementSizeOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, elementSizeOffset,
+            addConstant(cast(long) elementFacts.size), size_t.sizeof);
+        emit(&opMultiply, byteOffsetOffset, elementSizeOffset,
+            size_t.sizeof);
+
+        const pointerOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, pointerOffset,
+            arrayOffset + arrayPointerOffset, size_t.sizeof);
+        emit(&opAdd, pointerOffset, byteOffsetOffset, size_t.sizeof);
+        emit(&opCopy, _destination + arrayPointerOffset,
+            pointerOffset, size_t.sizeof);
     }
 
     // `arr[i]`, read as a value. `compileElementAddress` does the shared
@@ -1897,6 +1967,18 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
     override void visit(AssignExp expression) {
         compileAssign(expression, _destination);
+    }
+
+    // DMD lowers a dynamic-array length assignment to the druntime call
+    // that owns allocation, prefix preservation, and the native array
+    // representation. Compile that call instead of trying to infer the
+    // lowering from the source assignment node.
+    override void visit(LoweredAssignExp expression) {
+        if (expression.lowering is null)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        expression.lowering.accept(this);
     }
 
     override void visit(BinAssignExp expression) {
