@@ -31,7 +31,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; AliasSeq!(Native, Bytecode)) {
+static foreach (backend; Matrix!()) {
     @("compare.floatingOrdering." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
