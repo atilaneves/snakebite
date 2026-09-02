@@ -547,7 +547,8 @@ extern(C++) private final class Evaluator: Visitor {
                 || hasInterpretedDelegateArgument(callSite));
         const interprets = isGuest && !isTemplate
             || interpretsTemplate
-            || hasInterpretedDelegateArgument(callSite);
+            || hasInterpretedDelegateArgument(callSite)
+            || isNestedInCurrentlyWalkedFunction(function_);
         if (!interprets) {
             rejectInterpretedFunctionPointerArgument(
                 function_, arguments, argumentCount);
@@ -707,6 +708,28 @@ extern(C++) private final class Evaluator: Visitor {
         }
 
         return false;
+    }
+
+    // A closure literal lexically nested inside the function this
+    // evaluator is currently walking (e.g. druntime's `_toAA` cast
+    // wrapper inside a common `_d_aaApply2` instantiation) closes over
+    // this walk's own closure allocation, read back through
+    // `tryContextOf`. That allocation has whatever layout this
+    // evaluator's own `ClosureLayout` assigns, which has no reason to
+    // match the layout a natively-compiled build of the enclosing
+    // function chose for the same literal - and for a closure that
+    // never escapes, native code may skip a heap layout altogether and
+    // read captured variables straight off its own compiled stack
+    // frame, a frame this walk never builds. Walking the literal's body
+    // here instead keeps every reader of this walk's context the walker
+    // that wrote it, regardless of whether druntime also links a native
+    // specialization of the literal's declaration.
+    private bool isNestedInCurrentlyWalkedFunction(FuncDeclaration function_) {
+        if (_function is null)
+            return false;
+
+        auto parent = function_.toParent2();
+        return parent !is null && parent.isFuncDeclaration is _function;
     }
 
     private const(CallPlan)* callPlanOf(

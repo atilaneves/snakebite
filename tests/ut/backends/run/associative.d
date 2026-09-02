@@ -86,13 +86,13 @@ static foreach (backend; Matrix!(
 }
 
 // An index assignment on an associative array with a string key inserts
-// or overwrites that key's value, and a later index read of the same
-// key sees it.
+// or overwrites that key's value, and `foreach` over the array yields
+// every key/value pair.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
-    @("stringKeyedIndexAssignment." ~ backend.stringof)
+    @("stringKeyedIndexAssignmentAndForeach." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -101,9 +101,45 @@ static foreach (backend; Matrix!(
                 offsets["magic"] = 0;
                 offsets["schema"] = 4;
 
-                assert(offsets.length == 2);
-                assert(offsets["magic"] == 0);
-                assert(offsets["schema"] == 4);
+                int offsetSum;
+                int nameLengthSum;
+                foreach (name, offset; offsets) {
+                    assert(offsets[name] == offset);
+                    offsetSum += offset;
+                    nameLengthSum += cast(int) name.length;
+                }
+                assert(offsetSum == 4);
+                assert(nameLengthSum == 11);
+            }
+        });
+    }
+}
+
+// `foreach` over an associative array keyed by a built-in type (as
+// opposed to a struct) also yields every key/value pair.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("intKeyedForeach." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[int] squares;
+                squares[2] = 4;
+                squares[3] = 9;
+                squares[5] = 25;
+
+                int keySum;
+                int valueSum;
+                foreach (key, value; squares) {
+                    assert(squares[key] == value);
+                    keySum += key;
+                    valueSum += value;
+                }
+                assert(keySum == 10);
+                assert(valueSum == 38);
             }
         });
     }
