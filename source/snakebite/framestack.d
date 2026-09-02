@@ -9,10 +9,16 @@ private enum defaultFrameReservation = 1024 * 1024 * 1024;
 
 
 // The frame stack every guest call reserves its parameter frame from,
-// bump-allocated and popped LIFO. `push` is the only way to get bytes from
-// it, and the `Frame` it returns is the only way to give them back: a
-// call site never marks a position and pops back to it by hand, so it can
+// bump-allocated and popped LIFO. `push` is the default way to get bytes
+// from it, and the `Frame` it returns gives them back by itself: a call
+// site never marks a position and pops back to it by hand, so it can
 // never forget to, on a throw or any other path out of scope.
+//
+// `mark`/`reserve`/`release` are the exception, for a reservation whose
+// lifetime is not any host function's lexical scope - the interpreter's
+// expression-scoped temporaries outlive every call frame pushed while
+// their expression evaluates. A caller of `reserve` owns the release and
+// must pair its `mark` with a `scope(exit) release(mark)` of its own.
 //
 // A pushed frame can hold a guest pointer into GC-owned storage (an array's
 // `ptr` field, for instance) for as long as the frame is live, and nothing
@@ -22,9 +28,8 @@ public struct FrameStack {
     import core.memory: GC;
 
     // A byte position: how many bytes of the backing buffer were in use
-    // at some earlier point. Never exposed outside this struct - `Frame`
-    // is what a call site holds instead.
-    private alias Mark = size_t;
+    // at some earlier point.
+    public alias Mark = size_t;
 
     // The reservation never moves. Only pages below `_committed` become
     // readable, so a large reservation costs address space, not physical
@@ -99,7 +104,7 @@ public struct FrameStack {
             );
     }
 
-    private Mark mark() const {
+    public Mark mark() const {
         return _used;
     }
 
@@ -124,12 +129,20 @@ public struct FrameStack {
     // Bump-allocates `size` bytes aligned to `alignment` and hands back a
     // handle that frees them again when it goes out of scope.
     public Frame push(in size_t size, in uint alignment) @system {
+        const mark = this.mark;
+        return Frame(&this, mark, reserve(size, alignment));
+    }
+
+    // Bump-allocates like `push`, but hands back only the bytes (`null`
+    // for a zero-size reservation): the caller owns giving them back with
+    // `release`, in LIFO order. See the struct's own comment for who this
+    // is for.
+    public ubyte* reserve(in size_t size, in uint alignment) @system {
         import core.memory: pageSize;
         import std.conv: text;
 
-        const mark = this.mark;
         if (size == 0)
-            return Frame(&this, mark, null);
+            return null;
 
         // mmap returns a page-aligned address. A larger alignment would
         // need a separate alignment guarantee and could return a pointer
@@ -140,7 +153,7 @@ public struct FrameStack {
                     "-byte alignment: the backing buffer is page-aligned"),
             );
 
-        const alignedUsed = roundUp(mark, alignment);
+        const alignedUsed = roundUp(_used, alignment);
         if (alignedUsed > _limit || size > _limit - alignedUsed)
             throw new Exception(
                 text("frame stack overflow: need ", size,
@@ -151,7 +164,13 @@ public struct FrameStack {
         const end = alignedUsed + size;
         commit(end);
         _used = end;
-        return Frame(&this, mark, _base + alignedUsed);
+        return _base + alignedUsed;
+    }
+
+    // Gives back everything reserved since `mark`. Only for `reserve`d
+    // bytes: a `push`ed `Frame` gives its own back.
+    public void release(in Mark mark) {
+        popTo(mark);
     }
 
     private void popTo(in Mark mark) {
