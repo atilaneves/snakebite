@@ -2224,9 +2224,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
     }
 
     // rt-simple compares arrays whose elements are integral or float/double.
-    // Keeping this check at the compiler seam rejects struct, nested-array,
-    // and pointer equality instead of giving them incorrect bytewise semantics.
-    // The loop uses the native array layout and scalar comparison handlers.
+    // Keep the check here so unsupported element types are rejected instead
+    // of receiving incorrect bytewise semantics.
     private void compileScalarDynamicArrayComparison(
         BinExp expression, in size_t destOffset,
     ) {
@@ -2254,13 +2253,13 @@ extern(C++) private final class FunctionCompiler: Visitor {
         const rightOffset = reserveTemp(arrayFacts);
         evalInto(expression.e2, rightOffset, arrayValueSize);
 
-        const lengthOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, lengthOffset,
-            leftOffset + arrayLengthOffset, size_t.sizeof);
+        emit(&opConstant, destOffset, addConstant(0), 1);
+
         const lengthsEqualOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, lengthsEqualOffset, lengthOffset, size_t.sizeof);
-        emit(&opEqual, lengthsEqualOffset,
+        emit(&opCopy, lengthsEqualOffset,
             rightOffset + arrayLengthOffset, size_t.sizeof);
+        emit(&opEqual, lengthsEqualOffset,
+            leftOffset + arrayLengthOffset, size_t.sizeof);
         const differentLengthBranch = _instructions.length;
         emit(&opBranchFalse, lengthsEqualOffset, 0, 1);
 
@@ -2273,27 +2272,31 @@ extern(C++) private final class FunctionCompiler: Visitor {
             addConstant(cast(long) elementFacts.size), size_t.sizeof);
 
         const loopStart = _instructions.length;
-        const loopConditionOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, loopConditionOffset, indexOffset, size_t.sizeof);
-        emit(&opLessThanUnsigned, loopConditionOffset, lengthOffset,
+        emit(&opCopy, lengthsEqualOffset, indexOffset, size_t.sizeof);
+        emit(&opLessThanUnsigned, lengthsEqualOffset,
+            leftOffset + arrayLengthOffset,
             size_t.sizeof);
         const finishedBranch = _instructions.length;
-        emit(&opBranchFalse, loopConditionOffset, 0, 1);
+        emit(&opBranchFalse, lengthsEqualOffset, 0, 1);
 
-        const byteOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, byteOffset, indexOffset, size_t.sizeof);
-        emit(&opMultiply, byteOffset, elementSizeOffset, size_t.sizeof);
+        emit(&opCopy, lengthsEqualOffset, indexOffset, size_t.sizeof);
+        emit(&opMultiply, lengthsEqualOffset, elementSizeOffset,
+            size_t.sizeof);
 
-        const leftElementAddress =
-            elementAddress(leftOffset + arrayPointerOffset, byteOffset);
-        const rightElementAddress =
-            elementAddress(rightOffset + arrayPointerOffset, byteOffset);
+        const elementAddress = reserveTemp(pointerFacts);
+        emit(&opCopy, elementAddress,
+            leftOffset + arrayPointerOffset, size_t.sizeof);
+        emit(&opAdd, elementAddress, lengthsEqualOffset, size_t.sizeof);
 
         const leftElement = reserveTemp(elementFacts);
-        emit(&opLoadIndirect, leftElement, leftElementAddress,
-            elementFacts.size);
+        emit(&opLoadIndirect, leftElement, elementAddress, elementFacts.size);
+
+        emit(&opCopy, elementAddress,
+            rightOffset + arrayPointerOffset, size_t.sizeof);
+        emit(&opAdd, elementAddress, lengthsEqualOffset, size_t.sizeof);
+
         const rightElement = reserveTemp(elementFacts);
-        emit(&opLoadIndirect, rightElement, rightElementAddress,
+        emit(&opLoadIndirect, rightElement, elementAddress,
             elementFacts.size);
         emit(elementIsIntegral ? &opEqual : &opFloatEqual,
             leftElement, rightElement, elementFacts.size);
@@ -2304,34 +2307,14 @@ extern(C++) private final class FunctionCompiler: Visitor {
         emit(&opJump, loopStart, 0, 0);
 
         const equalIndex = _instructions.length;
-        emitBoolConstant(destOffset, !isNotEqual);
-        const finishJump = _instructions.length;
-        emit(&opJump, 0, 0, 0);
+        emit(&opConstant, destOffset, addConstant(1), 1);
+        const invertIndex = _instructions.length;
+        if (isNotEqual)
+            emit(&opLogicalNot, destOffset, 0, 1);
 
-        const differentIndex = _instructions.length;
-        _instructions[differentLengthBranch].source = differentIndex;
-        _instructions[differentElementBranch].source = differentIndex;
-        emitBoolConstant(destOffset, isNotEqual);
-
-        const finishIndex = _instructions.length;
+        _instructions[differentLengthBranch].source = invertIndex;
+        _instructions[differentElementBranch].source = invertIndex;
         _instructions[finishedBranch].source = equalIndex;
-        _instructions[finishJump].destination = finishIndex;
-    }
-
-    // The pointer stored at `arrayPointerFieldOffset` (an array's own
-    // pointer field, already offset into its temporary) plus a run-time
-    // byte offset - shared by both operands of the element loop above.
-    private size_t elementAddress(
-        in size_t arrayPointerFieldOffset, in size_t byteOffset,
-    ) {
-        const address = reserveTemp(pointerFacts);
-        emit(&opCopy, address, arrayPointerFieldOffset, size_t.sizeof);
-        emit(&opAdd, address, byteOffset, size_t.sizeof);
-        return address;
-    }
-
-    private void emitBoolConstant(in size_t offset, in bool value) {
-        emit(&opConstant, offset, addConstant(value ? 1 : 0), 1);
     }
 
     private Instruction.Handler comparisonHandler(
