@@ -3,8 +3,9 @@ module snakebite.backends.bytecode.compiler;
 
 private:
 
+import dmd.mtype: Type;
 import dmd.visitor: Visitor;
-import object: TypeInfo, TypeInfo_Array;
+import object: TypeInfo, TypeInfo_Array, TypeInfo_Class;
 import snakebite.ffi: maxArguments, PlanCache;
 
 
@@ -207,11 +208,21 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _allocatorAddress;
     }
 
-    private TypeInfo runtimeTypeInfo(imported!"dmd.mtype".Type type) {
+    private TypeInfo runtimeTypeInfo(Type type) {
         import dmd.astenums:
             Tarray, Tbool, Tchar, Tdchar, Tfloat32, Tfloat64, Tint8, Tint16,
             Tint32, Tint64, Tuns8, Tuns16, Tuns32, Tuns64, Twchar;
         import dmd.typesem: nextOf;
+
+        if (type.vtinfo !is null) {
+            auto address = _plans.resolve(type.vtinfo.ident.toString);
+            if (address !is null)
+                return cast(TypeInfo) address;
+        }
+
+        import dmd.astenums: Tclass;
+        if (type.ty == Tclass)
+            return cast(TypeInfo) cast() TypeInfo_Class.find(type.toString);
 
         if (type.ty == Tarray) {
             auto info = new TypeInfo_Array;
@@ -353,10 +364,11 @@ extern(C++) private final class FunctionCompiler: Visitor {
     import dmd.statement:
         CompoundStatement, ContinueStatement, ExpStatement, ForStatement,
         IfStatement, ImportStatement, ReturnStatement, ScopeStatement,
-        Statement, UnrolledLoopStatement, WhileStatement;
+        Statement, TryCatchStatement, UnrolledLoopStatement, WhileStatement;
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
-        Arg, AssertSite, CallSite, discardResult, Function, Instruction,
+        Arg, AssertSite, CallSite, discardResult, ExceptionHandler, Function,
+        Instruction,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
@@ -365,7 +377,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
         opGreaterOrEqualUnsigned, opGreaterThanSigned, opGreaterThanUnsigned,
         opJump, opLessOrEqualSigned, opLessOrEqualUnsigned, opLessThanSigned,
         opLessThanUnsigned, opLoadIndirect, opLogicalNot, opModuloSigned,
-        opModuloUnsigned, opMultiply, opNegate, opNotEqual, opReturn,
+        opModuloUnsigned, opMultiply, opNegate, opNotEqual, opRangeError,
+        opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
         opStoreIndirect, opSubtract, opZero;
     import dmd.expressionsem: toInteger;
@@ -394,6 +407,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private long[] _constants;
     private CallSite[] _callSites;
     private AssertSite[] _assertSites;
+    private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
     // Set once nothing after the statement just compiled can run: a
@@ -416,6 +430,14 @@ extern(C++) private final class FunctionCompiler: Visitor {
     private struct LoopContext {
         size_t continueTarget = size_t.max;
         size_t[] pendingContinueJumps;
+    }
+
+    private struct PendingExceptionHandler {
+        private TypeInfo_Class _type;
+        private size_t _bodyStart;
+        private size_t _bodyEnd;
+        private size_t _handler;
+        private size_t _catchOffset;
     }
     private LoopContext[] _loops;
     private size_t _destination;
@@ -462,10 +484,30 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
         resolveBranches();
 
+        ExceptionHandler[] exceptionHandlers;
+        foreach (pending; _exceptionHandlers) {
+            if (pending._handler >= _instructions.length)
+                throw rejection(_function, _function.loc,
+                    "an empty catch handler");
+
+            exceptionHandlers ~= ExceptionHandler(
+                pending._type,
+                instructionAt(pending._bodyStart),
+                instructionAt(pending._bodyEnd),
+                instructionAt(pending._handler),
+                pending._catchOffset,
+            );
+        }
+
         return Function(
             _instructions, _constants, _callSites, _assertSites,
+            exceptionHandlers,
             _tempSize, _tempAlignment,
         );
+    }
+
+    private const(Instruction)* instructionAt(in size_t index) const {
+        return cast(const(Instruction)*) (_instructions.ptr + index);
     }
 
     private void emit(
@@ -579,6 +621,40 @@ extern(C++) private final class FunctionCompiler: Visitor {
     override void visit(ImportStatement statement) {
     }
 
+    override void visit(TryCatchStatement statement) {
+        const bodyStart = _instructions.length;
+        compileStatement(statement._body);
+        const bodyFinished = _finished;
+        const bodyEnd = _instructions.length;
+
+        size_t skipHandlers = size_t.max;
+        if (!bodyFinished) {
+            skipHandlers = _instructions.length;
+            emit(&opJump, 0, 0, 0);
+        }
+
+        bool allHandlersFinished = true;
+        foreach (catch_; *statement.catches) {
+            const handler = _instructions.length;
+            const catchOffset = catch_.var is null
+                ? size_t.max
+                : _layout.offsetOf(catch_.var);
+            auto type = runtimeClassInfo(catch_.type);
+            _exceptionHandlers ~= PendingExceptionHandler(
+                type, bodyStart, bodyEnd, handler, catchOffset,
+            );
+
+            _finished = false;
+            compileStatement(catch_.handler);
+            allHandlersFinished &= _finished;
+        }
+
+        if (skipHandlers != size_t.max)
+            _instructions[skipHandlers].destination = _instructions.length;
+
+        _finished = bodyFinished && allHandlersFinished;
+    }
+
     override void visit(ReturnStatement statement) {
         compileReturn(statement);
     }
@@ -605,6 +681,25 @@ extern(C++) private final class FunctionCompiler: Visitor {
     }
 
     extern(D):
+
+    private TypeInfo_Class runtimeClassInfo(Type type) {
+        import dmd.astenums: Tclass;
+        import std.conv: text;
+
+        if (type.ty != Tclass)
+            throw new SnakebiteException(text(
+                "bytecode compiler cannot compile a non-class catch type `",
+                type.toString, "`",
+            ));
+
+        auto info = cast(TypeInfo_Class) cast() _bytecode.runtimeTypeInfo(type);
+        if (info is null)
+            throw new SnakebiteException(text(
+                "bytecode compiler cannot resolve catch type `",
+                type.toString, "`",
+            ));
+        return info;
+    }
 
     private void compileReturn(ReturnStatement statement) {
         _finished = true;
@@ -1574,8 +1669,26 @@ extern(C++) private final class FunctionCompiler: Visitor {
         requireDestination(expression);
 
         auto field = expression.var.isVarDeclaration;
-        if (field is null || field.isBitFieldDeclaration !is null
-                || !isPlainOldStruct(expression.e1.type))
+        if (field is null || field.isBitFieldDeclaration !is null)
+            return visit(cast(Expression) expression);
+
+        import dmd.astenums: Tclass;
+        if (expression.e1.type.ty == Tclass) {
+            const facts = TypeFacts.of(field.type);
+            if (!isSupportedFacts(facts, field.type))
+                return visit(cast(Expression) expression);
+
+            const objectOffset = reserveTemp(pointerFacts);
+            evalInto(expression.e1, objectOffset, size_t.sizeof);
+            const fieldOffset = reserveTemp(pointerFacts);
+            emit(&opConstant, fieldOffset,
+                addConstant(cast(long) field.offset), size_t.sizeof);
+            emit(&opAdd, objectOffset, fieldOffset, size_t.sizeof);
+            emit(&opLoadIndirect, _destination, objectOffset, _width);
+            return;
+        }
+
+        if (!isPlainOldStruct(expression.e1.type))
             return visit(cast(Expression) expression);
 
         const baseFacts = TypeFacts.of(expression.e1.type);
@@ -1635,13 +1748,12 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // whole-array slice of it before iterating, to fix the range being
     // walked against mutation of the original variable during the loop.
     // A dynamic array's whole slice is the same two words as the array
-    // itself, so this is nothing more than evaluating `e1` again; a
-    // bounded slice (`arr[a .. b]`) is out of scope, since nothing this
-    // compiler lowers writes one.
+    // itself, so it does not need the bounds work of a bounded slice.
     override void visit(SliceExp expression) {
         import dmd.astenums: Tpointer;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset;
+        import std.string: fromStringz;
 
         requireDestination(expression);
 
@@ -1674,11 +1786,81 @@ extern(C++) private final class FunctionCompiler: Visitor {
             return;
         }
 
-        if (!facts.isDynamicArray
-                || expression.lwr !is null || expression.upr !is null)
+        if (!facts.isDynamicArray)
             return visit(cast(Expression) expression);
 
-        evalInto(expression.e1, _destination, _width);
+        if (expression.lwr is null && expression.upr is null) {
+            evalInto(expression.e1, _destination, _width);
+            return;
+        }
+
+        const arrayOffset = reserveTemp(facts);
+        evalInto(expression.e1, arrayOffset, facts.size);
+
+        auto outerDollarVariable = _dollarVariable;
+        auto outerDollarOffset = _dollarOffset;
+        scope (exit) {
+            _dollarVariable = outerDollarVariable;
+            _dollarOffset = outerDollarOffset;
+        }
+        if (expression.lengthVar !is null) {
+            _dollarVariable = expression.lengthVar;
+            _dollarOffset = arrayOffset + arrayLengthOffset;
+        }
+
+        const lowOffset = reserveTemp(pointerFacts);
+        if (expression.lwr is null)
+            emit(&opConstant, lowOffset, addConstant(0), size_t.sizeof);
+        else
+            evalOperandInto(expression.lwr, lowOffset, size_t.sizeof);
+
+        const highOffset = reserveTemp(pointerFacts);
+        if (expression.upr is null)
+            emit(&opCopy, highOffset,
+                arrayOffset + arrayLengthOffset, size_t.sizeof);
+        else
+            evalOperandInto(expression.upr, highOffset, size_t.sizeof);
+
+        // D requires both bounds to be within the source array and the
+        // lower bound to come first. Check before pointer arithmetic so a
+        // bad slice cannot form an address outside the guest array.
+        const orderOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, orderOffset, lowOffset, size_t.sizeof);
+        emit(&opLessOrEqualUnsigned, orderOffset, highOffset, size_t.sizeof);
+        const site = AssertSite(
+            null,
+            expression.loc.filename.fromStringz.idup,
+            expression.loc.linnum,
+        );
+        _assertSites ~= site;
+        const siteIndex = _assertSites.length - 1;
+        emit(&opRangeError, orderOffset, siteIndex, 1);
+
+        emit(&opCopy, orderOffset, highOffset, size_t.sizeof);
+        emit(&opLessOrEqualUnsigned, orderOffset,
+            arrayOffset + arrayLengthOffset, size_t.sizeof);
+        emit(&opRangeError, orderOffset, siteIndex, 1);
+
+        emit(&opCopy, _destination + arrayLengthOffset,
+            highOffset, size_t.sizeof);
+        emit(&opSubtract, _destination + arrayLengthOffset,
+            lowOffset, size_t.sizeof);
+
+        const byteOffsetOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, byteOffsetOffset, lowOffset, size_t.sizeof);
+        const elementFacts = TypeFacts.of(expression.e1.type.nextOf);
+        const elementSizeOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, elementSizeOffset,
+            addConstant(cast(long) elementFacts.size), size_t.sizeof);
+        emit(&opMultiply, byteOffsetOffset, elementSizeOffset,
+            size_t.sizeof);
+
+        const pointerOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, pointerOffset,
+            arrayOffset + arrayPointerOffset, size_t.sizeof);
+        emit(&opAdd, pointerOffset, byteOffsetOffset, size_t.sizeof);
+        emit(&opCopy, _destination + arrayPointerOffset,
+            pointerOffset, size_t.sizeof);
     }
 
     // `arr[i]`, read as a value. `compileElementAddress` does the shared
@@ -1785,6 +1967,18 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
     override void visit(AssignExp expression) {
         compileAssign(expression, _destination);
+    }
+
+    // DMD lowers a dynamic-array length assignment to the druntime call
+    // that owns allocation, prefix preservation, and the native array
+    // representation. Compile that call instead of trying to infer the
+    // lowering from the source assignment node.
+    override void visit(LoweredAssignExp expression) {
+        if (expression.lowering is null)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        expression.lowering.accept(this);
     }
 
     override void visit(BinAssignExp expression) {

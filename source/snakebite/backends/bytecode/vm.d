@@ -12,6 +12,7 @@ extern(C) void executeCallPlan(
 );
 
 import snakebite.ffi.limits: maxArguments;
+import object: Throwable, TypeInfo_Class;
 
 
 // The widest value `opCall` can hand back to its caller: wide enough for
@@ -114,14 +115,25 @@ package struct Instruction {
 }
 
 
-// One `assert` site: the message and source location `opAssert` builds a
-// real `AssertError` from when its condition is false, resolved to plain
-// strings and a line number at compile time so this VM never has to reach
-// into dmd's own `Loc` to answer them.
+// One run-time check site, resolved to plain values at compile time so this
+// VM never has to reach into dmd's own `Loc`. Assertions use all fields;
+// range checks only need the source location.
 package struct AssertSite {
     package string message;
     package string file;
     package size_t line;
+}
+
+
+// One guest catch clause. The compiler resolves the three instruction
+// pointers after code generation; the VM only needs native runtime metadata
+// to decide whether a Throwable belongs to the clause and where to resume.
+package struct ExceptionHandler {
+    package TypeInfo_Class type;
+    package const(Instruction)* bodyStart;
+    package const(Instruction)* bodyEnd;
+    package const(Instruction)* handler;
+    package size_t catchOffset;
 }
 
 
@@ -130,6 +142,7 @@ package struct Function {
     package long[] constants;
     package CallSite[] callSites;
     package AssertSite[] assertSites;
+    package ExceptionHandler[] exceptionHandlers;
     package size_t frameSize;
     package uint frameAlignment;
 }
@@ -161,7 +174,8 @@ package struct Vm {
         auto pc = function_.instructions.ptr;
         dispatch(
             pc, frame.base, returnPlace, function_.constants,
-            function_.callSites, function_.assertSites, &_frames,
+            function_.callSites, function_.assertSites,
+            function_.exceptionHandlers, &_frames,
         );
     }
 }
@@ -246,11 +260,41 @@ private void dispatch(
     scope const long[] constants,
     scope const CallSite[] callSites,
     scope const AssertSite[] assertSites,
+    scope const ExceptionHandler[] exceptionHandlers,
     FrameStack* frames,
 ) {
-    while (pc !is null)
-        pc = pc.handler(
-            pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    while (pc !is null) {
+        try {
+            while (pc !is null)
+                pc = pc.handler(
+                    pc, frame, returnPlace, constants, callSites,
+                    assertSites, frames);
+        } catch (Throwable throwable) {
+            auto handler = findHandler(
+                exceptionHandlers, pc, throwable.classinfo);
+            if (handler is null)
+                throw throwable;
+
+            if (handler.catchOffset != size_t.max)
+                *cast(void**)(frame + handler.catchOffset) = cast(void*) throwable;
+            pc = handler.handler;
+        }
+    }
+}
+
+
+private const(ExceptionHandler)* findHandler(
+    const(ExceptionHandler)[] handlers,
+    const(Instruction)* pc,
+    TypeInfo_Class actual,
+) @nogc nothrow {
+    foreach (ref handler; handlers) {
+        if (pc < handler.bodyStart || pc >= handler.bodyEnd)
+            continue;
+        if (handler.type !is null && handler.type.isBaseOf(actual))
+            return &handler;
+    }
+    return null;
 }
 
 
@@ -328,6 +372,29 @@ package const(Instruction)* opAssert(
 }
 
 
+// A slice bounds failure must use druntime's range-error path. A backend
+// assertion would have a different D type and could not be caught as the
+// `RangeError` that compiled D specifies.
+package const(Instruction)* opRangeError(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    if (loadUnsigned(frame + pc.destination, pc.width) != 0)
+        return advance(pc, frame, returnPlace, constants, callSites,
+            assertSites, frames);
+
+    import core.exception: onRangeError;
+
+    const site = assertSites[pc.source];
+    onRangeError(site.file, site.line);
+}
+
+
 // Calls `callSites[pc.source]`'s callee: pushes its frame, copies each
 // argument in, runs it to its own return instruction through the nested
 // dispatch loop, then copies the result to `frame + pc.destination`
@@ -393,7 +460,7 @@ package const(Instruction)* opCall(
     auto calleePc = callee.instructions.ptr;
     dispatch(
         calleePc, calleeFrame.base, returnDestination, callee.constants,
-        callee.callSites, callee.assertSites, frames,
+        callee.callSites, callee.assertSites, callee.exceptionHandlers, frames,
     );
 
     if (pc.destination != discardResult && site.returnWidth != 0)
