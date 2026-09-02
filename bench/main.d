@@ -31,6 +31,7 @@ struct Options {
     bool helpWanted;
 }
 
+version (BenchMain)
 int main(string[] args) {
     import bench.report: printTable;
     import snakebite.frontend.compiler: Snippets, initialize;
@@ -249,7 +250,7 @@ private BackendReport[] benchmarkAll(Project project, in Options options) {
         if (selected(options, backendName!BackendType)) {
             reports ~= benchmark!BackendType(
                 backendName!BackendType,
-                project,
+                project.program,
                 options.warmup,
                 options.runs,
             );
@@ -275,9 +276,9 @@ private bool selected(in Options options, in string name) {
     return wanted.length == 0 || wanted.canFind(name);
 }
 
-private BackendReport benchmark(BackendType)(
+public BackendReport benchmark(BackendType)(
     in string name,
-    Project project,
+    imported!"snakebite.backends".Program program,
     in uint warmup,
     in uint runs,
 ) {
@@ -302,9 +303,9 @@ private BackendReport benchmark(BackendType)(
     Duration[] compileTimes;
     foreach (round; 0 .. warmup + runs) {
         auto stopWatch = StopWatch(AutoStart.yes);
-        auto backend = new BackendType(project.program);
+        auto backend = new BackendType(program);
         const compilationBefore = backend.compilationStatistics;
-        const result = captureStdout(() => backend.run(project.program));
+        const result = captureStdout(() => backend.run(program));
         const elapsed = stopWatch.peek;
         const compilationAfter = backend.compilationStatistics;
         const compilationElapsed =
@@ -315,7 +316,7 @@ private BackendReport benchmark(BackendType)(
             report.hasCompile = compilationAfter.hasCompiler;
             if (report.hasCompile)
                 compileTimes ~= compilationElapsed;
-            times ~= elapsed - compilationElapsed;
+            times ~= elapsed;
             report.updateTestCounts(result.output);
         }
     }
