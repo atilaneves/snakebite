@@ -48,6 +48,9 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.unconfirmed),
     Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Interpreter, Because.unconfirmed,
+        "calling an interpreted function back from native code is not yet "
+            ~ "supported (see issue #9)"),
 )) {
     @("moduleConstructorRunsBeforeMain." ~ backend.stringof)
     @Tags(backend.stringof)
