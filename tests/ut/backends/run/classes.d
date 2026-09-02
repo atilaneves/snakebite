@@ -258,26 +258,32 @@ unittest {
     });
 }
 
-@("scopeClassRunsDestructorAtScopeExit.Interpreter")
-@Tags(Interpreter.stringof)
-unittest {
-    0.shouldBeStatusOf!(Interpreter, q{
-        int destructions;
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the mutable static destruction counter"),
+)) {
+    @("scopeClassRunsDestructorAtScopeExit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int destructions;
 
-        scope class Resource {
-            ~this() {
-                ++destructions;
+            scope class Resource {
+                ~this() {
+                    ++destructions;
+                }
             }
-        }
 
-        void main() {
-            {
-                scope Resource resource = new Resource;
+            void main() {
+                {
+                    scope Resource resource = new Resource;
+                }
+
+                assert(destructions == 1);
             }
-
-            assert(destructions == 1);
-        }
-    });
+        });
+    }
 }
 
 // A call through an interface reference finds the class's override, which
