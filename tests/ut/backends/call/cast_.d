@@ -46,7 +46,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; AliasSeq!(Native, Bytecode)) {
+static foreach (backend; Matrix!()) {
     @("cast.floatToDouble.widensValue." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -66,7 +66,7 @@ static foreach (backend; AliasSeq!(Native, Bytecode)) {
     }
 }
 
-static foreach (backend; AliasSeq!(Native, Bytecode)) {
+static foreach (backend; Matrix!()) {
     @("cast.doubleToFloat.roundsValue." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -86,7 +86,9 @@ static foreach (backend; AliasSeq!(Native, Bytecode)) {
     }
 }
 
-static foreach (backend; AliasSeq!(Native, Bytecode)) {
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed),
+)) {
     @("cast.floatToIntegral.truncatesTowardZero." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
