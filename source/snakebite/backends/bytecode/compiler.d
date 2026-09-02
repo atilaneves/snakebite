@@ -2268,6 +2268,9 @@ extern(C++) private final class FunctionCompiler: Visitor {
         emit(&opConstant, indexOffset, addConstant(0), size_t.sizeof);
         const oneOffset = reserveTemp(pointerFacts);
         emit(&opConstant, oneOffset, addConstant(1), size_t.sizeof);
+        const elementSizeOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, elementSizeOffset,
+            addConstant(cast(long) elementFacts.size), size_t.sizeof);
 
         const loopStart = _instructions.length;
         const loopConditionOffset = reserveTemp(pointerFacts);
@@ -2277,22 +2280,14 @@ extern(C++) private final class FunctionCompiler: Visitor {
         const finishedBranch = _instructions.length;
         emit(&opBranchFalse, loopConditionOffset, 0, 1);
 
-        const elementByteOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, elementByteOffset, indexOffset, size_t.sizeof);
-        const elementSizeOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, elementSizeOffset,
-            addConstant(cast(long) elementFacts.size), size_t.sizeof);
-        emit(&opMultiply, elementByteOffset, elementSizeOffset,
-            size_t.sizeof);
+        const byteOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, byteOffset, indexOffset, size_t.sizeof);
+        emit(&opMultiply, byteOffset, elementSizeOffset, size_t.sizeof);
 
-        const leftElementAddress = reserveTemp(pointerFacts);
-        emit(&opCopy, leftElementAddress,
-            leftOffset + arrayPointerOffset, size_t.sizeof);
-        emit(&opAdd, leftElementAddress, elementByteOffset, size_t.sizeof);
-        const rightElementAddress = reserveTemp(pointerFacts);
-        emit(&opCopy, rightElementAddress,
-            rightOffset + arrayPointerOffset, size_t.sizeof);
-        emit(&opAdd, rightElementAddress, elementByteOffset, size_t.sizeof);
+        const leftElementAddress =
+            elementAddress(leftOffset + arrayPointerOffset, byteOffset);
+        const rightElementAddress =
+            elementAddress(rightOffset + arrayPointerOffset, byteOffset);
 
         const leftElement = reserveTemp(elementFacts);
         emit(&opLoadIndirect, leftElement, leftElementAddress,
@@ -2300,12 +2295,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
         const rightElement = reserveTemp(elementFacts);
         emit(&opLoadIndirect, rightElement, rightElementAddress,
             elementFacts.size);
-        if (elementIsIntegral)
-            emit(&opEqual, leftElement, rightElement,
-                elementFacts.size);
-        else
-            emit(&opFloatEqual, leftElement, rightElement,
-                elementFacts.size);
+        emit(elementIsIntegral ? &opEqual : &opFloatEqual,
+            leftElement, rightElement, elementFacts.size);
         const differentElementBranch = _instructions.length;
         emit(&opBranchFalse, leftElement, 0, 1);
 
@@ -2313,23 +2304,34 @@ extern(C++) private final class FunctionCompiler: Visitor {
         emit(&opJump, loopStart, 0, 0);
 
         const equalIndex = _instructions.length;
-        if (isNotEqual)
-            emit(&opConstant, destOffset, addConstant(0), 1);
-        else
-            emit(&opConstant, destOffset, addConstant(1), 1);
+        emitBoolConstant(destOffset, !isNotEqual);
         const finishJump = _instructions.length;
         emit(&opJump, 0, 0, 0);
 
         const differentIndex = _instructions.length;
         _instructions[differentLengthBranch].source = differentIndex;
         _instructions[differentElementBranch].source = differentIndex;
-        if (isNotEqual)
-            emit(&opConstant, destOffset, addConstant(1), 1);
-        else
-            emit(&opConstant, destOffset, addConstant(0), 1);
+        emitBoolConstant(destOffset, isNotEqual);
+
         const finishIndex = _instructions.length;
         _instructions[finishedBranch].source = equalIndex;
         _instructions[finishJump].destination = finishIndex;
+    }
+
+    // The pointer stored at `arrayPointerFieldOffset` (an array's own
+    // pointer field, already offset into its temporary) plus a run-time
+    // byte offset - shared by both operands of the element loop above.
+    private size_t elementAddress(
+        in size_t arrayPointerFieldOffset, in size_t byteOffset,
+    ) {
+        const address = reserveTemp(pointerFacts);
+        emit(&opCopy, address, arrayPointerFieldOffset, size_t.sizeof);
+        emit(&opAdd, address, byteOffset, size_t.sizeof);
+        return address;
+    }
+
+    private void emitBoolConstant(in size_t offset, in bool value) {
+        emit(&opConstant, offset, addConstant(value ? 1 : 0), 1);
     }
 
     private Instruction.Handler comparisonHandler(
