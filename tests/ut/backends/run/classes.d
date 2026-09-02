@@ -258,6 +258,28 @@ unittest {
     });
 }
 
+@("scopeClassRunsDestructorAtScopeExit.Interpreter")
+@Tags(Interpreter.stringof)
+unittest {
+    0.shouldBeStatusOf!(Interpreter, q{
+        int destructions;
+
+        scope class Resource {
+            ~this() {
+                ++destructions;
+            }
+        }
+
+        void main() {
+            {
+                scope Resource resource = new Resource;
+            }
+
+            assert(destructions == 1);
+        }
+    });
+}
+
 // A call through an interface reference finds the class's override, which
 // needs the interface's own offset rather than the class vtable.
 static foreach (backend; Matrix!(
