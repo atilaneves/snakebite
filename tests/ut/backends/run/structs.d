@@ -623,3 +623,158 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
         });
     }
 }
+
+// A constructor call nested inside another constructor call's argument,
+// where the inner constructor's own body calls an ordinary function
+// before it is done. The interpreter reserves the inner temporary's
+// frame slot before that ordinary call runs, and the slot must still be
+// there - not reused for the ordinary call's own frame - when the
+// constructor resumes writing to it afterward.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("structCtorCallBodyCallsAnotherFunctionBeforeFinishing." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            size_t helper(size_t n) {
+                return n + 100;
+            }
+
+            struct Part {
+                size_t count;
+                size_t extra;
+
+                this(size_t n) {
+                    count = n;
+                    extra = helper(99);
+                }
+            }
+
+            struct Whole {
+                ubyte tag;
+                Part part;
+            }
+
+            void main() {
+                auto whole = Whole(2, Part(7));
+
+                assert(whole.part.count == 7);
+                assert(whole.part.extra == 199);
+                assert(whole.tag == 2);
+            }
+        });
+    }
+}
+
+// A constructor that throws partway through, caught by its caller: the
+// temporary frame slot the interpreter reserved for the hidden `this`
+// must still be released, or it leaks for the rest of the run. A later,
+// unrelated recursive call is run afterward to disturb the frame stack
+// where that leaked slot would have been, and the same construction is
+// then repeated to check its zero-initialization was not skipped by a
+// stale cache entry from the failed attempt.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("structCtorCallThrowDoesNotLeakItsSlot." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Part {
+                size_t count;
+                size_t sometimes;
+
+                this(size_t n) {
+                    if (n == 0)
+                        throw new Exception("zero");
+                    count = n;
+                    if (n > 100)
+                        sometimes = n;
+                }
+            }
+
+            struct Whole {
+                ubyte tag;
+                Part part;
+            }
+
+            size_t make(size_t n) {
+                auto w = Whole(2, Part(n));
+                return w.part.sometimes;
+            }
+
+            size_t scribble(
+                size_t a, size_t b, size_t c, size_t d, size_t depth,
+            ) {
+                if (depth == 0)
+                    return a;
+                return scribble(a, b, c, d, depth - 1);
+            }
+
+            void main() {
+                try {
+                    make(0);
+                    assert(false);
+                } catch (Exception e) {}
+
+                scribble(0xDEAD, 0xDEAD, 0xDEAD, 0xDEAD, 20);
+
+                assert(make(5) == 0);
+            }
+        });
+    }
+}
+
+// A constructor's own body recursively calls back into the very same
+// call site that is mid-construction of it - the same
+// `Whole(2, Part(n))` syntax node, revisited before its outer activation
+// is done with it. The interpreter must give the inner activation its
+// own frame slot rather than serve it the outer, still-live one.
+//
+// `make` is a delegate variable, assigned only after `Part` and `Whole`
+// are declared, rather than an ordinary function declared below them:
+// `shouldBeRetOf`'s own native comparison mixes this snippet into a
+// function body to run it as compiled D, and a nested function cannot
+// forward-reference another nested function the way two module-level
+// declarations can. Referring to an already-visible variable sidesteps
+// that, without changing what the interpreter is being asked to do -
+// call back into the same construction site while it is still running.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a closure's captured variable at compile " ~
+        "time - `make` is exactly that, the trampoline this test uses " ~
+        "so two nested declarations can refer to each other despite " ~
+        "`shouldBeRetOf`'s own native comparison mixing this snippet " ~
+        "into a function body, where a nested declaration cannot " ~
+        "forward-reference another one the way two module-level " ~
+        "declarations can"),
+)) {
+    @("structCtorCallReentersItsOwnConstructionSite." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.shouldBeRetOf!(backend, q{
+            size_t delegate(size_t) make;
+
+            struct Part {
+                size_t count;
+
+                this(size_t n) {
+                    count = n == 0 ? 0 : make(n - 1) + 1;
+                }
+            }
+
+            struct Whole {
+                ubyte tag;
+                Part part;
+            }
+
+            int main() {
+                make = (size_t n) {
+                    auto w = Whole(2, Part(n));
+                    return w.part.count;
+                };
+
+                return cast(int) make(3);
+            }
+        }, "main");
+    }
+}
