@@ -740,13 +740,13 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot read a closure's captured variable at compile " ~
-        "time - `make` is exactly that, the trampoline this test uses " ~
-        "so two nested declarations can refer to each other despite " ~
-        "`shouldBeRetOf`'s own native comparison mixing this snippet " ~
-        "into a function body, where a nested declaration cannot " ~
-        "forward-reference another one the way two module-level " ~
-        "declarations can"),
+        "CTFE refuses to read a mutable static variable - `make` is " ~
+        "exactly that in the guest, where this snippet is a module and " ~
+        "`make` a module-level variable. The trampoline exists so the " ~
+        "constructor can call back into a declaration the harness's " ~
+        "native arm - which mixes this snippet into a function body, " ~
+        "where nested functions cannot forward-reference each other - " ~
+        "can still express"),
 )) {
     @("structCtorCallReentersItsOwnConstructionSite." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -776,5 +776,147 @@ static foreach (backend; Matrix!(
                 return cast(int) make(3);
             }
         }, "main");
+    }
+}
+
+// A method called on a constructor-call rvalue, where the method's own
+// body makes a further guest call. D keeps the rvalue temporary alive
+// until the end of the full expression, so `this` must still hold the
+// constructor's writes when the method reads `payload` - even though the
+// helper call in between reserves and fills a frame of its own.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("structCtorRvalueMethodBodyCallsHelper." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            long helper(long a, long b, long c, long d) {
+                return a + b + c + d;
+            }
+
+            struct Part {
+                long payload;
+
+                this(long payload) {
+                    this.payload = payload;
+                }
+
+                long describe() {
+                    // The helper call comes first and `payload` is read
+                    // after it returns, so the temporary holding `this`
+                    // must survive the helper's own frame coming and
+                    // going.
+                    return helper(4, 3, 2, 0) + payload;
+                }
+            }
+
+            void main() {
+                assert(Part(3000).describe() == 3009);
+            }
+        });
+    }
+}
+
+// A guest throw while an outer constructor call is still binding its
+// arguments: the inner `Q` temporary exists by the time `mayThrow`
+// throws, and the whole expression is abandoned. The temporary must be
+// released cleanly on that unwinding path, and a later construction must
+// then work as if the failed one never happened.
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("structCtorArgumentThrowDuringOuterArgumentBinding." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            long mayThrow(long n) {
+                if (n == 0)
+                    throw new Exception("zero");
+                return n;
+            }
+
+            struct Q {
+                long a;
+                long b;
+
+                this(long a, long b) {
+                    this.a = a;
+                    this.b = b;
+                }
+            }
+
+            struct W {
+                long tag;
+                Q q;
+                long total;
+
+                this(long tag, Q q) {
+                    this.tag = tag;
+                    this.q = q;
+                    // A guest call after the field writes: its frame must
+                    // not land on top of the temporary this constructor
+                    // is writing `this` into, so the fields must still be
+                    // intact when `total` sums them afterward.
+                    this.total = mayThrow(1) + this.tag + this.q.a
+                        + this.q.b;
+                }
+            }
+
+            // One function makes both attempts, so the second call runs
+            // the very same construction expression the first call
+            // abandoned mid-argument-binding.
+            long make(long tag, long a, long b) {
+                auto w = W(tag, Q(a, mayThrow(b)));
+                return w.tag + w.q.a + w.q.b + w.total;
+            }
+
+            void main() {
+                bool caught;
+                try {
+                    make(2, 1, 0);
+                } catch (Exception e) {
+                    caught = true;
+                }
+                assert(caught);
+
+                assert(make(3, 4, 5) == 25);
+            }
+        });
+    }
+}
+
+// Reading a field straight off a value-returning call, hundreds of
+// thousands of times: each iteration materializes a 4KiB temporary for
+// the call's result, and D destroys it at the end of that iteration's
+// full expression. A temporary that instead survives the statement leaks
+// its reservation every iteration and exhausts the frame stack well
+// before the loop is done.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed,
+        "not run: 300000 CTFE iterations, each copying a 4KiB struct, " ~
+        "take longer than a unit test can afford"),
+)) {
+    @("structValueCallFieldReadsDoNotExhaustFrameStack." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Big {
+                long[511] pad;
+                long count;
+            }
+
+            Big makeBig(long n) {
+                Big b;
+                b.count = n;
+                return b;
+            }
+
+            void main() {
+                long total;
+                foreach (i; 0 .. 300_000)
+                    total += makeBig(i).count;
+                assert(total == 299_999L * 300_000 / 2);
+            }
+        });
     }
 }
