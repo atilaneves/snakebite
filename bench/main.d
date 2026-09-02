@@ -300,7 +300,7 @@ private BackendReport benchmark(BackendType)(
             const result = captureStdout(() => backend.run(project.program));
             return BackendRound(result.status, result.output);
         },
-        write,
+        (message) => write(message),
         name,
         warmup,
         runs,
