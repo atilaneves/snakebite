@@ -41,6 +41,35 @@ static foreach (backend; Matrix!(
 }
 
 
+// A module constructor must run even when it calls a native function with an
+// interpreted delegate. A backend that refuses that call makes `run` skip
+// the constructor, so `initialized` stays false and `main` returns the
+// wrong status.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed),
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("moduleConstructorRunsBeforeMain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.runtime : Runtime;
+
+            __gshared bool initialized;
+
+            shared static this() {
+                Runtime.moduleUnitTester = () => true;
+                initialized = true;
+            }
+
+            int main() {
+                return initialized ? 0 : 1;
+            }
+        });
+    }
+}
+
+
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
