@@ -119,26 +119,43 @@ public abstract class Backend {
 // once on top of `call`, and return the exit status. A `Throwable` that
 // escapes is handled as druntime would handle it: printed, exit status 1.
 public int run(Backend backend, Program program) {
-    if (runModuleConstructors(backend, program.moduleConstructors))
+    const constructorResult =
+        runModuleConstructors(backend, program.moduleConstructors);
+
+    if (constructorResult == ConstructorResult.failed)
         return 1;
 
-    return runMain(backend, program.main.func);
+    const status = runMain(backend, program.main.func);
+
+    if (constructorResult == ConstructorResult.skipped)
+        return 1;
+
+    return status;
 }
 
 // Constructors that require code from a dependency image cannot run in the
-// interpreter until that image exists. Keep running the program, but report
-// every skipped constructor loudly so it cannot look like successful startup.
-private int runModuleConstructors(
+// interpreter until that image exists. Keep running the program so a
+// caller can inspect partial results, but make the run fail if any required
+// startup work was skipped.
+private enum ConstructorResult {
+    succeeded,
+    skipped,
+    failed,
+}
+
+private ConstructorResult runModuleConstructors(
     Backend backend,
     imported!"dmd.func".FuncDeclaration[] constructors,
 ) {
     import snakebite.exception: SnakebiteException;
     import std.stdio: stderr;
 
+    auto result = ConstructorResult.succeeded;
     foreach (constructor; constructors) {
         try
             backend.call(constructor, null, []);
         catch (SnakebiteException exception) {
+            result = ConstructorResult.skipped;
             stderr.writeln(
                 "snakebite: skipping module constructor `",
                 constructor.toString,
@@ -153,11 +170,11 @@ private int runModuleConstructors(
                 "` failed: ",
                 throwable.msg,
             );
-            return 1;
+            return ConstructorResult.failed;
         }
     }
 
-    return 0;
+    return result;
 }
 
 // The program's own `main`. `void main` maps to exit status 0, and no `main`
