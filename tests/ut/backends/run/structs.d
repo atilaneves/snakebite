@@ -1116,3 +1116,101 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// dmd lowers `foreach (x; Range(...))` to
+// `Range __aggr4 = Range(...); try { for (...) { ... } } finally
+// { __aggr4.__dtor(); }` - `__aggr4` is `STC.temp` with a non-null
+// `edtor`, the same as an `addDtorHook` temporary, but its declaration
+// is the whole statement, not a fragment of a larger one, and its
+// destructor is already called explicitly by the `finally`. Registering
+// it a second time from the declaration would destroy the range twice.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("foreachRangeTemporaryDestroyedOnceByItsOwnFinally." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Range {
+                int* dtors;
+                int i;
+
+                ~this() {
+                    ++*dtors;
+                }
+
+                bool empty() {
+                    return i >= 3;
+                }
+
+                int front() {
+                    return i;
+                }
+
+                void popFront() {
+                    ++i;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                int sum = 0;
+                foreach (x; Range(&dtors, 0))
+                    sum += x;
+                assert(dtors == 1);
+                assert(sum == 3);
+            }
+        });
+    }
+}
+
+// dmd lowers `T(&dtors, true).get()`, where `T` has a user-defined
+// constructor, to
+// `((T __slT6 = T(null);), __slT6).__ctor(&dtors, true).get()`: the
+// declaration only default-initializes the temporary, and the real
+// construction is a separate, fallible `__ctor` call afterward. When
+// that call throws, the temporary was never actually constructed, so
+// native D does not run its destructor for it - registering the
+// destructor at the declaration, before the constructor call that can
+// still fail, would run it anyway.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("temporaryWithThrowingConstructorRunsNoDestructor." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T {
+                int* dtors;
+
+                this(int* d, bool doThrow) {
+                    dtors = d;
+                    if (doThrow) throw new Exception("ctor");
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                int get() {
+                    return 5;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                bool caught;
+                try
+                    T(&dtors, true).get();
+                catch (Exception e)
+                    caught = true;
+                assert(caught);
+                assert(dtors == 0);
+            }
+        });
+    }
+}

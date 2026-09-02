@@ -270,6 +270,16 @@ extern(C++) private final class Evaluator: Visitor {
     // entry belongs to an activation further out on the call stack -
     // only the pairing within its own full expression is visible to it.
     private size_t _temporariesFloor;
+    // The expression `runFullExpression` was last handed directly - not
+    // some node reached later by walking into it. A `DeclarationExp` this
+    // interpreter is about to visit compares itself against it (see
+    // `registerPendingDestructorIfTemporary`) to tell apart dmd's two uses
+    // of a `STC.temp` variable: one where the declaration is the entire
+    // statement (a `foreach` range's `__aggr4`, with its own explicit
+    // scope-exit destructor call elsewhere in the AST), and one where it
+    // is only a piece of a larger expression (`addDtorHook`'s
+    // `(T __slT1 = ..., __slT1)`, with no destructor call anywhere else).
+    private Expression _fullExpressionRoot;
     // The most recently asked-about `Type` and its facts: dmd interns
     // basic types, so a loop revisiting the same `int` node hits this
     // every time - a pointer compare instead of an AA hash lookup - and
@@ -1120,9 +1130,12 @@ extern(C++) private final class Evaluator: Visitor {
     private void runFullExpression(Expression expression) {
         const mark = _temporaries.length;
         const previousFloor = raiseTemporariesFloor(mark);
+        auto previousRoot = _fullExpressionRoot;
+        _fullExpressionRoot = expression;
         scope(exit) {
             releaseTemporariesSince(mark);
             _temporariesFloor = previousFloor;
+            _fullExpressionRoot = previousRoot;
         }
         runForEffect(expression);
     }
@@ -2058,25 +2071,97 @@ extern(C++) private final class Evaluator: Visitor {
         } else
             evaluate(value, variable.type, slot);
 
-        registerPendingDestructorIfTemporary(variable);
+        registerPendingDestructorIfTemporary(variable, expression);
     }
 
-    // A statement-level local's own scope-exit destructor call is already
-    // an explicit AST node dmd's semantic pass wrapped its enclosing block
-    // in (`try { ... } finally { local.__xdtor(); }`), which
-    // `visit(TryFinallyStatement)` already runs with no help from here.
-    // `STC.temp` marks the other case: a variable dmd itself introduced
-    // mid-expression to hold a struct-with-a-destructor rvalue that would
-    // otherwise have no variable of its own to hang a destructor call on
-    // (`addDtorHook` in dmd's `expressionsem.d`, e.g. `Tracked(...).method()`
-    // becoming `(Tracked __slTracked1 = Tracked(...); , __slTracked1)`).
-    // dmd builds that destructor call the same way, but only records it as
-    // `VarDeclaration.edtor` rather than an explicit AST node, since the
-    // variable's scope is the enclosing full expression, not a block this
-    // interpreter already walks - so it is registered here instead, to run
-    // when that full expression's statement releases its temporaries.
-    private void registerPendingDestructorIfTemporary(VarDeclaration variable) {
+    // `STC.temp` alone does not say who owns a variable's destructor
+    // call: dmd sets it on two different shapes, only one of which needs
+    // registering here.
+    //
+    // `addDtorHook` (dmd's `expressionsem.d`) builds the first shape
+    // mid-expression, to hold a struct-with-a-destructor rvalue that
+    // would otherwise have no variable of its own to hang a destructor
+    // call on (`Tracked(...).method()` becoming
+    // `(Tracked __slTracked1 = Tracked(...), __slTracked1)`). Its
+    // `DeclarationExp` is always a fragment of a larger expression - the
+    // left side of that `CommaExp` - never the full expression by
+    // itself, and dmd records its destructor call only as
+    // `VarDeclaration.edtor`, with no explicit AST node calling it. That
+    // is exactly the gap this method fills, registering it to run when
+    // the enclosing full expression's statement releases its temporaries.
+    //
+    // A `foreach` over a range with a destructor builds the second
+    // shape: the range temporary (`Range __aggr4 = Range(...);`) is also
+    // `STC.temp` with a non-null `edtor`, but its `DeclarationExp` *is*
+    // the whole statement, and dmd wraps the loop that follows in its
+    // own explicit `try { ... } finally { __aggr4.__dtor(); }`, which
+    // `visit(TryFinallyStatement)` already runs unaided. Registering
+    // `__aggr4`'s destructor here too would run it twice. Comparing this
+    // declaration against `_fullExpressionRoot` (its own doc comment)
+    // tells the two shapes apart: `addDtorHook`'s declaration never is
+    // that root, `__aggr4`'s always is.
+    //
+    // A struct with a user-defined constructor adds a third wrinkle to
+    // `addDtorHook`'s shape: dmd default-initializes the temporary in
+    // this declaration and calls the constructor as a separate,
+    // fallible statement afterward
+    // (`((T __slT6 = T(null);), __slT6).__ctor(args)`), so the value is
+    // not actually constructed yet when this declaration runs -
+    // registering its destructor now would run it even when that later
+    // constructor call throws before ever finishing building the value.
+    // Construction is only complete once that call returns, so this
+    // leaves it unregistered and defers to the ctor-call handling in
+    // `visit(CallExp)` instead. A plain literal (no user constructor)
+    // has no such follow-up call - its declaration's own initializer
+    // already is the whole value - so it keeps registering here.
+    private void registerPendingDestructorIfTemporary(
+        VarDeclaration variable,
+        DeclarationExp expression,
+    ) {
         import dmd.astenums: STC;
+
+        if (!(variable.storage_class & STC.temp) || variable.edtor is null)
+            return;
+
+        if (expression is _fullExpressionRoot)
+            return;
+
+        auto structType = variable.type.isTypeStruct;
+        if (structType !is null && structType.sym.ctor !is null)
+            return;
+
+        registerPendingDestructor(variable.edtor);
+    }
+
+    // Registers `variable`'s destructor once its own constructor call
+    // has actually finished - see `registerPendingDestructorIfTemporary`
+    // for the shape this completes: a `STC.temp` variable whose
+    // declaration only default-initializes it, leaving a separate
+    // `__ctor` call (this one) to do the real construction. `receiver`
+    // is that call's `expression.e1`, still wearing the `CommaExp` dmd
+    // wrapped the declaration and the variable's own name in
+    // (`(T __slT6 = T(null);), __slT6`); unwrapping it to the `VarExp`
+    // on the right names the same variable the declaration reserved
+    // storage for. A call that is not this shape - a constructor called
+    // directly on a named local, say - has nothing to unwrap down to a
+    // `VarExp` with a pending, unregistered destructor, so it is left
+    // alone here exactly as `registerPendingDestructorIfTemporary`
+    // already left it.
+    private void registerPendingDestructorForConstructedTemporary(
+        Expression receiver,
+    ) {
+        import dmd.astenums: STC;
+
+        if (auto comma = receiver.isCommaExp)
+            receiver = comma.e2;
+
+        auto var = receiver.isVarExp;
+        if (var is null)
+            return;
+
+        auto variable = var.var.isVarDeclaration;
+        if (variable is null)
+            return;
 
         if ((variable.storage_class & STC.temp) && variable.edtor !is null)
             registerPendingDestructor(variable.edtor);
@@ -4406,10 +4491,20 @@ extern(C++) private final class Evaluator: Visitor {
             );
             return;
         }
+        auto isCtorCall = function_.isCtorDeclaration() !is null;
         executeCall(
-            function_, _place, frame.base, layout, expression,
-            function_.isCtorDeclaration() !is null,
+            function_, _place, frame.base, layout, expression, isCtorCall,
         );
+
+        // Only reached once the constructor call above has returned
+        // without throwing - see
+        // `registerPendingDestructorForConstructedTemporary`'s own doc
+        // comment for the temporary this completes registration for.
+        if (isCtorCall) {
+            auto dot = expression.e1.isDotVarExp;
+            if (dot !is null)
+                registerPendingDestructorForConstructedTemporary(dot.e1);
+        }
     }
 
     private void* nativeVirtualAddress(
