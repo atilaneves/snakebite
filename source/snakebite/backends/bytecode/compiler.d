@@ -340,16 +340,13 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         }
 
         // A struct method's hidden `this` is a pointer to the receiver. A
-        // nested function and a class method use the same DMD slot for a
-        // different context, so keep those outside this backend's scope.
+        // nested function uses the same DMD slot for its static chain, which
+        // the bytecode frame now carries as a context pointer. Class methods
+        // still need virtual dispatch and remain outside this scope.
         if (function_.vthis !is null
-                && (function_.isThis is null
-                    || function_.isThis.isStructDeclaration is null)) {
-            auto literal = function_.isFuncLiteralDeclaration;
-            if (literal is null || literal.outerVars.length != 0
-                    || literal.needsClosure)
-                throw rejection(function_, function_.loc, "a method");
-        }
+                && function_.isThis !is null
+                && function_.isThis.isStructDeclaration is null)
+            throw rejection(function_, function_.loc, "a class method");
 
         auto functionType = typeFunctionOf(function_);
         auto returnType = function_.type.nextOf;
@@ -429,7 +426,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         UnrolledLoopStatement, WhileStatement;
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
-        Arg, AssertSite, CallSite, discardResult, ExceptionHandler, Function,
+        Arg, AssertSite, CallSite, ClosureSlot, discardResult,
+        ExceptionHandler, Function,
         Instruction,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
@@ -452,7 +450,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opSubtract, opZero;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf;
-    import snakebite.backends.layout: FrameLayout;
+    import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout:
         alignUp, isIntegralSize, storeValue, TypeFacts;
@@ -464,6 +462,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private Bytecode _bytecode;
     private FuncDeclaration _function;
     private const FrameLayout _layout;
+    private ClosureLayout _closureLayout;
     private TypeFacts _returnFacts;
     private bool _isVoidReturn;
     // Whether this function returns by `ref`: `compileReturn` then compiles
@@ -480,6 +479,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
+    private size_t _closureOffset = size_t.max;
     private struct StaticSlot {
         private size_t _offset;
     }
@@ -545,6 +545,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _isRefReturn = isRefReturn;
         _tempSize = layout.size;
         _tempAlignment = layout.alignment;
+
+        import dmd.funcsem: needsClosure;
+        if (function_.needsClosure()) {
+            _closureLayout = ClosureLayout.of(function_);
+            _closureOffset = reserveTemp(pointerFacts);
+        }
     }
 
     public Function build(Statement body_) {
@@ -578,11 +584,26 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto staticData = allocateStaticData;
         resolveStaticAddresses(staticData);
 
+        ClosureSlot[] closureSlots;
+        if (_closureOffset != size_t.max)
+            foreach (variable; _function.closureVars) {
+                const slot = _closureLayout.slotOf(variable);
+                closureSlots ~= ClosureSlot(
+                    _layout.offsetOf(variable), slot.offset, slot.facts.size,
+                );
+            }
+
+        const contextOffset = _layout.hiddenThis.variable is null
+            ? size_t.max : _layout.hiddenThis.parameter.offset;
         return Function(
             _instructions, _constants, _callSites, _assertSites,
             exceptionHandlers,
             staticData,
             _tempSize, _tempAlignment,
+            _closureOffset, contextOffset,
+            _closureOffset == size_t.max ? 0 : _closureLayout.size,
+            _closureOffset == size_t.max ? 1 : _closureLayout.alignment,
+            closureSlots,
         );
     }
 
@@ -1133,6 +1154,25 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
+        if (isClosureVariable(variable)) {
+            const slot = _closureLayout.slotOf(variable);
+            const target = closureSlotAddress(slot.offset);
+            if (slot.isRef) {
+                const addressOffset = compileAddress(initializerValueOf(
+                    expInitializer));
+                emit(&opStoreIndirect, target, addressOffset,
+                    size_t.sizeof);
+            } else {
+                const valueOffset = reserveTemp(facts);
+                evalInto(
+                    nativeAggregateReturn ? initializer : expInitializer.exp,
+                    valueOffset, facts.size,
+                );
+                emit(&opStoreIndirect, target, valueOffset, facts.size);
+            }
+            return;
+        }
+
         const offset = _layout.offsetOf(variable);
 
         // `foreach (ref value; values) ...` declares `value` afresh each
@@ -1293,6 +1333,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (_layout.isRef(variable))
             return compileIndirectAssign(expression, varExp, destOffset);
 
+        if (!_layout.hasSlot(variable) || isClosureVariable(variable)) {
+            const refOffset = addressOfVariable(variable);
+            const valueOffset = reserveTemp(facts);
+            evalInto(expression.e2, valueOffset, facts.size);
+            emit(&opStoreIndirect, refOffset, valueOffset, facts.size);
+
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, facts.size);
+            return;
+        }
+
         const targetOffset = _layout.offsetOf(variable);
 
         // A postfix expression yields the old value, but also increments
@@ -1330,6 +1381,138 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return thisAggregate !is null
             && thisAggregate.isStructDeclaration !is null
             && aggregate is thisAggregate;
+    }
+
+    private bool isClosureVariable(VarDeclaration variable) const {
+        return _closureOffset != size_t.max
+            && _closureLayout.hasSlot(variable);
+    }
+
+    private FuncDeclaration outerFunctionOf(VarDeclaration variable) const {
+        auto parent = variable.toParent2();
+        return parent is null ? null : parent.isFuncDeclaration;
+    }
+
+    private bool functionNeedsClosure(FuncDeclaration function_) const {
+        import dmd.funcsem: needsClosure;
+
+        return function_.needsClosure();
+    }
+
+    private size_t addPointerOffset(
+        in size_t pointerOffset,
+        in size_t byteOffset,
+    ) {
+        if (byteOffset == 0)
+            return pointerOffset;
+
+        const offset = reserveTemp(pointerFacts);
+        emit(&opConstant, offset, addConstant(cast(long) byteOffset),
+            size_t.sizeof);
+        emit(&opAdd, pointerOffset, offset, size_t.sizeof);
+        return pointerOffset;
+    }
+
+    // The context of `owner`, as a pointer value in a temporary frame slot.
+    // A closure's first word links to its parent context. A non-closure
+    // nested frame stores that link in its hidden `vthis` slot.
+    private size_t contextAddressOf(FuncDeclaration owner) {
+        if (owner is _function) {
+            if (_closureOffset != size_t.max)
+                return _closureOffset;
+
+            const result = reserveTemp(pointerFacts);
+            emit(&opFrameAddress, result, 0, size_t.sizeof);
+            return result;
+        }
+
+        auto parent = _function.toParent2();
+        auto current = parent is null ? null : parent.isFuncDeclaration;
+        if (current is null)
+            throw rejection(_function, _function.loc, "a static chain");
+
+        const result = reserveTemp(pointerFacts);
+        emit(&opCopy, result,
+            _layout.hiddenThis.parameter.offset, size_t.sizeof);
+
+        while (current !is owner) {
+            if (functionNeedsClosure(current)) {
+                emit(&opLoadIndirect, result, result, size_t.sizeof);
+            } else {
+                const layout = FrameLayout.of(current);
+                if (layout.hiddenThis.variable is null)
+                    throw rejection(_function, _function.loc,
+                        "a static chain");
+
+                const offset = reserveTemp(pointerFacts);
+                emit(&opConstant, offset,
+                    addConstant(cast(long)
+                        layout.hiddenThis.parameter.offset), size_t.sizeof);
+                emit(&opAdd, result, offset, size_t.sizeof);
+                emit(&opLoadIndirect, result, result, size_t.sizeof);
+            }
+
+            auto next = current.toParent2();
+            current = next is null ? null : next.isFuncDeclaration;
+            if (current is null)
+                throw rejection(_function, _function.loc, "a static chain");
+        }
+
+        return result;
+    }
+
+    // The address of a variable's storage as a pointer value in a frame
+    // slot. A ref variable is indirected here, so all callers see the
+    // storage it refers to rather than its pointer slot.
+    private size_t addressOfVariable(VarDeclaration variable) {
+        if (isClosureVariable(variable)) {
+            const slot = _closureLayout.slotOf(variable);
+            auto result = closureSlotAddress(slot.offset);
+            if (slot.isRef)
+                emit(&opLoadIndirect, result, result, size_t.sizeof);
+            return result;
+        }
+
+        auto owner = outerFunctionOf(variable);
+        if (owner is _function) {
+            if (_layout.isRef(variable))
+                return _layout.offsetOf(variable);
+
+            const result = reserveTemp(pointerFacts);
+            emit(&opFrameAddress, result, _layout.offsetOf(variable),
+                size_t.sizeof);
+            return result;
+        }
+
+        if (owner is null)
+            throw rejection(_function, variable.loc, "a local variable");
+
+        auto context = contextAddressOf(owner);
+        if (functionNeedsClosure(owner)) {
+            const closure = ClosureLayout.of(owner);
+            if (closure.hasSlot(variable)) {
+                const slot = closure.slotOf(variable);
+                context = addPointerOffset(context, slot.offset);
+                if (slot.isRef)
+                    emit(&opLoadIndirect, context, context, size_t.sizeof);
+                return context;
+            }
+        }
+
+        const layout = FrameLayout.of(owner);
+        if (!layout.hasSlot(variable))
+            throw rejection(_function, variable.loc, "a local variable");
+
+        context = addPointerOffset(context, layout.offsetOf(variable));
+        if (layout.isRef(variable))
+            emit(&opLoadIndirect, context, context, size_t.sizeof);
+        return context;
+    }
+
+    private size_t closureSlotAddress(in size_t offset) {
+        const closure = reserveTemp(pointerFacts);
+        emit(&opCopy, closure, _closureOffset, size_t.sizeof);
+        return addPointerOffset(closure, offset);
     }
 
     private size_t hiddenThisOffset(VarDeclaration variable = null) {
@@ -1500,13 +1683,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        // A `ref` target's own slot holds its storage's address, not the
-        // storage: the current value is read through it into a temporary,
-        // combined there, and written back the same way - `opCopy` on the
-        // slot itself would combine into the address, not the value it
-        // points at.
-        if (_layout.isRef(variable)) {
-            const refOffset = _layout.offsetOf(variable);
+        // A `ref` target, a captured variable, or a variable in an outer
+        // frame is reached through its storage address. Read and write
+        // through that address so the operation changes the variable's
+        // value, not a context pointer or a ref slot.
+        if (!_layout.hasSlot(variable) || isClosureVariable(variable)
+                || _layout.isRef(variable)) {
+            const refOffset = addressOfVariable(variable);
             const valueOffset = reserveTemp(facts);
             emit(&opLoadIndirect, valueOffset, refOffset, facts.size);
             emit(handler, valueOffset, rightOffset, facts.size);
@@ -1585,6 +1768,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 ? &opAdd : &opSubtract;
             emit(handler, valueOffset, stepOffset, facts.size);
             emitStaticStore(variable, valueOffset, facts.size);
+            return;
+        }
+
+        if (!_layout.hasSlot(variable) || isClosureVariable(variable)) {
+            const refOffset = addressOfVariable(variable);
+            const valueOffset = reserveTemp(facts);
+            emit(&opLoadIndirect, valueOffset, refOffset, facts.size);
+
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, facts.size);
+
+            const stepOffset = reserveTemp(facts);
+            evalInto(expression.e2, stepOffset, facts.size);
+
+            auto handler = expression.op == EXP.plusPlus
+                ? &opAdd : &opSubtract;
+            emit(handler, valueOffset, stepOffset, facts.size);
+            emit(&opStoreIndirect, refOffset, valueOffset, facts.size);
             return;
         }
 
@@ -1750,6 +1951,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // stands for around evaluating the index expression it appears in.
         if (variable is _dollarVariable) {
             emit(&opCopy, _destination, _dollarOffset, _width);
+            return;
+        }
+
+        if (!_layout.hasSlot(variable) || isClosureVariable(variable)) {
+            const address = addressOfVariable(variable);
+            emit(&opLoadIndirect, _destination, address, _width);
             return;
         }
 
@@ -2956,7 +3163,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const isConstructor = callee.isCtorDeclaration !is null;
         if (callee.vthis !is null) {
             size_t thisOffset;
-            if (isConstructor) {
+            if (callee.isThis is null) {
+                auto parent = callee.toParent2();
+                auto parentFunction = parent is null
+                    ? null : parent.isFuncDeclaration;
+                if (parentFunction is null)
+                    throw rejection(_function, expression.loc,
+                        "a static chain");
+                thisOffset = contextAddressOf(parentFunction);
+            } else if (isConstructor) {
                 if (destOffset == discardResult)
                     throw rejection(_function, expression.loc,
                         expressionText(expression));
@@ -3192,25 +3407,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         throw rejection(_function, expression.loc, expressionText(expression));
-    }
-
-    // `variable`'s own address, as a run-time pointer value left in a
-    // fresh temporary: a `ref` variable's slot already holds the address
-    // it is bound to, so that slot's own offset already answers the
-    // question; a value variable's address is its frame slot's own
-    // address, computed fresh by `opFrameAddress` since the frame this
-    // compiled function runs in only exists at run time. Shared by
-    // `compileAddress`'s own `VarExp` case and `visit(SymOffExp)`, dmd's
-    // own node for `&variable` written directly rather than through a
-    // `VarExp`.
-    private size_t addressOfVariable(VarDeclaration variable) {
-        if (_layout.isRef(variable))
-            return _layout.offsetOf(variable);
-
-        const offset = reserveTemp(pointerFacts);
-        emit(&opFrameAddress, offset, _layout.offsetOf(variable),
-            size_t.sizeof);
-        return offset;
     }
 
     // Calls druntime's allocator for `size` bytes and leaves the resulting
