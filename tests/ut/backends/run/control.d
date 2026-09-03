@@ -14,8 +14,7 @@ import ut.backends;
 static foreach (backend; Matrix!(
     // `foreach (value; [0u, 1u, 3u])` lowers to a `uint[3]` static array
     // local, not the `switch` this test means to exercise - static
-    // arrays are a separate, unimplemented backend feature (tracked on
-    // the `bytecode-static-arrays` branch).
+    // arrays are a separate, unimplemented backend feature.
     Omit!(Bytecode, Because.unconfirmed, "static arrays are unimplemented"),
 )) {
     @("switchDispatchesAndFallsThrough." ~ backend.stringof)
