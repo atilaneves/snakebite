@@ -1,3 +1,2 @@
-# The interpreter cannot call an interpreted function back from native code
-# yet; see issue #9.
 dmd
+interpreter
