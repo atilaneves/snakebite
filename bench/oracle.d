@@ -14,9 +14,9 @@ enum oracleName = "dmd";
 // Not a `Backend`: the real workflow, spawned as subprocesses, always the
 // `dmd` binary (never `$DC`) so the numbers don't shift with CI's compiler
 // matrix. `dmd -o-` (parse+sema) is measured once as the `compile` cell,
-// mirroring the in-process backends' compile step; each round then measures
-// the developer's edit-to-test cycle and subtracts that baseline, leaving
-// codegen+link+run - what the in-process rows' min/median measure.
+// mirroring the in-process backends' compile step. Each `run` measurement is
+// the complete developer edit-to-test cycle, including compilation, as it is
+// for the in-process backends.
 //
 // For a dub project the cycle is: a throw-away `dub test` build first so the
 // dependencies are compiled and cached, then per round touch a project
@@ -90,7 +90,7 @@ BackendReport oracleReport(
             continue;
 
         compileTimes ~= compileElapsed;
-        times ~= elapsed - compileElapsed;
+        times ~= elapsed;
 
         if (result.ramBytes > report.ramBytes)
             report.ramBytes = result.ramBytes;
