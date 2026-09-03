@@ -51,7 +51,6 @@ static foreach (backend; Matrix!(
 // writing through the result does not change either operand, and writing
 // through an operand afterwards does not change the result.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -88,7 +87,6 @@ static foreach (backend; Matrix!(
 // leaves the original alone, which a backend returning the same
 // (ptr, length) pair would not.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -252,4 +250,3 @@ static foreach (backend; Matrix!(
         });
     }
 }
-

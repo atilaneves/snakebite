@@ -4,7 +4,7 @@ module snakebite.backends.bytecode.compiler;
 private:
 
 import dmd.mtype: Type;
-import object: TypeInfo, TypeInfo_Array, TypeInfo_Class;
+import object: TypeInfo, TypeInfo_Array, TypeInfo_Class, TypeInfo_Struct;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.ffi:
     BoolFunction, BoolFunctionEntry, BoolFunctionTarget, maxArguments, PlanCache;
@@ -261,6 +261,16 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         import dmd.astenums: Tclass;
         if (type.ty == Tclass)
             return cast(TypeInfo) cast() TypeInfo_Class.find(type.toString);
+
+        if (auto structType = type.isTypeStruct) {
+            auto info = new TypeInfo_Struct;
+            info.m_init = new byte[](structType.sym.structsize);
+            info.m_align = structType.sym.alignsize;
+            if (structType.sym.hasPointerField)
+                info.m_flags = TypeInfo_Struct.StructFlags.hasPointers;
+            _typeInfoRoots ~= info;
+            return info;
+        }
 
         if (type.ty == Tarray) {
             auto info = new TypeInfo_Array;
@@ -873,15 +883,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // time when it is false and otherwise falls through - the only two
     // things D's own assertion semantics call for.
     //
-    // dmd gives an `AssertExp` whose condition it can already prove false at
-    // compile time (`assert(0)`, `assert(false)`, `assert(1 == 2)`) the
-    // `noreturn` type for flow analysis, but that changes nothing about how
-    // this compiles: with asserts enabled - `useAssert == CHECKENABLE.off`
-    // is what turns one into a plain trap (dmd's own `HaltExp`, a different
-    // node this compiler never sees here) - it still throws the same
-    // `AssertError` at the same instant a call to `fail()` returning `false`
-    // would, so `opAssert` handles both without asking which one this is.
     private void compileAssert(AssertExp expression) {
+        import dmd.astenums: Tnoreturn;
         import std.conv: text;
         import std.string: fromStringz;
 
@@ -895,6 +898,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         );
         _assertSites ~= site;
         emit(&opAssert, conditionOffset, _assertSites.length - 1, width);
+        _finished = expression.type.ty == Tnoreturn;
     }
 
     // Only the branch taken at run time ever executes - the other one, if
@@ -1400,7 +1404,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 expressionText(expression));
 
         const facts = TypeFacts.of(expression.e1.type);
-        if (!isSupportedElementFacts(facts, expression.e1.type))
+        if (!isSupportedFacts(facts, expression.e1.type))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -1572,179 +1576,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(handler, varOffset, stepOffset, facts.size);
     }
 
-    // `arr ~= x;`/`arr ~= other;`: dmd's semantic pass, not this compiler,
-    // decides which of druntime's own growth hooks the guest needs -
-    // `_d_arrayappendcTX` for one element, `_d_arrayappendT` for a whole
-    // slice - and leaves the resolved `FuncDeclaration` reachable on
-    // `expression.lowering`'s own call node (`CatAssignExp.lowering` in
-    // dmd's `expressionsem.d`). `findLoweredCallee` only reads that
-    // declaration back out; the arguments this compiler passes it are
-    // built fresh from `expression.e1`/`e2` themselves; the appended
-    // storage always grows through that real, already-compiled druntime
-    // call, never a private growth algorithm of this compiler's own.
-    private void compileCatAssign(CatAssignExp expression, in size_t destOffset) {
-        import dmd.tokens: EXP;
-
-        auto hook = findLoweredCallee(expression.lowering);
-        if (hook is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        if (expression.op == EXP.concatenateElemAssign)
-            return compileElementAppend(expression, hook, destOffset);
-
-        if (expression.op == EXP.concatenateAssign)
-            return compileSliceAppend(expression, hook, destOffset);
-
-        throw rejection(_function, expression.loc, expressionText(expression));
-    }
-
-    private FuncDeclaration findLoweredCallee(Expression expression) {
-        if (expression is null)
-            return null;
-
-        if (auto call = expression.isCallExp)
-            return call.f;
-
-        if (auto comma = expression.isCommaExp) {
-            if (auto found = findLoweredCallee(comma.e1))
-                return found;
-            return findLoweredCallee(comma.e2);
-        }
-
-        return null;
-    }
-
-    // `arr ~= x;`: grows `arr` by one element through `_d_arrayappendcTX`,
-    // passed `arr`'s own address so the growth it may have to do - a new,
-    // larger block, when the old one has no room left to extend in place -
-    // lands back in `arr` itself, then writes `x` into the slot that
-    // growth made. `x` is evaluated *before* the call: `arr ~= arr[$-1] +
-    // 1` reads the pre-growth `$`, the same order dmd's own lowering
-    // already forces by extracting `x` into a temporary ahead of the call
-    // for exactly this reason (`extractSideEffect` in `expressionsem.d`).
-    private void compileElementAppend(
-        CatAssignExp expression, FuncDeclaration hook, in size_t destOffset,
-    ) {
-        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
-
-        const arrayFacts = TypeFacts.of(expression.e1.type);
-        if (!arrayFacts.isDynamicArray)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        auto elementType = expression.e1.type.nextOf;
-        const elementFacts = TypeFacts.of(elementType);
-        // `messages ~= "failure";` appends a whole `string` as one element
-        // of a `string[]` - the element itself is a dynamic array, not a
-        // scalar `isSupportedElementFacts` accepts elsewhere (a literal or
-        // `new T[](n)`'s own per-element default fill, which both need a
-        // single `long`-sized constant this two-word case cannot be).
-        // `opStoreIndirect` only ever memcpies the element's own bytes, so
-        // a two-word element is exactly as supported here as a one-word
-        // one.
-        if (!isSupportedElementFacts(elementFacts, elementType)
-                && !elementFacts.isDynamicArray)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        const valueOffset = reserveTemp(elementFacts);
-        evalInto(expression.e2, valueOffset, elementFacts.size);
-
-        const arrayAddressOffset = compileAddress(expression.e1);
-
-        const oneOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, oneOffset, addConstant(1), size_t.sizeof);
-
-        const(Function)* callee;
-        const(void)* nativePlan;
-        size_t arrayParameterOffset;
-        size_t countParameterOffset;
-        const compilesTemplate = hook.isInstantiated() !is null
-            && hook.fbody !is null && !_bytecode.hasNativeSymbol(hook);
-        if (compilesTemplate) {
-            import snakebite.backends.layout: FrameLayout;
-
-            callee = _bytecode.compileFunction(hook);
-            auto layout = FrameLayout.of(hook);
-            arrayParameterOffset = layout.parameters[0].offset;
-            countParameterOffset = layout.parameters[1].offset;
-        } else {
-            nativePlan = cast(const(void)*) &_bytecode._plans.of(hook);
-        }
-
-        _callSites ~= CallSite(
-            callee,
-            [
-                Arg(arrayAddressOffset, arrayParameterOffset, size_t.sizeof),
-                Arg(oneOffset, countParameterOffset, size_t.sizeof),
-            ],
-            0,
-            nativePlan,
-        );
-        emit(&opCall, discardResult, _callSites.length - 1, 0);
-
-        const grownOffset = reserveTemp(arrayFacts);
-        emit(&opLoadIndirect, grownOffset, arrayAddressOffset, arrayFacts.size);
-
-        const elementSizeOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, elementSizeOffset,
-            addConstant(cast(long) elementFacts.size), size_t.sizeof);
-
-        const byteOffsetOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, byteOffsetOffset, grownOffset + arrayLengthOffset,
-            size_t.sizeof);
-        emit(&opSubtract, byteOffsetOffset, oneOffset, size_t.sizeof);
-        emit(&opMultiply, byteOffsetOffset, elementSizeOffset, size_t.sizeof);
-
-        const elementAddressOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, elementAddressOffset, grownOffset + arrayPointerOffset,
-            size_t.sizeof);
-        emit(&opAdd, elementAddressOffset, byteOffsetOffset, size_t.sizeof);
-
-        emit(&opStoreIndirect, elementAddressOffset, valueOffset,
-            elementFacts.size);
-
-        if (destOffset != discardResult)
-            emit(&opCopy, destOffset, grownOffset, arrayFacts.size);
-    }
-
-    // `arr ~= other;`: grows `arr` in place through `_d_arrayappendT`,
-    // which copies `other`'s own elements into the room it made - this
-    // compiler never touches an element itself, the same as the single-
-    // element form above hands the element write to `opStoreIndirect`
-    // rather than druntime.
-    private void compileSliceAppend(
-        CatAssignExp expression, FuncDeclaration hook, in size_t destOffset,
-    ) {
-        const arrayFacts = TypeFacts.of(expression.e1.type);
-        const otherFacts = TypeFacts.of(expression.e2.type);
-        if (!arrayFacts.isDynamicArray || !otherFacts.isDynamicArray)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        const otherOffset = reserveTemp(otherFacts);
-        evalInto(expression.e2, otherOffset, otherFacts.size);
-
-        const arrayAddressOffset = compileAddress(expression.e1);
-
-        auto plan = &_bytecode._plans.of(hook);
-        _callSites ~= CallSite(
-            null,
-            [
-                Arg(arrayAddressOffset, 0, size_t.sizeof),
-                Arg(otherOffset, 0, otherFacts.size),
-            ],
-            0,
-            cast(const(void)*) plan,
-        );
-        emit(&opCall, discardResult, _callSites.length - 1, 0);
-
-        if (destOffset != discardResult)
-            emit(&opLoadIndirect, destOffset, arrayAddressOffset,
-                arrayFacts.size);
-    }
-
     // Compiles `expression`'s value into `frame[destOffset .. destOffset +
     // width]` - a literal, a parameter or local read, a nested call, a
     // nested assignment's own value (`return (sum = five());`), or any of
@@ -1852,6 +1683,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(VarExp expression) {
+        if (_destination == discardResult)
+            return;
+
         requireDestination(expression);
         auto variable = expression.var.isVarDeclaration;
         if (variable is null)
@@ -1979,6 +1813,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // reads out of that temporary at its own `field.offset`, laid out by
     // dmd's own native semantics rather than recomputed here.
     override void visit(DotVarExp expression) {
+        if (_destination == discardResult) {
+            const facts = TypeFacts.of(expression.type);
+            const offset = reserveTemp(facts);
+            evalInto(expression, offset, facts.size);
+            return;
+        }
+
         requireDestination(expression);
 
         auto field = expression.var.isVarDeclaration;
@@ -2180,6 +2021,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // work of computing where that element actually lives; this only adds
     // the load once that address is in hand.
     override void visit(IndexExp expression) {
+        if (_destination == discardResult) {
+            const elementFacts = TypeFacts.of(expression.type);
+            const offset = reserveTemp(elementFacts);
+            evalInto(expression, offset, elementFacts.size);
+            return;
+        }
+
         requireDestination(expression);
 
         const facts = TypeFacts.of(expression.e1.type);
@@ -2201,12 +2049,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileArrayLiteral(expression, _destination);
     }
 
-    // `new T[](n)`/`new T[n]`: dmd represents both spellings the same way,
-    // an allocation of `n` elements whose count is only known once this
-    // compiler evaluates `n` itself.
     override void visit(NewExp expression) {
-        requireDestination(expression);
-        compileNewArray(expression, _destination);
+        if (expression.lowering is null)
+            return visit(cast(Expression) expression);
+
+        expression.lowering.accept(this);
     }
 
     // `null`: pointers and class references are one zero word, while a
@@ -2288,6 +2135,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileAssign(expression, _destination);
     }
 
+    override void visit(ConstructExp expression) {
+        if (expression.lowering !is null) {
+            expression.lowering.accept(this);
+            return;
+        }
+
+        compileAssign(expression, _destination);
+    }
+
     // DMD lowers a dynamic-array length assignment to the druntime call
     // that owns allocation, prefix preservation, and the native array
     // representation. Compile that call instead of trying to infer the
@@ -2304,11 +2160,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileCompoundAssign(expression, _destination);
     }
 
-    // `~=`: more specific than `BinAssignExp`, whose own base class this
-    // is (`CatElemAssignExp`/`CatDcharAssignExp` in turn derive from this),
-    // so this takes priority over `visit(BinAssignExp)` for all three.
-    override void visit(CatAssignExp expression) {
-        compileCatAssign(expression, _destination);
+    override void visit(CatExp expression) {
+        if (expression.lowering is null)
+            return visit(cast(Expression) expression);
+
+        expression.lowering.accept(this);
     }
 
     override void visit(PostExp expression) {
@@ -2324,6 +2180,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(CastExp expression) {
+        if (expression.lowering !is null) {
+            expression.lowering.accept(this);
+            return;
+        }
+
         requireDestination(expression);
         compileCast(expression, _destination, _width);
     }
@@ -3337,24 +3198,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCall, resultOffset, siteIndex, 0);
     }
 
-    // `elementType`'s own `.init`, as the raw bits `opConstant` can write
-    // into an element slot directly - zero for most of the scalar types
-    // this compiler accepts, but not for `float`/`double`, whose `.init`
-    // is NaN, not zero, so a `new T[](n)`'s default fill cannot simply
-    // zero the block the way an integral element's default could.
-    private long defaultConstantOf(
-        imported!"dmd.mtype".Type elementType,
-        in TypeFacts elementFacts,
-    ) {
-        import dmd.typesem: defaultInit;
-        import snakebite.nativelayout: storeValue;
-
-        auto initializer = defaultInit(elementType, _function.loc);
-        long bits;
-        storeValue(elementType, elementFacts, initializer, &bits);
-        return bits;
-    }
-
     // `[a, b, c]`: allocates one block through druntime for every element,
     // then evaluates each element expression directly into its own slot in
     // it - never constant-folded bytes copied in bulk, since an element
@@ -3428,79 +3271,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             size_t.sizeof);
     }
 
-    // `new T[](n)`/`new T[n]` - dmd represents both spellings the same way.
-    // `n` is a run-time value, unlike a literal's own element count, so the
-    // default fill below is a genuine loop rather than something this
-    // compiler can unroll at compile time.
-    private void compileNewArray(NewExp expression, in size_t destOffset) {
-        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
-
-        const facts = TypeFacts.of(expression.type);
-        if (!facts.isDynamicArray || expression.arguments is null
-                || expression.arguments.length != 1)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        auto elementType = expression.type.nextOf;
-        const elementFacts = TypeFacts.of(elementType);
-        if (!isSupportedElementFacts(elementFacts, elementType))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        const countOffset = reserveTemp(pointerFacts);
-        evalOperandInto(
-            (*expression.arguments)[0], countOffset, size_t.sizeof);
-        emit(&opCopy, destOffset + arrayLengthOffset, countOffset,
-            size_t.sizeof);
-
-        const sizeOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, sizeOffset,
-            addConstant(cast(long) elementFacts.size), size_t.sizeof);
-        emit(&opMultiply, sizeOffset, countOffset, size_t.sizeof);
-        emitAllocate(sizeOffset, destOffset + arrayPointerOffset);
-
-        const indexOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, indexOffset, addConstant(0), size_t.sizeof);
-
-        const loopStart = _instructions.length;
-        const condOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, condOffset, indexOffset, size_t.sizeof);
-        emit(&opLessThanUnsigned, condOffset, countOffset, size_t.sizeof);
-        const branchIndex = _instructions.length;
-        emit(&opBranchFalse, condOffset, 0, 1);
-
-        const addressOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, addressOffset, destOffset + arrayPointerOffset,
-            size_t.sizeof);
-        const byteOffsetOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, byteOffsetOffset, indexOffset, size_t.sizeof);
-        const elementSizeOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, elementSizeOffset,
-            addConstant(cast(long) elementFacts.size), size_t.sizeof);
-        emit(&opMultiply, byteOffsetOffset, elementSizeOffset, size_t.sizeof);
-        emit(&opAdd, addressOffset, byteOffsetOffset, size_t.sizeof);
-
-        const defaultOffset = reserveTemp(elementFacts);
-        // A zero-init struct element can be wider than the 8 bytes
-        // `defaultConstantOf` folds a default into - it goes through
-        // `opZero` directly instead, the same way `visit(IntegerExp)`
-        // reaches for it over `opConstant` for the same reason.
-        if (isPlainOldStruct(elementType))
-            emit(&opZero, defaultOffset, 0, elementFacts.size);
-        else
-            emit(&opConstant, defaultOffset,
-                addConstant(defaultConstantOf(elementType, elementFacts)),
-                elementFacts.size);
-        emit(&opStoreIndirect, addressOffset, defaultOffset,
-            elementFacts.size);
-
-        const oneOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, oneOffset, addConstant(1), size_t.sizeof);
-        emit(&opAdd, indexOffset, oneOffset, size_t.sizeof);
-
-        emit(&opJump, loopStart, 0, 0);
-        _instructions[branchIndex].source = _instructions.length;
-    }
 }
 
 // Renders `statement` back to source text for a rejection message, on one

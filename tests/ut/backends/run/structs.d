@@ -325,7 +325,6 @@ static foreach (backend; Matrix!(
 // 754, where `-0.0` equals `0.0` and `double.nan` never equals itself,
 // unlike a raw byte compare.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("structEqualityComparesFloatFieldByIeeeRules." ~ backend.stringof)
