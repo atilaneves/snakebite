@@ -75,7 +75,7 @@ private final class GuestException: Exception {
     }
 }
 
-import dmd.visitor: Visitor;
+import snakebite.backends.loweringvisitor: LoweringVisitor;
 
 // The evaluation context: executes statements and evaluates expressions,
 // always into the current destination (`_type` bytes at `_place`),
@@ -88,7 +88,7 @@ import dmd.visitor: Visitor;
 // call to stay warm across calls, and this is the only place that ever
 // walks a call's frames, so there is nothing left for a separate
 // `Interpreter`-side cache to hold.
-extern(C++) private final class Evaluator: Visitor {
+extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.backends.backend: Program;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import dmd.dclass: ClassDeclaration;
@@ -126,7 +126,7 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.tokens: EXP;
     import dmd.typesem: isIntegral, nextOf;
 
-    alias visit = Visitor.visit;
+    alias visit = LoweringVisitor.visit;
 
     // Every guest frame lives in this one frame stack, bump-allocated on
     // call and popped on return. Frames never move; overflow throws
@@ -2721,7 +2721,7 @@ extern(C++) private final class Evaluator: Visitor {
     // Integral equality can therefore compare the common representation,
     // while floating equality must compare values: positive and negative
     // zero have different representations but compare equal in D.
-    override void visit(EqualExp expression) {
+    protected override void visitUnloweredEqual(EqualExp expression) {
         import core.stdc.string: memcmp;
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
@@ -2752,19 +2752,6 @@ extern(C++) private final class Evaluator: Visitor {
         }
 
         if (type.ty == Tarray) {
-            // DMD lowers arrays whose elements need semantic equality to a
-            // call that performs it. A missing lowering is DMD's proof that
-            // these element types are trivially byte-comparable.
-            if (expression.lowering !is null) {
-                evaluate(
-                    expression.lowering,
-                    expression.lowering.type,
-                    factsOf(expression.lowering.type),
-                    _place,
-                );
-                return;
-            }
-
             const a = evaluateArray(expression.e1, factsOf(type));
             const b = evaluateArray(
                 expression.e2, factsOf(expression.e2.type));
@@ -2785,16 +2772,6 @@ extern(C++) private final class Evaluator: Visitor {
         // for elements needing semantic equality (a `float`/`double`
         // element's NaN, or one with its own `opEquals`).
         if (type.ty == Tsarray) {
-            if (expression.lowering !is null) {
-                evaluate(
-                    expression.lowering,
-                    expression.lowering.type,
-                    factsOf(expression.lowering.type),
-                    _place,
-                );
-                return;
-            }
-
             const facts = factsOf(type);
             auto left = _frames.push(facts.size, facts.alignment);
             auto right = _frames.push(facts.size, facts.alignment);

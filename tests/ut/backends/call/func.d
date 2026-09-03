@@ -42,7 +42,6 @@ static foreach (backend; Matrix!()) {
 
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run mutable struct methods through interpreter frames"),
 )) {
@@ -68,7 +67,12 @@ static foreach (backend; Matrix!(
             "empty",
         );
     }
+}
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run mutable struct methods through interpreter frames"),
+)) {
     @("struct.decerealiser.constructorArray." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -95,7 +99,12 @@ static foreach (backend; Matrix!(
             "supplied",
         );
     }
+}
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run mutable struct methods through interpreter frames"),
+)) {
     @("struct.mutableMethod.dynamicArrayField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -117,6 +126,70 @@ static foreach (backend; Matrix!(
                 }
             },
             "filled",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run mutable struct methods through interpreter frames"),
+)) {
+    @("struct.thisAndRefField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(
+            backend,
+            q{
+                struct Counter {
+                    int value;
+
+                    void set(int next) {
+                        this.value = next;
+                    }
+
+                    ref int slot() {
+                        return this.value;
+                    }
+                }
+
+                int drive() {
+                    auto counter = Counter();
+                    counter.set(3);
+                    counter.slot() = 7;
+                    return counter.value;
+                }
+            },
+            "drive",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run mutable struct methods through interpreter frames"),
+)) {
+    @("struct.implicitFieldAssign." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        9.shouldBeRetOf!(
+            backend,
+            q{
+                struct Counter {
+                    int padding;
+                    int value;
+
+                    void set(int next) {
+                        value = next;
+                    }
+                }
+
+                int drive() {
+                    auto counter = Counter();
+                    counter.set(9);
+                    return counter.padding + counter.value;
+                }
+            },
+            "drive",
         );
     }
 }

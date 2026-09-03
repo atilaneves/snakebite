@@ -276,8 +276,8 @@ unittest {
     catch (AssertError error)
         caught = error;
 
-    (caught !is null).shouldBeTrue;
-    caught.msg.shouldEqual("bytecode: index out of bounds: `cast(ulong)i`");
+    (caught !is null).should == true;
+    caught.msg.should == "bytecode: index out of bounds: `cast(ulong)i`";
 }
 
 // The same bounds check, but with an unrelated assertion earlier in the
@@ -312,8 +312,8 @@ unittest {
     catch (AssertError error)
         caught = error;
 
-    (caught !is null).shouldBeTrue;
-    caught.msg.shouldEqual("bytecode: index out of bounds: `cast(ulong)i`");
+    (caught !is null).should == true;
+    caught.msg.should == "bytecode: index out of bounds: `cast(ulong)i`";
 }
 
 static foreach (backend; Matrix!()) {
@@ -673,7 +673,7 @@ unittest {
         catch (RangeError error)
             caught = error;
 
-        (caught !is null).shouldBeTrue;
+        (caught !is null).should == true;
     }
 }
 
@@ -700,11 +700,11 @@ unittest {
 
     int first;
     interpreter.call(function_, &first, []);
-    first.shouldEqual(20);
+    first.should == 20;
 
     int later;
     interpreter.call(function_, &later, []);
-    later.shouldEqual(20);
+    later.should == 20;
 }
 
 // `~=` appending a single element lowers to `_d_arrayappendcTX`, dmd's
@@ -852,9 +852,9 @@ unittest {
 
     int first;
     interpreter.call(function_, &first, []);
-    first.shouldEqual(1);
+    first.should == 1;
 
     int second;
     interpreter.call(function_, &second, []);
-    second.shouldEqual(12);
+    second.should == 12;
 }

@@ -40,7 +40,7 @@ unittest {
     auto statistics = (new Ctfe(Program([module_]))).compilationStatistics;
 
     statistics.hasCompiler.shouldBeFalse;
-    statistics.cacheMisses.shouldEqual(0);
+    statistics.cacheMisses.should == 0;
 }
 
 
@@ -58,20 +58,20 @@ unittest {
     auto program = Program([module_]);
     auto backend = new Bytecode(program);
 
-    backend.compilationStatistics.hasCompiler.shouldBeTrue;
-    backend.compilationStatistics.cacheMisses.shouldEqual(0);
+    backend.compilationStatistics.hasCompiler.should == true;
+    backend.compilationStatistics.cacheMisses.should == 0;
 
     backend.call(findFunction(module_, "main"), null, []);
     auto afterMain = backend.compilationStatistics;
-    afterMain.cacheMisses.shouldEqual(2);
+    afterMain.cacheMisses.should == 2;
 
     backend.call(findFunction(module_, "main"), null, []);
-    backend.compilationStatistics.cacheMisses.shouldEqual(2);
+    backend.compilationStatistics.cacheMisses.should == 2;
 
     backend.call(findFunction(module_, "other"), null, []);
-    backend.compilationStatistics.cacheMisses.shouldEqual(3);
+    backend.compilationStatistics.cacheMisses.should == 3;
     (backend.compilationStatistics.duration >= afterMain.duration)
-        .shouldBeTrue;
+        .should == true;
 }
 
 

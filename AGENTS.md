@@ -36,6 +36,12 @@ created or merged.
 
 Test behaviours, not implementations.
 
+Find if an existing test with `Omit` exists for the backend in question
+instead of writing a new test.
+
+A new test should always be attempted on the full matrix of backends
+and only have `Omit` for the ones verified to fail.
+
 ## Runtime semantics
 
 druntime is not be emulated or reimplemented. It is either interpreted,

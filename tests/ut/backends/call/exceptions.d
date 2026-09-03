@@ -82,7 +82,7 @@ static foreach (backend; Matrix!(
                 caught = error;
         }
 
-        (caught !is null).shouldBeTrue;
+        (caught !is null).should == true;
     }
 }
 
@@ -138,10 +138,10 @@ static foreach (backend; Matrix!(
             catch (AssertError error)
                 caught = error;
 
-            (caught !is null).shouldBeTrue;
+            (caught !is null).should == true;
 
             const tripled = tripleFour();
-            tripled.shouldEqual(12);
+            tripled.should == 12;
         } else {
             import snakebite.backends.backend: Program;
             import snakebite.frontend.compiler: parseSnippet;
@@ -157,11 +157,11 @@ static foreach (backend; Matrix!(
             catch (AssertError error)
                 caught = error;
 
-            (caught !is null).shouldBeTrue;
+            (caught !is null).should == true;
 
             int tripled;
             instance.call(tripleFour, &tripled, []);
-            tripled.shouldEqual(12);
+            tripled.should == 12;
         }
     }
 }
