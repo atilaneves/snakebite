@@ -285,31 +285,37 @@ static foreach (backend; Matrix!(
     }
 }
 
-@("tryCatchThrowable.rethrowsCaughtGuestThrowable.Interpreter")
-@Tags("Interpreter")
-unittest {
-    1.shouldBeRetOf!(
-        Interpreter,
-        q{
-            bool fail() {
-                return false;
-            }
-
-            int result() {
-                try {
-                    try
-                        assert(fail());
-                    catch (Throwable caught)
-                        throw caught;
-                } catch (Throwable) {
-                    return 1;
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a failing assertion into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("tryCatchThrowable.rethrowsCaughtGuestThrowable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                bool fail() {
+                    return false;
                 }
 
-                return 0;
-            }
-        },
-        "result",
-    );
+                int result() {
+                    try {
+                        try
+                            assert(fail());
+                        catch (Throwable caught)
+                            throw caught;
+                    } catch (Throwable) {
+                        return 1;
+                    }
+
+                    return 0;
+                }
+            },
+            "result",
+        );
+    }
 }
 
 // `AssertError` derives from `Error`, not from `Exception`, so a

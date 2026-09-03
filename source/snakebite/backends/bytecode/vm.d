@@ -465,6 +465,23 @@ package const(Instruction)* opRangeError(
 }
 
 
+// Throws the Throwable reference at `pc.destination`. The expression has
+// already been evaluated into the frame, so this preserves the original
+// object while dispatch unwinds through guest catch handlers and frames.
+package const(Instruction)* opThrow(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto throwable = cast(Throwable) *cast(void**) (frame + pc.destination);
+    throw throwable;
+}
+
+
 // Calls `callSites[pc.source]`'s callee: pushes its frame, copies each
 // argument in, runs it to its own return instruction through the nested
 // dispatch loop, then copies the result to `frame + pc.destination`

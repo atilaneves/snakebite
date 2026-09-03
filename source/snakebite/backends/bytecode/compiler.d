@@ -423,7 +423,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         CompoundStatement, ContinueStatement, ExpStatement, ForStatement,
         IfStatement, ImportStatement, ReturnStatement, ScopeStatement,
         Statement, TryCatchStatement, TryFinallyStatement,
-        UnrolledLoopStatement, WhileStatement;
+        ThrowStatement, UnrolledLoopStatement, WhileStatement;
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
         Arg, AssertSite, CallSite, ClosureSlot, discardResult,
@@ -447,7 +447,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
         opStaticAddress, opStaticLoad, opStaticStore, opStoreIndirect,
-        opSubtract, opZero;
+        opSubtract, opThrow, opZero;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
@@ -794,6 +794,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, statement.loc, statementText(statement));
 
         compileStatement(statement.finalbody);
+    }
+
+    override void visit(ThrowStatement statement) {
+        import dmd.astenums: Tclass;
+
+        if (statement.exp is null || statement.exp.type.ty != Tclass)
+            throw rejection(_function, statement.loc, statementText(statement));
+
+        const facts = TypeFacts.of(statement.exp.type);
+        const offset = reserveTemp(facts);
+        evalInto(statement.exp, offset, facts.size);
+        emit(&opThrow, offset, 0, 0);
+        _finished = true;
     }
 
     override void visit(ReturnStatement statement) {
