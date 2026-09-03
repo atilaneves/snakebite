@@ -1087,13 +1087,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        const facts = TypeFacts.of(variable.type);
-        if (!isSupportedFacts(facts, variable.type))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        const offset = _layout.offsetOf(variable);
-
         // dmd always installs an `ExpInitializer` holding the type's own
         // default value for a function local with no initialiser written -
         // `int ret;` and `int ret = 0;` reach here the same way. Zero is
@@ -1109,6 +1102,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
+        const facts = TypeFacts.of(variable.type);
+        auto initializer = initializerValueOf(expInitializer);
+        auto nativeCall = initializer.isCallExp;
+        // A native aggregate return already writes directly to caller-owned
+        // storage. It does not need the bytewise copy path, which is only
+        // valid for plain-old structs.
+        const nativeAggregateReturn = variable.type.isTypeStruct !is null
+            && nativeCall !is null && nativeCall.f !is null
+            && (nativeCall.f.fbody is null
+                || _bytecode.hasNativeSymbol(nativeCall.f));
+        if (!isSupportedFacts(facts, variable.type)
+                && !nativeAggregateReturn)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const offset = _layout.offsetOf(variable);
+
         // `foreach (ref value; values) ...` declares `value` afresh each
         // iteration, bound to `values[i]`'s own storage - the same `ref`
         // local shape a `ref int x = y;` written by hand has. Its own
@@ -1121,7 +1131,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        evalInto(expInitializer.exp, offset, facts.size);
+        evalInto(
+            nativeAggregateReturn ? initializer : expInitializer.exp,
+            offset,
+            facts.size,
+        );
     }
 
     // Reserves one native-layout slot for a function-local static and stores

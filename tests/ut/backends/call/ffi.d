@@ -13,6 +13,38 @@ private extern(C) ubyte[] snakebite_ut_dynamic_array() {
 }
 
 
+// The bytecode backend can receive this value from a native call without
+// copying it. A disabled copy constructor keeps the test outside its
+// bytewise plain-struct path.
+private struct NonCopyableAggregate {
+    long first;
+    long second;
+    long third;
+
+    @disable this(this);
+}
+
+
+private int nonCopyableAggregateCalls;
+
+
+private extern(C) void snakebite_ut_reset_non_copyable_aggregate_calls() {
+    nonCopyableAggregateCalls = 0;
+}
+
+
+private extern(C) NonCopyableAggregate
+    snakebite_ut_non_copyable_aggregate() {
+    ++nonCopyableAggregateCalls;
+    return NonCopyableAggregate(17, 31, 47);
+}
+
+
+private extern(C) int snakebite_ut_non_copyable_aggregate_call_count() {
+    return nonCopyableAggregateCalls;
+}
+
+
 private int remembered;
 
 
@@ -73,6 +105,46 @@ static foreach (backend; Matrix!(
                 int answer() {
                     import core.stdc.stdlib: abs;
                     return abs(7);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "pragma(mangle) native declarations are not routed through FFI"),
+)) {
+    @("aggregateReturn.localDeclaration." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                struct NonCopyableAggregate {
+                    long first;
+                    long second;
+                    long third;
+
+                    @disable this(this);
+                }
+
+                pragma(mangle,
+                    "snakebite_ut_reset_non_copyable_aggregate_calls")
+                extern(C) void resetCalls();
+                pragma(mangle, "snakebite_ut_non_copyable_aggregate")
+                extern(C) NonCopyableAggregate getAggregate();
+                pragma(mangle,
+                    "snakebite_ut_non_copyable_aggregate_call_count")
+                extern(C) int callCount();
+
+                int answer() {
+                    resetCalls();
+                    auto value = getAggregate();
+                    return callCount();
                 }
             },
             "answer",
