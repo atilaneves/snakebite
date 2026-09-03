@@ -155,7 +155,6 @@ static foreach (backend; Matrix!()) {
 // `continue` in a `do`-`while` transfers control to the trailing
 // condition check, not back to the start of the body.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -177,6 +176,81 @@ static foreach (backend; Matrix!(
                 } while (i < 6);
 
                 assert(sum == 15);
+            }
+        });
+    }
+}
+
+// A plain `break` inside a `for` loop leaves the loop, running nothing
+// after it in the same iteration and none of the loop's own remaining
+// iterations.
+static foreach (backend; Matrix!()) {
+    @("breakExitsForLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int sum;
+
+                for (int i; i < 10; ++i) {
+                    if (i == 5)
+                        break;
+
+                    sum += i;
+                }
+
+                assert(sum == 10);
+            }
+        });
+    }
+}
+
+// A labelled `break` leaves the loop its label names, not just the
+// innermost one it is written inside.
+static foreach (backend; Matrix!()) {
+    @("labelledBreakExitsOuterLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int count;
+
+                outer:
+                for (int i; i < 2; ++i) {
+                    for (int j; j < 2; ++j) {
+                        ++count;
+                        if (i == 0 && j == 1)
+                            break outer;
+                    }
+                }
+
+                assert(count == 2);
+            }
+        });
+    }
+}
+
+// A labelled `continue` moves the loop its label names to its next
+// iteration, skipping the rest of every loop nested inside it too.
+static foreach (backend; Matrix!()) {
+    @("labelledContinueRepeatsOuterLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int count;
+
+                outer:
+                for (int i; i < 3; ++i) {
+                    for (int j; j < 4; ++j) {
+                        if (j == i + 1)
+                            continue outer;
+
+                        ++count;
+                    }
+                }
+
+                assert(count == 6);
             }
         });
     }
@@ -260,7 +334,6 @@ static foreach (backend; Matrix!()) {
 // skips every remaining element's statement entirely, exactly like an
 // ordinary loop body.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
