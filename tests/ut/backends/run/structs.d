@@ -1214,3 +1214,295 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// The result of the temporary's method feeds a declaration
+// (`int r = T(&dtors).get();`), so the constructor-call receiver is
+// evaluated for its address rather than as a statement of its own. The
+// temporary's construction still completes - the `__ctor` call in
+// dmd's `((T __slT = T(null);), __slT).__ctor(&dtors)` lowering
+// returns normally - so its destructor runs exactly once at the end of
+// the full expression, the same as when the result is discarded.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("userCtorTemporaryConsumedAsValueRunsDestructorOnce." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T {
+                int* dtors;
+
+                this(int* d) {
+                    dtors = d;
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                int get() {
+                    return 5;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                int r = T(&dtors).get();
+                assert(dtors == 1);
+                assert(r == 5);
+            }
+        });
+    }
+}
+
+// The temporary's own `__ctor` call returns normally; the method
+// called on it afterward, still inside the same full expression, is
+// what throws. Native D destroys every temporary whose construction
+// completed when the full expression unwinds, so the destructor runs
+// exactly once - construction finishing, not the expression finishing,
+// is what commits the destructor.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("userCtorTemporaryDestroyedWhenLaterCallInExpressionThrows." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T {
+                int* dtors;
+
+                this(int* d) {
+                    dtors = d;
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                int boom() {
+                    throw new Exception("later");
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                bool caught;
+                try
+                    T(&dtors).boom();
+                catch (Exception e)
+                    caught = true;
+                assert(caught);
+                assert(dtors == 1);
+            }
+        });
+    }
+}
+
+// A constructor whose body builds another temporary of its own type
+// re-enters the same lowered `((T __slT = T(null);), __slT).__ctor`
+// nodes while an outer activation of them is still live. Each
+// activation owns its own temporary: the two inner recursion levels
+// destroy theirs when their enclosing statement inside the constructor
+// body ends, and the outermost temporary is destroyed at the end of
+// the full expression that created it - three destructor runs in
+// total, never a shared or clobbered slot.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("userCtorTemporaryReentrantConstructionDestroysEachActivation." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T {
+                int* dtors;
+                int depth;
+
+                this(int* d, int dep) {
+                    dtors = d;
+                    depth = dep;
+                    if (dep > 0)
+                        T(d, dep - 1).id();
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                int id() {
+                    return depth;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                int r = T(&dtors, 2).id();
+                assert(dtors == 3);
+                assert(r == 2);
+            }
+        });
+    }
+}
+
+// A callee reached mid-expression runs its own full expressions, each
+// with a constructor-called temporary of its own. The callee's
+// temporary is destroyed when the callee's statement ends, inside the
+// caller's still-evaluating expression; the caller's own temporary is
+// destroyed when the outer full expression ends. Two temporaries, two
+// destructor runs, each owned by its own full expression.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("userCtorTemporaryInCalleeAndCallerDestroyedByTheirOwnExpressions." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T {
+                int* dtors;
+
+                this(int* d) {
+                    dtors = d;
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                int get() {
+                    return 3;
+                }
+            }
+
+            int helper(int* dtors) {
+                return T(dtors).get();
+            }
+
+            void main() {
+                int dtors = 0;
+                int r = helper(&dtors) + T(&dtors).get();
+                assert(dtors == 2);
+                assert(r == 6);
+            }
+        });
+    }
+}
+
+// The user-defined-constructor variant of the `foreach` range shape:
+// dmd declares the range temporary as its own whole statement
+// (`Range __aggr = Range(...);`, the constructor called directly on
+// the named variable) and destroys it in the explicit `finally` it
+// wraps the loop in. The constructor call returning must not commit a
+// second destructor run for a variable whose destruction that
+// `finally` already owns.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("foreachRangeWithUserCtorDestroyedOnceByItsOwnFinally." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Range {
+                int* dtors;
+                int i;
+                int n;
+
+                this(int* d, int limit) {
+                    dtors = d;
+                    i = 0;
+                    n = limit;
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                bool empty() {
+                    return i >= n;
+                }
+
+                int front() {
+                    return i;
+                }
+
+                void popFront() {
+                    ++i;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                int sum = 0;
+                foreach (x; Range(&dtors, 3))
+                    sum += x;
+                assert(dtors == 1);
+                assert(sum == 3);
+            }
+        });
+    }
+}
+
+// An inner temporary fully constructed, then moved into an outer
+// constructor's by-value parameter: dmd's `valueNoDtor` transfers
+// ownership to the callee (the argument is not copied, so the caller
+// must not also destroy it), and the callee destroys its parameter
+// exactly once - here while unwinding its own throw. The outer
+// temporary's constructor never returns, so its destructor never runs
+// at all.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("temporaryMovedIntoThrowingOuterCtorDestroyedOnceByCallee." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner {
+                int* dtors;
+
+                this(int* d) {
+                    dtors = d;
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+            }
+
+            struct Outer {
+                int* dtors;
+
+                this(Inner i, int* d) {
+                    dtors = d;
+                    throw new Exception("outer");
+                }
+
+                ~this() {
+                    if (dtors) *dtors += 10;
+                }
+            }
+
+            void main() {
+                int innerDtors = 0;
+                int outerDtors = 0;
+                bool caught;
+                try
+                    Outer(Inner(&innerDtors), &outerDtors);
+                catch (Exception e)
+                    caught = true;
+                assert(caught);
+                assert(outerDtors == 0);
+                assert(innerDtors == 1);
+            }
+        });
+    }
+}
