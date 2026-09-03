@@ -365,6 +365,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import dmd.init: ExpInitializer;
     import dmd.expression;
     import dmd.func: FuncDeclaration;
+    import dmd.mtype: Type;
     import dmd.statement:
         CompoundStatement, ContinueStatement, ExpStatement, ForStatement,
         IfStatement, ImportStatement, ReturnStatement, ScopeStatement,
@@ -390,12 +391,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opModuloUnsigned, opMultiply, opNegate, opNotEqual, opRangeError,
         opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
-        opStoreIndirect, opSubtract, opZero;
+        opStaticAddress, opStaticLoad, opStaticStore, opStoreIndirect,
+        opSubtract, opZero;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf;
     import snakebite.backends.layout: FrameLayout;
     import snakebite.exception: SnakebiteException;
-    import snakebite.nativelayout: alignUp, isIntegralSize, TypeFacts;
+    import snakebite.nativelayout:
+        alignUp, isIntegralSize, storeValue, TypeFacts;
 
     alias visit = LoweringVisitor.visit;
 
@@ -420,6 +423,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
+    private struct StaticSlot {
+        private size_t _offset;
+    }
+    private StaticSlot[VarDeclaration] _staticSlots;
+    private ubyte[] _staticInitialValue;
+    private uint _staticAlignment = 1;
     // Set once nothing after the statement just compiled can run: a
     // `return`, a `continue`, or an `if`/loop whose every path already
     // ends one of those. Every statement kind after one in the same block
@@ -509,9 +518,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             );
         }
 
+        auto staticData = allocateStaticData;
+        resolveStaticAddresses(staticData);
+
         return Function(
             _instructions, _constants, _callSites, _assertSites,
             exceptionHandlers,
+            staticData,
             _tempSize, _tempAlignment,
         );
     }
@@ -534,6 +547,36 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t addConstant(in long value) {
         _constants ~= value;
         return _constants.length - 1;
+    }
+
+    private ubyte[] allocateStaticData() {
+        if (_staticInitialValue.length == 0)
+            return null;
+
+        auto block = new ubyte[
+            _staticInitialValue.length + _staticAlignment - 1];
+        const start = -cast(size_t) block.ptr & (_staticAlignment - 1);
+        auto data = block[start .. start + _staticInitialValue.length];
+        data[] = _staticInitialValue[];
+        return data;
+    }
+
+    private void resolveStaticAddresses(ubyte[] staticData) {
+        if (staticData is null)
+            return;
+
+        foreach (ref instruction; _instructions) {
+            size_t* address;
+            if (instruction.handler is &opStaticLoad
+                    || instruction.handler is &opStaticAddress)
+                address = &instruction.source;
+            else if (instruction.handler is &opStaticStore)
+                address = &instruction.destination;
+            else
+                continue;
+
+            *address = cast(size_t) (staticData.ptr + *address);
+        }
     }
 
     // Grows this compiled function's own frame past whatever `_layout`
@@ -989,9 +1032,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
 
         auto variable = expression.declaration.isVarDeclaration;
-        if (variable is null || variable.isDataseg)
+        if (variable is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
+
+        if (variable.isDataseg) {
+            staticOffsetOf(variable);
+            return;
+        }
 
         const facts = TypeFacts.of(variable.type);
         if (!isSupportedFacts(facts, variable.type))
@@ -1030,6 +1078,85 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         evalInto(expInitializer.exp, offset, facts.size);
     }
 
+    // Reserves one native-layout slot for a function-local static and stores
+    // its constant initializer in the same layout. A static initializer is
+    // part of the compiled function's persistent data, so the declaration
+    // statement itself has no per-call instruction to run.
+    private size_t staticOffsetOf(VarDeclaration variable) {
+        import dmd.typesem: defaultInit;
+        import std.conv: text;
+
+        if (auto found = variable in _staticSlots)
+            return found._offset;
+
+        if (!variable.isDataseg)
+            throw rejection(_function, variable.loc,
+                text("the variable `", variable.toString, "`"));
+
+        const facts = TypeFacts.of(variable.type);
+        if (!isSupportedFacts(facts, variable.type))
+            throw rejection(_function, variable.loc,
+                text("the variable `", variable.toString, "`"));
+
+        auto initializer = variable._init is null
+            ? null : variable._init.isExpInitializer;
+        if (variable._init !is null && initializer is null)
+            throw rejection(_function, variable.loc, text(
+                "the variable `", variable.toString, "`",
+            ));
+        auto value = initializer is null
+            ? defaultInit(variable.type, variable.loc)
+            : initializerValueOf(initializer);
+        if (!isSupportedStaticInitializer(variable.type, facts, value))
+            throw rejection(_function, variable.loc,
+                text("the variable `", variable.toString, "`"));
+
+        const offset = alignUp(_staticInitialValue.length, facts.alignment);
+        const end = offset + facts.size;
+        _staticInitialValue.length = end;
+        if (facts.alignment > _staticAlignment)
+            _staticAlignment = facts.alignment;
+        _staticSlots[variable] = StaticSlot(offset);
+
+        storeValue(
+            variable.type,
+            facts,
+            value,
+            _staticInitialValue.ptr + offset,
+        );
+        return offset;
+    }
+
+    private static bool isSupportedStaticInitializer(
+        Type type,
+        in TypeFacts facts,
+        Expression value,
+    ) {
+        import dmd.astenums: Tarray, Tfloat32, Tfloat64;
+        import dmd.expressionsem: toInteger;
+        import dmd.typesem: nextOf, size;
+        import snakebite.nativelayout: arrayValueSize;
+
+        if (value.isNullExp !is null)
+            return true;
+
+        if (auto literal = value.isStringExp) {
+            auto element = type.nextOf;
+            return type.ty == Tarray && facts.size == arrayValueSize
+                && element !is null && literal.sz == element.size;
+        }
+
+        if (type.ty == Tfloat32 || type.ty == Tfloat64)
+            return value.isRealExp !is null;
+
+        if (type.isTypeStruct !is null) {
+            auto integer = value.isIntegerExp;
+            return integer !is null && integer.toInteger == 0;
+        }
+
+        return facts.isIntegral && value.isIntegerExp !is null;
+    }
+
     // A `ref` local's `ExpInitializer` holds a full `value = target`
     // assignment (a `ConstructExp`, dmd's node for initialising storage the
     // guest has not touched yet) rather than bare `target` the way a
@@ -1065,7 +1192,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto varExp = expression.e1.isVarExp;
         auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg)
+        if (variable is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -1076,6 +1203,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (!isSupportedFacts(facts, variable.type))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
+
+        if (variable.isDataseg) {
+            const valueOffset = reserveTemp(facts);
+            evalInto(expression.e2, valueOffset, facts.size);
+            emitStaticStore(variable, valueOffset, facts.size);
+
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, facts.size);
+            return;
+        }
 
         if (_layout.isRef(variable))
             return compileIndirectAssign(expression, varExp, destOffset);
@@ -1101,6 +1238,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (destOffset != discardResult && destOffset != targetOffset)
             emit(&opCopy, destOffset, targetOffset, facts.size);
+    }
+
+    private void emitStaticStore(
+        VarDeclaration variable,
+        in size_t sourceOffset,
+        in size_t width,
+    ) {
+        emit(&opStaticStore, staticOffsetOf(variable), sourceOffset, width);
     }
 
     private bool isThisField(VarDeclaration variable) const {
@@ -1240,7 +1385,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         auto varExp = expression.e1.isVarExp;
         auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg)
+        if (variable is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -1256,6 +1401,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const rightOffset = reserveTemp(facts);
         evalInto(expression.e2, rightOffset, facts.size);
+
+        if (variable.isDataseg) {
+            const valueOffset = reserveTemp(facts);
+            emitStaticLoad(variable, valueOffset, facts.size);
+            emit(handler, valueOffset, rightOffset, facts.size);
+            emitStaticStore(variable, valueOffset, facts.size);
+
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, facts.size);
+            return;
+        }
 
         // A `ref` target's own slot holds its storage's address, not the
         // storage: the current value is read through it into a temporary,
@@ -1279,6 +1435,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (destOffset != discardResult && destOffset != varOffset)
             emit(&opCopy, destOffset, varOffset, facts.size);
+    }
+
+    private void emitStaticLoad(
+        VarDeclaration variable,
+        in size_t destinationOffset,
+        in size_t width,
+    ) {
+        emit(&opStaticLoad, destinationOffset, staticOffsetOf(variable), width);
     }
 
     private Instruction.Handler compoundHandler(
@@ -1311,7 +1475,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compilePost(PostExp expression, in size_t destOffset) {
         auto varExp = expression.e1.isVarExp;
         auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg)
+        if (variable is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -1319,6 +1483,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
+
+        if (variable.isDataseg) {
+            const valueOffset = reserveTemp(facts);
+            emitStaticLoad(variable, valueOffset, facts.size);
+
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, facts.size);
+
+            const stepOffset = reserveTemp(facts);
+            evalInto(expression.e2, stepOffset, facts.size);
+
+            auto handler = expression.op == EXP.plusPlus
+                ? &opAdd : &opSubtract;
+            emit(handler, valueOffset, stepOffset, facts.size);
+            emitStaticStore(variable, valueOffset, facts.size);
+            return;
+        }
 
         const varOffset = _layout.offsetOf(variable);
 
@@ -1631,8 +1812,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(VarExp expression) {
         requireDestination(expression);
         auto variable = expression.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg)
+        if (variable is null)
             return visit(cast(Expression) expression);
+
+        if (variable.isDataseg) {
+            emitStaticLoad(variable, _destination, _width);
+            return;
+        }
 
         if (isThisField(variable)) {
             const addressOffset = compileThisFieldAddress(variable);
@@ -1673,12 +1859,26 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(SymOffExp expression) {
         requireDestination(expression);
         auto variable = expression.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg || expression.offset != 0)
+        if (variable is null || expression.offset != 0)
             return visit(cast(Expression) expression);
+
+        if (variable.isDataseg) {
+            const addressOffset = compileStaticAddress(variable);
+            if (addressOffset != _destination)
+                emit(&opCopy, _destination, addressOffset, size_t.sizeof);
+            return;
+        }
 
         const addressOffset = addressOfVariable(variable);
         if (addressOffset != _destination)
             emit(&opCopy, _destination, addressOffset, size_t.sizeof);
+    }
+
+    private size_t compileStaticAddress(VarDeclaration variable) {
+        const addressOffset = reserveTemp(pointerFacts);
+        emit(&opStaticAddress, addressOffset,
+            staticOffsetOf(variable), size_t.sizeof);
+        return addressOffset;
     }
 
     // `this` is a reference to a struct value. Its hidden slot contains the
@@ -2935,6 +3135,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t compileAddress(Expression expression) {
         if (auto varExp = expression.isVarExp) {
             auto variable = varExp.var.isVarDeclaration;
+            if (variable !is null && variable.isDataseg)
+                return compileStaticAddress(variable);
             if (variable !is null && !variable.isDataseg) {
                 if (isThisField(variable))
                     return compileThisFieldAddress(variable);
