@@ -988,7 +988,7 @@ static foreach (backend; Matrix!(
 // its destructor still runs once the statement using it is done.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.inexpressible,
+    Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE evaluates the call but never runs the " ~
         "destructor of a struct-typed rvalue temporary that is only " ~
         "consumed by a method call on itself and never bound to a " ~
@@ -1100,7 +1100,7 @@ static foreach (backend; Matrix!(
 // leaked just because nothing ever consumed its value.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.inexpressible,
+    Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE catches the throw but never runs the " ~
         "destructor of the already-constructed first-argument temporary " ~
         "while unwinding the call expression - `dtors` stays 0 instead " ~
@@ -1251,7 +1251,7 @@ static foreach (backend; Matrix!(
 // the full expression, the same as when the result is discarded.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.inexpressible,
+    Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right value but never runs " ~
         "the destructor of the user-constructor temporary once its " ~
         "value feeds a declaration - `dtors` stays 0 instead of " ~
@@ -1296,7 +1296,7 @@ static foreach (backend; Matrix!(
 // is what commits the destructor.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.inexpressible,
+    Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE catches the throw but never runs the " ~
         "destructor of the user-constructor temporary whose `__ctor` " ~
         "already completed - `dtors` stays 0 instead of reaching 1"),
@@ -1346,7 +1346,7 @@ static foreach (backend; Matrix!(
 // total, never a shared or clobbered slot.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.inexpressible,
+    Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of any of the three reentrant " ~
         "user-constructor temporaries - `dtors` stays 0 instead of " ~
@@ -1395,7 +1395,7 @@ static foreach (backend; Matrix!(
 // destructor runs, each owned by its own full expression.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.inexpressible,
+    Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of either user-constructor " ~
         "temporary - `dtors` stays 0 instead of reaching 2"),
@@ -1501,7 +1501,7 @@ static foreach (backend; Matrix!(
 // expression.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.inexpressible,
+    Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of the temporary initialized from " ~
         "`make(&dtors)`'s returned value - `dtors` stays 0 instead of " ~
@@ -1553,7 +1553,7 @@ static foreach (backend; Matrix!(
 // later, against a frame that is already gone.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.inexpressible,
+    Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of the taken ternary branch's " ~
         "user-constructor temporary - `dtors` stays 0 instead of " ~
