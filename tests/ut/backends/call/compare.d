@@ -31,6 +31,34 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// Pointers into the same allocation have the array element order. Keep the
+// four operators in one runtime expression so each pointer handler is
+// exercised without relying on the addresses of separate locals.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter does not order pointer values"),
+)) {
+    @("compare.pointerOrdering." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool ordered() {
+                    int[] values = [10, 20];
+                    int* first = values.ptr;
+                    int* second = values.ptr + 1;
+                    return first < second
+                        && first <= second
+                        && second > first
+                        && second >= first;
+                }
+            },
+            "ordered",
+        );
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("compare.floatingOrdering." ~ backend.stringof)
     @Tags(backend.stringof)

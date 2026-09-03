@@ -2702,6 +2702,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (expression.e1.type.ty == Tpointer) {
             Instruction.Handler pointerHandler;
             with (EXP) switch (expression.op) {
+                case lessThan:
+                    pointerHandler = &opLessThanUnsigned;
+                    break;
+                case lessOrEqual:
+                    pointerHandler = &opLessOrEqualUnsigned;
+                    break;
+                case greaterThan:
+                    pointerHandler = &opGreaterThanUnsigned;
+                    break;
+                case greaterOrEqual:
+                    pointerHandler = &opGreaterOrEqualUnsigned;
+                    break;
                 case equal, identity: pointerHandler = &opEqual; break;
                 case notEqual, notIdentity: pointerHandler = &opNotEqual;
                     break;
