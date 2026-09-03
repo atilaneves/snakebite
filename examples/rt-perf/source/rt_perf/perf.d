@@ -26,6 +26,7 @@ unittest {
     assert(fibonacci(21) == 10_946);
     assert(fibonacci(22) == 17_711);
     assert(fibonacci(23) == 28_657);
+    assert(fibonacci(25) == 75_025);
 }
 
 int tak(int x, int y, int z) {
@@ -41,6 +42,7 @@ int tak(int x, int y, int z) {
 
 unittest {
     assert(tak(15, 10, 5) == 15);
+    assert(tak(16, 11, 6) == 16);
 }
 
 long binarySearch(const(long)[] a, long x) {
@@ -92,6 +94,7 @@ unittest {
     assert(countPrimes(100) == 25);
     assert(countPrimes(1_000) == 168);
     assert(countPrimes(10_000) == 1_229);
+    assert(countPrimes(50_000) == 5_133);
 }
 
 // Loop-heavy over a buffer: 15k element reads and adds, no allocation.
