@@ -1746,9 +1746,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (auto fieldTarget = expression.e1.isDotVarExp)
             return compileFieldAssign(expression, fieldTarget, destOffset);
 
-        // `*p = value`: writes through the address `p` itself holds, not a
-        // copy of `p`'s own slot - the same address a read of `*p`
-        // (`visit(PtrExp)`) loads through.
         if (auto ptrTarget = expression.e1.isPtrExp)
             return compileIndirectAssign(expression, ptrTarget, destOffset);
 
@@ -2522,10 +2519,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opCopy, _destination, addressOffset, size_t.sizeof);
     }
 
-    // `*p`, read as a value: `compileAddress`'s own `PtrExp` case already
-    // knows how to compute the address `p` holds, the same address `*p = v`
-    // (`compileIndirectAssign`) writes through - this only adds the load
-    // once that address is in hand.
     override void visit(PtrExp expression) {
         requireDestination(expression);
 
