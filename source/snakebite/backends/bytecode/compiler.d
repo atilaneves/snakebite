@@ -2171,6 +2171,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(CastExp expression) {
+        if (expression.lowering !is null) {
+            expression.lowering.accept(this);
+            return;
+        }
+
         requireDestination(expression);
         compileCast(expression, _destination, _width);
     }
