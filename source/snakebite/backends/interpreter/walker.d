@@ -4,6 +4,7 @@ module snakebite.backends.interpreter.walker;
 private:
 
 import std.conv: text;
+import snakebite.ffi.limits: maxArguments;
 
 
 // Walks dmd's AST directly. The one invariant: a result is never boxed
@@ -100,8 +101,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
     import snakebite.ffi:
-        BoolFunction, BoolFunctionEntry, BoolFunctionTarget, CallPlan,
-        CallResult, PlanCache, maxArguments;
+        CallbackArguments, CallbackBridge, CallPlan, CallResult, PlanCache;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
         isIntegralSize, storeValue, TypeFacts;
@@ -194,9 +194,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // after it - the same cold-path-once shape as `_layouts`.
     private PlanCache _plans;
     private ThreadID _ownerThread;
-    // This signature-specific cache is temporary support for `rt-simple`.
-    // A proper, general FFI solution must replace it.
-    private BoolFunctionEntry[FuncDeclaration] _boolFunctionEntries;
+    private CallbackBridge _callbacks;
     // A call expression is one call site, even when a loop visits it many
     // times. The plan cache remains the cold path; this side cache keeps
     // the prepared plan with the AST call site that uses it.
@@ -377,12 +375,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _frames = FrameStack(defaultFrameCapacity);
         _temporaryFrames = FrameStack(defaultFrameCapacity);
         _ownerThread = Thread.getThis.id;
+        _callbacks = new CallbackBridge(
+            &invokeBoolFunction,
+            cast(void*) this,
+            &isGuestFunction,
+            cast(void*) this,
+            "interpreter",
+        );
     }
 
     extern(D) final void releaseCallbacks() {
-        foreach (ref entry_; _boolFunctionEntries.byValue)
-            entry_.release;
-        _boolFunctionEntries = null;
+        if (_callbacks !is null)
+            _callbacks.release;
     }
 
     // Runs `function_` against a fresh top-level frame, mirroring the
@@ -790,11 +794,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // `visit(SymOffExp)`/`visit(FuncExp)` store a function pointer's value
     // as the `FuncDeclaration` itself. `calleeOf` resolves this value when
     // guest code calls it. Host code needs an executable address instead.
-    // For the temporary `rt-simple` callback type, replace the guest
-    // declaration with a compiler-built entry that returns to this
-    // evaluator. A proper, general FFI solution must replace this signature
-    // check and adapter. Reject other guest callback forms before
-    // host code can jump to a declaration.
+    // CallbackBridge handles the supported signature, identity, lifetime,
+    // and argument adaptation; this evaluator supplies only re-entry.
     //
     // Only a function-pointer-typed parameter is inspected: any other
     // parameter's bytes might legitimately contain the same bit pattern
@@ -807,86 +808,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const(void*)* arguments,
         size_t argumentCount,
     ) {
-        import dmd.astenums: LINK, STC;
-        import snakebite.nativelayout: loadIntegral;
-        import std.conv: text;
-
-        const(void)*[maxArguments] hostArguments;
-        size_t[maxArguments] callbackAddresses;
-        hostArguments[0 .. argumentCount] = arguments[0 .. argumentCount];
-
-        auto type = hostFunction.type.isTypeFunction;
-        assert(type !is null);
-
-        size_t index = hostFunction.vthis !is null ? 1 : 0;
-        foreach (i; 0 .. type.parameterList.length) {
-            if (index >= argumentCount)
-                break;
-
-            auto parameter = type.parameterList[i];
-            const argumentIndex = index++;
-            auto pointer = parameter.type.isTypePointer;
-            if (pointer is null || pointer.next.isTypeFunction is null)
-                continue;
-
-            const indirect =
-                (parameter.storageClass & (STC.ref_ | STC.out_)) != 0;
-            auto callbackPlace = indirect
-                ? cast(const(void)*) loadIntegral(
-                    arguments[argumentIndex], size_t.sizeof, false,
-                )
-                : arguments[argumentIndex];
-            if (callbackPlace is null)
-                continue;
-            const raw = loadIntegral(
-                callbackPlace, size_t.sizeof, false);
-            if (raw == 0)
-                continue;
-
-            auto candidate = cast(FuncDeclaration) cast(void*) raw;
-            if (!_program.isInterpreted(candidate))
-                continue;
-
-            if (indirect)
-                throw new SnakebiteException(
-                    text("interpreter cannot call `", hostFunction.toString,
-                        "` with a guest function pointer through a `ref` "
-                        ~ "or `out` parameter (see issue #9)"),
-                );
-
-            auto callbackType = candidate.type.isTypeFunction;
-            const linkage = candidate.resolvedLinkage;
-            if (callbackType is null
-                    || callbackType.parameterList.length != 0
-                    || callbackType.nextOf.ty != Tbool
-                    || (linkage != LINK.d && linkage != LINK.default_))
-                throw new SnakebiteException(
-                    text("interpreter cannot call `", hostFunction.toString,
-                        "` with `", candidate.toString, "` as a function "
-                        ~ "pointer argument: callback signature `",
-                        candidate.type.toString,
-                        "` is not supported (see issue #9)"),
-                );
-
-            callbackAddresses[argumentIndex] = cast(size_t)
-                boolFunctionEntry(candidate);
-            hostArguments[argumentIndex] = &callbackAddresses[argumentIndex];
-        }
-
-        plan.call(returnPlace, hostArguments[0 .. argumentCount]);
+        CallbackArguments adapted;
+        _callbacks.adaptArguments(
+            hostFunction, arguments[0 .. argumentCount], adapted,
+        );
+        plan.call(returnPlace, adapted.values);
     }
 
-    private BoolFunction boolFunctionEntry(FuncDeclaration function_) {
-        if (auto existing = function_ in _boolFunctionEntries)
-            return existing.address;
-
-        auto target = BoolFunctionTarget(
-            &invokeBoolFunction,
-            cast(void*) this,
-            cast(void*) function_,
-        );
-        _boolFunctionEntries[function_] = BoolFunctionEntry.reserve(target);
-        return _boolFunctionEntries[function_].address;
+    extern(C) private static bool isGuestFunction(
+        void* context,
+        imported!"dmd.func".FuncDeclaration function_,
+    ) {
+        return (cast(Evaluator) context)._program.isInterpreted(function_);
     }
 
     extern(C) private static bool invokeBoolFunction(
