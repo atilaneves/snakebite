@@ -2209,17 +2209,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileNewArray(expression, _destination);
     }
 
-    // `null`, as a dynamic array: the same all-zero two words `[]` already
-    // writes for an empty literal, since a `null` slice and an empty one
-    // share that same representation.
+    // `null`: pointers and class references are one zero word, while a
+    // dynamic array is two zero words. These are the native representations
+    // the host expects for their null values.
     override void visit(NullExp expression) {
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
-        import dmd.astenums: Tpointer;
+        import dmd.astenums: Tclass, Tpointer;
 
         requireDestination(expression);
 
         const facts = TypeFacts.of(expression.type);
-        if (expression.type.ty == Tpointer) {
+        if (expression.type.ty == Tpointer || expression.type.ty == Tclass) {
             emit(&opConstant, _destination,
                 addConstant(0), facts.size);
             return;

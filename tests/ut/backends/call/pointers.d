@@ -26,6 +26,12 @@ public extern(C) bool snakebite_ut_same_bool_callback(
 }
 
 
+public extern(C) bool snakebite_ut_is_null_object(Object object_)
+{
+    return object_ is null;
+}
+
+
 public extern(C) bool snakebite_ut_collect_then_call_bool_callback(
     BoolCallback callback,
 ) {
@@ -136,6 +142,30 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
                 }
             },
             "deref",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "pragma(mangle) native declarations are not routed through FFI"),
+)) {
+    @("pointers.null.classArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_is_null_object")
+                extern(C) bool nativeIsNullObject(Object);
+
+                int isNull() {
+                    return nativeIsNullObject(null);
+                }
+            },
+            "isNull",
         );
     }
 }
