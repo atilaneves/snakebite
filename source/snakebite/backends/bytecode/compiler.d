@@ -2833,22 +2833,41 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(CallExp expression) {
-        import snakebite.frontend.dmd.functions: typeFunctionOf;
-
         if (_destination != discardResult && expression.f !is null
                 && expression.f.isCtorDeclaration() !is null) {
             compileCall(expression, _destination);
             return;
         }
 
-        if (_destination != discardResult && expression.f !is null
-                && typeFunctionOf(expression.f).isRef) {
+        if (_destination != discardResult && isRefCall(expression)) {
             const addressOffset = compileAddress(expression);
             emit(&opLoadIndirect, _destination, addressOffset, _width);
             return;
         }
 
         compileCall(expression, _destination);
+    }
+
+    // Whether `expression` calls a `ref`-returning function, resolved
+    // (`expression.f`) or through a function pointer's own `TypeFunction`
+    // - both `visit(CallExp)` and `compileAddress`'s `CallExp` case need
+    // this same answer to know whether the call's result is a value or an
+    // address to load through.
+    private bool isRefCall(CallExp expression) {
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+        auto callee = expression.f;
+        if (callee is null) {
+            auto calleeExp = expression.e1.isVarExp;
+            callee = calleeExp is null
+                ? null : calleeExp.var.isFuncDeclaration;
+        }
+        if (callee !is null)
+            return typeFunctionOf(callee).isRef;
+
+        auto deref = expression.e1.isPtrExp;
+        auto functionType = deref is null ? null : deref.type.isTypeFunction;
+        return functionType !is null && functionType.isRef;
     }
 
     // `assert(x)`, run at statement level for its effect alone - it has no
@@ -3730,7 +3749,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         Arg[] args;
         const isConstructor = callee.isCtorDeclaration !is null;
-        if (callee.vthis !is null) {
+        // `calleeLayout.hiddenThis.variable`, not `callee.vthis`: a
+        // `FuncLiteralDeclaration` bound through `auto` can keep a dead
+        // `vthis` semantic proved nothing reads (see `FrameLayout.of`'s
+        // own `hasDeadContext`), and `calleeLayout` is what actually
+        // knows whether this callee's frame reserved it a slot.
+        if (calleeLayout.hiddenThis.variable !is null) {
             size_t thisOffset;
             if (callee.isThis is null) {
                 auto parent = callee.toParent2();
@@ -3822,16 +3846,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // shape), so `expression.e1` is a `PtrExp` whose pointee type is the
     // `TypeFunction` this call's own signature comes from - there is no
     // `FuncDeclaration` to read a `FrameLayout` from, since more than one
-    // could reach this call site at run time.
-    //
-    // `FrameLayout.of` packs each parameter from its declared *type* alone,
-    // in declaration order, never from anything specific to one function
-    // body - every guest function this pointer's type can name therefore
-    // lays its parameters out identically, so replaying that same packing
-    // here, from the pointer's own `TypeFunction`, answers where argument
-    // `i` belongs in whichever callee this call reaches, without knowing
-    // which one that is until `opCall` reads `calleeOffset`'s slot at run
-    // time.
+    // could reach this call site at run time. `FrameLayout.ofParameters`
+    // packs from that `TypeFunction` alone, the same packing every callee's
+    // own `FrameLayout.of` uses for its declared parameters, so argument
+    // `i` lands where whichever callee this call reaches at run time reads
+    // it from.
     private void compileIndirectCall(CallExp expression, in size_t destOffset) {
         import dmd.astenums: STC, Tvoid;
 
@@ -3848,11 +3867,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
+        // A `ref` return hands back its target's address in the return
+        // register regardless of the pointee's own width - the same
+        // convention `compileCall`'s own `isRefCallee` follows for a
+        // resolved callee.
+        const isRefCallee = functionType.isRef;
         auto returnType = functionType.next;
         const isVoidCallee = returnType is null || returnType.ty == Tvoid;
-        const returnFacts =
-            isVoidCallee ? TypeFacts.init : TypeFacts.of(returnType);
-        if (!isVoidCallee && !isSupportedFacts(returnFacts, returnType))
+        const returnFacts = isRefCallee
+            ? pointerFacts
+            : isVoidCallee ? TypeFacts.init : TypeFacts.of(returnType);
+        if (!isRefCallee && !isVoidCallee
+                && !isSupportedFacts(returnFacts, returnType))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
         if (isVoidCallee && destOffset != discardResult)
@@ -3862,24 +3888,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const calleeOffset = reserveTemp(pointerFacts);
         evalInto(deref.e1, calleeOffset, size_t.sizeof);
 
+        auto calleeLayout = FrameLayout.ofParameters(functionType);
+
         Arg[] args;
-        size_t frameOffset;
         foreach (i; 0 .. parameterCount) {
             auto parameter = functionType.parameterList[i];
             if (parameter.storageClass & (STC.out_ | STC.lazy_ | STC.ref_))
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
-            const facts = TypeFacts.of(parameter.type);
-            if (!isSupportedFacts(facts, parameter.type))
+            auto slot = calleeLayout.parameters[i];
+            if (!isSupportedFacts(slot.facts, parameter.type))
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
-            frameOffset = alignUp(frameOffset, facts.alignment);
-            const argumentOffset = reserveTemp(facts);
-            evalInto((*expression.arguments)[i], argumentOffset, facts.size);
-            args ~= Arg(argumentOffset, frameOffset, facts.size);
-            frameOffset += facts.size;
+            const argumentOffset = reserveTemp(slot.facts);
+            evalInto(
+                (*expression.arguments)[i], argumentOffset, slot.facts.size);
+            args ~= Arg(argumentOffset, slot.offset, slot.facts.size);
         }
 
         CallSite site;
@@ -4030,15 +4056,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         if (auto callExp = expression.isCallExp) {
-            import snakebite.frontend.dmd.functions: typeFunctionOf;
-
             auto callee = callExp.f;
             if (callee is null) {
                 auto calleeExp = callExp.e1.isVarExp;
                 callee = calleeExp is null
                     ? null : calleeExp.var.isFuncDeclaration;
             }
-            if (callee !is null && typeFunctionOf(callee).isRef) {
+            if (isRefCall(callExp)) {
                 const offset = reserveTemp(pointerFacts);
                 compileCall(callExp, offset);
                 return offset;
