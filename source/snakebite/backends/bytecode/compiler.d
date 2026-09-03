@@ -2135,6 +2135,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileAssign(expression, _destination);
     }
 
+    override void visit(ConstructExp expression) {
+        if (expression.lowering !is null) {
+            expression.lowering.accept(this);
+            return;
+        }
+
+        compileAssign(expression, _destination);
+    }
+
     // DMD lowers a dynamic-array length assignment to the druntime call
     // that owns allocation, prefix preservation, and the native array
     // representation. Compile that call instead of trying to infer the
