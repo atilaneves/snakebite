@@ -388,6 +388,32 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A label names the loop it is written on, not the first breakable
+// construct compiled inside it - here a `switch` in the `for` init.
+static foreach (backend; Matrix!()) {
+    @("labelledBreakIgnoresSwitchInForInit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int count;
+                int i;
+
+                outer:
+                for ({ switch (i) { default: break; } } i < 2; ++i) {
+                    for (int j; j < 2; ++j) {
+                        ++count;
+                        if (i == 0 && j == 1)
+                            break outer;
+                    }
+                }
+
+                assert(count == 2);
+            }
+        });
+    }
+}
+
 // `final switch` dispatches to the case matching the value at run time,
 // each case running its own body rather than falling into another's.
 static foreach (backend; Matrix!()) {

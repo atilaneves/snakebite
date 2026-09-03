@@ -527,24 +527,30 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // What a `break` targets: the innermost loop, `switch`, or unrolled
     // `foreach` this compiler is currently inside the body of, or - given
-    // a label - whichever of those an enclosing `LabelStatement` names
-    // (`label`, set from `_pendingLabel` the moment one of these is
-    // pushed - see `compileLabel`'s own doc). `pendingBreakJumps` collects
-    // every `break` that targets this one, each patched once this
-    // construct's own compiled code ends, the same way a `switch`'s
-    // already were before a loop or an unrolled `foreach` could have one
-    // of its own.
+    // a label - whichever of those an enclosing `LabelStatement` names.
+    // `pendingBreakJumps` collects every `break` that targets this one,
+    // each patched once this construct's own compiled code ends, the
+    // same way a `switch`'s already were before a loop or an unrolled
+    // `foreach` could have one of its own.
     private struct Breakable {
         Identifier label;
         size_t[] pendingBreakJumps;
     }
     private Breakable[] _breakables;
 
-    // The label a `LabelStatement` just wrapped its own statement with,
-    // consumed by whichever loop, `switch`, or unrolled `foreach` compiles
-    // next - see `compileLabel`. `null` once consumed, or when nothing is
-    // labelled.
+    // The identifier and resolved target of a `LabelStatement` this
+    // compiler is currently inside, not yet claimed by the loop/`switch`/
+    // unrolled `foreach` it labels - see `compileLabel`. dmd resolves
+    // which statement a label actually names itself (`gotoTarget`, or
+    // `statement` when dmd left it unset), since a label on a `for` with
+    // an init is rewritten to sit directly on the generated
+    // `ForStatement`, not on whatever the init itself might also compile
+    // (a `switch`, say). `consumeLabel` compares its own caller's
+    // `Statement` against `_pendingLabelTarget` rather than simply taking
+    // whatever is pending, so a label survives past constructs it does
+    // not name.
     private Identifier _pendingLabel;
+    private Statement _pendingLabelTarget;
 
     // The `switch` a `default:` inside its body belongs to - needed only
     // because, unlike `GotoDefaultStatement`, dmd's `DefaultStatement`
@@ -925,7 +931,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(SwitchStatement statement) {
         import snakebite.nativelayout: TypeFacts;
 
-        auto label = consumeLabel; // auto: const(Identifier) will not implicitly convert back
+        auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
         const facts = TypeFacts.of(statement.condition.type);
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             throw rejection(_function, statement.loc, statementText(statement));
@@ -1207,18 +1213,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return integer !is null && integer.toInteger != 0;
     }
 
-    // Consumes whatever label a `LabelStatement` directly wrapping this
-    // construct left pending (`compileLabel`), so a nested loop/`switch`/
-    // unrolled `foreach` inside this one's own body starts with none of
-    // its own.
-    private Identifier consumeLabel() {
+    // Claims the pending label (see `_pendingLabelTarget`'s own doc) only
+    // when it actually names `statement` - the exact `Statement` dmd
+    // resolved a label to, not merely the first breakable construct
+    // compiled while one is pending. Anything else compiled along the
+    // way (a `switch` in a `for`'s own init, say) sees no label at all.
+    private Identifier consumeLabel(Statement statement) {
+        if (_pendingLabelTarget !is statement)
+            return null;
+
         auto label = _pendingLabel;
         _pendingLabel = null;
+        _pendingLabelTarget = null;
         return label;
     }
 
     private void compileWhile(WhileStatement statement) {
-        auto label = consumeLabel; // auto: const(Identifier) will not implicitly convert back
+        auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
         const loopStart = _instructions.length;
         // A condition that can never be false - `while (1)` - is never
         // guarded: the check itself would still compile correctly, but
@@ -1261,7 +1272,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private void compileFor(ForStatement statement) {
-        auto label = consumeLabel; // auto: const(Identifier) will not implicitly convert back
+        auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
         if (statement._init !is null)
             compileStatement(statement._init);
 
@@ -1313,7 +1324,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // the condition is compiled queues its own jump the same way
     // `compileFor`'s does for its increment.
     private void compileDo(DoStatement statement) {
-        auto label = consumeLabel; // auto: const(Identifier) will not implicitly convert back
+        auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
         const bodyStart = _instructions.length;
 
         _loops ~= LoopContext(label);
@@ -1366,7 +1377,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // was itself about to skip (an `else`, a `catch` handler, the next
     // `case`).
     private void compileUnrolledLoop(UnrolledLoopStatement statement) {
-        auto label = consumeLabel; // auto: const(Identifier) will not implicitly convert back
+        auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
         if (statement.statements is null) {
             _finished = false;
             return;
@@ -1397,19 +1408,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             && breakable.pendingBreakJumps.length == 0;
     }
 
-    // Consumed by whichever `LabelStatement` directly wraps this one -
-    // see `consumeLabel` - regardless of whether that wrapped statement
-    // turns out to be one that can use it (a loop, a `switch`, an
-    // unrolled `foreach`) or not: a label on anything else (a labelled
-    // block, say) has no compiler support of its own yet, and a `break`/
-    // `continue` naming it then finds no matching entry in `_breakables`/
-    // `_loops` and is rejected the same way one naming an unknown label
-    // would be if dmd's own semantic pass had not already ruled that out.
+    // dmd resolves which statement a label actually names to
+    // `statement.gotoTarget`, falling back to `statement.statement`
+    // itself when dmd left `gotoTarget` unset (see `_pendingLabelTarget`'s
+    // own doc) - a label on anything neither a loop, a `switch`, nor an
+    // unrolled `foreach` can name (a labelled block, say) has no compiler
+    // support of its own yet, and a `break`/`continue` naming it then
+    // finds no matching entry in `_breakables`/`_loops` and is rejected
+    // the same way one naming an unknown label would be if dmd's own
+    // semantic pass had not already ruled that out.
     private void compileLabel(LabelStatement statement) {
-        auto outer = _pendingLabel; // auto: const(Identifier) will not implicitly convert back
+        auto outerLabel = _pendingLabel; // auto: const(Identifier) will not implicitly convert back
+        auto outerTarget = _pendingLabelTarget;
         _pendingLabel = statement.ident;
+        _pendingLabelTarget = statement.gotoTarget !is null
+            ? statement.gotoTarget : statement.statement;
         compileStatement(statement.statement);
-        _pendingLabel = outer;
+        _pendingLabel = outerLabel;
+        _pendingLabelTarget = outerTarget;
     }
 
     // An unlabelled `continue`/`break` targets the innermost entry; a
