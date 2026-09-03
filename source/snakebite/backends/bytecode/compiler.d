@@ -4,8 +4,8 @@ module snakebite.backends.bytecode.compiler;
 private:
 
 import dmd.mtype: Type;
-import dmd.visitor: Visitor;
 import object: TypeInfo, TypeInfo_Array, TypeInfo_Class;
+import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.ffi: maxArguments, PlanCache;
 
 
@@ -360,7 +360,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 // its way out, an operand of a nested expression - by growing
 // `_tempSize`/`_tempAlignment` past it; nothing about a temporary slot is
 // ever handed back through `FrameLayout` itself.
-extern(C++) private final class FunctionCompiler: Visitor {
+extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import dmd.declaration: VarDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.expression;
@@ -376,7 +376,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
-        opConstant, opCopy, opDivideSigned, opDivideUnsigned, opEqual,
+        opArrayEqual, opConstant, opCopy, opDivideSigned, opDivideUnsigned,
+        opEqual,
         opFloatAdd, opFloatDivide, opFloatEqual, opFloatGreaterOrEqual,
         opFloatGreaterThan, opFloatLessOrEqual, opFloatLessThan,
         opFloatModulo, opFloatMultiply, opFloatNegate, opFloatNotEqual,
@@ -396,7 +397,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout: alignUp, isIntegralSize, TypeFacts;
 
-    alias visit = Visitor.visit;
+    alias visit = LoweringVisitor.visit;
 
     extern(D):
 
@@ -2085,8 +2086,17 @@ extern(C++) private final class FunctionCompiler: Visitor {
         compileComparison(expression, _destination);
     }
 
-    override void visit(EqualExp expression) {
+    protected override void visitUnloweredEqual(EqualExp expression) {
+        import dmd.astenums: Tarray;
+
         requireDestination(expression);
+
+        if (expression.e1.type.ty == Tarray
+                && expression.e2.type.ty == Tarray) {
+            compileMemcmpDynamicArrayEquality(expression, _destination);
+            return;
+        }
+
         compileComparison(expression, _destination);
     }
 
@@ -2314,11 +2324,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // `bool` - and the comparison opcode leaves its answer in the first
     // of those, copied out to `destOffset` only when it differs.
     private void compileComparison(BinExp expression, in size_t destOffset) {
-        import dmd.astenums: Tarray, Tpointer;
-
-        if (expression.e1.type.ty == Tarray
-                && expression.e2.type.ty == Tarray)
-            return compileDynamicArrayEquality(expression, destOffset);
+        import dmd.astenums: Tpointer;
 
         const operandFacts = TypeFacts.of(expression.e1.type);
 
@@ -2391,29 +2397,25 @@ extern(C++) private final class FunctionCompiler: Visitor {
             emit(&opCopy, destOffset, leftOffset, 1);
     }
 
-    // The bytecode backend supports equality for dynamic arrays whose
-    // elements are integral or float/double. Keep the check here so
-    // unsupported element types are rejected instead of receiving incorrect
-    // bytewise semantics.
-    private void compileDynamicArrayEquality(
-        BinExp expression, in size_t destOffset,
+    // DMD leaves EqualExp.lowering null only when its semantic pass approved
+    // bytewise element equality. All other array equality runs through that
+    // lowering instead of entering this fast path.
+    private void compileMemcmpDynamicArrayEquality(
+        EqualExp expression, in size_t destOffset,
     ) {
         import dmd.tokens: EXP;
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset, arrayValueSize;
+        import snakebite.nativelayout: arrayValueSize;
+
+        assert(expression.lowering is null);
 
         if (expression.op != EXP.equal && expression.op != EXP.notEqual)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
-        const isNotEqual = expression.op == EXP.notEqual;
 
-        auto arrayFacts = TypeFacts.of(expression.e1.type);
+        const arrayFacts = TypeFacts.of(expression.e1.type);
         auto elementType = expression.e1.type.nextOf;
-        auto elementFacts = TypeFacts.of(elementType);
-        const elementIsIntegral = elementFacts.isIntegral
-            && isIntegralSize(elementFacts.size);
-        if (!arrayFacts.isDynamicArray
-                || (!elementIsIntegral && !isFloatingType(elementType)))
+        const elementFacts = TypeFacts.of(elementType);
+        if (!arrayFacts.isDynamicArray)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -2422,81 +2424,11 @@ extern(C++) private final class FunctionCompiler: Visitor {
         const rightOffset = reserveTemp(arrayFacts);
         evalInto(expression.e2, rightOffset, arrayValueSize);
 
-        emit(&opConstant, destOffset, addConstant(0), 1);
-
-        const lengthsEqualOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, lengthsEqualOffset,
-            rightOffset + arrayLengthOffset, size_t.sizeof);
-        emit(&opEqual, lengthsEqualOffset,
-            leftOffset + arrayLengthOffset, size_t.sizeof);
-        const differentLengthBranch = _instructions.length;
-        emit(&opBranchFalse, lengthsEqualOffset, 0, 1);
-
-        const differentElementBranch = compileDynamicArrayElementsEqual(
-            leftOffset, rightOffset, lengthsEqualOffset, elementFacts,
-            elementIsIntegral,
-        );
-
-        emit(&opConstant, destOffset, addConstant(1), 1);
-        const invertIndex = _instructions.length;
-        if (isNotEqual)
-            emit(&opLogicalNot, destOffset, 0, 1);
-
-        _instructions[differentLengthBranch].source = invertIndex;
-        _instructions[differentElementBranch].source = invertIndex;
-    }
-
-    private size_t compileDynamicArrayElementsEqual(
-        in size_t leftOffset,
-        in size_t rightOffset,
-        in size_t lengthsEqualOffset,
-        in TypeFacts elementFacts,
-        in bool elementIsIntegral,
-    ) {
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset;
-
-        const indexOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, indexOffset, addConstant(0), size_t.sizeof);
-        const oneOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, oneOffset, addConstant(1), size_t.sizeof);
-        const elementSizeOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, elementSizeOffset,
-            addConstant(cast(long) elementFacts.size), size_t.sizeof);
-
-        const loopStart = _instructions.length;
-        emit(&opCopy, lengthsEqualOffset, indexOffset, size_t.sizeof);
-        emit(&opLessThanUnsigned, lengthsEqualOffset,
-            leftOffset + arrayLengthOffset,
-            size_t.sizeof);
-        const finishedBranch = _instructions.length;
-        emit(&opBranchFalse, lengthsEqualOffset, 0, 1);
-
-        emit(&opCopy, lengthsEqualOffset, indexOffset, size_t.sizeof);
-        emit(&opMultiply, lengthsEqualOffset, elementSizeOffset,
-            size_t.sizeof);
-
-        const elementAddress = reserveTemp(pointerFacts);
-        const elementOffsets = [
-            reserveTemp(elementFacts), reserveTemp(elementFacts),
-        ];
-        foreach (index, arrayOffset; [leftOffset, rightOffset]) {
-            emit(&opCopy, elementAddress,
-                arrayOffset + arrayPointerOffset, size_t.sizeof);
-            emit(&opAdd, elementAddress, lengthsEqualOffset, size_t.sizeof);
-            emit(&opLoadIndirect, elementOffsets[index], elementAddress,
-                elementFacts.size);
-        }
-        emit(elementIsIntegral ? &opEqual : &opFloatEqual,
-            elementOffsets[0], elementOffsets[1], elementFacts.size);
-        const differentElementBranch = _instructions.length;
-        emit(&opBranchFalse, elementOffsets[0], 0, 1);
-
-        emit(&opAdd, indexOffset, oneOffset, size_t.sizeof);
-        emit(&opJump, loopStart, 0, 0);
-
-        _instructions[finishedBranch].source = _instructions.length;
-        return differentElementBranch;
+        emit(&opArrayEqual, leftOffset, rightOffset, elementFacts.size);
+        if (expression.op == EXP.notEqual)
+            emit(&opLogicalNot, leftOffset, 0, 1);
+        if (destOffset != leftOffset)
+            emit(&opCopy, destOffset, leftOffset, 1);
     }
 
     private Instruction.Handler comparisonHandler(

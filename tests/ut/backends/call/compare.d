@@ -688,6 +688,39 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("compare.dynamicArrayEquality.pod." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                struct Pod {
+                    int first;
+                    int second;
+                }
+
+                Pod[] values() {
+                    return [Pod(17, 31), Pod(47, 53)];
+                }
+
+                Pod[] same() {
+                    return [Pod(17, 31), Pod(47, 53)];
+                }
+
+                Pod[] different() {
+                    return [Pod(17, 31), Pod(47, 59)];
+                }
+
+                bool comparePods() {
+                    return values() == same() && values() != different();
+                }
+            },
+            "comparePods",
+        );
+    }
+}
+
 
 // The bytecode compiler's own type switch recognises only `float` and
 // `double` as floating types - `real` has no case there at all, so a
