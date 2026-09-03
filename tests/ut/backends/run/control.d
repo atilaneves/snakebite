@@ -12,7 +12,10 @@ import ut.backends;
 // An ordinary switch selects one case, falls through until `break`, and
 // takes `default` when no case matches.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
+    // `foreach (value; [0u, 1u, 3u])` lowers to a `uint[3]` static array
+    // local, not the `switch` this test means to exercise - static
+    // arrays are a separate, unimplemented backend feature.
+    Omit!(Bytecode, Because.unconfirmed, "static arrays are unimplemented"),
 )) {
     @("switchDispatchesAndFallsThrough." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -52,9 +55,7 @@ static foreach (backend; Matrix!(
 
 // A string switch is lowered by dmd to a call to druntime's `__switch`, so
 // the interpreter must route that call through the normal native boundary.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("switchOnStringUsesDruntime." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -122,9 +123,7 @@ static foreach (backend; Matrix!(
 
 // `goto case` and `goto default` jump to another case body and keep
 // running from there, so every body on the path contributes.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("gotoCaseAndDefaultFallThrough." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -185,9 +184,7 @@ static foreach (backend; Matrix!(
 
 // `final switch` dispatches to the case matching the value at run time,
 // each case running its own body rather than falling into another's.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("finalSwitchDispatchesEveryEnumMember." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -227,9 +224,7 @@ static foreach (backend; Matrix!(
 }
 
 // A case range and a case list each select one shared case body.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("switchSupportsCaseRangesAndLists." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
