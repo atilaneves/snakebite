@@ -1567,8 +1567,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         AssignExp expression, DotVarExp target, in size_t destOffset,
     ) {
         auto field = target.var.isVarDeclaration;
-        if (field is null || field.isBitFieldDeclaration !is null
-                || !isPlainOldStruct(target.e1.type))
+        if (field is null || field.isBitFieldDeclaration !is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -1599,7 +1598,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             addressOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, addressOffset, size_t.sizeof);
         } else {
-            if (!isPlainOldStruct(expression.e1.type))
+            if (expression.e1.type.isTypeStruct is null)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
             addressOffset = compileAddress(expression.e1);
@@ -2090,7 +2089,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        if (!isPlainOldStruct(expression.e1.type))
+        if (expression.e1.type.isTypeStruct is null)
             return visit(cast(Expression) expression);
 
         const baseFacts = TypeFacts.of(expression.e1.type);
@@ -3401,7 +3400,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto field = dot.var.isVarDeclaration;
             if (field !is null && field.isBitFieldDeclaration is null
                     && (dot.e1.type.ty == Tclass
-                        || isPlainOldStruct(dot.e1.type)))
+                        || dot.e1.type.isTypeStruct !is null))
                 return compileFieldAddress(dot);
         }
 
