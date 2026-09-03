@@ -94,8 +94,7 @@ private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
 }
 
 // Whether `type` is `float`/`double`/`real` - `TypeFacts` has no notion of
-// its own for this, since nothing outside array element types and their
-// literals needs to ask, unlike `isIntegral`/`isDynamicArray`, which drive
+// its own for this, unlike `isIntegral`/`isDynamicArray`, which drive
 // checks all over this compiler.
 private bool isFloatingType(imported!"dmd.mtype".Type type) {
     import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
@@ -114,8 +113,8 @@ private imported!"snakebite.nativelayout".TypeFacts pointerFactsOf() {
 }
 
 // An array element type this compiler can lay out: every integral width it
-// already accepts elsewhere, plus `float`/`double`, which have no `.init`
-// this compiler can write any other way but zero.
+// already accepts elsewhere, plus `float`/`double`/`real`, which have no
+// `.init` this compiler can write any other way but zero.
 private bool isSupportedElementFacts(
     in imported!"snakebite.nativelayout".TypeFacts facts,
     imported!"dmd.mtype".Type type,
@@ -1701,7 +1700,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in TypeFacts facts,
         Expression value,
     ) {
-        import dmd.astenums: Tarray, Tfloat32, Tfloat64, Tfloat80;
+        import dmd.astenums: Tarray;
         import dmd.expressionsem: toInteger;
         import dmd.typesem: nextOf, size;
         import snakebite.nativelayout: arrayValueSize;
@@ -1715,7 +1714,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 && element !is null && literal.sz == element.size;
         }
 
-        if (type.ty == Tfloat32 || type.ty == Tfloat64 || type.ty == Tfloat80)
+        if (isFloatingType(type))
             return value.isRealExp !is null;
 
         if (type.isTypeStruct !is null) {
@@ -2344,7 +2343,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return visit(cast(Expression) expression);
 
         if (_width > long.sizeof) {
-            align(real.alignof) ubyte[real.sizeof] bits = void;
+            align(real.alignof) ubyte[real.sizeof] bits = 0;
             storeValue(expression.type, facts, expression, bits.ptr);
             auto halves = cast(const(long)*) bits.ptr;
             emit(&opConstant, _destination, addConstant(halves[0]),
