@@ -11,6 +11,9 @@ import ut.backends;
 
 // `with` on an enum type brings its members into scope, so they resolve
 // unqualified.
+// Bytecode has no `WithStatement` support at all yet (a missing
+// feature separate from function-local enum declarations), so it
+// stays omitted here.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
@@ -48,7 +51,6 @@ static foreach (backend; Matrix!(
 // so casting bytes to the enum type and comparing against its members
 // exercises only that folding, not the declaration statement.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
 )) {
     @("localEnumDeclarationIsANoOp." ~ backend.stringof)
     @Tags(backend.stringof)

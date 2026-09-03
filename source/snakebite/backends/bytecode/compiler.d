@@ -1558,7 +1558,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (expression.declaration.isStructDeclaration !is null
                 || expression.declaration.isAliasDeclaration !is null
                 || expression.declaration.isTemplateDeclaration !is null
-                || expression.declaration.isFuncDeclaration !is null)
+                || expression.declaration.isFuncDeclaration !is null
+                || expression.declaration.isEnumDeclaration !is null)
             return;
 
         auto variable = expression.declaration.isVarDeclaration;
