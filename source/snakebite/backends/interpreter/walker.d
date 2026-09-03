@@ -2308,6 +2308,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         );
     }
 
+    override void visit(ConstructExp expression) {
+        if (expression.lowering !is null) {
+            expression.lowering.accept(this);
+            return;
+        }
+
+        assign(expression);
+    }
+
     // DMD lowers dynamic-array length assignment to a native druntime call
     // so allocation, prefix preservation, and the array pointer update stay
     // in druntime rather than being emulated by the interpreter.
@@ -3331,6 +3340,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
         import std.conv: text;
 
+        if (expression.lowering !is null) {
+            expression.lowering.accept(this);
+            return;
+        }
+
         auto sourceType = expression.e1.type;
 
         // `cast(void) e` discards the value but keeps e's effects. DMD
@@ -3636,11 +3650,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
+        auto structType = type.isTypeStruct;
+        if (structType !is null && isRootOwnedStruct(structType.sym)) {
+            storeIntegral(
+                _place,
+                cast(size_t) cast(void*)
+                    structRuntimeInfo(structType.sym),
+                _facts.size,
+            );
+            return;
+        }
+
         auto name = type.vtinfo.ident.toString;
         countForeignNameLookup;
         auto address = _plans.resolve(name);
         if (address is null) {
-            auto structType = type.isTypeStruct;
             if (structType !is null
                     && !isRootOwnedStruct(structType.sym)) {
                 storeIntegral(
@@ -3951,8 +3975,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(NewExp expression) {
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset, storeIntegral;
+        import dmd.astenums: Taarray;
+
+        if (expression.type.ty == Tarray || expression.type.ty == Taarray) {
+            if (expression.lowering is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot evaluate `", expression.op,
+                        "` expression: `", expression.toString, "`"),
+                );
+
+            expression.lowering.accept(this);
+            return;
+        }
+
+        import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
         auto arguments = expression.arguments;
@@ -4039,60 +4075,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        if (expression.type.ty != Tarray || arguments is null
-                || arguments.length != 1)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate a `", expression.op,
-                    "` expression: `", expression.toString, "`"),
-            );
-
-        auto elementType = expression.type.nextOf;
-        const elementFacts = factsOf(elementType);
-
-        const length = cast(size_t) asIntegral((*arguments)[0]);
-        if (elementFacts.size != 0 && length > size_t.max / elementFacts.size)
-            throw new SnakebiteException(
-                text("interpreter cannot allocate `", expression.toString,
-                "`: its byte size overflows `size_t`"),
-            );
-
-        const dataSize = length * elementFacts.size;
-        const padding = elementFacts.alignment - 1;
-        if (dataSize > size_t.max - padding)
-            throw new SnakebiteException(
-                text("interpreter cannot allocate `", expression.toString,
-                    "`: its alignment padding overflows `size_t`"),
-            );
-
-        ubyte* elements;
-        if (dataSize != 0) {
-            auto allocation = new ubyte[](dataSize + padding);
-            _allocations ~= allocation;
-
-            const start = -cast(size_t) allocation.ptr
-                & (elementFacts.alignment - 1);
-            elements = cast(ubyte*) allocation.ptr + start;
-
-            foreach (i; 0 .. length) {
-                try
-                    initializeDefault(
-                        elementType,
-                        elementFacts,
-                        elements + i * elementFacts.size,
-                        expression.loc,
-                    );
-                catch (SnakebiteException exception)
-                    throw new SnakebiteException(
-                        text("interpreter cannot initialize an array of `",
-                            elementType.toString, "` from its `.init`: ",
-                            exception.msg),
-                    );
-            }
-        }
-
-        auto bytes = cast(ubyte*) _place;
-        storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
-        *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
+        throw new SnakebiteException(
+            text("interpreter cannot evaluate a `", expression.op,
+                "` expression: `", expression.toString, "`"),
+        );
     }
 
     override void visit(DeleteExp expression) {
@@ -4496,6 +4482,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
 
         return element;
+    }
+
+    override void visit(CatExp expression) {
+        if (expression.lowering is null) {
+            visit(cast(Expression) expression);
+            return;
+        }
+
+        expression.lowering.accept(this);
     }
 
     // `~=` appending a `dchar` (`CatDcharAssignExp`, `EXP.concatenateDcharAssign`)
