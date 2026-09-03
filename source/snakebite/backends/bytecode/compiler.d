@@ -500,16 +500,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private bool _finished;
     // The loop or unrolled `foreach` this compiler is currently inside the
     // body of, innermost last - what a `continue` targets, labelled or
-    // not. A `do` already knows its own continue target (the condition it
-    // re-checks) the moment it starts compiling its body; a `for`'s is its
-    // increment, compiled only after the body is, so a `continue` reached
-    // first records its own instruction's index here instead and
-    // `resolveContinues` patches every one of them in once the target is
-    // known. An unrolled `foreach` has no re-checked condition either -
-    // dmd already unrolled it into one statement per element - so its
-    // `continue` target is the next element's own first instruction,
-    // known only once `compileUnrolledLoop` starts compiling it; that
-    // reuses the same pending/resolve mechanism as `for`.
+    // not. A `do` knows its own continue target (the condition it
+    // re-checks) before it compiles its body; a `for`'s increment and an
+    // unrolled `foreach`'s next element are both only known once the body
+    // ahead of them is already compiled, so a `continue` reached first
+    // queues its own instruction index in `pendingContinueJumps` instead,
+    // and `resolveContinues` patches every one of them in once the target
+    // is known.
     private struct LoopContext {
         Identifier label;
         size_t continueTarget = size_t.max;
@@ -528,26 +525,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `foreach` this compiler is currently inside the body of, or - given
     // a label - whichever of those an enclosing `LabelStatement` names.
     // `pendingBreakJumps` collects every `break` that targets this one,
-    // each patched once this construct's own compiled code ends, the
-    // same way a `switch`'s already were before a loop or an unrolled
-    // `foreach` could have one of its own.
+    // patched once this construct's own compiled code ends.
     private struct Breakable {
         Identifier label;
         size_t[] pendingBreakJumps;
     }
     private Breakable[] _breakables;
 
-    // The identifier and resolved target of a `LabelStatement` this
-    // compiler is currently inside, not yet claimed by the loop/`switch`/
-    // unrolled `foreach` it labels - see `compileLabel`. dmd resolves
-    // which statement a label actually names itself (`gotoTarget`, or
-    // `statement` when dmd left it unset), since a label on a `for` with
-    // an init is rewritten to sit directly on the generated
-    // `ForStatement`, not on whatever the init itself might also compile
-    // (a `switch`, say). `consumeLabel` compares its own caller's
-    // `Statement` against `_pendingLabelTarget` rather than simply taking
-    // whatever is pending, so a label survives past constructs it does
-    // not name.
+    // A label of a `LabelStatement` this compiler is currently inside,
+    // not yet claimed by the loop/`switch`/unrolled `foreach` it labels.
+    // dmd does not resolve `break ident`/`continue ident` to a target
+    // itself - only `findLoopIndex`/`findBreakableIndex` below do, by
+    // identifier - but it does resolve which statement a label names:
+    // `_pendingLabelTarget` holds that resolved `Statement` (see
+    // `compileLabel`), since a labelled `for` with an init is rewritten
+    // to put the label on the generated `ForStatement` alone, not on
+    // whatever the init itself also compiles (a `switch`, say).
     private Identifier _pendingLabel;
     private Statement _pendingLabelTarget;
 
@@ -1208,11 +1201,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return integer !is null && integer.toInteger != 0;
     }
 
-    // Claims the pending label (see `_pendingLabelTarget`'s own doc) only
-    // when it actually names `statement` - the exact `Statement` dmd
-    // resolved a label to, not merely the first breakable construct
-    // compiled while one is pending. Anything else compiled along the
-    // way (a `switch` in a `for`'s own init, say) sees no label at all.
+    // Claims the pending label only when `statement` is what dmd resolved
+    // it to, not merely the first breakable construct compiled while one
+    // is pending.
     private Identifier consumeLabel(Statement statement) {
         if (_pendingLabelTarget !is statement)
             return null;
@@ -1371,15 +1362,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             && breakable.pendingBreakJumps.length == 0;
     }
 
-    // dmd resolves which statement a label actually names to
-    // `statement.gotoTarget`, falling back to `statement.statement`
-    // itself when dmd left `gotoTarget` unset (see `_pendingLabelTarget`'s
-    // own doc) - a label on anything neither a loop, a `switch`, nor an
-    // unrolled `foreach` can name (a labelled block, say) has no compiler
-    // support of its own yet, and a `break`/`continue` naming it then
-    // finds no matching entry in `_breakables`/`_loops` and is rejected
-    // the same way one naming an unknown label would be if dmd's own
-    // semantic pass had not already ruled that out.
+    // `gotoTarget` is unset when dmd did not need to rewrite the labelled
+    // statement, so the label names `statement.statement` itself then.
     private void compileLabel(LabelStatement statement) {
         auto outerLabel = _pendingLabel; // auto: const(Identifier) will not implicitly convert back
         auto outerTarget = _pendingLabelTarget;
@@ -1391,13 +1375,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _pendingLabelTarget = outerTarget;
     }
 
-    // An unlabelled `continue`/`break` targets the innermost entry; a
-    // labelled one searches outward for the `LabelStatement` dmd's own
-    // semantic pass already confirmed exists (`checkLabeledLoop`,
-    // `visitBreak`/`visitContinue` in `statementsem.d`) - so a search
-    // that finds nothing here means this compiler failed to record an
-    // entry a legally-typed program guarantees is there, not that the
-    // program itself is wrong.
+    // dmd resolves neither `break ident` nor `continue ident` to a
+    // target itself, only confirming one exists (`checkLabeledLoop` in
+    // `statementsem.d`), so this compiler searches outward by identifier
+    // for the entry a legally-typed program guarantees is there.
     private size_t findLoopIndex(Identifier label) {
         if (label is null)
             return _loops.length - 1;
