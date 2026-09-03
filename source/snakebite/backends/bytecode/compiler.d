@@ -2151,6 +2151,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileCompoundAssign(expression, _destination);
     }
 
+    override void visit(CatExp expression) {
+        if (expression.lowering is null)
+            return visit(cast(Expression) expression);
+
+        expression.lowering.accept(this);
+    }
+
     override void visit(PostExp expression) {
         compilePost(expression, _destination);
     }
