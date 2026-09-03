@@ -1082,37 +1082,33 @@ extern(C++) private final class Evaluator: Visitor {
         if (_type.ty == Tvoid)
             return;
 
-        const mark = _temporaries.length;
-        const previousFloor = raiseTemporariesFloor(mark);
-        scope(exit) {
-            releaseTemporariesSince(mark);
-            _temporariesFloor = previousFloor;
-        }
-
-        void* referenceAddress() {
-            return addressOf(statement.exp);
-        }
-
-        void evaluateValue() {
-            // `_type`/`_facts` are already this function's return type and
-            // its facts, set together on entry (`executeRaw`) or by the last
-            // `evaluate`, so this callback needs no fresh type lookup.
-            if (_place !is null) {
-                evaluate(statement.exp, _type, _facts, _place);
-                return;
+        withTemporaryLifetime(this, {
+            void* referenceAddress() {
+                return addressOf(statement.exp);
             }
 
-            // The caller discarded the result, but evaluating the expression
-            // can have effects, so it still runs - into a reservation on the
-            // frame stack, popped when it goes out of scope, not into a GC
-            // allocation.
-            auto frame = _frames.push(_facts.size, _facts.alignment);
-            evaluate(statement.exp, _type, _facts, frame.base);
-        }
+            void evaluateValue() {
+                // `_type`/`_facts` are already this function's return type
+                // and its facts, set together on entry (`executeRaw`) or by
+                // the last `evaluate`, so this callback needs no fresh type
+                // lookup.
+                if (_place !is null) {
+                    evaluate(statement.exp, _type, _facts, _place);
+                    return;
+                }
 
-        _layout.call.returnFromCall(
-            _place, &referenceAddress, &evaluateValue,
-        );
+                // The caller discarded the result, but evaluating the
+                // expression can have effects, so it still runs - into a
+                // reservation on the frame stack, popped when it goes out
+                // of scope, not into a GC allocation.
+                auto frame = _frames.push(_facts.size, _facts.alignment);
+                evaluate(statement.exp, _type, _facts, frame.base);
+            }
+
+            _layout.call.returnFromCall(
+                _place, &referenceAddress, &evaluateValue,
+            );
+        });
     }
 
     override void visit(ExpStatement statement) {
@@ -1128,29 +1124,23 @@ extern(C++) private final class Evaluator: Visitor {
     // temporary, so a guest throw from any point of the evaluation still
     // releases whatever was reserved by then.
     private void runFullExpression(Expression expression) {
-        const mark = _temporaries.length;
-        const previousFloor = raiseTemporariesFloor(mark);
         auto previousRoot = _fullExpressionRoot;
         _fullExpressionRoot = expression;
-        scope(exit) {
-            releaseTemporariesSince(mark);
-            _temporariesFloor = previousFloor;
-            _fullExpressionRoot = previousRoot;
-        }
-        runForEffect(expression);
+        scope(exit) _fullExpressionRoot = previousRoot;
+        withTemporaryLifetime(this, {
+            runForEffect(expression);
+        });
     }
 
     // A condition is a full expression of its own on each evaluation - a
     // loop's every test included - so its temporaries are given back as
     // soon as its truth is known.
     private bool conditionHolds(Expression condition) {
-        const mark = _temporaries.length;
-        const previousFloor = raiseTemporariesFloor(mark);
-        scope(exit) {
-            releaseTemporariesSince(mark);
-            _temporariesFloor = previousFloor;
-        }
-        return truthOf(condition);
+        bool result;
+        withTemporaryLifetime(this, {
+            result = truthOf(condition);
+        });
+        return result;
     }
 
     override void visit(BreakStatement statement) {
@@ -1175,13 +1165,7 @@ extern(C++) private final class Evaluator: Visitor {
     override void visit(SwitchStatement statement) {
         _pendingLoopLabel = null;
         Statement selected;
-        {
-            const mark = _temporaries.length;
-            const previousFloor = raiseTemporariesFloor(mark);
-            scope(exit) {
-                releaseTemporariesSince(mark);
-                _temporariesFloor = previousFloor;
-            }
+        withTemporaryLifetime(this, {
             const condition = asIntegral(statement.condition);
             if (statement.cases !is null)
                 foreach (case_; *statement.cases) {
@@ -1190,7 +1174,7 @@ extern(C++) private final class Evaluator: Visitor {
                         break;
                     }
                 }
-        }
+        });
 
         if (selected is null)
             selected = statement.sdefault;
@@ -1271,13 +1255,9 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(ThrowStatement statement) {
-        const mark = _temporaries.length;
-        const previousFloor = raiseTemporariesFloor(mark);
-        scope(exit) {
-            releaseTemporariesSince(mark);
-            _temporariesFloor = previousFloor;
-        }
-        throwGuest(statement.exp);
+        withTemporaryLifetime(this, {
+            throwGuest(statement.exp);
+        });
     }
 
     // Runs `expression` for its side effects, discarding whatever value it
@@ -3836,12 +3816,26 @@ extern(C++) private final class Evaluator: Visitor {
 
             auto declaration = cast(ClassDeclaration) classType.sym;
             auto runtime = classRuntimeInfo(declaration);
-            auto object = cast(ubyte*) cast(void*) runtime.create;
-            if (object is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot allocate `",
-                        expression.toString, "`: druntime returned null"),
+            ubyte* object;
+            if (expression.onstack) {
+                import core.stdc.string: memcpy;
+
+                const alignment = declaration.alignsize == 0
+                    ? 1 : declaration.alignsize;
+                object = _frames.reserve(
+                    declaration.structsize,
+                    alignment,
                 );
+                memcpy(object, runtime.m_init.ptr, runtime.m_init.length);
+            } else {
+                object = cast(ubyte*) cast(void*) runtime.create;
+                if (object is null)
+                    throw new SnakebiteException(
+                        text("interpreter cannot allocate `",
+                            expression.toString,
+                            "`: druntime returned null"),
+                    );
+            }
 
             initializeClass(declaration, object, expression.loc);
             _classes[object] = declaration;
@@ -3948,6 +3942,45 @@ extern(C++) private final class Evaluator: Visitor {
         auto bytes = cast(ubyte*) _place;
         storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
+    }
+
+    override void visit(DeleteExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+
+        if (expression.e1.type.ty != Tclass)
+            throw new SnakebiteException(
+                text("interpreter cannot delete `", expression.e1.toString,
+                    "`: it is not a class reference"),
+            );
+
+        auto object = classReferenceOf(expression.e1);
+        if (object is null)
+            return;
+
+        auto classDeclaration = object in _classes;
+        if (classDeclaration is null)
+            return;
+
+        auto destructor = (*classDeclaration).dtor;
+        if (destructor !is null) {
+            auto layout = layoutOf(destructor);
+            auto frame = _frames.push(layout.size, layout.alignment);
+            storeIntegral(
+                frame.base + layout.hiddenThis.parameter.offset,
+                cast(size_t) object,
+                size_t.sizeof,
+            );
+            executeCall(
+                destructor,
+                null,
+                frame.base,
+                layout,
+                null,
+                true,
+            );
+        }
+
+        _classes.remove(object);
     }
 
     // Parsed guest classes have no emitted native ClassInfo. Build the
@@ -4926,6 +4959,19 @@ extern(C++) private final class Evaluator: Visitor {
         _place = place;
         expression.accept(this);
     }
+}
+
+private void withTemporaryLifetime(
+    Evaluator evaluator,
+    scope void delegate() action,
+) {
+    const mark = evaluator._temporaries.length;
+    const previousFloor = evaluator.raiseTemporariesFloor(mark);
+    scope(exit) {
+        evaluator.releaseTemporariesSince(mark);
+        evaluator._temporariesFloor = previousFloor;
+    }
+    action();
 }
 
 private ulong combine(string op)(
