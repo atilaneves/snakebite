@@ -2964,7 +2964,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const sourceFacts = TypeFacts.of(sourceType);
         const destFacts = TypeFacts.of(destType);
-        import dmd.astenums: Tpointer;
+        import dmd.astenums: Tpointer, Tsarray;
 
         if (isFloatingType(destType)) {
             if (isFloatingType(sourceType)) {
@@ -3022,6 +3022,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto(expression.e1, addressOffset, sourceFacts.size);
             emit(&opLoadIndirect, destOffset, addressOffset,
                 destFacts.size);
+            return;
+        }
+
+        if (sourceType.ty == Tsarray && destFacts.isDynamicArray
+                && destType.nextOf !is null
+                && sourceType.nextOf.equals(destType.nextOf)) {
+            import snakebite.nativelayout:
+                arrayLengthOffset, arrayPointerOffset;
+
+            const length = cast(size_t)
+                sourceType.isTypeSArray.dim.toInteger;
+            const addressOffset = compileAddress(expression.e1);
+            emit(&opConstant, destOffset + arrayLengthOffset,
+                addConstant(cast(long) length), size_t.sizeof);
+            emit(&opCopy, destOffset + arrayPointerOffset,
+                addressOffset, size_t.sizeof);
             return;
         }
 
