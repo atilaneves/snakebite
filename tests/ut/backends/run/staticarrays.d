@@ -16,9 +16,7 @@ import ut.backends;
 // exact shape `examples/ct-full/source/corpus.d`'s own `int[3][2]`
 // unittest exercises, since the interpreter refused every one of these
 // before it could run through them.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("staticArray.rowAssignElementWriteAndEquality." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -51,9 +49,7 @@ static foreach (backend; Matrix!(
 // that row's elements, at their own position - `a[1][2]` is the row
 // `a` was assigned, indexed a second time, not some other row's or
 // column's byte.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("staticArray.nestedElementReadAfterRowAssign." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -80,7 +76,6 @@ static foreach (backend; Matrix!(
 // not a bug in either of this project's backends, so `Ctfe` disagrees
 // here on purpose.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "dmd's CTFE engine evaluates a[i][j]'s indices in the opposite " ~
         "order from its runtime codegen for the same expression"),
@@ -117,7 +112,6 @@ static foreach (backend; Matrix!(
 // this backend. `Ctfe` calls that same engine, so it disagrees here on
 // purpose.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "dmd's CTFE engine aliases a static-array local on `=` " ~
         "instead of copying it, unlike its runtime codegen"),
@@ -141,9 +135,7 @@ static foreach (backend; Matrix!(
 // `int[3].init` is every element's own `.init` - zero for `int` - so a
 // freshly declared static array reads back as all zero bytes before
 // anything writes to it.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("staticArray.defaultInitIsZero." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

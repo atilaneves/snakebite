@@ -34,11 +34,12 @@ private bool isSupportedFacts(
     in imported!"snakebite.nativelayout".TypeFacts facts,
     imported!"dmd.mtype".Type type,
 ) {
-    import dmd.astenums: Tpointer;
+    import dmd.astenums: Tpointer, Tsarray;
 
     return isSupportedFacts(facts) || isFloatingType(type)
         || type.ty == Tpointer
-        || type.isTypeStruct !is null;
+        || type.isTypeStruct !is null
+        || type.ty == Tsarray;
 }
 
 // Whether this compiler can treat `type` as plain bytes it never has to
@@ -123,7 +124,24 @@ private bool isSupportedElementFacts(
 
     return (facts.isIntegral && isIntegralSize(facts.size))
         || isFloatingType(type)
-        || isPlainOldStruct(type);
+        || isPlainOldStruct(type)
+        || isPlainStaticArray(type);
+}
+
+// Whether this compiler can lay `type` out as a static array's own
+// in-place bytes: `T[N]` whose element `T` is itself one this compiler
+// already lays out - an integral, `float`/`double`/`real`, a plain-old
+// struct, or another static array (`int[3][2]`, nested). Mutually
+// recursive with `isSupportedElementFacts` for exactly that nesting.
+private bool isPlainStaticArray(imported!"dmd.mtype".Type type) {
+    import snakebite.nativelayout: TypeFacts;
+
+    auto sarrayType = type.isTypeSArray;
+    if (sarrayType is null)
+        return false;
+
+    auto element = sarrayType.next;
+    return isSupportedElementFacts(TypeFacts.of(element), element);
 }
 
 
@@ -450,8 +468,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opModuloUnsigned, opMultiply, opNegate, opNotEqual, opRangeError,
         opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
-        opStaticAddress, opStaticLoad, opStaticStore, opStoreIndirect,
-        opSubtract, opThrow, opZero;
+        opStaticAddress, opStaticArrayEqual, opStaticLoad, opStaticStore,
+        opStoreIndirect, opSubtract, opThrow, opZero;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
@@ -1737,6 +1755,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (auto indexTarget = expression.e1.isIndexExp)
             return compileIndexAssign(expression, indexTarget, destOffset);
 
+        // `a[] = 0`: dmd's own shape for blitting a scalar into every
+        // element of a static array - not just written by hand, but also
+        // what `dsymbolsem`'s default-init `constructInit` builds for a
+        // local static array with no initialiser of its own (a scalar
+        // `.init` cannot otherwise convert to an array type, so semantic
+        // analysis rewrites the blit's own target from the bare variable
+        // to its whole slice).
+        if (auto sliceTarget = expression.e1.isSliceExp)
+            return compileSliceAssign(expression, sliceTarget, destOffset);
+
         // `pick(a, b, true) = 5;`: the call's own return is `ref`, an
         // lvalue naming whichever of its own arguments it picked, not a
         // value of its own - the same address `compileAddress`'s own
@@ -2064,6 +2092,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileIndexAssign(
         AssignExp expression, IndexExp target, in size_t destOffset,
     ) {
+        import dmd.astenums: Tsarray;
+
+        if (target.e1.type.ty == Tsarray)
+            return compileStaticIndexAssign(expression, target, destOffset);
+
         const arrayFacts = TypeFacts.of(target.e1.type);
         if (!arrayFacts.isDynamicArray)
             throw rejection(_function, expression.loc,
@@ -2081,6 +2114,73 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (destOffset != discardResult)
             emit(&opCopy, destOffset, valueOffset, facts.size);
+    }
+
+    // `a[i] = value` when `a` is a static array: the same store
+    // `compileIndexAssign` already does for a dynamic array's element,
+    // just through `compileStaticElementAddress`'s address instead of
+    // `compileElementAddress`'s.
+    private void compileStaticIndexAssign(
+        AssignExp expression, IndexExp target, in size_t destOffset,
+    ) {
+        const facts = TypeFacts.of(expression.e1.type);
+        if (!isSupportedFacts(facts, expression.e1.type))
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const addressOffset = compileStaticElementAddress(target);
+        const valueOffset = reserveTemp(facts);
+        evalInto(expression.e2, valueOffset, facts.size);
+        emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
+
+        if (destOffset != discardResult)
+            emit(&opCopy, destOffset, valueOffset, facts.size);
+    }
+
+    // `arr[] = value;`, only for `arr` a static array's own whole slice - a
+    // bounded slice or a dynamic array's own runtime fill are both out of
+    // scope. `value` is evaluated once, then copied into every element in
+    // turn; the fill's own value as an expression (the slice `arr[]`
+    // itself) is never needed by either caller that reaches here - an
+    // `ExpStatement` discards it, and a local's own default-init blit
+    // already targets this same array's storage, so there is nothing left
+    // to copy out.
+    private void compileSliceAssign(
+        AssignExp expression, SliceExp target, in size_t destOffset,
+    ) {
+        import dmd.astenums: Tsarray;
+
+        if (target.e1.type.ty != Tsarray
+                || target.lwr !is null || target.upr !is null)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        auto sarrayType = target.e1.type.isTypeSArray;
+        const elementFacts = TypeFacts.of(sarrayType.next);
+        if (!isSupportedElementFacts(elementFacts, sarrayType.next))
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const dim = cast(size_t) sarrayType.dim.toInteger;
+
+        const baseOffset = compileAddress(target.e1);
+
+        const valueOffset = reserveTemp(elementFacts);
+        evalInto(expression.e2, valueOffset, elementFacts.size);
+
+        foreach (i; 0 .. dim) {
+            const addressOffset = reserveTemp(pointerFacts);
+            emit(&opCopy, addressOffset, baseOffset, size_t.sizeof);
+            if (i != 0) {
+                const byteOffsetOffset = reserveTemp(pointerFacts);
+                emit(&opConstant, byteOffsetOffset,
+                    addConstant(cast(long) (i * elementFacts.size)),
+                    size_t.sizeof);
+                emit(&opAdd, addressOffset, byteOffsetOffset, size_t.sizeof);
+            }
+            emit(&opStoreIndirect, addressOffset, valueOffset,
+                elementFacts.size);
+        }
     }
 
     // `+=`, `-=`, ... and every other compound assignment: the target is
@@ -2624,7 +2724,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // A dynamic array's whole slice is the same two words as the array
     // itself, so it does not need the bounds work of a bounded slice.
     override void visit(SliceExp expression) {
-        import dmd.astenums: Tpointer;
+        import dmd.astenums: Tpointer, Tsarray;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset;
         import std.string: fromStringz;
@@ -2657,6 +2757,27 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opAdd, pointerOffset, lowOffset, size_t.sizeof);
             emit(&opCopy, _destination + arrayPointerOffset, pointerOffset,
                 size_t.sizeof);
+            return;
+        }
+
+        // `xs[]`: a static array's own whole-array slice, dmd's own
+        // `foreach` lowering over one (see `dmd.statementsem`'s rewrite to
+        // a `for` loop over `xs[]`) as well as an explicit one written by
+        // hand. No bounds to check - the whole array is always in bounds
+        // of itself - and no separate storage to point into: the result's
+        // pointer word is `xs`'s own address, its length word `xs`'s own
+        // dimension, known at compile time.
+        if (expression.e1.type.ty == Tsarray) {
+            if (expression.lwr !is null || expression.upr !is null)
+                return visit(cast(Expression) expression);
+
+            const dim = cast(size_t)
+                expression.e1.type.isTypeSArray.dim.toInteger;
+            const addressOffset = compileAddress(expression.e1);
+            emit(&opConstant, _destination + arrayLengthOffset,
+                addConstant(cast(long) dim), size_t.sizeof);
+            emit(&opCopy, _destination + arrayPointerOffset,
+                addressOffset, size_t.sizeof);
             return;
         }
 
@@ -2749,6 +2870,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         requireDestination(expression);
+
+        import dmd.astenums: Tsarray;
+
+        if (expression.e1.type.ty == Tsarray) {
+            const addressOffset = compileStaticElementAddress(expression);
+            emit(&opLoadIndirect, _destination, addressOffset, _width);
+            return;
+        }
 
         const facts = TypeFacts.of(expression.e1.type);
         if (!facts.isDynamicArray)
@@ -2998,13 +3127,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     protected override void visitUnloweredEqual(EqualExp expression) {
-        import dmd.astenums: Tarray;
+        import dmd.astenums: Tarray, Tsarray;
 
         requireDestination(expression);
 
         if (expression.e1.type.ty == Tarray
                 && expression.e2.type.ty == Tarray) {
             compileMemcmpDynamicArrayEquality(expression, _destination);
+            return;
+        }
+
+        if (expression.e1.type.ty == Tsarray
+                && expression.e2.type.ty == Tsarray) {
+            compileStaticArrayEquality(expression, _destination);
             return;
         }
 
@@ -3354,6 +3489,36 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opCopy, destOffset, leftOffset, 1);
     }
 
+    // A static array has no `{length, pointer}` header of its own to
+    // compare - `expression.e1`/`e2` are already the whole array's own
+    // bytes once evaluated, so this compares that many bytes directly
+    // rather than reaching through a pointer the way
+    // `compileMemcmpDynamicArrayEquality` does.
+    private void compileStaticArrayEquality(
+        EqualExp expression, in size_t destOffset,
+    ) {
+        import dmd.tokens: EXP;
+
+        assert(expression.lowering is null);
+
+        if (expression.op != EXP.equal && expression.op != EXP.notEqual)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const facts = TypeFacts.of(expression.e1.type);
+
+        const leftOffset = reserveTemp(facts);
+        evalInto(expression.e1, leftOffset, facts.size);
+        const rightOffset = reserveTemp(facts);
+        evalInto(expression.e2, rightOffset, facts.size);
+
+        emit(&opStaticArrayEqual, leftOffset, rightOffset, facts.size);
+        if (expression.op == EXP.notEqual)
+            emit(&opLogicalNot, leftOffset, 0, 1);
+        if (destOffset != leftOffset)
+            emit(&opCopy, destOffset, leftOffset, 1);
+    }
+
     private Instruction.Handler comparisonHandler(
         BinExp expression, in bool unsigned,
     ) {
@@ -3578,6 +3743,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 addConstant(cast(long) length), size_t.sizeof);
             emit(&opCopy, destOffset + arrayPointerOffset,
                 addressOffset, size_t.sizeof);
+            return;
+        }
+
+        // `xs.ptr`: dmd's own semantic pass for `Id.ptr` on a static array
+        // (`TypeSArray.dotExp`) casts straight to a pointer to its element
+        // type - the array's own address is already that pointer, with no
+        // bytes to move.
+        if (sourceType.ty == Tsarray && destType.ty == Tpointer
+                && destType.nextOf !is null
+                && sourceType.nextOf.equals(destType.nextOf)) {
+            const addressOffset = compileAddress(expression.e1);
+            emit(&opCopy, destOffset, addressOffset, size_t.sizeof);
             return;
         }
 
@@ -4016,6 +4193,75 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return addressOffset;
     }
 
+    // Where `expression`'s element lives when `expression.e1` is a static
+    // array: no `{length, pointer}` header to read at run time, since a
+    // static array's own bytes sit directly in whatever storage holds it -
+    // so the dimension comes from `expression.e1.type` itself, known at
+    // compile time, and the base address is `expression.e1`'s own address,
+    // recursed through `compileAddress` since `expression.e1` can itself be
+    // a nested static-array index (`a[i][j]`, `expression.e1` is `a[i]`).
+    //
+    // The index is evaluated before that recursion, not after: dmd's own
+    // runtime codegen evaluates a nested static-array index write's
+    // rightmost bracket first and its leftmost bracket second, the
+    // opposite of source order - see
+    // `staticArray.nestedElementWriteIndexEvaluationOrder`'s own doc.
+    // Evaluating this level's own index first and only then recursing into
+    // `expression.e1`'s reproduces exactly that order, since each nested
+    // call does the same in turn.
+    private size_t compileStaticElementAddress(IndexExp expression) {
+        import std.conv: text;
+        import std.string: fromStringz;
+
+        auto sarrayType = expression.e1.type.isTypeSArray;
+        const elementFacts = TypeFacts.of(sarrayType.next);
+        const dim = cast(size_t) sarrayType.dim.toInteger;
+
+        const dimOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, dimOffset, addConstant(cast(long) dim),
+            size_t.sizeof);
+
+        auto outerDollarVariable = _dollarVariable;
+        auto outerDollarOffset = _dollarOffset;
+        scope (exit) {
+            _dollarVariable = outerDollarVariable;
+            _dollarOffset = outerDollarOffset;
+        }
+        if (expression.lengthVar !is null) {
+            _dollarVariable = expression.lengthVar;
+            _dollarOffset = dimOffset;
+        }
+
+        const indexOffset = reserveTemp(pointerFacts);
+        evalOperandInto(expression.e2, indexOffset, size_t.sizeof);
+
+        const boundsOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, boundsOffset, indexOffset, size_t.sizeof);
+        emit(&opLessThanUnsigned, boundsOffset, dimOffset, size_t.sizeof);
+
+        const site = AssertSite(
+            text("bytecode: index out of bounds: `", expression.e2.toString,
+                "`"),
+            expression.loc.filename.fromStringz.idup,
+            expression.loc.linnum,
+        );
+        _assertSites ~= site;
+        emit(&opAssert, boundsOffset, _assertSites.length - 1, 1);
+
+        const baseOffset = compileAddress(expression.e1);
+
+        const elementSizeOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, elementSizeOffset,
+            addConstant(cast(long) elementFacts.size), size_t.sizeof);
+        emit(&opMultiply, indexOffset, elementSizeOffset, size_t.sizeof);
+
+        const addressOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, addressOffset, baseOffset, size_t.sizeof);
+        emit(&opAdd, addressOffset, indexOffset, size_t.sizeof);
+
+        return addressOffset;
+    }
+
     // Where `expression`'s own storage lives, as a run-time pointer value
     // left in a fresh temporary - the one operation `ref` binding (a `ref`
     // parameter's argument, a `ref` local's initialiser, a `ref` return's
@@ -4032,7 +4278,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // address once `compileCall` compiles it into a pointer-sized slot -
     // see `_isRefReturn` in `compileReturn`.
     private size_t compileAddress(Expression expression) {
-        import dmd.astenums: Tclass;
+        import dmd.astenums: Tclass, Tsarray;
 
         if (auto varExp = expression.isVarExp) {
             auto variable = varExp.var.isVarDeclaration;
@@ -4060,6 +4306,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const arrayFacts = TypeFacts.of(indexExp.e1.type);
             if (arrayFacts.isDynamicArray)
                 return compileElementAddress(indexExp, arrayFacts);
+            if (indexExp.e1.type.ty == Tsarray)
+                return compileStaticElementAddress(indexExp);
         }
 
         if (auto callExp = expression.isCallExp) {
@@ -4148,7 +4396,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileArrayLiteral(
         ArrayLiteralExp expression, in size_t destOffset,
     ) {
+        import dmd.astenums: Tsarray;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+
+        if (expression.type.ty == Tsarray)
+            return compileStaticArrayLiteral(expression, destOffset);
 
         const facts = TypeFacts.of(expression.type);
         if (!facts.isDynamicArray)
@@ -4204,6 +4456,33 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             size_t.sizeof);
         emit(&opCopy, destOffset + arrayPointerOffset, pointerOffset,
             size_t.sizeof);
+    }
+
+    // `[a, b, c]` typed as a static array: every element evaluated
+    // straight into its own place at `destOffset + i * element size`, in
+    // whatever storage already holds `destOffset` - a local's frame slot,
+    // another array's own element - since a static array is its elements'
+    // own bytes with no separate allocation of its own, unlike a dynamic
+    // array literal's `compileArrayLiteral` above.
+    private void compileStaticArrayLiteral(
+        ArrayLiteralExp expression, in size_t destOffset,
+    ) {
+        auto sarrayType = expression.type.isTypeSArray;
+        const elementFacts = TypeFacts.of(sarrayType.next);
+        if (!isSupportedElementFacts(elementFacts, sarrayType.next))
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const count =
+            expression.elements is null ? 0 : expression.elements.length;
+
+        foreach (i; 0 .. count) {
+            auto element = (*expression.elements)[i];
+            evalInto(
+                element, destOffset + i * elementFacts.size,
+                elementFacts.size,
+            );
+        }
     }
 
 }
