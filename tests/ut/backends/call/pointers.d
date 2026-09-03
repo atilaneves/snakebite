@@ -608,3 +608,47 @@ unittest {
                 "int(scope const(void*) a, scope const(void*) b)` is not " ~
                 "supported (see issue #9)");
 }
+
+// A lambda written without `function` or `delegate` and bound to `auto`
+// keeps dmd's `TOK.reserved`: semantic proved it reads no enclosing local,
+// so its type is a plain function pointer, but the context slot dmd
+// declared while that was still undecided stays on the declaration. Calling
+// through the pointer must still hand `x` to the slot the callee's own body
+// reads it from.
+static foreach (backend; Matrix!()) {
+    @("pointers.functionPointer.inferredLambda.call." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                auto increment = (int x) => x + 1;
+                assert(increment(4) == 5);
+                return 0;
+            }
+        });
+    }
+}
+
+// A `ref` return hands back the returned storage's address, whatever the
+// declared return type's own width is. Read through a function pointer,
+// where only the pointer's `TypeFunction` says the return is `ref`, the
+// value must still come from that address rather than from its bytes.
+static foreach (backend; Matrix!()) {
+    @("pointers.functionPointer.refReturn.read." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            ref int first(int[] a) {
+                return a[0];
+            }
+
+            int main() {
+                int[] xs = [7, 8];
+                auto fp = &first;
+                int v = fp(xs);
+                assert(v == 7);
+                return 0;
+            }
+        });
+    }
+}
