@@ -550,7 +550,9 @@ static foreach (backend; Matrix!(
         "the callback's extern(C) int signature is outside the " ~
         "extern(D) bool signature supported by issue #168"),
     Omit!(Bytecode, Because.unconfirmed,
-        "static arrays are unimplemented"),
+        "`&compare`'s signature is `extern(C) int(scope const void*, " ~
+        "scope const void*)`, not the `bool()` callback this backend " ~
+        "supports handing to native code"),
 )) {
     @("pointers.functionPointer.nativeCallback." ~ backend.stringof)
     @Tags(backend.stringof)
