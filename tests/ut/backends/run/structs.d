@@ -1450,6 +1450,146 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A temporary of a user-constructor type initialized from an already
+// completed value: dmd lowers `make(&dtors).get()` to
+// `((T __tmpfordtor5 = make(&dtors);) , __tmpfordtor5).get()` - the
+// declaration's initializer is the function's returned value, whole,
+// with no follow-up `__ctor` call anywhere. Whether construction is
+// still pending is a property of the initializer, not of the type
+// having a constructor: this temporary is fully constructed at its
+// declaration, and its destructor runs once at the end of the full
+// expression.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("userCtorTypeTemporaryFromReturnedValueRunsDestructorOnce." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T {
+                int* dtors;
+                int v;
+
+                this(int* d, int value) {
+                    dtors = d;
+                    v = value;
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                int get() {
+                    return v;
+                }
+            }
+
+            T make(int* d) {
+                return T(d, 6);
+            }
+
+            void main() {
+                int dtors = 0;
+                int r = make(&dtors).get();
+                assert(dtors == 1);
+                assert(r == 6);
+            }
+        });
+    }
+}
+
+// A ternary between two constructor-called temporaries: dmd hoists the
+// condition into its own temporary and declares one `__slT` per
+// branch, each with a destructor guarded by that condition, since only
+// the branch taken ever constructs its temporary. The taken branch's
+// destructor runs exactly once, at the end of the full expression,
+// while the condition temporary's frame slot is still live - never
+// later, against a frame that is already gone.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("ternaryBetweenUserCtorTemporariesDestroysTakenBranchOnce." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T {
+                int* dtors;
+                int v;
+
+                this(int* d, int value) {
+                    dtors = d;
+                    v = value;
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                int get() {
+                    return v;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                bool c = true;
+                int r = (c ? T(&dtors, 1) : T(&dtors, 2)).get();
+                assert(dtors == 1);
+                assert(r == 1);
+            }
+        });
+    }
+}
+
+// A temporary initialized from a compile-time struct value: dmd
+// lowers `g.get()`, `g` an enum of a user-constructor type, to
+// `((G __slG4 = G(5);) , __slG4).get()` - the same
+// declaration-of-a-literal shape its deferred-`__ctor` lowering uses,
+// but with no `__ctor` call following, since the literal already is
+// the whole value. The destructor still runs once: a constructor call
+// that never arrives must not be what the destructor waits for.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("userCtorTypeTemporaryFromEnumLiteralRunsDestructorOnce." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int gdtors;
+
+            struct G {
+                int x;
+
+                this(int y) {
+                    x = y;
+                }
+
+                ~this() {
+                    ++gdtors;
+                }
+
+                int get() {
+                    return x;
+                }
+            }
+
+            enum g = G(5);
+
+            void main() {
+                int r = g.get();
+                assert(gdtors == 1);
+                assert(r == 5);
+            }
+        });
+    }
+}
+
 // An inner temporary fully constructed, then moved into an outer
 // constructor's by-value parameter: dmd's `valueNoDtor` transfers
 // ownership to the callee (the argument is not copied, so the caller

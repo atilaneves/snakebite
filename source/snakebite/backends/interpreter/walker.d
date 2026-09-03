@@ -238,10 +238,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // slot from `layoutOf`, like any other local - so its `mark` is
         // just wherever `_temporaryFrames` already stood, a no-op release.
         FrameStack.Mark mark;
-        // An anonymous slot's bytes, or - when `edtor` is set and the
-        // entry is not yet `armed` - the frame slot of the named variable
-        // whose constructor has not returned yet, so `executeCall` can
-        // recognise that constructor's hidden `this` when it does.
+        // An anonymous slot's bytes, or - when `edtor` is set - the
+        // named variable's own frame slot, so a constructor call binding
+        // its hidden `this` to that storage can be recognised
+        // (`suspendTemporaryDestructor`/`armTemporaryDestructor`).
         ubyte* base;
         // Set instead of `node` for a temporary dmd gave its own named
         // `VarDeclaration` rather than an anonymous slot: a struct with a
@@ -256,12 +256,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // this expression is exactly running that same, dmd-built
         // destructor call - never a hand-rolled field-by-field teardown.
         Expression edtor;
-        // An `edtor` runs at release only once construction of its value
-        // has verifiably completed. A temporary whose declaration already
-        // holds the whole value is born armed; one that still awaits a
-        // separate `__ctor` call is armed by `executeCall` when that call
-        // returns without throwing, and stays disarmed forever - no
-        // destructor run - when it never does.
+        // An `edtor` runs at release only while its value is a completed
+        // construction. Born `true` with the declaration's own
+        // initializer's value; suspended for exactly the duration of a
+        // constructor call targeting `base`
+        // (`suspendTemporaryDestructor`/`armTemporaryDestructor`), so a
+        // throw anywhere inside that call leaves the entry off and the
+        // destructor unrun. Always `false` for an anonymous slot, which
+        // has no `edtor` to run.
         bool armed;
     }
     private Temporary[] _temporaries;
@@ -606,9 +608,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return result;
     }
 
-    // The single point where a disarmed temporary's destructor is
-    // committed (see `registerTemporaryDestructor` for why it starts
-    // disarmed): every constructor call this evaluator makes - an
+    // Closes the construction window `suspendTemporaryDestructor`
+    // opened: every constructor call this evaluator makes - an
     // ordinary `visit(CallExp)`, a receiver or `ref` lvalue through
     // `refCallAddress`, a by-value consumer through `valueCallAddress` -
     // funnels through `executeCall`, and only reaches this once the call
@@ -642,6 +643,23 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (!temporary.armed && temporary.edtor !is null
                     && temporary.base is self) {
                 temporary.armed = true;
+                return;
+            }
+    }
+
+    // A constructor call is about to run with `address` as its hidden
+    // `this`: from this moment until `armTemporaryDestructor` sees the
+    // call return, `address` does not hold a completed construction - a
+    // later argument's evaluation or the constructor body itself can
+    // still throw, and native D runs no destructor for a value whose
+    // construction never completed. Suspending the entry for exactly
+    // that window reproduces those bounds; storage not owned by a
+    // recorded temporary - a named local, a heap object - matches no
+    // entry and nothing changes.
+    private void suspendTemporaryDestructor(in void* address) {
+        foreach_reverse (ref temporary; _temporaries[_temporariesFloor .. $])
+            if (temporary.armed && temporary.base is address) {
+                temporary.armed = false;
                 return;
             }
     }
@@ -2117,7 +2135,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // struct-with-a-destructor rvalue (`Tracked(...).method()` becoming
     // `(Tracked __slTracked1 = Tracked(...), __slTracked1)`), whose
     // destructor exists only as `VarDeclaration.edtor` with no explicit
-    // AST node calling it. Three exclusions, each a different owner:
+    // AST node calling it. Two exclusions, each a different owner:
     //
     // - A declaration that is itself the whole statement
     //   (`expression is _fullExpressionRoot`): a `foreach` range
@@ -2134,17 +2152,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     //   its own parameter). Recording it here too would destroy the
     //   moved-from value a second time.
     //
-    // - A struct with a user-defined constructor: dmd's lowering
-    //   default-initializes the temporary in this declaration and
-    //   constructs it for real in a separate, fallible `__ctor` call
-    //   afterward (`((T __slT6 = T(null);), __slT6).__ctor(args)`).
-    //   Its entry is recorded now - the declaration still owns the
-    //   registration - but disarmed: `executeCall` arms it when that
-    //   constructor call returns without throwing, whichever evaluation
-    //   path the call arrives by, and a construction that never
-    //   completes leaves the entry disarmed and the destructor unrun. A
-    //   plain literal's declaration already holds the whole value, so
-    //   its entry is born armed.
+    // The entry is born armed: this declaration's initializer has just
+    // run, so the variable holds a whole value. When that value is only
+    // dmd's default-initialization and the real construction is a
+    // separate, fallible `__ctor` call afterward
+    // (`((T __slT6 = T(null);), __slT6).__ctor(args)`), nothing here
+    // can tell - a `T.init` or enum-literal temporary has the very same
+    // default-valued initializer and no call at all - so instead of
+    // guessing, the call itself suspends the entry for exactly its own
+    // duration: `suspendTemporaryDestructor` when it binds its hidden
+    // `this` to this variable's storage, `armTemporaryDestructor` when
+    // it returns.
     private void registerTemporaryDestructor(
         VarDeclaration variable,
         DeclarationExp expression,
@@ -2160,15 +2178,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (expression is _fullExpressionRoot)
             return;
 
-        auto structType = variable.type.isTypeStruct;
-        const awaitsConstruction =
-            structType !is null && structType.sym.ctor !is null;
         _temporaries ~= Temporary(
             null,
             _temporaryFrames.mark,
-            awaitsConstruction ? storageOf(variable) : null,
+            storageOf(variable),
             variable.edtor,
-            !awaitsConstruction,
+            true,
         );
     }
 
@@ -2735,6 +2750,19 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativelayout: storeIntegral;
 
         const left = truthOf(expression.e1);
+
+        // D allows a `void` right side in a statement context, making
+        // the whole expression `void`: dmd guards a conditionally
+        // constructed temporary's destructor call with the condition
+        // that selected it (`__cond6 && __slT4.~this()`), so the right
+        // side runs for its effect and there is no value to produce.
+        if (expression.e2.type.ty == Tvoid) {
+            const runsRight = expression.op == EXP.andAnd ? left : !left;
+            if (runsRight)
+                runForEffect(expression.e2);
+            return;
+        }
+
         const answer = expression.op == EXP.andAnd
             ? left && truthOf(expression.e2)
             : left || truthOf(expression.e2);
@@ -4738,12 +4766,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                         text("interpreter cannot call `", function_.toString,
                             "`: its `this` receiver is not a struct lvalue"),
                     );
-                else
+                else {
+                    auto receiver = addressOf(dot.e1);
+                    if (function_.isCtorDeclaration !is null)
+                        suspendTemporaryDestructor(receiver);
                     storeIntegral(
                         frame.base + layout.hiddenThis.parameter.offset,
-                        cast(size_t) addressOf(dot.e1),
+                        cast(size_t) receiver,
                         size_t.sizeof,
                     );
+                }
             } else {
                 // A nested callee's `vthis` is its enclosing context. A
                 // delegate supplies this context directly because it may
