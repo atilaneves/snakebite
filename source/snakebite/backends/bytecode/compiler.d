@@ -2862,6 +2862,55 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileCompoundAssign(expression, _destination);
     }
 
+    // `~=` appending a `dchar` (`CatDcharAssignExp`) never gets a
+    // `.lowering`: dmd's semantic pass builds one only for `CatAssignExp`'s
+    // other two operators (see `LoweringVisitor.visit(CatAssignExp)`),
+    // leaving this case's UTF-8/UTF-16 encoding to glue-layer codegen
+    // alone, which calls `_d_arrayappendcd`/`_d_arrayappendwd` by linker
+    // symbol with no `FuncDeclaration` behind it - so, unlike every other
+    // `~=` lowering here, there is no `CallExp` this compiler could walk
+    // through the ordinary native-call path. This resolves and calls that
+    // same hook directly (see `CallSite.isAppendDchar`), the same symbol a
+    // real build's glue layer would call.
+    override void visit(CatDcharAssignExp expression) {
+        import dmd.astenums: Tchar, Twchar;
+        import snakebite.nativelayout: arrayValueSize;
+
+        auto elementType = expression.e1.type.nextOf;
+        const name = elementType.ty == Tchar ? "_d_arrayappendcd"
+            : elementType.ty == Twchar ? "_d_arrayappendwd"
+            : null;
+        if (name is null)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        auto address = _bytecode._plans.resolve(name);
+        if (address is null)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const arrayOffset = compileAddress(expression.e1);
+
+        const valueFacts = TypeFacts.of(expression.e2.type);
+        const valueOffset = reserveTemp(valueFacts);
+        evalInto(expression.e2, valueOffset, valueFacts.size);
+
+        _callSites ~= CallSite(
+            null,
+            [
+                Arg(arrayOffset, 0, size_t.sizeof),
+                Arg(valueOffset, 0, valueFacts.size),
+            ],
+            arrayValueSize,
+            null,
+            address,
+            false,
+            0,
+            true,
+        );
+        emit(&opCall, _destination, _callSites.length - 1, 0);
+    }
+
     override void visit(CatExp expression) {
         if (expression.lowering is null)
             return visit(cast(Expression) expression);

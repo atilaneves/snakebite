@@ -133,7 +133,6 @@ static foreach (backend; Matrix!(
 // Appending a `dchar` to a `char[]` encodes it as UTF-8, so one append
 // adds as many elements as the code point needs, not one.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("appendingDcharEncodesUtf8." ~ backend.stringof)
@@ -161,7 +160,6 @@ static foreach (backend; Matrix!(
 // point outside the Basic Multilingual Plane becomes a surrogate pair
 // (two elements), not one.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("appendingDcharEncodesUtf16." ~ backend.stringof)
