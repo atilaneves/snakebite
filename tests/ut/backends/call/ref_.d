@@ -173,10 +173,12 @@ static foreach (backend; Matrix!()) {
 // `writeln` initializes a scoped `File` temporary from the native
 // `trustedStdout` value before it writes. This is the public library path
 // used by the rt-simple runner's final summary.
-@("temporary.nativeAggregateFeedsCommaLvalue.Interpreter")
-@Tags("Interpreter")
-unittest {
-    0.shouldBeStatusOf!(Interpreter, q{
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot write to native stdout"))) {
+    @("temporary.nativeAggregateFeedsCommaLvalue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
         import std.stdio: writeln;
 
         void main() {
@@ -184,7 +186,8 @@ unittest {
             size_t failed;
             writeln(total, " test(s) run, ", failed, " failed.");
         }
-    });
+        });
+    }
 }
 
 // Taking the address of a ref-returning call must evaluate the call once and
