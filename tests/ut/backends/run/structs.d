@@ -9,6 +9,30 @@ module ut.backends.run.structs;
 import ut.backends;
 
 
+// A non-plain aggregate can cross a guest call as native bytes. The
+// destructor is handled by the DMD-generated cleanup around the local.
+static foreach (backend; Matrix!()) {
+    @("struct.nonPlainValueParameter.crossesGuestCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Value {
+                ~this() {
+                }
+            }
+
+            void consume(Value value) {
+            }
+
+            void main() {
+                Value value;
+                consume(value);
+            }
+        });
+    }
+}
+
+
 // A slice assignment copies element by element and runs the postblit for
 // each one, rather than blitting the whole slice.
 static foreach (backend; Matrix!(

@@ -27,8 +27,9 @@ private bool isSupportedFacts(
 }
 
 // As above, for a caller that also has `type` in hand and so can ask the
-// one further question `TypeFacts` alone cannot answer: whether `type` is
-// a struct this compiler can copy bytewise (see `isPlainOldStruct`).
+// one further question `TypeFacts` alone cannot answer: whether `type` is a
+// struct whose native bytes can occupy a frame slot. Operations that need
+// aggregate semantics still check `isPlainOldStruct` below.
 private bool isSupportedFacts(
     in imported!"snakebite.nativelayout".TypeFacts facts,
     imported!"dmd.mtype".Type type,
@@ -37,7 +38,7 @@ private bool isSupportedFacts(
 
     return isSupportedFacts(facts) || isFloatingType(type)
         || type.ty == Tpointer
-        || isPlainOldStruct(type);
+        || type.isTypeStruct !is null;
 }
 
 // Whether this compiler can treat `type` as plain bytes it never has to
