@@ -198,9 +198,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     }
 
     public override string eval(FuncDeclaration function_) {
-        throw new SnakebiteException(
-            "eval not implemented for the bytecode backend yet",
-        );
+        string result;
+        call(function_, &result, []);
+        return result;
     }
 
     package bool hasNativeSymbol(FuncDeclaration function_) {
