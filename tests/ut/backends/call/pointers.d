@@ -2,6 +2,120 @@ module ut.backends.call.pointers;
 
 
 import ut.backends;
+import snakebite.backends.backend: Program;
+import snakebite.ffi: boolFunctionEntryCount;
+import snakebite.frontend.compiler: parseSnippets;
+import snakebite.frontend.dmd.functions: findFunction;
+
+
+private alias BoolCallback = extern(D) bool function();
+
+
+public extern(C) bool snakebite_ut_call_bool_callback(
+    BoolCallback callback,
+) {
+    return callback();
+}
+
+
+public extern(C) bool snakebite_ut_same_bool_callback(
+    BoolCallback first,
+    BoolCallback second,
+) {
+    return first == second;
+}
+
+
+public extern(C) bool snakebite_ut_collect_then_call_bool_callback(
+    BoolCallback callback,
+) {
+    import core.memory: GC;
+
+    GC.collect;
+    return callback();
+}
+
+
+public extern(C) string snakebite_ut_call_bool_callback_on_thread(
+    BoolCallback callback,
+) {
+    import core.thread: Thread;
+
+    string message;
+    auto thread = new Thread({
+        try
+            callback();
+        catch (Throwable throwable)
+            message = throwable.msg;
+    });
+    thread.start;
+    thread.join;
+    return message;
+}
+
+
+private enum hostCallbackDeclarations = q{
+    module ut.backends.call.pointers;
+
+    alias BoolCallback = extern(D) bool function();
+
+    extern(C) bool snakebite_ut_call_bool_callback(BoolCallback);
+    extern(C) bool snakebite_ut_same_bool_callback(
+        BoolCallback, BoolCallback,
+    );
+    extern(C) bool snakebite_ut_collect_then_call_bool_callback(
+        BoolCallback,
+    );
+    extern(C) string snakebite_ut_call_bool_callback_on_thread(
+        BoolCallback,
+    );
+};
+
+
+private enum boolCallbackCode = q{
+    import ut.backends.call.pointers:
+        snakebite_ut_call_bool_callback,
+        snakebite_ut_collect_then_call_bool_callback,
+        snakebite_ut_same_bool_callback;
+
+    static bool yes() {
+        return true;
+    }
+
+    static bool no() {
+        return false;
+    }
+
+    int answer() {
+        assert(snakebite_ut_call_bool_callback(&yes));
+        assert(!snakebite_ut_call_bool_callback(&no));
+        assert(snakebite_ut_same_bool_callback(&yes, &yes));
+        assert(!snakebite_ut_same_bool_callback(&yes, &no));
+
+        int[] values = [17, 31, 47];
+        assert(snakebite_ut_collect_then_call_bool_callback(&yes));
+        return values[0] + values[1] + values[2];
+    }
+};
+
+
+private enum boolCallbackExceptionCode = q{
+    import ut.backends.call.pointers: snakebite_ut_call_bool_callback;
+
+    static int zero() {
+        return 0;
+    }
+
+    static bool fail() {
+        assert(zero());
+        return false;
+    }
+
+    int answer() {
+        snakebite_ut_call_bool_callback(&fail);
+        return 0;
+    }
+};
 
 
 // `&b` is dmd's `SymOffExp`, not a general `&expression`: taking a local's
@@ -24,6 +138,180 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
         );
     }
 }
+
+
+// A plain function pointer has no context word. When host code calls it, its
+// code address alone must select the right guest function. Calling two
+// functions proves the address does not select one process-global target;
+// comparing a repeated conversion proves one guest function keeps one native
+// identity. The collection happens while the outer guest frame holds the only
+// remaining pointer to `values`, so reading the array afterward also proves
+// that re-entry does not hide that frame from the collector.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't call host code"),
+)) {
+    @("pointers.functionPointer.boolCallback." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        static if (is(backend == Native))
+            95.shouldBeRetOf!(backend, boolCallbackCode, "answer");
+        else {
+            auto modules = parseSnippets([
+                "module bool_callback_root;\n" ~ boolCallbackCode,
+                hostCallbackDeclarations,
+            ]);
+            auto function_ = findFunction(modules[0], "answer");
+            auto interpreter = new Interpreter(Program([modules[0]]));
+
+            int result;
+            interpreter.call(function_, &result, []);
+
+            result.should == 95;
+        }
+    }
+}
+
+
+// A guest throw remains a guest throw while it crosses the compiled helper's
+// frame. `Backend.call` sees the original `AssertError`, not an FFI error or
+// an interpreter implementation exception.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't call host code"),
+)) {
+    @("pointers.functionPointer.boolCallback.exception." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import core.exception: AssertError;
+
+        AssertError caught;
+        static if (is(backend == Native)) {
+            mixin(boolCallbackExceptionCode);
+            try
+                answer();
+            catch (AssertError error)
+                caught = error;
+        } else {
+            auto modules = parseSnippets([
+                "module bool_callback_exception_root;\n"
+                    ~ boolCallbackExceptionCode,
+                hostCallbackDeclarations,
+            ]);
+            auto function_ = findFunction(modules[0], "answer");
+            auto interpreter = new Interpreter(Program([modules[0]]));
+
+            int result;
+            try
+                interpreter.call(function_, &result, []);
+            catch (AssertError error)
+                caught = error;
+        }
+
+        (caught !is null).should == true;
+    }
+}
+
+
+// Worker-thread execution is owned by issue #40. The callback rejects the
+// worker before it reads or writes the evaluator that its creator thread
+// owns, so an unsupported call is a diagnostic instead of a data race.
+@("pointers.functionPointer.boolCallback.wrongThread.Interpreter")
+@Tags("Interpreter")
+unittest {
+    auto modules = parseSnippets([
+        q{
+            module bool_callback_thread_root;
+            import ut.backends.call.pointers:
+                snakebite_ut_call_bool_callback_on_thread;
+
+            static bool yes() {
+                return true;
+            }
+
+            bool rejected() {
+                return snakebite_ut_call_bool_callback_on_thread(&yes) ==
+                    "interpreter callback called on a thread that does not "
+                    ~ "own its evaluator (see issue #40)";
+            }
+        },
+        hostCallbackDeclarations,
+    ]);
+    auto function_ = findFunction(modules[0], "rejected");
+    auto interpreter = new Interpreter(Program([modules[0]]));
+
+    bool result;
+    interpreter.call(function_, &result, []);
+
+    result.should == true;
+}
+
+
+// Capacity belongs to the process, so the child runs without callback entries
+// held by other parallel tests. Each evaluator reserves one entry. The 65th
+// evaluator must fail clearly, then succeed after one owner is destroyed.
+@("pointers.functionPointer.boolCallback.poolCapacity.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import std.file: thisExePath;
+    import std.process: environment, execute;
+
+    enum marker = "SNAKEBITE_CALLBACK_POOL_CAPACITY_CHILD";
+    enum testName = "ut.backends.call.pointers.pointers.functionPointer."
+        ~ "boolCallback.poolCapacity.Interpreter";
+    if (environment.get(marker) is null) {
+        auto childEnvironment = environment.toAA;
+        childEnvironment[marker] = "1";
+        const child = execute([thisExePath, testName], childEnvironment);
+        assert(child.status == 0, child.output);
+        return;
+    }
+
+    auto modules = parseSnippets([
+        q{
+            module bool_callback_capacity_root;
+            import ut.backends.call.pointers:
+                snakebite_ut_call_bool_callback;
+
+            static bool yes() {
+                return true;
+            }
+
+            bool call() {
+                return snakebite_ut_call_bool_callback(&yes);
+            }
+        },
+        hostCallbackDeclarations,
+    ]);
+    auto function_ = findFunction(modules[0], "call");
+    auto program = Program([modules[0]]);
+    Interpreter[boolFunctionEntryCount] interpreters;
+    Interpreter overflow = new Interpreter(program);
+    scope(exit) {
+        foreach (instance; interpreters)
+            if (instance !is null)
+                destroy(instance);
+        if (overflow !is null)
+            destroy(overflow);
+    }
+
+    foreach (ref instance; interpreters) {
+        instance = new Interpreter(program);
+        bool result;
+        instance.call(function_, &result, []);
+        result.should == true;
+    }
+
+    bool result;
+    const exhausted = overflow.call(function_, &result, []).shouldThrow;
+    exhausted.msg.should == "ffi bool function callback pool is exhausted";
+
+    destroy(interpreters[0]);
+    interpreters[0] = null;
+    overflow.call(function_, &result, []);
+    result.should == true;
+}
+
 
 // Writing through the pointer changes the variable it points at, not a
 // copy of it: `p` and `b` name the same storage.
@@ -232,9 +520,8 @@ static foreach (backend; Matrix!(
     Omit!(Interpreter, Because.diverges,
         "pinned in " ~
         "pointers.functionPointer.nativeCallback.refused.Interpreter: " ~
-        "a guest function pointer reaching native code through FFI is " ~
-        "refused loudly instead of segfaulting the host, until issue " ~
-        "#9 gives the interpreter a real native callback mechanism"),
+        "the callback's extern(C) int signature is outside the " ~
+        "extern(D) bool signature supported by issue #168"),
 )) {
     @("pointers.functionPointer.nativeCallback." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -260,12 +547,9 @@ static foreach (backend; Matrix!(
 }
 
 // The sibling of the Matrix test above, for the one backend it could not
-// express: the interpreter refuses to hand `qsort` a function pointer it
-// cannot itself turn back into machine code, with a message naming the
-// gap (issue #9) instead of segfaulting the host. Confirmed by running
-// this before the guard existed: the host died with no diagnostic, which
-// `shouldThrowWithMessage` cannot observe from inside the same process -
-// the guard exists precisely so this test can assert anything at all.
+// express: the interpreter refuses to hand `qsort` a callback whose
+// signature is not supported, with a message naming the signature and the
+// remaining issue #9 work instead of letting the host call a declaration.
 @("pointers.functionPointer.nativeCallback.refused.Interpreter")
 @Tags("Interpreter")
 unittest {
@@ -291,6 +575,7 @@ unittest {
     interpreter(module_).call(function_, &result, [])
         .shouldThrowWithMessage(
             "interpreter cannot call `qsort` with `compare` as a function " ~
-                "pointer argument: calling an interpreted function back " ~
-                "from native code is not yet supported (see issue #9)");
+                "pointer argument: callback signature `extern (C) " ~
+                "int(scope const(void*) a, scope const(void*) b)` is not " ~
+                "supported (see issue #9)");
 }
