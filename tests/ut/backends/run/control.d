@@ -154,10 +154,7 @@ static foreach (backend; Matrix!()) {
 
 // `continue` in a `do`-`while` transfers control to the trailing
 // condition check, not back to the start of the body.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("continueInDoWhileJumpsToCondition." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -491,10 +488,7 @@ static foreach (backend; Matrix!()) {
 // statement's own body and moves to the next element's, while `break`
 // skips every remaining element's statement entirely, exactly like an
 // ordinary loop body.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("breakAndContinueInUnrolledForeach." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
