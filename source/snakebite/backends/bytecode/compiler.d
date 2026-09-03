@@ -1398,13 +1398,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t compileFieldAddress(DotVarExp expression) {
+        import dmd.astenums: Tclass;
+
         auto field = expression.var.isVarDeclaration;
-        if (field is null || field.isBitFieldDeclaration !is null
-                || !isPlainOldStruct(expression.e1.type))
+        if (field is null || field.isBitFieldDeclaration !is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        const addressOffset = compileAddress(expression.e1);
+        size_t addressOffset;
+        if (expression.e1.type.ty == Tclass) {
+            addressOffset = reserveTemp(pointerFacts);
+            evalInto(expression.e1, addressOffset, size_t.sizeof);
+        } else {
+            if (!isPlainOldStruct(expression.e1.type))
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+            addressOffset = compileAddress(expression.e1);
+        }
+
         if (field.offset == 0)
             return addressOffset;
 
@@ -3127,6 +3138,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // address once `compileCall` compiles it into a pointer-sized slot -
     // see `_isRefReturn` in `compileReturn`.
     private size_t compileAddress(Expression expression) {
+        import dmd.astenums: Tclass;
+
         if (auto varExp = expression.isVarExp) {
             auto variable = varExp.var.isVarDeclaration;
             if (variable !is null && variable.isDataseg)
@@ -3144,7 +3157,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (auto dot = expression.isDotVarExp) {
             auto field = dot.var.isVarDeclaration;
             if (field !is null && field.isBitFieldDeclaration is null
-                    && isPlainOldStruct(dot.e1.type))
+                    && (dot.e1.type.ty == Tclass
+                        || isPlainOldStruct(dot.e1.type)))
                 return compileFieldAddress(dot);
         }
 

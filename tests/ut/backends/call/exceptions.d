@@ -255,28 +255,34 @@ static foreach (backend; Matrix!(
     }
 }
 
-@("failureMessage.fromClassField.survivesArrayAppend.Interpreter")
-@Tags("Interpreter")
-unittest {
-    true.shouldBeRetOf!(
-        Interpreter,
-        q{
-            bool fail() {
-                return false;
-            }
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a failing assertion into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("failureMessage.fromClassField.survivesArrayAppend." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool fail() {
+                    return false;
+                }
 
-            bool result() {
-                string[] messages;
-                try
-                    assert(fail());
-                catch (Throwable throwable)
-                    messages ~= throwable.msg;
+                bool result() {
+                    string[] messages;
+                    try
+                        assert(fail());
+                    catch (Throwable throwable)
+                        messages ~= throwable.msg;
 
-                return messages.length == 1 && messages[0].length != 0;
-            }
-        },
-        "result",
-    );
+                    return messages.length == 1 && messages[0].length != 0;
+                }
+            },
+            "result",
+        );
+    }
 }
 
 @("tryCatchThrowable.rethrowsCaughtGuestThrowable.Interpreter")
