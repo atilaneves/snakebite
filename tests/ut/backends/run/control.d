@@ -181,6 +181,27 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A `do` body always runs once, so a body that returns on every path
+// makes the whole loop return on every path; the condition is never
+// reached.
+static foreach (backend; Matrix!()) {
+    @("doBodyThatAlwaysReturnsEndsFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int x) {
+                do {
+                    return x + 1;
+                } while (x > 0);
+            }
+
+            void main() {
+                assert(f(1) == 2);
+            }
+        });
+    }
+}
+
 // A plain `break` inside a `for` loop leaves the loop, running nothing
 // after it in the same iteration and none of the loop's own remaining
 // iterations.

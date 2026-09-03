@@ -1305,13 +1305,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     // `do`-`while` always runs its own body once before the condition is
-    // ever checked, so - unlike `compileWhile`/`compileFor` - there is no
-    // upfront branch to skip the body with, only a trailing one that
-    // decides whether to run it again. `continue` still needs a target
-    // distinct from that trailing branch itself: the spec sends it to the
-    // condition check, not back to the body's own start, so a `continue`
-    // reached before the condition is compiled queues its own jump the
-    // same way `compileFor`'s does for its increment.
+    // ever checked, so - unlike `compileFor` - there is no upfront branch
+    // to skip the body with, only a trailing one that decides whether to
+    // run it again. `continue` still needs a target distinct from that
+    // trailing branch itself: the spec sends it to the condition check,
+    // not back to the body's own start, so a `continue` reached before
+    // the condition is compiled queues its own jump the same way
+    // `compileFor`'s does for its increment.
     private void compileDo(DoStatement statement) {
         auto label = consumeLabel; // auto: const(Identifier) will not implicitly convert back
         const bodyStart = _instructions.length;
@@ -1319,15 +1319,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _loops ~= LoopContext(label);
         _breakables ~= Breakable(label);
         compileStatement(statement._body);
+        const bodyFinished = _finished;
         const breakable = _breakables[$ - 1];
         _breakables = _breakables[0 .. $ - 1];
+        const hadContinue = _loops[$ - 1].pendingContinueJumps.length > 0;
         _finished = false;
 
         const conditionIndex = _instructions.length;
         resolveContinues(conditionIndex);
         _loops = _loops[0 .. $ - 1];
 
-        // See `compileWhile`'s own doc for why a trivially-true condition
+        // See `compileFor`'s own doc for why a trivially-true condition
         // is never guarded - here that means the trailing check becomes
         // an unconditional jump back to the body instead of a real test.
         const guarded = !isTriviallyTrueCondition(statement.condition);
@@ -1343,7 +1345,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         foreach (index; breakable.pendingBreakJumps)
             patchTarget(index, afterLoop);
 
-        _finished = !guarded && breakable.pendingBreakJumps.length == 0;
+        // A body that returns on every path, with nothing left to
+        // `continue` past it, never reaches the condition at all - the
+        // whole loop is then finished the same way the body is, the
+        // condition's own instructions being dead code nothing jumps
+        // into.
+        const hadBreak = breakable.pendingBreakJumps.length > 0;
+        _finished = !hadBreak && (bodyFinished && !hadContinue || !guarded);
     }
 
     // dmd unrolls a `foreach` over a tuple (an `AliasSeq`, `static
