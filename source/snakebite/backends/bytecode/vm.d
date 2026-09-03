@@ -990,6 +990,32 @@ package const(Instruction)* opEqual(
     return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
+// Bytewise equality for two native dynamic-array values. The compiler emits
+// this only when DMD left EqualExp.lowering null, which means the element
+// types are safe for memcmp. `destination` holds the left array on entry and
+// the bool result on exit; `source` holds the right array; `width` is the
+// element size.
+package const(Instruction)* opArrayEqual(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    import core.stdc.string: memcmp;
+
+    const left = *cast(const(void)[]*) (frame + pc.destination);
+    const right = *cast(const(void)[]*) (frame + pc.source);
+    const byteLength = left.length * pc.width;
+    const equal = left.length == right.length
+        && (byteLength == 0 || memcmp(left.ptr, right.ptr, byteLength) == 0);
+    *cast(ubyte*) (frame + pc.destination) = equal ? 1 : 0;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
 package const(Instruction)* opNotEqual(
     const(Instruction)* pc,
     ubyte* frame,
