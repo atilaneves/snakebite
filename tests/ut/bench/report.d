@@ -1,7 +1,8 @@
 module ut.bench.report;
 
 
-import bench.report: BackendReport, updateTestCounts;
+import bench.report:
+    BackendReport, TimingStatistics, orderByMinimumRunTime, updateTestCounts;
 import core.time: dur, hnsecs, msecs;
 import ut;
 
@@ -37,6 +38,21 @@ unittest {
     milliseconds(1.hnsecs).should == "0.1 us";
     milliseconds(dur!"usecs"(1)).should == "1.0 us";
     milliseconds(1.msecs).should == "1.0 ms";
+}
+
+
+@("table.ordersBackendsByMinimumRunTime")
+unittest {
+    import std.algorithm.iteration: map;
+
+    BackendReport[] reports = [
+        BackendReport(name: "slow", runTime: TimingStatistics(3.msecs)),
+        BackendReport(name: "fast", runTime: TimingStatistics(1.msecs)),
+    ];
+
+    reports.orderByMinimumRunTime.map!(report => report.name).should == [
+        "fast", "slow",
+    ];
 }
 
 

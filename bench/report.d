@@ -73,6 +73,7 @@ void printTable(in BackendReport[] reports) {
     // Absent (e.g. `-b ctfe` excludes it) means nothing to cross-check
     // against, not a failure.
     const oracleFailed = !oracle.empty && !clean(oracle.front);
+    const ordered = orderByMinimumRunTime(reports);
 
     string[][] rows = [
         [
@@ -81,7 +82,7 @@ void printTable(in BackendReport[] reports) {
         ],
     ];
     rows ~= [""];
-    foreach (report; reports) {
+    foreach (report; ordered) {
         string passCell = passCellText(report);
         // A backend claiming a clean run while the oracle itself failed is
         // unverified, not confirmed correct.
@@ -119,6 +120,16 @@ void printTable(in BackendReport[] reports) {
 
     if (oracleFailed)
         writeln("\n* dmd oracle failed this run; pass columns unverified");
+}
+
+BackendReport[] orderByMinimumRunTime(in BackendReport[] reports) {
+    import std.algorithm.sorting: sort;
+
+    auto ordered = reports.dup;
+    ordered.sort!((left, right) =>
+        left.runTime.minimum < right.runTime.minimum,
+    );
+    return ordered;
 }
 
 private bool clean(in BackendReport report) {
