@@ -4,6 +4,27 @@ module ut.backends.call.control_flow;
 import ut.backends;
 
 
+// DMD emits this shape for cleanup code, including the cleanup in the
+// benchmark's generated `write` function.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.runsOnNormalExit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(backend, q{
+            int result() {
+                int value;
+                try {
+                    value = 1;
+                } finally {
+                    value = 2;
+                }
+                return value;
+            }
+        }, "result");
+    }
+}
+
+
 @("tryFinally.scopeExitRuns.Interpreter")
 @Tags("Interpreter")
 unittest {
