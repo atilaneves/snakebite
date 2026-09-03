@@ -101,6 +101,10 @@ package struct Instruction {
     //    `source`: the one thing a widening cast needs besides its own
     //    `destination`/`width` (the destination width) that neither
     //    already carries.
+    //  - a resolved static-storage address, cast to a `size_t`: the
+    //    `source` of `opStaticLoad`/`opStaticAddress` and the
+    //    `destination` of `opStaticStore`, patched after compilation once
+    //    the function's persistent storage has an address.
     //  - a source offset's width, for floating-point conversions whose
     //    destination and source widths can differ.
     //  - a resolved instruction address, cast to a `size_t`: `opJump`'s
@@ -146,6 +150,10 @@ package struct Function {
     package CallSite[] callSites;
     package AssertSite[] assertSites;
     package ExceptionHandler[] exceptionHandlers;
+    // Storage for this function's data-segment locals. It belongs to the
+    // compiled function, not to a call frame, so every invocation sees the
+    // same native-layout bytes.
+    package ubyte[] staticData;
     package size_t frameSize;
     package uint frameAlignment;
 }
@@ -344,6 +352,65 @@ package const(Instruction)* opCopy(
     memcpy(frame + pc.destination, frame + pc.source, pc.width);
     const next = pc + 1;
     return next;
+}
+
+
+// Copies a function-local static from its persistent native-layout storage
+// into the current frame. The compiler resolves `pc.source` from a temporary
+// static offset to the storage address after the function is built.
+package const(Instruction)* opStaticLoad(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    import core.stdc.string: memcpy;
+
+    memcpy(frame + pc.destination, cast(const(void)*) pc.source, pc.width);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+
+// Copies a value from the current frame into a function-local static's
+// persistent native-layout storage. The compiler resolves `pc.destination`
+// from a temporary static offset to the storage address after the function
+// is built.
+package const(Instruction)* opStaticStore(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    import core.stdc.string: memcpy;
+
+    memcpy(cast(void*) pc.destination, frame + pc.source, pc.width);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+
+// Writes the address of a function-local static into the current frame.
+// The address remains stable for the lifetime of the compiled function and
+// is used by native druntime calls such as array append.
+package const(Instruction)* opStaticAddress(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    *cast(void**) (frame + pc.destination) = cast(void*) pc.source;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
 }
 
 

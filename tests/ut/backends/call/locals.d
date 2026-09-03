@@ -2,6 +2,9 @@ module ut.backends.call.locals;
 
 
 import ut.backends;
+import snakebite.backends.backend: Program;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
 
 
 @("locals.voidInitializerPerformsNoValueEvaluation.Interpreter")
@@ -92,9 +95,6 @@ static foreach (backend; Matrix!()) {
 @("locals.dynamicArrayInitialisesAcrossCalls.Interpreter")
 @Tags("Interpreter")
 unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
-
     auto module_ = parseSnippet(q{
         size_t appendOne() {
             string[] messages;
@@ -115,7 +115,6 @@ unittest {
 }
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible, "CTFE can't mutate a static local"),
 )) {
     @("locals.staticPersistsAcrossCalls." ~ backend.stringof)
@@ -123,19 +122,19 @@ static foreach (backend; Matrix!(
     unittest {
         // A `static` local's storage lives once per function, not once per
         // call: `n` keeps whatever `inc` left it at, so five calls add
-        // 1 + 2 + 3 + 4 + 5. A backend that re-runs the initialiser on
-        // every call instead sees `n` reset to 0 each time, and returns 5.
-        15.shouldBeRetOf!(
+        // 8 + 9 + 10 + 11 + 12. A backend that re-runs the initialiser on
+        // every call instead sees `n` reset to 7 each time, and returns 40.
+        50UL.shouldBeRetOf!(
             backend,
             q{
-                int inc() {
-                    static int n = 0;
+                ulong inc() {
+                    static ulong n = 7;
                     n += 1;
                     return n;
                 }
 
-                int kindaMain() {
-                    int ret = 0;
+                ulong kindaMain() {
+                    ulong ret = 0;
                     foreach(i; 0 .. 5) {
                         ret += inc();
                     }
@@ -143,6 +142,126 @@ static foreach (backend; Matrix!(
                 }
             },
             "kindaMain",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE can't mutate a static local"),
+)) {
+    @("locals.staticPlainAssignment." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        9.shouldBeRetOf!(
+            backend,
+            q{
+                int assign() {
+                    static int value = 3;
+                    value = 9;
+                    return value;
+                }
+            },
+            "assign",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE can't mutate a static local"),
+)) {
+    @("locals.staticPostincrement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        34.shouldBeRetOf!(
+            backend,
+            q{
+                int increment() {
+                    static int value = 3;
+                    auto before = value++;
+                    return before * 10 + value;
+                }
+            },
+            "increment",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE can't mutate a static local"),
+)) {
+    @("locals.staticDynamicArrayAppend." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        17.shouldBeRetOf!(
+            backend,
+            q{
+                int append() {
+                    static int[] values;
+                    values ~= 7;
+                    return cast(int) values.length * 10 + values[0];
+                }
+            },
+            "append",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE can't mutate a static local"),
+)) {
+    @("locals.staticStringInitialiser." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(3).shouldBeRetOf!(
+            backend,
+            q{
+                size_t length() {
+                    static string value = "abc";
+                    return value.length;
+                }
+            },
+            "length",
+        );
+    }
+}
+
+@("locals.staticPersistsAcrossBackendCalls.Bytecode")
+@Tags("Bytecode")
+unittest {
+    auto module_ = parseSnippet(q{
+        int next() {
+            static int value;
+            value += 1;
+            return value;
+        }
+    });
+    auto function_ = findFunction(module_, "next");
+    auto backend = new Bytecode(Program([module_]));
+
+    int first;
+    backend.call(function_, &first, []);
+    first.should == 1;
+
+    int second;
+    backend.call(function_, &second, []);
+    second.should == 2;
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE can't mutate a static local"),
+)) {
+    @("locals.staticDefaultInitialiser." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                int read() {
+                    static int value;
+                    return value + 1;
+                }
+            },
+            "read",
         );
     }
 }
