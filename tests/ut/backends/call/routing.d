@@ -66,12 +66,9 @@ unittest {
 }
 
 
-// The guest-only element type means no native `_d_arrayappendcTX` instance
-// can exist. DMD did synthesize its body, so the interpreter enters it and
-// reaches the guest struct's TypeInfo. That TypeInfo has no native symbol
-// either. The later refusal proves the missing template did not fail at the
-// FFI boundary, without requiring this test to expand TypeInfo support.
-@("nonRootOwned.missingTemplateBodyIsWalked.Interpreter")
+// DMD's lowered append call uses the guest-only struct's synthesized TypeInfo
+// and runs its body in the interpreter.
+@("rootOwned.guestStructAppend.Interpreter")
 @Tags("Interpreter")
 unittest {
     auto module_ = parseSnippet(q{
@@ -86,20 +83,14 @@ unittest {
     auto function_ = findFunction(module_, "grown");
 
     size_t result;
-    const thrown = interpreter(module_)
-        .call(function_, &result, [])
-        .shouldThrow;
-
-    thrown.msg.startsWith("interpreter cannot resolve the symbol").should
-        == true;
-    thrown.msg.canFind("TypeInfo_S").should == true;
+    interpreter(module_).call(function_, &result, []);
+    result.should == 1;
 }
 
 
-// Plan preparation, native-template detection, and `typeid` all ask the
-// same resolver during this call. The final missing TypeInfo is expected;
-// the second call must reuse every address and every missing-symbol result.
-@("nonRootOwned.allSymbolPathsShareResolver.Interpreter")
+// A lowered append and its native argument call reuse resolved symbols on a
+// second execution.
+@("rootOwned.guestStructAppend.reusesResolvedSymbols.Interpreter")
 @Tags("Interpreter")
 unittest {
     auto module_ = parseSnippet(q{
@@ -116,12 +107,11 @@ unittest {
     auto backend = interpreter(module_);
 
     size_t result;
-    const thrown = backend.call(function_, &result, []).shouldThrow;
-
-    thrown.msg.startsWith("interpreter cannot resolve the symbol").should
-        == true;
+    backend.call(function_, &result, []);
+    result.should == 1;
     const lookups = backend.symbolLookups;
-    backend.call(function_, &result, []).shouldThrow;
+    backend.call(function_, &result, []);
+    result.should == 1;
     backend.symbolLookups.should == lookups;
-    assert(lookups >= 3);
+    assert(lookups >= 1);
 }

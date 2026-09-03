@@ -52,7 +52,6 @@ static foreach (backend; Matrix!(
 // through an operand afterwards does not change the result.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("concatenationCopiesBothSides." ~ backend.stringof)
     @Tags(backend.stringof)
