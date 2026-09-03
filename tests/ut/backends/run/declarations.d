@@ -41,16 +41,13 @@ static foreach (backend; Matrix!(
 }
 
 
-// A module constructor must run even when it calls a native function with an
-// interpreted delegate. A backend that refuses that call makes `run` skip
-// the constructor, so `initialized` stays false and `main` returns the
-// wrong status.
+// A module constructor must run even when it calls a native function with a
+// guest function pointer. A backend that refuses that call makes `run` skip
+// the constructor, so `initialized` stays false and `main` returns the wrong
+// status.
 static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.unconfirmed),
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed,
-        "calling an interpreted function back from native code is not yet "
-            ~ "supported (see issue #9)"),
 )) {
     @("moduleConstructorRunsBeforeMain." ~ backend.stringof)
     @Tags(backend.stringof)

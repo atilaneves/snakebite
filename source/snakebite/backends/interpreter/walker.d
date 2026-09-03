@@ -24,6 +24,11 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         _evaluator = new Evaluator(program);
     }
 
+    public ~this() {
+        if (_evaluator !is null)
+            _evaluator.releaseCallbacks;
+    }
+
     public override void call(
         FuncDeclaration function_,
         void* returnPlace,
@@ -95,7 +100,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
     import snakebite.ffi:
-        CallPlan, CallResult, PlanCache, maxArguments;
+        BoolFunction, BoolFunctionEntry, BoolFunctionTarget, CallPlan,
+        CallResult, PlanCache, maxArguments;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
         isIntegralSize, storeValue, TypeFacts;
@@ -125,6 +131,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         TryFinallyStatement, UnrolledLoopStatement;
     import dmd.tokens: EXP;
     import dmd.typesem: isIntegral, nextOf;
+    import core.thread: ThreadID;
 
     alias visit = LoweringVisitor.visit;
 
@@ -186,6 +193,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // worked out on that function's first call and reused by every call
     // after it - the same cold-path-once shape as `_layouts`.
     private PlanCache _plans;
+    private ThreadID _ownerThread;
+    // This signature-specific cache is temporary support for `rt-simple`.
+    // A proper, general FFI solution must replace it.
+    private BoolFunctionEntry[FuncDeclaration] _boolFunctionEntries;
     // A call expression is one call site, even when a loop visits it many
     // times. The plan cache remains the cold path; this side cache keeps
     // the prepared plan with the AST call site that uses it.
@@ -360,9 +371,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // member of an `extern(C++)` signature, and only `Visitor`'s `visit`
     // overloads need that linkage.
     extern(D) public this(const Program program) {
+        import core.thread: Thread;
+
         _program = program;
         _frames = FrameStack(defaultFrameCapacity);
         _temporaryFrames = FrameStack(defaultFrameCapacity);
+        _ownerThread = Thread.getThis.id;
+    }
+
+    extern(D) final void releaseCallbacks() {
+        foreach (ref entry_; _boolFunctionEntries.byValue)
+            entry_.release;
+        _boolFunctionEntries = null;
     }
 
     // Runs `function_` against a fresh top-level frame, mirroring the
@@ -426,7 +446,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 releaseTemporariesSince(0);
                 _temporariesFloor = previousFloor;
             }
-            executeCall(function_, returnPlace, frame.base, layout);
+            try
+                executeCall(function_, returnPlace, frame.base, layout);
+            catch (GuestException exception)
+                throw exception._guest;
         });
     }
 
@@ -703,12 +726,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             || hasInterpretedDelegateArgument(callSite)
             || isNestedInCurrentlyWalkedFunction(function_);
         if (!interprets) {
-            rejectInterpretedFunctionPointerArgument(
-                function_, arguments, argumentCount);
             const plan = callSite is null
                 ? &_plans.of(function_)
                 : callPlanOf(callSite, function_);
-            plan.call(returnPlace, arguments[0 .. argumentCount]);
+            callHost(
+                function_, plan, returnPlace, arguments, argumentCount,
+            );
             return;
         }
 
@@ -764,48 +787,59 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         body_.accept(this);
     }
 
-    // `visit(SymOffExp)`/`visit(FuncExp)` store a guest function pointer's
-    // value as the `FuncDeclaration` itself, since this backend has no
-    // machine code of its own for an interpreted function - `calleeOf`
-    // resolves that stand-in back on every call this evaluator makes. A
-    // call routed to real native code instead (`function_` here has no
-    // guest body to walk) hands its arguments to the FFI seam as opaque
-    // bytes, which marshals a function-pointer argument's bits unchanged
-    // into a register; if those bits are one of this backend's
-    // declaration stand-ins rather than an executable address, the native
-    // callee jumps to it and the host segfaults with no diagnostic.
-    // Checked once here, at the one place every native call's arguments
-    // are about to leave this evaluator for good, rather than in every
-    // caller that might produce such a value.
+    // `visit(SymOffExp)`/`visit(FuncExp)` store a function pointer's value
+    // as the `FuncDeclaration` itself. `calleeOf` resolves this value when
+    // guest code calls it. Host code needs an executable address instead.
+    // For the temporary `rt-simple` callback type, replace the guest
+    // declaration with a compiler-built entry that returns to this
+    // evaluator. A proper, general FFI solution must replace this signature
+    // check and adapter. Reject other guest callback forms before
+    // host code can jump to a declaration.
     //
     // Only a function-pointer-typed parameter is inspected: any other
     // parameter's bytes might legitimately contain the same bit pattern
     // (an `int` happening to equal some declaration's address, say)
     // without meaning a function pointer at all.
-    private void rejectInterpretedFunctionPointerArgument(
-        FuncDeclaration function_,
+    private void callHost(
+        FuncDeclaration hostFunction,
+        const(CallPlan)* plan,
+        void* returnPlace,
         const(void*)* arguments,
         size_t argumentCount,
     ) {
+        import dmd.astenums: LINK, STC;
         import snakebite.nativelayout: loadIntegral;
         import std.conv: text;
 
-        auto type = function_.type.isTypeFunction;
-        if (type is null)
-            return;
+        const(void)*[maxArguments] hostArguments;
+        size_t[maxArguments] callbackAddresses;
+        hostArguments[0 .. argumentCount] = arguments[0 .. argumentCount];
 
-        size_t index = function_.vthis !is null ? 1 : 0;
+        auto type = hostFunction.type.isTypeFunction;
+        assert(type !is null);
+
+        size_t index = hostFunction.vthis !is null ? 1 : 0;
         foreach (i; 0 .. type.parameterList.length) {
             if (index >= argumentCount)
-                return;
+                break;
 
+            auto parameter = type.parameterList[i];
             const argumentIndex = index++;
-            auto pointer = type.parameterList[i].type.isTypePointer;
+            auto pointer = parameter.type.isTypePointer;
             if (pointer is null || pointer.next.isTypeFunction is null)
                 continue;
 
+            const indirect =
+                (parameter.storageClass & (STC.ref_ | STC.out_)) != 0;
+            auto callbackPlace = indirect
+                ? cast(const(void)*) loadIntegral(
+                    arguments[argumentIndex], size_t.sizeof, false,
+                )
+                : arguments[argumentIndex];
+            if (callbackPlace is null)
+                continue;
             const raw = loadIntegral(
-                arguments[argumentIndex], size_t.sizeof, false);
+                callbackPlace, size_t.sizeof, false);
             if (raw == 0)
                 continue;
 
@@ -813,14 +847,81 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (!_program.isInterpreted(candidate))
                 continue;
 
-            throw new SnakebiteException(
-                text("interpreter cannot call `", function_.toString,
-                    "` with `", candidate.toString, "` as a function "
-                    ~ "pointer argument: calling an interpreted function "
-                    ~ "back from native code is not yet supported "
-                    ~ "(see issue #9)"),
-            );
+            if (indirect)
+                throw new SnakebiteException(
+                    text("interpreter cannot call `", hostFunction.toString,
+                        "` with a guest function pointer through a `ref` "
+                        ~ "or `out` parameter (see issue #9)"),
+                );
+
+            auto callbackType = candidate.type.isTypeFunction;
+            const linkage = candidate.resolvedLinkage;
+            if (callbackType is null
+                    || callbackType.parameterList.length != 0
+                    || callbackType.nextOf.ty != Tbool
+                    || (linkage != LINK.d && linkage != LINK.default_))
+                throw new SnakebiteException(
+                    text("interpreter cannot call `", hostFunction.toString,
+                        "` with `", candidate.toString, "` as a function "
+                        ~ "pointer argument: callback signature `",
+                        candidate.type.toString,
+                        "` is not supported (see issue #9)"),
+                );
+
+            callbackAddresses[argumentIndex] = cast(size_t)
+                boolFunctionEntry(candidate);
+            hostArguments[argumentIndex] = &callbackAddresses[argumentIndex];
         }
+
+        plan.call(returnPlace, hostArguments[0 .. argumentCount]);
+    }
+
+    private BoolFunction boolFunctionEntry(FuncDeclaration function_) {
+        if (auto existing = function_ in _boolFunctionEntries)
+            return existing.address;
+
+        auto target = BoolFunctionTarget(
+            &invokeBoolFunction,
+            cast(void*) this,
+            cast(void*) function_,
+        );
+        _boolFunctionEntries[function_] = BoolFunctionEntry.reserve(target);
+        return _boolFunctionEntries[function_].address;
+    }
+
+    extern(C) private static bool invokeBoolFunction(
+        void* context,
+        void* functionAddress,
+    ) {
+        auto evaluator = cast(Evaluator) context;
+        auto function_ = cast(FuncDeclaration) functionAddress;
+        return evaluator.callBoolFunction(function_);
+    }
+
+    extern(D) private bool callBoolFunction(FuncDeclaration function_) {
+        import core.thread: Thread;
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        if (Thread.getThis.id != _ownerThread)
+            throw new SnakebiteException(
+                "interpreter callback called on a thread that does not "
+                    ~ "own its evaluator (see issue #40)",
+            );
+
+        bool result;
+        withCompilerLock({
+            auto layout = layoutOf(function_);
+            auto frame = _frames.push(layout.size, layout.alignment);
+            const temporaryMark = _temporaries.length;
+            const previousFloor = raiseTemporariesFloor(temporaryMark);
+            scope(exit) {
+                releaseTemporariesSince(temporaryMark);
+                _temporariesFloor = previousFloor;
+            }
+
+            executeCall(function_, &result, frame.base, layout);
+        });
+        return result;
     }
 
     // dmd lowers `foreach` over an associative array to a call to a

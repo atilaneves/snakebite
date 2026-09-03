@@ -37,10 +37,6 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns a failing assertion into a compile-time error, so " ~
         "it cannot be expressed the same way as a runtime throw"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "Interpreter.call wraps an unhandled guest throw in its private " ~
-        "GuestException instead of letting the original AssertError " ~
-        "escape - a real gap, not yet fixed"),
 )) {
     @("assert.fails.unhandled.propagatesTheRealAssertError." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -94,10 +90,6 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns a failing assertion into a compile-time error, so " ~
         "it cannot be expressed the same way as a runtime throw"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "Interpreter.call wraps an unhandled guest throw in its private " ~
-        "GuestException instead of letting the original AssertError " ~
-        "escape - a real gap, not yet fixed"),
 )) {
     @("assert.fails.unhandled.unwindsNestedActivationsCleanly." ~ backend.stringof)
     @Tags(backend.stringof)
