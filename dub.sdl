@@ -43,7 +43,10 @@ configuration "acceptance-test" {
 
     mainSourceFile "acceptance/main.d"
     sourcePaths "acceptance"
+    sourcePaths "bench"
+    excludedSourceFiles "bench/main.d"
     importPaths "acceptance"
+    importPaths "."
 
     dependency "unit-threaded" version="*"
 }

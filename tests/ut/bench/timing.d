@@ -29,6 +29,6 @@ unittest {
         report.passed.should == true;
         if (report.hasCompile)
             (report.runTime.minimum >= report.compileTime.minimum)
-                .should == true;
+                .shouldBeTrue;
     }}
 }
