@@ -89,6 +89,7 @@ private enum boolCallbackCode = q{
     int answer() {
         assert(snakebite_ut_call_bool_callback(&yes));
         assert(!snakebite_ut_call_bool_callback(&no));
+        assert(snakebite_ut_call_bool_callback(() => true));
         assert(snakebite_ut_same_bool_callback(&yes, &yes));
         assert(!snakebite_ut_same_bool_callback(&yes, &no));
 
@@ -148,7 +149,6 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // remaining pointer to `values`, so reading the array afterward also proves
 // that re-entry does not hide that frame from the collector.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't call host code"),
 )) {
     @("pointers.functionPointer.boolCallback." ~ backend.stringof)
@@ -162,10 +162,10 @@ static foreach (backend; Matrix!(
                 hostCallbackDeclarations,
             ]);
             auto function_ = findFunction(modules[0], "answer");
-            auto interpreter = new Interpreter(Program([modules[0]]));
+            auto backend_ = new backend(Program([modules[0]]));
 
             int result;
-            interpreter.call(function_, &result, []);
+            backend_.call(function_, &result, []);
 
             result.should == 95;
         }
@@ -177,7 +177,6 @@ static foreach (backend; Matrix!(
 // frame. `Backend.call` sees the original `AssertError`, not an FFI error or
 // an interpreter implementation exception.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't call host code"),
 )) {
     @("pointers.functionPointer.boolCallback.exception." ~ backend.stringof)
@@ -199,11 +198,11 @@ static foreach (backend; Matrix!(
                 hostCallbackDeclarations,
             ]);
             auto function_ = findFunction(modules[0], "answer");
-            auto interpreter = new Interpreter(Program([modules[0]]));
+            auto backend_ = new backend(Program([modules[0]]));
 
             int result;
             try
-                interpreter.call(function_, &result, []);
+                backend_.call(function_, &result, []);
             catch (AssertError error)
                 caught = error;
         }
