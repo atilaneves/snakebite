@@ -936,7 +936,6 @@ static foreach (backend; Matrix!(
 // outright.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("postblitRunsOnceOnCopyIntoVariable." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -966,7 +965,11 @@ static foreach (backend; Matrix!(
 // its destructor still runs once the statement using it is done.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE evaluates the call but never runs the " ~
+        "destructor of a struct-typed rvalue temporary that is only " ~
+        "consumed by a method call on itself and never bound to a " ~
+        "variable - `dtors` stays 0 instead of reaching 1"),
 )) {
     @("destructorRunsAtFullExpressionEndForUnconsumedTemporary." ~
         backend.stringof)
@@ -1004,7 +1007,6 @@ static foreach (backend; Matrix!(
 // for `moved`/`constructed` account for every increment of `dtors`.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("postblitAndDestructorThroughFieldCopyMoveAndDirectConstruction." ~
         backend.stringof)
@@ -1075,7 +1077,11 @@ static foreach (backend; Matrix!(
 // leaked just because nothing ever consumed its value.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE catches the throw but never runs the " ~
+        "destructor of the already-constructed first-argument temporary " ~
+        "while unwinding the call expression - `dtors` stays 0 instead " ~
+        "of reaching 1"),
 )) {
     @("destructorRunsForAlreadyConstructedTemporaryOnThrowMidExpression." ~
         backend.stringof)
@@ -1126,7 +1132,6 @@ static foreach (backend; Matrix!(
 // it a second time from the declaration would destroy the range twice.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("foreachRangeTemporaryDestroyedOnceByItsOwnFinally." ~
         backend.stringof)
@@ -1177,7 +1182,6 @@ static foreach (backend; Matrix!(
 // still fail, would run it anyway.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("temporaryWithThrowingConstructorRunsNoDestructor." ~
         backend.stringof)
@@ -1224,7 +1228,11 @@ static foreach (backend; Matrix!(
 // the full expression, the same as when the result is discarded.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE computes the right value but never runs " ~
+        "the destructor of the user-constructor temporary once its " ~
+        "value feeds a declaration - `dtors` stays 0 instead of " ~
+        "reaching 1"),
 )) {
     @("userCtorTemporaryConsumedAsValueRunsDestructorOnce." ~
         backend.stringof)
@@ -1265,7 +1273,10 @@ static foreach (backend; Matrix!(
 // is what commits the destructor.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE catches the throw but never runs the " ~
+        "destructor of the user-constructor temporary whose `__ctor` " ~
+        "already completed - `dtors` stays 0 instead of reaching 1"),
 )) {
     @("userCtorTemporaryDestroyedWhenLaterCallInExpressionThrows." ~
         backend.stringof)
@@ -1312,7 +1323,11 @@ static foreach (backend; Matrix!(
 // total, never a shared or clobbered slot.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE computes the right return value but " ~
+        "never runs the destructor of any of the three reentrant " ~
+        "user-constructor temporaries - `dtors` stays 0 instead of " ~
+        "reaching 3"),
 )) {
     @("userCtorTemporaryReentrantConstructionDestroysEachActivation." ~
         backend.stringof)
@@ -1357,7 +1372,10 @@ static foreach (backend; Matrix!(
 // destructor runs, each owned by its own full expression.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE computes the right return value but " ~
+        "never runs the destructor of either user-constructor " ~
+        "temporary - `dtors` stays 0 instead of reaching 2"),
 )) {
     @("userCtorTemporaryInCalleeAndCallerDestroyedByTheirOwnExpressions." ~
         backend.stringof)
@@ -1403,7 +1421,6 @@ static foreach (backend; Matrix!(
 // `finally` already owns.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("foreachRangeWithUserCtorDestroyedOnceByItsOwnFinally." ~
         backend.stringof)
@@ -1461,7 +1478,11 @@ static foreach (backend; Matrix!(
 // expression.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE computes the right return value but " ~
+        "never runs the destructor of the temporary initialized from " ~
+        "`make(&dtors)`'s returned value - `dtors` stays 0 instead of " ~
+        "reaching 1"),
 )) {
     @("userCtorTypeTemporaryFromReturnedValueRunsDestructorOnce." ~
         backend.stringof)
@@ -1509,7 +1530,11 @@ static foreach (backend; Matrix!(
 // later, against a frame that is already gone.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE computes the right return value but " ~
+        "never runs the destructor of the taken ternary branch's " ~
+        "user-constructor temporary - `dtors` stays 0 instead of " ~
+        "reaching 1"),
 )) {
     @("ternaryBetweenUserCtorTemporariesDestroysTakenBranchOnce." ~
         backend.stringof)
@@ -1554,7 +1579,14 @@ static foreach (backend; Matrix!(
 // that never arrives must not be what the destructor waits for.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE refuses `gdtors` with \"static variable " ~
+        "`gdtors` cannot be read at compile time\" - the enum's " ~
+        "construction runs in the compiler's own CTFE session while " ~
+        "compiling the snippet, and `main()`'s later, separate " ~
+        "`ctfeInterpret` call cannot read a static mutated by a prior " ~
+        "session, not even after replacing `__gshared` with a plain " ~
+        "static (same error either way)"),
 )) {
     @("userCtorTypeTemporaryFromEnumLiteralRunsDestructorOnce." ~
         backend.stringof)
@@ -1599,7 +1631,6 @@ static foreach (backend; Matrix!(
 // at all.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("temporaryMovedIntoThrowingOuterCtorDestroyedOnceByCallee." ~
         backend.stringof)

@@ -4,33 +4,11 @@ module ut.backends.call.assign;
 import ut.backends;
 
 
-@("assign.structBlitRunsPostblitOnce.Interpreter")
-@Tags("Interpreter")
-unittest {
-    17.shouldBeRetOf!(
-        Interpreter,
-        q{
-            __gshared int copies;
-
-            struct Element {
-                int value;
-
-                this(this) {
-                    ++copies;
-                }
-            }
-
-            int result() {
-                Element source;
-                source.value = 7;
-                const before = copies;
-                Element target = source;
-                return (copies - before) * 10 + target.value;
-            }
-        },
-        "result",
-    );
-}
+// The `assign.structBlitRunsPostblitOnce` case this used to cover -
+// postblit runs exactly once on a struct-local copy assignment - is now
+// `structs.postblitRunsOnceOnCopyIntoVariable`, which asserts the same
+// behaviour across the whole backend `Matrix` instead of `Interpreter`
+// alone.
 
 
 @("assign.resultIsLvalue.Interpreter")
