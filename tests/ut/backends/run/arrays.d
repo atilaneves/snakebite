@@ -87,7 +87,6 @@ static foreach (backend; Matrix!(
 // leaves the original alone, which a backend returning the same
 // (ptr, length) pair would not.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {

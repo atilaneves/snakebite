@@ -157,7 +157,7 @@ static foreach (backend; Matrix!()) {
 // The shape the array code needs: a `size_t` (the array's own length,
 // 8 bytes) narrowed to an `int` (4 bytes). The string literal isolates the
 // cast from array support, which is exercised on its own elsewhere.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("cast.narrowLength." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
