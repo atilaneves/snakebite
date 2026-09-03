@@ -729,11 +729,16 @@ private const(Instruction)* opFloatBinary(string operation)(
             *cast(float*) place,
             *cast(const float*) (frame + pc.source),
         );
-    else {
-        assert(pc.width == double.sizeof);
+    else if (pc.width == double.sizeof)
         *cast(double*) place = applyFloatBinary!operation(
             *cast(double*) place,
             *cast(const double*) (frame + pc.source),
+        );
+    else {
+        assert(pc.width == real.sizeof);
+        *cast(real*) place = applyFloatBinary!operation(
+            *cast(real*) place,
+            *cast(const real*) (frame + pc.source),
         );
     }
     return advance(pc, frame, returnPlace, constants, callSites,
@@ -1136,15 +1141,24 @@ private const(Instruction)* opFloatComparison(string operation)(
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
-    const result = pc.width == float.sizeof
-        ? applyFloatComparison!operation(
+    bool result;
+    if (pc.width == float.sizeof)
+        result = applyFloatComparison!operation(
             *cast(float*) place,
             *cast(const float*) (frame + pc.source),
-        )
-        : applyFloatComparison!operation(
+        );
+    else if (pc.width == double.sizeof)
+        result = applyFloatComparison!operation(
             *cast(double*) place,
             *cast(const double*) (frame + pc.source),
         );
+    else {
+        assert(pc.width == real.sizeof);
+        result = applyFloatComparison!operation(
+            *cast(real*) place,
+            *cast(const real*) (frame + pc.source),
+        );
+    }
     *cast(ubyte*) place = result ? 1 : 0;
     return advance(pc, frame, returnPlace, constants, callSites,
         assertSites, frames);
@@ -1192,10 +1206,12 @@ private const(Instruction)* opFloatUnary(string operation)(
     auto place = frame + pc.destination;
     if (pc.width == float.sizeof)
         *cast(float*) place = applyFloatUnary!operation(*cast(float*) place);
-    else {
-        assert(pc.width == double.sizeof);
+    else if (pc.width == double.sizeof)
         *cast(double*) place =
             applyFloatUnary!operation(*cast(double*) place);
+    else {
+        assert(pc.width == real.sizeof);
+        *cast(real*) place = applyFloatUnary!operation(*cast(real*) place);
     }
     return advance(pc, frame, returnPlace, constants, callSites,
         assertSites, frames);
@@ -1296,19 +1312,27 @@ private void storeFloating(T)(void* place, in T value, in size_t width)
         @nogc nothrow {
     if (width == float.sizeof)
         *cast(float*) place = cast(float) value;
-    else {
-        assert(width == double.sizeof);
+    else if (width == double.sizeof)
         *cast(double*) place = cast(double) value;
+    else {
+        assert(width == real.sizeof);
+        *cast(real*) place = value;
     }
 }
 
-private double loadFloating(const(void)* place, in size_t width)
+// Returns `real` rather than `double`, wide enough to carry a `real`
+// source's own precision without narrowing it first - `float` and
+// `double` both widen to `real` exactly, so the one return type serves
+// every source width.
+private real loadFloating(const(void)* place, in size_t width)
         @nogc nothrow {
     if (width == float.sizeof)
         return *cast(const float*) place;
+    if (width == double.sizeof)
+        return *cast(const double*) place;
 
-    assert(width == double.sizeof);
-    return *cast(const double*) place;
+    assert(width == real.sizeof);
+    return *cast(const real*) place;
 }
 
 private const(Instruction)* opIntegralToFloat(bool unsigned_)(

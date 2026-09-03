@@ -93,14 +93,14 @@ private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
     return true;
 }
 
-// Whether `type` is `float`/`double` - `TypeFacts` has no notion of its own
-// for this, since nothing outside array element types and their literals
-// needs to ask, unlike `isIntegral`/`isDynamicArray`, which drive checks
-// all over this compiler.
+// Whether `type` is `float`/`double`/`real` - `TypeFacts` has no notion of
+// its own for this, since nothing outside array element types and their
+// literals needs to ask, unlike `isIntegral`/`isDynamicArray`, which drive
+// checks all over this compiler.
 private bool isFloatingType(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: Tfloat32, Tfloat64;
+    import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
 
-    return type.ty == Tfloat32 || type.ty == Tfloat64;
+    return type.ty == Tfloat32 || type.ty == Tfloat64 || type.ty == Tfloat80;
 }
 
 // A pointer-sized temporary's facts: the shape every address this compiler
@@ -252,8 +252,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
     private TypeInfo runtimeTypeInfo(Type type) {
         import dmd.astenums:
-            Tarray, Tbool, Tchar, Tdchar, Tfloat32, Tfloat64, Tint8, Tint16,
-            Tint32, Tint64, Tuns8, Tuns16, Tuns32, Tuns64, Twchar;
+            Tarray, Tbool, Tchar, Tdchar, Tfloat32, Tfloat64, Tfloat80,
+            Tint8, Tint16, Tint32, Tint64, Tuns8, Tuns16, Tuns32, Tuns64,
+            Twchar;
         import dmd.typesem: nextOf;
 
         if (type.vtinfo !is null) {
@@ -300,6 +301,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             case Tuns64: return typeid(ulong);
             case Tfloat32: return typeid(float);
             case Tfloat64: return typeid(double);
+            case Tfloat80: return typeid(real);
             default: return null;
         }
     }
@@ -1699,7 +1701,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in TypeFacts facts,
         Expression value,
     ) {
-        import dmd.astenums: Tarray, Tfloat32, Tfloat64;
+        import dmd.astenums: Tarray, Tfloat32, Tfloat64, Tfloat80;
         import dmd.expressionsem: toInteger;
         import dmd.typesem: nextOf, size;
         import snakebite.nativelayout: arrayValueSize;
@@ -1713,7 +1715,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 && element !is null && literal.sz == element.size;
         }
 
-        if (type.ty == Tfloat32 || type.ty == Tfloat64)
+        if (type.ty == Tfloat32 || type.ty == Tfloat64 || type.ty == Tfloat80)
             return value.isRealExp !is null;
 
         if (type.isTypeStruct !is null) {
@@ -2328,6 +2330,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `storeValue` already knows how to lay either width out (see its own
     // doc), so this only has to fold that same compile-time write into one
     // constant rather than reimplementing the float-to-bits conversion.
+    // `real` is wider than the `long` a single constant carries, so it
+    // instead folds into the two 8-byte halves of its own 16-byte native
+    // layout, the same way `StringExp` below folds its own two words into
+    // two separate constants.
     override void visit(RealExp expression) {
         import snakebite.nativelayout: storeValue;
 
@@ -2336,6 +2342,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const facts = TypeFacts.of(expression.type);
         if (!isFloatingType(expression.type))
             return visit(cast(Expression) expression);
+
+        if (_width > long.sizeof) {
+            align(real.alignof) ubyte[real.sizeof] bits = void;
+            storeValue(expression.type, facts, expression, bits.ptr);
+            auto halves = cast(const(long)*) bits.ptr;
+            emit(&opConstant, _destination, addConstant(halves[0]),
+                long.sizeof);
+            emit(&opConstant, _destination + long.sizeof,
+                addConstant(halves[1]), _width - long.sizeof);
+            return;
+        }
 
         long bits;
         storeValue(expression.type, facts, expression, &bits);

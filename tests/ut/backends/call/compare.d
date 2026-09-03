@@ -750,17 +750,10 @@ static foreach (backend; Matrix!()) {
 }
 
 
-// The bytecode compiler's own type switch recognises only `float` and
-// `double` as floating types - `real` has no case there at all, so a
-// program using it cannot be compiled for that backend.
-private alias RealOmit = Omit!(Bytecode, Because.unconfirmed,
-    "the bytecode compiler recognises only `float`/`double` as floating "
-        ~ "types, not `real`");
-
 // The four orderings over `real`, each pinned on both sides of its
 // boundary the same way the integral versions above are. Every operand
 // comes from a call so dmd cannot fold the comparison away.
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("compare.real.lessThan.true." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -784,7 +777,7 @@ static foreach (backend; Matrix!(RealOmit)) {
     }
 }
 
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("compare.real.lessThan.false." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -808,7 +801,7 @@ static foreach (backend; Matrix!(RealOmit)) {
     }
 }
 
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("compare.real.lessOrEqual.equal." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -832,7 +825,7 @@ static foreach (backend; Matrix!(RealOmit)) {
     }
 }
 
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("compare.real.greaterThan.true." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -856,7 +849,7 @@ static foreach (backend; Matrix!(RealOmit)) {
     }
 }
 
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("compare.real.greaterOrEqual.equal." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -883,7 +876,7 @@ static foreach (backend; Matrix!(RealOmit)) {
 // Positive and negative zero have different bit patterns but compare
 // equal, the same rule `compare.floatingEquality` pins for `float`/
 // `double`.
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("compare.real.equal.signedZero." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -907,7 +900,7 @@ static foreach (backend; Matrix!(RealOmit)) {
     }
 }
 
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("compare.real.notEqual.true." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
