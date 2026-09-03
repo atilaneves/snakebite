@@ -135,6 +135,15 @@ def test_command_prints_expression_result() -> None:
     assert result.stdout == "3\n"
 
 
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_command_uses_requested_backend(backend: str) -> None:
+    result = run_sb("-b", backend, "-c", "1 + 2")
+
+    assert result.returncode == 0
+    assert result.stdout == "3\n"
+    assert result.stderr == ""
+
+
 def test_command_can_use_several_file_arguments(tmp_path: Path) -> None:
     first = tmp_path / "first.d"
     second = tmp_path / "second.d"

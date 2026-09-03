@@ -179,17 +179,14 @@ unittest {
 }
 
 
-// The bytecode backend does not implement `eval` yet: the REPL surfaces
-// that refusal as an ordinary error rather than crashing, and this also
-// exercises `makeBackend`'s bytecode branch.
-@("submit.bytecodeBackendSurfacesItsOwnEvalRefusal")
+@("submit.evaluatesAnExpressionWithBytecode")
 unittest {
     auto repl = Repl(ReplBackendName.bytecode);
 
     const result = repl.submit("1 + 2");
 
-    result.kind.should == SubmitResult.Kind.error;
-    result.text.should == "eval not implemented for the bytecode backend yet";
+    result.kind.should == SubmitResult.Kind.value;
+    result.text.should == "3";
 }
 
 
