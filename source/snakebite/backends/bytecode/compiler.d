@@ -4,8 +4,8 @@ module snakebite.backends.bytecode.compiler;
 private:
 
 import dmd.mtype: Type;
-import dmd.visitor: Visitor;
 import object: TypeInfo, TypeInfo_Array, TypeInfo_Class;
+import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.ffi: maxArguments, PlanCache;
 
 
@@ -34,7 +34,8 @@ private bool isSupportedFacts(
 ) {
     import dmd.astenums: Tpointer;
 
-    return isSupportedFacts(facts) || type.ty == Tpointer
+    return isSupportedFacts(facts) || isFloatingType(type)
+        || type.ty == Tpointer
         || isPlainOldStruct(type);
 }
 
@@ -286,9 +287,12 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 _compilationTime += stopWatch.peek;
         }
 
-        // A struct method's hidden `this` is not a value this compiler
-        // lays out yet; only a free function's own parameters are.
-        if (function_.vthis !is null)
+        // A struct method's hidden `this` is a pointer to the receiver. A
+        // nested function and a class method use the same DMD slot for a
+        // different context, so keep those outside this backend's scope.
+        if (function_.vthis !is null
+                && (function_.isThis is null
+                    || function_.isThis.isStructDeclaration is null))
             throw rejection(function_, function_.loc, "a method");
 
         auto functionType = typeFunctionOf(function_);
@@ -356,7 +360,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 // its way out, an operand of a nested expression - by growing
 // `_tempSize`/`_tempAlignment` past it; nothing about a temporary slot is
 // ever handed back through `FrameLayout` itself.
-extern(C++) private final class FunctionCompiler: Visitor {
+extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import dmd.declaration: VarDeclaration;
     import dmd.init: ExpInitializer;
     import dmd.expression;
@@ -373,12 +377,19 @@ extern(C++) private final class FunctionCompiler: Visitor {
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
-        opConstant, opCopy, opDivideSigned, opDivideUnsigned, opEqual,
-        opFloatEqual, opFloatNotEqual, opFrameAddress, opGreaterOrEqualSigned,
+        opArrayEqual, opConstant, opCopy, opDivideSigned, opDivideUnsigned,
+        opEqual,
+        opFloatAdd, opFloatDivide, opFloatEqual, opFloatGreaterOrEqual,
+        opFloatGreaterThan, opFloatLessOrEqual, opFloatLessThan,
+        opFloatModulo, opFloatMultiply, opFloatNegate, opFloatNotEqual,
+        opFloatSubtract, opFloatToIntegralSigned, opFloatToIntegralUnsigned,
+        opFloatWidthCast, opFrameAddress, opGreaterOrEqualSigned,
         opGreaterOrEqualUnsigned, opGreaterThanSigned, opGreaterThanUnsigned,
+        opIntegralToFloatSigned, opIntegralToFloatUnsigned,
         opJump, opLessOrEqualSigned, opLessOrEqualUnsigned, opLessThanSigned,
         opLessThanUnsigned, opLoadIndirect, opLogicalNot, opModuloSigned,
-        opModuloUnsigned, opMultiply, opNegate, opNotEqual, opReturn,
+        opModuloUnsigned, opMultiply, opNegate, opNotEqual, opRangeError,
+        opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
         opStaticAddress, opStaticLoad, opStaticStore, opStoreIndirect,
         opSubtract, opZero;
@@ -389,7 +400,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
     import snakebite.nativelayout:
         alignUp, isIntegralSize, storeValue, TypeFacts;
 
-    alias visit = Visitor.visit;
+    alias visit = LoweringVisitor.visit;
 
     extern(D):
 
@@ -527,8 +538,10 @@ extern(C++) private final class FunctionCompiler: Visitor {
         in size_t destination,
         in size_t source,
         in size_t width,
+        in size_t sourceWidth = 0,
     ) {
-        _instructions ~= Instruction(handler, destination, source, width);
+        _instructions ~= Instruction(
+            handler, destination, source, width, sourceWidth);
     }
 
     private size_t addConstant(in long value) {
@@ -1183,6 +1196,9 @@ extern(C++) private final class FunctionCompiler: Visitor {
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
+        if (isThisField(variable))
+            return compileIndirectAssign(expression, varExp, destOffset);
+
         const facts = TypeFacts.of(variable.type);
         if (!isSupportedFacts(facts, variable.type))
             throw rejection(_function, expression.loc,
@@ -1232,6 +1248,36 @@ extern(C++) private final class FunctionCompiler: Visitor {
         emit(&opStaticStore, staticOffsetOf(variable), sourceOffset, width);
     }
 
+    private bool isThisField(VarDeclaration variable) const {
+        auto aggregate = variable.toParent2;
+        auto thisAggregate = _function.isThis;
+        return thisAggregate !is null
+            && thisAggregate.isStructDeclaration !is null
+            && aggregate is thisAggregate;
+    }
+
+    private size_t hiddenThisOffset(VarDeclaration variable = null) {
+        auto hiddenThis = variable is null
+            ? cast() _layout.hiddenThis.variable
+            : variable;
+        if (hiddenThis is null || !_layout.isRef(hiddenThis))
+            throw rejection(_function, _function.loc, "a struct `this`");
+
+        return _layout.offsetOf(hiddenThis);
+    }
+
+    private size_t compileThisFieldAddress(VarDeclaration field) {
+        const addressOffset = hiddenThisOffset;
+        if (field.offset == 0)
+            return addressOffset;
+
+        const fieldOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, fieldOffset,
+            addConstant(cast(long) field.offset), size_t.sizeof);
+        emit(&opAdd, fieldOffset, addressOffset, size_t.sizeof);
+        return fieldOffset;
+    }
+
     // `*p = value` in every guise this compiler reaches it through: a `ref`
     // variable's own target, or a `ref`-returning call's own result.
     // `compileAddress` already knows how to compile either lvalue's
@@ -1255,10 +1301,9 @@ extern(C++) private final class FunctionCompiler: Visitor {
             emit(&opCopy, destOffset, valueOffset, facts.size);
     }
 
-    // `s.field = value`, `s` a chain of local struct fields (`a.b.c = 5`)
-    // grounded in a local or parameter - never an array element, which has
-    // no frame offset of its own to write the field's bytes into (see
-    // `fieldBaseFrameOffset`).
+    // `s.field = value`, with the target address computed from the receiver
+    // lvalue. This also covers a method's implicit field (`_bytes`) and a
+    // field reached through `this`, so writes update the caller's struct.
     private void compileFieldAssign(
         AssignExp expression, DotVarExp target, in size_t destOffset,
     ) {
@@ -1273,42 +1318,31 @@ extern(C++) private final class FunctionCompiler: Visitor {
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        const targetOffset = fieldBaseFrameOffset(target.e1) + field.offset;
-        evalInto(expression.e2, targetOffset, facts.size);
+        const addressOffset = compileFieldAddress(target);
+        const valueOffset = reserveTemp(facts);
+        evalInto(expression.e2, valueOffset, facts.size);
+        emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
 
-        if (destOffset != discardResult && destOffset != targetOffset)
-            emit(&opCopy, destOffset, targetOffset, facts.size);
+        if (destOffset != discardResult)
+            emit(&opCopy, destOffset, valueOffset, facts.size);
     }
 
-    // Where `expression` - a local, a parameter, or a field access chain
-    // grounded in one of those - already lives in this frame, with no
-    // `evalInto` of its own needed to get it there: `compileFieldAssign`'s
-    // own target, and each step of a nested field chain (`a.b.c`) it
-    // recurses through to reach `a`'s own slot before adding every field
-    // offset from there back down to `c`.
-    private size_t fieldBaseFrameOffset(Expression expression) {
-        if (auto varExp = expression.isVarExp) {
-            auto variable = varExp.var.isVarDeclaration;
-            if (variable is null || variable.isDataseg
-                    || _layout.isRef(variable))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+    private size_t compileFieldAddress(DotVarExp expression) {
+        auto field = expression.var.isVarDeclaration;
+        if (field is null || field.isBitFieldDeclaration !is null
+                || !isPlainOldStruct(expression.e1.type))
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
 
-            return _layout.offsetOf(variable);
-        }
+        const addressOffset = compileAddress(expression.e1);
+        if (field.offset == 0)
+            return addressOffset;
 
-        if (auto dot = expression.isDotVarExp) {
-            auto field = dot.var.isVarDeclaration;
-            if (field is null || field.isBitFieldDeclaration !is null
-                    || !isPlainOldStruct(dot.e1.type))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            return fieldBaseFrameOffset(dot.e1) + field.offset;
-        }
-
-        throw rejection(_function, expression.loc,
-            expressionText(expression));
+        const fieldOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, fieldOffset,
+            addConstant(cast(long) field.offset), size_t.sizeof);
+        emit(&opAdd, fieldOffset, addressOffset, size_t.sizeof);
+        return fieldOffset;
     }
 
     // `arr[i] = value`. `opStoreIndirect` writes `facts.size` bytes
@@ -1786,6 +1820,12 @@ extern(C++) private final class FunctionCompiler: Visitor {
             return;
         }
 
+        if (isThisField(variable)) {
+            const addressOffset = compileThisFieldAddress(variable);
+            emit(&opLoadIndirect, _destination, addressOffset, _width);
+            return;
+        }
+
         // `$` inside an index has no frame slot of its own - dmd hands out
         // a fresh `VarDeclaration` for it that no statement declares
         // (`FrameLayout` never reserves it a slot for exactly that reason),
@@ -1839,6 +1879,18 @@ extern(C++) private final class FunctionCompiler: Visitor {
         emit(&opStaticAddress, addressOffset,
             staticOffsetOf(variable), size_t.sizeof);
         return addressOffset;
+    }
+
+    // `this` is a reference to a struct value. Its hidden slot contains the
+    // receiver's address, so a value read loads the struct bytes through it.
+    // A constructor can synthesize a `ThisExp` without a declaration; the
+    // shared layout records the declaration in that case.
+    override void visit(ThisExp expression) {
+        requireDestination(expression);
+
+        emit(&opLoadIndirect, _destination,
+            hiddenThisOffset(expression.var),
+            _width);
     }
 
     // The general `&expression` node: dmd only folds `&variable` into a
@@ -1947,13 +1999,12 @@ extern(C++) private final class FunctionCompiler: Visitor {
     // whole-array slice of it before iterating, to fix the range being
     // walked against mutation of the original variable during the loop.
     // A dynamic array's whole slice is the same two words as the array
-    // itself, so this is nothing more than evaluating `e1` again; a
-    // bounded slice (`arr[a .. b]`) is out of scope, since nothing this
-    // compiler lowers writes one.
+    // itself, so it does not need the bounds work of a bounded slice.
     override void visit(SliceExp expression) {
         import dmd.astenums: Tpointer;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset;
+        import std.string: fromStringz;
 
         requireDestination(expression);
 
@@ -1986,11 +2037,81 @@ extern(C++) private final class FunctionCompiler: Visitor {
             return;
         }
 
-        if (!facts.isDynamicArray
-                || expression.lwr !is null || expression.upr !is null)
+        if (!facts.isDynamicArray)
             return visit(cast(Expression) expression);
 
-        evalInto(expression.e1, _destination, _width);
+        if (expression.lwr is null && expression.upr is null) {
+            evalInto(expression.e1, _destination, _width);
+            return;
+        }
+
+        const arrayOffset = reserveTemp(facts);
+        evalInto(expression.e1, arrayOffset, facts.size);
+
+        auto outerDollarVariable = _dollarVariable;
+        auto outerDollarOffset = _dollarOffset;
+        scope (exit) {
+            _dollarVariable = outerDollarVariable;
+            _dollarOffset = outerDollarOffset;
+        }
+        if (expression.lengthVar !is null) {
+            _dollarVariable = expression.lengthVar;
+            _dollarOffset = arrayOffset + arrayLengthOffset;
+        }
+
+        const lowOffset = reserveTemp(pointerFacts);
+        if (expression.lwr is null)
+            emit(&opConstant, lowOffset, addConstant(0), size_t.sizeof);
+        else
+            evalOperandInto(expression.lwr, lowOffset, size_t.sizeof);
+
+        const highOffset = reserveTemp(pointerFacts);
+        if (expression.upr is null)
+            emit(&opCopy, highOffset,
+                arrayOffset + arrayLengthOffset, size_t.sizeof);
+        else
+            evalOperandInto(expression.upr, highOffset, size_t.sizeof);
+
+        // D requires both bounds to be within the source array and the
+        // lower bound to come first. Check before pointer arithmetic so a
+        // bad slice cannot form an address outside the guest array.
+        const orderOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, orderOffset, lowOffset, size_t.sizeof);
+        emit(&opLessOrEqualUnsigned, orderOffset, highOffset, size_t.sizeof);
+        const site = AssertSite(
+            null,
+            expression.loc.filename.fromStringz.idup,
+            expression.loc.linnum,
+        );
+        _assertSites ~= site;
+        const siteIndex = _assertSites.length - 1;
+        emit(&opRangeError, orderOffset, siteIndex, 1);
+
+        emit(&opCopy, orderOffset, highOffset, size_t.sizeof);
+        emit(&opLessOrEqualUnsigned, orderOffset,
+            arrayOffset + arrayLengthOffset, size_t.sizeof);
+        emit(&opRangeError, orderOffset, siteIndex, 1);
+
+        emit(&opCopy, _destination + arrayLengthOffset,
+            highOffset, size_t.sizeof);
+        emit(&opSubtract, _destination + arrayLengthOffset,
+            lowOffset, size_t.sizeof);
+
+        const byteOffsetOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, byteOffsetOffset, lowOffset, size_t.sizeof);
+        const elementFacts = TypeFacts.of(expression.e1.type.nextOf);
+        const elementSizeOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, elementSizeOffset,
+            addConstant(cast(long) elementFacts.size), size_t.sizeof);
+        emit(&opMultiply, byteOffsetOffset, elementSizeOffset,
+            size_t.sizeof);
+
+        const pointerOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, pointerOffset,
+            arrayOffset + arrayPointerOffset, size_t.sizeof);
+        emit(&opAdd, pointerOffset, byteOffsetOffset, size_t.sizeof);
+        emit(&opCopy, _destination + arrayPointerOffset,
+            pointerOffset, size_t.sizeof);
     }
 
     // `arr[i]`, read as a value. `compileElementAddress` does the shared
@@ -2079,6 +2200,12 @@ extern(C++) private final class FunctionCompiler: Visitor {
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         if (_destination != discardResult && expression.f !is null
+                && expression.f.isCtorDeclaration() !is null) {
+            compileCall(expression, _destination);
+            return;
+        }
+
+        if (_destination != discardResult && expression.f !is null
                 && typeFunctionOf(expression.f).isRef) {
             const addressOffset = compileAddress(expression);
             emit(&opLoadIndirect, _destination, addressOffset, _width);
@@ -2097,6 +2224,18 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
     override void visit(AssignExp expression) {
         compileAssign(expression, _destination);
+    }
+
+    // DMD lowers a dynamic-array length assignment to the druntime call
+    // that owns allocation, prefix preservation, and the native array
+    // representation. Compile that call instead of trying to infer the
+    // lowering from the source assignment node.
+    override void visit(LoweredAssignExp expression) {
+        if (expression.lowering is null)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        expression.lowering.accept(this);
     }
 
     override void visit(BinAssignExp expression) {
@@ -2147,8 +2286,17 @@ extern(C++) private final class FunctionCompiler: Visitor {
         compileComparison(expression, _destination);
     }
 
-    override void visit(EqualExp expression) {
+    protected override void visitUnloweredEqual(EqualExp expression) {
+        import dmd.astenums: Tarray;
+
         requireDestination(expression);
+
+        if (expression.e1.type.ty == Tarray
+                && expression.e2.type.ty == Tarray) {
+            compileMemcmpDynamicArrayEquality(expression, _destination);
+            return;
+        }
+
         compileComparison(expression, _destination);
     }
 
@@ -2290,6 +2438,19 @@ extern(C++) private final class FunctionCompiler: Visitor {
         }
 
         const facts = TypeFacts.of(expression.type);
+        if (isFloatingType(expression.type)) {
+            const leftOffset = reserveTemp(facts);
+            evalInto(expression.e1, leftOffset, facts.size);
+            const rightOffset = reserveTemp(facts);
+            evalInto(expression.e2, rightOffset, facts.size);
+            emit(floatingBinaryHandler(expression), leftOffset, rightOffset,
+                facts.size);
+
+            if (destOffset != leftOffset)
+                emit(&opCopy, destOffset, leftOffset, width);
+            return;
+        }
+
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
@@ -2302,6 +2463,19 @@ extern(C++) private final class FunctionCompiler: Visitor {
 
         if (destOffset != leftOffset)
             emit(&opCopy, destOffset, leftOffset, width);
+    }
+
+    private Instruction.Handler floatingBinaryHandler(BinExp expression) {
+        with (EXP) switch (expression.op) {
+            case add: return &opFloatAdd;
+            case min: return &opFloatSubtract;
+            case mul: return &opFloatMultiply;
+            case div: return &opFloatDivide;
+            case mod: return &opFloatModulo;
+            default:
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+        }
     }
 
     // Evaluates `operand` for use as one side of a binary opcode that
@@ -2376,15 +2550,18 @@ extern(C++) private final class FunctionCompiler: Visitor {
             return;
         }
 
-        // `float`/`double` compare unequal to themselves when they are NaN,
-        // so this reaches for the host's own float comparison
-        // (`opFloatEqual`/`opFloatNotEqual`) rather than the bit-pattern
-        // test every integral comparison uses - only `==`/`!=` are
-        // supported for now, since nothing in scope needs a floating
-        // ordering.
+        // Host floating-point operators preserve D's NaN and signed-zero
+        // semantics for equality and ordering. Integral equality instead
+        // compares the stored bits, which would make a NaN equal itself and
+        // positive and negative zero unequal.
         if (isFloatingType(expression.e1.type)) {
             Instruction.Handler floatHandler;
             with (EXP) switch (expression.op) {
+                case lessThan: floatHandler = &opFloatLessThan; break;
+                case lessOrEqual: floatHandler = &opFloatLessOrEqual; break;
+                case greaterThan: floatHandler = &opFloatGreaterThan; break;
+                case greaterOrEqual:
+                    floatHandler = &opFloatGreaterOrEqual; break;
                 case equal: floatHandler = &opFloatEqual; break;
                 case notEqual: floatHandler = &opFloatNotEqual; break;
                 default:
@@ -2416,6 +2593,40 @@ extern(C++) private final class FunctionCompiler: Visitor {
         evalInto(expression.e2, rightOffset, operandFacts.size);
         emit(handler, leftOffset, rightOffset, operandFacts.size);
 
+        if (destOffset != leftOffset)
+            emit(&opCopy, destOffset, leftOffset, 1);
+    }
+
+    // DMD leaves EqualExp.lowering null only when its semantic pass approved
+    // bytewise element equality. All other array equality runs through that
+    // lowering instead of entering this fast path.
+    private void compileMemcmpDynamicArrayEquality(
+        EqualExp expression, in size_t destOffset,
+    ) {
+        import dmd.tokens: EXP;
+        import snakebite.nativelayout: arrayValueSize;
+
+        assert(expression.lowering is null);
+
+        if (expression.op != EXP.equal && expression.op != EXP.notEqual)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const arrayFacts = TypeFacts.of(expression.e1.type);
+        auto elementType = expression.e1.type.nextOf;
+        const elementFacts = TypeFacts.of(elementType);
+        if (!arrayFacts.isDynamicArray)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const leftOffset = reserveTemp(arrayFacts);
+        evalInto(expression.e1, leftOffset, arrayValueSize);
+        const rightOffset = reserveTemp(arrayFacts);
+        evalInto(expression.e2, rightOffset, arrayValueSize);
+
+        emit(&opArrayEqual, leftOffset, rightOffset, elementFacts.size);
+        if (expression.op == EXP.notEqual)
+            emit(&opLogicalNot, leftOffset, 0, 1);
         if (destOffset != leftOffset)
             emit(&opCopy, destOffset, leftOffset, 1);
     }
@@ -2452,6 +2663,16 @@ extern(C++) private final class FunctionCompiler: Visitor {
         Instruction.Handler handler,
     ) {
         const facts = TypeFacts.of(expression.type);
+        if (isFloatingType(expression.type)) {
+            if (handler !is &opNegate)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            evalInto(expression.e1, destOffset, width);
+            emit(&opFloatNegate, destOffset, 0, width);
+            return;
+        }
+
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
@@ -2561,6 +2782,53 @@ extern(C++) private final class FunctionCompiler: Visitor {
         const sourceFacts = TypeFacts.of(sourceType);
         const destFacts = TypeFacts.of(destType);
         import dmd.astenums: Tpointer;
+
+        if (isFloatingType(destType)) {
+            if (isFloatingType(sourceType)) {
+                if (sourceFacts.size == destFacts.size)
+                    return evalInto(expression.e1, destOffset, width);
+
+                const sourceOffset = sourceFacts.size > destFacts.size
+                    ? reserveTemp(sourceFacts) : destOffset;
+                evalInto(expression.e1, sourceOffset, sourceFacts.size);
+                emit(&opFloatWidthCast, destOffset, sourceOffset, destFacts.size,
+                    sourceFacts.size);
+                return;
+            }
+
+            if (!sourceFacts.isIntegral
+                    || !isIntegralSize(sourceFacts.size))
+                throw rejection(_function, expression.loc,
+                    text("a cast from `", sourceType.toString, "` to `",
+                        destType.toString, "`"));
+
+            const sourceOffset = reserveTemp(sourceFacts);
+            evalInto(expression.e1, sourceOffset, sourceFacts.size);
+            emit(
+                sourceFacts.isUnsigned
+                    ? &opIntegralToFloatUnsigned
+                    : &opIntegralToFloatSigned,
+                destOffset, sourceOffset, destFacts.size, sourceFacts.size,
+            );
+            return;
+        }
+
+        if (isFloatingType(sourceType)) {
+            if (!destFacts.isIntegral || !isIntegralSize(destFacts.size))
+                throw rejection(_function, expression.loc,
+                    text("a cast from `", sourceType.toString, "` to `",
+                        destType.toString, "`"));
+
+            const sourceOffset = reserveTemp(sourceFacts);
+            evalInto(expression.e1, sourceOffset, sourceFacts.size);
+            emit(
+                destFacts.isUnsigned
+                    ? &opFloatToIntegralUnsigned
+                    : &opFloatToIntegralSigned,
+                destOffset, sourceOffset, destFacts.size, sourceFacts.size,
+            );
+            return;
+        }
 
         if (sourceType.ty == Tpointer && destType.ty == Tpointer
                 && width == sourceFacts.size)
@@ -2704,6 +2972,32 @@ extern(C++) private final class FunctionCompiler: Visitor {
                 expressionText(expression));
 
         Arg[] args;
+        const isConstructor = callee.isCtorDeclaration !is null;
+        if (callee.vthis !is null) {
+            size_t thisOffset;
+            if (isConstructor) {
+                if (destOffset == discardResult)
+                    throw rejection(_function, expression.loc,
+                        expressionText(expression));
+
+                thisOffset = reserveTemp(pointerFacts);
+                emit(&opFrameAddress, thisOffset, destOffset,
+                    size_t.sizeof);
+            } else {
+                auto dot = expression.e1.isDotVarExp;
+                if (dot !is null)
+                    thisOffset = compileAddress(dot.e1);
+                else
+                    thisOffset = hiddenThisOffset;
+            }
+
+            args ~= Arg(
+                thisOffset,
+                calleeLayout.hiddenThis.parameter.offset,
+                size_t.sizeof,
+            );
+        }
+
         foreach (i; 0 .. parameterCount) {
             auto parameter = calleeLayout.parameters[i];
 
@@ -2738,8 +3032,8 @@ extern(C++) private final class FunctionCompiler: Visitor {
         // is the one place it is written through.
         const isRefCallee = calleeType.isRef;
         auto calleeReturnType = calleeType.next;
-        const isVoidCallee =
-            calleeReturnType is null || calleeReturnType.ty == Tvoid;
+        const isVoidCallee = isConstructor || calleeReturnType is null
+            || calleeReturnType.ty == Tvoid;
         const returnFacts = isRefCallee
             ? pointerFacts
             : isVoidCallee ? TypeFacts.init : TypeFacts.of(calleeReturnType);
@@ -2747,7 +3041,7 @@ extern(C++) private final class FunctionCompiler: Visitor {
                 && !isSupportedFacts(returnFacts, calleeReturnType))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
-        if (isVoidCallee && destOffset != discardResult)
+        if (isVoidCallee && !isConstructor && destOffset != discardResult)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -2843,8 +3137,21 @@ extern(C++) private final class FunctionCompiler: Visitor {
             auto variable = varExp.var.isVarDeclaration;
             if (variable !is null && variable.isDataseg)
                 return compileStaticAddress(variable);
-            if (variable !is null)
+            if (variable !is null && !variable.isDataseg) {
+                if (isThisField(variable))
+                    return compileThisFieldAddress(variable);
                 return addressOfVariable(variable);
+            }
+        }
+
+        if (auto thisExp = expression.isThisExp)
+            return hiddenThisOffset(thisExp.var);
+
+        if (auto dot = expression.isDotVarExp) {
+            auto field = dot.var.isVarDeclaration;
+            if (field !is null && field.isBitFieldDeclaration is null
+                    && isPlainOldStruct(dot.e1.type))
+                return compileFieldAddress(dot);
         }
 
         if (auto indexExp = expression.isIndexExp) {

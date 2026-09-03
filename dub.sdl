@@ -27,9 +27,9 @@ configuration "unittest" {
 
     mainSourceFile "tests/main.d"
     sourcePaths "tests"
+    sourcePaths "bench"
+    excludedSourceFiles "bench/main.d"
     importPaths "tests"
-    sourceFiles "bench/report.d"
-    sourceFiles "bench/capture.d"
     importPaths "."
 
     dependency "unit-threaded" version="*"

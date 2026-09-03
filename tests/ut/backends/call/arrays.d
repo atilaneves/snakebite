@@ -276,8 +276,8 @@ unittest {
     catch (AssertError error)
         caught = error;
 
-    (caught !is null).shouldBeTrue;
-    caught.msg.shouldEqual("bytecode: index out of bounds: `cast(ulong)i`");
+    (caught !is null).should == true;
+    caught.msg.should == "bytecode: index out of bounds: `cast(ulong)i`";
 }
 
 // The same bounds check, but with an unrelated assertion earlier in the
@@ -312,8 +312,8 @@ unittest {
     catch (AssertError error)
         caught = error;
 
-    (caught !is null).shouldBeTrue;
-    caught.msg.shouldEqual("bytecode: index out of bounds: `cast(ulong)i`");
+    (caught !is null).should == true;
+    caught.msg.should == "bytecode: index out of bounds: `cast(ulong)i`";
 }
 
 static foreach (backend; Matrix!()) {
@@ -582,25 +582,99 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A runtime `.length` assignment lowers to druntime's type-specific
-// `_d_arraysetlengthT` template. The guest is interpreted, so its template
-// instance needs either native code or its synthesized D body. Writing and
-// reading the last element proves that the runtime growth really happened.
-@("arrays.length.runtime.ushort.Interpreter")
-@Tags("Interpreter")
-unittest {
-    1_034.shouldBeRetOf!(
-        Interpreter,
-        q{
-            int growWords() {
-                ushort[] words;
-                words.length = 3;
-                words[2] = 1_031;
-                return cast(int) words.length + words[2];
+// A runtime `.length` assignment lowers to a native druntime call
+// `_d_arraysetlengthT`. Writing and reading the last element proves that
+// the runtime growth really happened.
+static foreach (backend; Matrix!()) {
+    @("arrays.length.runtime.ushort." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1_034.shouldBeRetOf!(
+            backend,
+            q{
+                int growWords() {
+                    ushort[] words;
+                    words.length = 3;
+                    words[2] = 1_031;
+                    return cast(int) words.length + words[2];
+                }
+            },
+            "growWords",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.slice.bounded.dynamicArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        350.shouldBeRetOf!(
+            backend,
+            q{
+                int tail() {
+                    int[] values = [10, 20, 30, 40];
+                    size_t dataSize = 1;
+                    int[] slice = values[dataSize .. $];
+                    return cast(int) slice.length * 100 + slice[0] +
+                        slice[1];
+                }
+            },
+            "tail",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.slice.bounded.outOfBounds." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] values = [10, 20, 30, 40];
+                int[] invalid = values[3 .. 5];
+                assert(invalid.length == 1);
             }
-        },
-        "growWords",
-    );
+        });
+    }
+}
+
+@("arrays.slice.bounded.boundsFailures.throwRangeError.Bytecode")
+@Tags("Bytecode")
+unittest {
+    import core.exception: RangeError;
+    import snakebite.backends.backend: Program;
+    import snakebite.backends.bytecode: Bytecode;
+    import snakebite.frontend.compiler: parseSnippet;
+    import snakebite.frontend.dmd.functions: findFunction;
+
+    auto module_ = parseSnippet(q{
+        int upperTooLarge() {
+            int[] values = [10, 20, 30, 40];
+            int[] invalid = values[3 .. 5];
+            return cast(int) invalid.length;
+        }
+
+        int reversedBounds() {
+            int[] values = [10, 20, 30, 40];
+            size_t lower = 3;
+            size_t upper = 2;
+            int[] invalid = values[lower .. upper];
+            return cast(int) invalid.length;
+        }
+    });
+    auto instance = new Bytecode(Program([module_]));
+
+    foreach (name; ["upperTooLarge", "reversedBounds"]) {
+        auto function_ = findFunction(module_, name);
+        RangeError caught;
+        int result;
+        try
+            instance.call(function_, &result, []);
+        catch (RangeError error)
+            caught = error;
+
+        (caught !is null).should == true;
+    }
 }
 
 // A literal assigned to a `static` slice is built once, on whichever call
@@ -626,11 +700,11 @@ unittest {
 
     int first;
     interpreter.call(function_, &first, []);
-    first.shouldEqual(20);
+    first.should == 20;
 
     int later;
     interpreter.call(function_, &later, []);
-    later.shouldEqual(20);
+    later.should == 20;
 }
 
 // `~=` appending a single element lowers to `_d_arrayappendcTX`, dmd's
@@ -778,9 +852,9 @@ unittest {
 
     int first;
     interpreter.call(function_, &first, []);
-    first.shouldEqual(1);
+    first.should == 1;
 
     int second;
     interpreter.call(function_, &second, []);
-    second.shouldEqual(12);
+    second.should == 12;
 }

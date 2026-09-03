@@ -75,7 +75,7 @@ private final class GuestException: Exception {
     }
 }
 
-import dmd.visitor: Visitor;
+import snakebite.backends.loweringvisitor: LoweringVisitor;
 
 // The evaluation context: executes statements and evaluates expressions,
 // always into the current destination (`_type` bytes at `_place`),
@@ -88,7 +88,7 @@ import dmd.visitor: Visitor;
 // call to stay warm across calls, and this is the only place that ever
 // walks a call's frames, so there is nothing left for a separate
 // `Interpreter`-side cache to hold.
-extern(C++) private final class Evaluator: Visitor {
+extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.backends.backend: Program;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import dmd.dclass: ClassDeclaration;
@@ -126,7 +126,7 @@ extern(C++) private final class Evaluator: Visitor {
     import dmd.tokens: EXP;
     import dmd.typesem: isIntegral, nextOf;
 
-    alias visit = Visitor.visit;
+    alias visit = LoweringVisitor.visit;
 
     // Every guest frame lives in this one frame stack, bump-allocated on
     // call and popped on return. Frames never move; overflow throws
@@ -207,6 +207,52 @@ extern(C++) private final class Evaluator: Visitor {
     // `_layouts`: a `Type` such as `int` is dmd's own shared, interned
     // instance, so the same entry serves every function that mentions it.
     private Cache!(Type, TypeFacts) _typeFacts;
+    // A reservation made for an rvalue with no variable of its own - a
+    // struct constructor call's hidden `this` (`structLiteralAddress`) or
+    // a value-returning call's result (`valueCallAddress`) - taken by
+    // address for another expression to read or write through, after the
+    // call that reserved it has returned. D destroys such a temporary at
+    // the end of the full expression that created it, so each statement
+    // visitor that evaluates a full expression records
+    // `_temporaries.length` first and releases back to that mark on every
+    // path out of the evaluation (`releaseTemporariesSince`).
+    //
+    // That lifetime is why these bytes live on `_temporaryFrames` rather
+    // than `_frames`: a temporary outlives every call frame pushed after
+    // it while its expression evaluates, and `_frames` releases strictly
+    // LIFO. On a stack whose only occupants are temporaries, the
+    // expression-end releases are LIFO by themselves - inner statements
+    // (a callee's body mid-expression) release their temporaries before
+    // the outer statement's own turn comes.
+    private struct Temporary {
+        // Set for a struct constructor's hidden `this`, so a second visit
+        // of the same `StructLiteralExp` (see `structLiteralAddress`)
+        // can find it again; `null` for a value-call temporary, which
+        // nothing ever looks back up by node.
+        StructLiteralExp node;
+        // Where `_temporaryFrames` stood before this reservation:
+        // releasing back to it gives back this temporary's bytes and
+        // every reservation made after them.
+        FrameStack.Mark mark;
+        ubyte* base;
+    }
+    private Temporary[] _temporaries;
+    // The bytes behind `_temporaries`. Only temporaries live here; every
+    // guest call frame stays on `_frames`.
+    private FrameStack _temporaryFrames;
+    // Where the innermost full expression currently being evaluated
+    // started reserving temporaries - every site that records a
+    // `_temporaries.length` mark (see above) also parks it here for the
+    // duration of that full expression, restoring the enclosing value
+    // before returning. `structLiteralAddress` searches only
+    // `_temporaries[_temporariesFloor .. $]`: a full expression nested
+    // inside this one (a constructor's body making its own call, not
+    // excluding a call back into the very function that is mid-
+    // construction of the same literal) raises the floor for its own
+    // duration, so it can never match a `StructLiteralExp` node whose
+    // entry belongs to an activation further out on the call stack -
+    // only the pairing within its own full expression is visible to it.
+    private size_t _temporariesFloor;
     // The most recently asked-about `Type` and its facts: dmd interns
     // basic types, so a loop revisiting the same `int` node hits this
     // every time - a pointer compare instead of an AA hash lookup - and
@@ -276,6 +322,7 @@ extern(C++) private final class Evaluator: Visitor {
     extern(D) public this(const Program program) {
         _program = program;
         _frames = FrameStack(defaultFrameCapacity);
+        _temporaryFrames = FrameStack(defaultFrameCapacity);
     }
 
     // Runs `function_` against a fresh top-level frame, mirroring the
@@ -331,6 +378,14 @@ extern(C++) private final class Evaluator: Visitor {
             layout.call.rejectHostReferenceReturn(function_);
             auto frame = _frames.push(layout.size, layout.alignment);
 
+            // The statement visitors release every temporary at the end
+            // of its full expression; this is the backstop that keeps a
+            // temporary from surviving into the next top-level call.
+            const previousFloor = raiseTemporariesFloor(0);
+            scope(exit) {
+                releaseTemporariesSince(0);
+                _temporariesFloor = previousFloor;
+            }
             executeCall(function_, returnPlace, frame.base, layout);
         });
     }
@@ -1000,37 +1055,62 @@ extern(C++) private final class Evaluator: Visitor {
         if (_type.ty == Tvoid)
             return;
 
-        void* referenceAddress() {
-            return addressOf(statement.exp);
-        }
-
-        void evaluateValue() {
-            // `_type`/`_facts` are already this function's return type and
-            // its facts, set together on entry (`executeRaw`) or by the last
-            // `evaluate`, so this callback needs no fresh type lookup.
-            if (_place !is null) {
-                evaluate(statement.exp, _type, _facts, _place);
-                return;
+        withTemporaryLifetime(this, {
+            void* referenceAddress() {
+                return addressOf(statement.exp);
             }
 
-            // The caller discarded the result, but evaluating the expression
-            // can have effects, so it still runs - into a reservation on the
-            // frame stack, popped when it goes out of scope, not into a GC
-            // allocation.
-            auto frame = _frames.push(_facts.size, _facts.alignment);
-            evaluate(statement.exp, _type, _facts, frame.base);
-        }
+            void evaluateValue() {
+                // `_type`/`_facts` are already this function's return type
+                // and its facts, set together on entry (`executeRaw`) or by
+                // the last `evaluate`, so this callback needs no fresh type
+                // lookup.
+                if (_place !is null) {
+                    evaluate(statement.exp, _type, _facts, _place);
+                    return;
+                }
 
-        _layout.call.returnFromCall(
-            _place, &referenceAddress, &evaluateValue,
-        );
+                // The caller discarded the result, but evaluating the
+                // expression can have effects, so it still runs - into a
+                // reservation on the frame stack, popped when it goes out
+                // of scope, not into a GC allocation.
+                auto frame = _frames.push(_facts.size, _facts.alignment);
+                evaluate(statement.exp, _type, _facts, frame.base);
+            }
+
+            _layout.call.returnFromCall(
+                _place, &referenceAddress, &evaluateValue,
+            );
+        });
     }
 
     override void visit(ExpStatement statement) {
         if (statement.exp is null)
             return;
 
-        runForEffect(statement.exp);
+        runFullExpression(statement.exp);
+    }
+
+    // Runs one full expression for its effects, giving back its rvalue
+    // temporaries afterward - the end of the full expression is where D
+    // destroys them. The mark is recorded before anything can reserve a
+    // temporary, so a guest throw from any point of the evaluation still
+    // releases whatever was reserved by then.
+    private void runFullExpression(Expression expression) {
+        withTemporaryLifetime(this, {
+            runForEffect(expression);
+        });
+    }
+
+    // A condition is a full expression of its own on each evaluation - a
+    // loop's every test included - so its temporaries are given back as
+    // soon as its truth is known.
+    private bool conditionHolds(Expression condition) {
+        bool result;
+        withTemporaryLifetime(this, {
+            result = truthOf(condition);
+        });
+        return result;
     }
 
     override void visit(BreakStatement statement) {
@@ -1054,15 +1134,17 @@ extern(C++) private final class Evaluator: Visitor {
 
     override void visit(SwitchStatement statement) {
         _pendingLoopLabel = null;
-        const condition = asIntegral(statement.condition);
         Statement selected;
-        if (statement.cases !is null)
-            foreach (case_; *statement.cases) {
-                if (asIntegral(case_.exp) == condition) {
-                    selected = case_;
-                    break;
+        withTemporaryLifetime(this, {
+            const condition = asIntegral(statement.condition);
+            if (statement.cases !is null)
+                foreach (case_; *statement.cases) {
+                    if (asIntegral(case_.exp) == condition) {
+                        selected = case_;
+                        break;
+                    }
                 }
-            }
+        });
 
         if (selected is null)
             selected = statement.sdefault;
@@ -1143,7 +1225,9 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(ThrowStatement statement) {
-        throwGuest(statement.exp);
+        withTemporaryLifetime(this, {
+            throwGuest(statement.exp);
+        });
     }
 
     // Runs `expression` for its side effects, discarding whatever value it
@@ -1194,7 +1278,7 @@ extern(C++) private final class Evaluator: Visitor {
     // Only the branch that runs is walked: the other one never executes,
     // so nothing in it is ever evaluated, not even to be discarded.
     override void visit(IfStatement statement) {
-        auto taken = truthOf(statement.condition)
+        auto taken = conditionHolds(statement.condition)
             ? statement.ifbody
             : statement.elsebody;
 
@@ -1206,7 +1290,8 @@ extern(C++) private final class Evaluator: Visitor {
         auto loopLabel = _pendingLoopLabel;
         _pendingLoopLabel = null;
 
-        while (statement.condition is null || truthOf(statement.condition)) {
+        while (statement.condition is null
+                || conditionHolds(statement.condition)) {
             if (statement._body !is null) {
                 statement._body.accept(this);
                 if (_returned || _gotoTarget !is null)
@@ -1230,7 +1315,7 @@ extern(C++) private final class Evaluator: Visitor {
             }
 
             if (statement.increment !is null)
-                runForEffect(statement.increment);
+                runFullExpression(statement.increment);
         }
     }
 
@@ -1263,7 +1348,7 @@ extern(C++) private final class Evaluator: Visitor {
                 _continueLabel = null;
             }
 
-            if (!truthOf(statement.condition))
+            if (!conditionHolds(statement.condition))
                 return;
         }
     }
@@ -2127,6 +2212,20 @@ extern(C++) private final class Evaluator: Visitor {
             return addressOf(comma.e2);
         }
 
+        // A struct constructor call used as an rvalue - a temporary passed
+        // straight into a `ref`-taking parameter, with no variable of its
+        // own - is this node: dmd's lowering runs the constructor on it
+        // through the preceding `CommaExp.e1`, with this same node as the
+        // constructor's hidden `this`, before naming it here as the
+        // result. `_temporaries` is what makes both visits land on
+        // the same slot: the first one (whichever runs first, ordinarily
+        // the constructor's `this` binding) reserves it and default-
+        // initializes the literal's fields into it, and every later visit
+        // of the same node just returns that address, so the constructor's
+        // writes are still there when the `CommaExp` names the result.
+        if (auto literal = target.isStructLiteralExp)
+            return structLiteralAddress(literal);
+
         // An assignment used as an lvalue first performs the assignment,
         // then names the storage on its left. DMD uses this form for a
         // copied aggregate whose postblit is called on the new copy.
@@ -2158,8 +2257,20 @@ extern(C++) private final class Evaluator: Visitor {
         if (auto assignment = target.isAssignExp)
             return assignmentResultAddress(assignment);
 
-        if (auto call = target.isCallExp)
-            return refCallAddress(call);
+        // A call with no lvalue of its own - it returns its result by
+        // value, not by `ref` - still needs an address when its result is
+        // a struct passed on as another constructor's by-address argument.
+        // `refCallAddress` only applies to a `ref`-returning call, whose
+        // result already lives in the callee's own storage; a value
+        // return has no storage of its own until this makes one.
+        if (auto call = target.isCallExp) {
+            auto function_ = call.f;
+            auto type = function_ is null
+                ? null : function_.type.isTypeFunction;
+            return type !is null && !type.isRef
+                ? valueCallAddress(call, function_)
+                : refCallAddress(call);
+        }
 
         if (auto length = target.isArrayLengthExp) {
             import snakebite.nativelayout: arrayLengthOffset;
@@ -2460,7 +2571,7 @@ extern(C++) private final class Evaluator: Visitor {
     // Integral equality can therefore compare the common representation,
     // while floating equality must compare values: positive and negative
     // zero have different representations but compare equal in D.
-    override void visit(EqualExp expression) {
+    protected override void visitUnloweredEqual(EqualExp expression) {
         import core.stdc.string: memcmp;
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
@@ -2491,19 +2602,6 @@ extern(C++) private final class Evaluator: Visitor {
         }
 
         if (type.ty == Tarray) {
-            // DMD lowers arrays whose elements need semantic equality to a
-            // call that performs it. A missing lowering is DMD's proof that
-            // these element types are trivially byte-comparable.
-            if (expression.lowering !is null) {
-                evaluate(
-                    expression.lowering,
-                    expression.lowering.type,
-                    factsOf(expression.lowering.type),
-                    _place,
-                );
-                return;
-            }
-
             const a = evaluateArray(expression.e1, factsOf(type));
             const b = evaluateArray(
                 expression.e2, factsOf(expression.e2.type));
@@ -2524,16 +2622,6 @@ extern(C++) private final class Evaluator: Visitor {
         // for elements needing semantic equality (a `float`/`double`
         // element's NaN, or one with its own `opEquals`).
         if (type.ty == Tsarray) {
-            if (expression.lowering !is null) {
-                evaluate(
-                    expression.lowering,
-                    expression.lowering.type,
-                    factsOf(expression.lowering.type),
-                    _place,
-                );
-                return;
-            }
-
             const facts = factsOf(type);
             auto left = _frames.push(facts.size, facts.alignment);
             auto right = _frames.push(facts.size, facts.alignment);
@@ -3555,12 +3643,26 @@ extern(C++) private final class Evaluator: Visitor {
 
             auto declaration = cast(ClassDeclaration) classType.sym;
             auto runtime = classRuntimeInfo(declaration);
-            auto object = cast(ubyte*) cast(void*) runtime.create;
-            if (object is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot allocate `",
-                        expression.toString, "`: druntime returned null"),
+            ubyte* object;
+            if (expression.onstack) {
+                import core.stdc.string: memcpy;
+
+                const alignment = declaration.alignsize == 0
+                    ? 1 : declaration.alignsize;
+                object = _frames.reserve(
+                    declaration.structsize,
+                    alignment,
                 );
+                memcpy(object, runtime.m_init.ptr, runtime.m_init.length);
+            } else {
+                object = cast(ubyte*) cast(void*) runtime.create;
+                if (object is null)
+                    throw new SnakebiteException(
+                        text("interpreter cannot allocate `",
+                            expression.toString,
+                            "`: druntime returned null"),
+                    );
+            }
 
             initializeClass(declaration, object, expression.loc);
             _classes[object] = declaration;
@@ -3667,6 +3769,45 @@ extern(C++) private final class Evaluator: Visitor {
         auto bytes = cast(ubyte*) _place;
         storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
+    }
+
+    override void visit(DeleteExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+
+        if (expression.e1.type.ty != Tclass)
+            throw new SnakebiteException(
+                text("interpreter cannot delete `", expression.e1.toString,
+                    "`: it is not a class reference"),
+            );
+
+        auto object = classReferenceOf(expression.e1);
+        if (object is null)
+            return;
+
+        auto classDeclaration = object in _classes;
+        if (classDeclaration is null)
+            return;
+
+        auto destructor = (*classDeclaration).dtor;
+        if (destructor !is null) {
+            auto layout = layoutOf(destructor);
+            auto frame = _frames.push(layout.size, layout.alignment);
+            storeIntegral(
+                frame.base + layout.hiddenThis.parameter.offset,
+                cast(size_t) object,
+                size_t.sizeof,
+            );
+            executeCall(
+                destructor,
+                null,
+                frame.base,
+                layout,
+                null,
+                true,
+            );
+        }
+
+        _classes.remove(object);
     }
 
     // Parsed guest classes have no emitted native ClassInfo. Build the
@@ -4126,6 +4267,24 @@ extern(C++) private final class Evaluator: Visitor {
     }
 
     override void visit(CommaExp expression) {
+        // A struct constructor call's rvalue temporary (see
+        // `structLiteralAddress`) may already have its fields written by
+        // the constructor `expression.e1` runs - visiting the literal
+        // again here, the ordinary way, would instead overwrite them with
+        // the literal's own default fields. Routing through the same
+        // slot and copying its bytes into `_place` keeps the constructor's
+        // writes; every other `CommaExp` shape is unaffected, since
+        // `structLiteralAddress` only ever does what `expression.e2.accept`
+        // would have anyway when nothing bound the literal's address first.
+        if (auto literal = expression.e2.isStructLiteralExp) {
+            import core.stdc.string: memcpy;
+
+            runForEffect(expression.e1);
+            auto address = structLiteralAddress(literal);
+            memcpy(_place, address, _facts.size);
+            return;
+        }
+
         runForEffect(expression.e1);
         expression.e2.accept(this);
     }
@@ -4469,6 +4628,106 @@ extern(C++) private final class Evaluator: Visitor {
         ).address;
     }
 
+    // The address of a call's own return value, for `addressOf` when the
+    // call returns by value rather than by `ref` - a function returning a
+    // struct that another constructor call takes by address, with no
+    // variable of its own to hold it. A frame slot sized for the return
+    // type stands in for that missing variable, and the call fills it the
+    // same way it would fill any other destination.
+    //
+    // The slot itself outlives this function: whatever `addressOf` this
+    // ran for (ordinarily binding another call's `this` or a by-address
+    // argument) keeps using the address after this returns. The statement
+    // that owns the enclosing full expression is what releases it
+    // (`releaseTemporariesSince`) - not this function, and not `Frame`'s
+    // own RAII, which would pop it the instant this returns instead.
+    private void* valueCallAddress(
+        CallExp expression,
+        FuncDeclaration function_,
+    ) {
+        const facts = factsOf(expression.type);
+        auto base = pushTemporary(null, facts.size, facts.alignment);
+
+        auto layout = layoutOf(function_);
+        auto frame = bindFrame(expression, function_, layout);
+        executeCall(function_, base, frame.base, layout, expression);
+        return base;
+    }
+
+    // A struct constructor call's rvalue temporary reaches its frame slot
+    // here, whichever of its two visits (the constructor's hidden `this`,
+    // or the `CommaExp` naming the result) runs first - see `_temporaries`.
+    // The first visit reserves the slot and default-initializes the
+    // literal's own fields into it, exactly as a plain struct literal
+    // would into `_place`; the constructor that runs next (in
+    // `CommaExp.e1`) then writes its own fields on top.
+    //
+    // Recursion can revisit the same node before the outer visit's slot
+    // is released - a constructor whose body calls back into the
+    // function that is itself mid-construction of this same literal (see
+    // the re-entrancy test in `structs.d`). Without `_temporariesFloor`,
+    // a plain search over every entry would find the outer, still-live
+    // slot instead of reserving a fresh one for the inner activation, and
+    // the two activations would clobber each other's fields. Bounding
+    // the search to `_temporariesFloor .. $` keeps each activation's
+    // pairing within its own full expression: the outer entry sits below
+    // the floor the inner activation's full expression raised, so it is
+    // invisible until that inner full expression ends and lowers the
+    // floor again.
+    private void* structLiteralAddress(StructLiteralExp literal) {
+        foreach_reverse (ref temporary; _temporaries[_temporariesFloor .. $])
+            if (temporary.node is literal)
+                return temporary.base;
+
+        const facts = factsOf(literal.type);
+        auto base = pushTemporary(literal, facts.size, facts.alignment);
+        evaluate(literal, literal.type, facts, base);
+        return base;
+    }
+
+    // Reserves `size` bytes on `_temporaryFrames` for a temporary with no
+    // variable of its own, alive until the statement evaluating the
+    // enclosing full expression releases it - see `_temporaries`' own doc
+    // comment.
+    private ubyte* pushTemporary(
+        StructLiteralExp node,
+        in size_t size,
+        in uint alignment,
+    ) {
+        const mark = _temporaryFrames.mark;
+        auto base = _temporaryFrames.reserve(size, alignment);
+        _temporaries ~= Temporary(node, mark, base);
+        return base;
+    }
+
+    // Raises `_temporariesFloor` to `mark` for the duration of one full
+    // expression - see `_temporariesFloor`. Every site that records a
+    // `_temporaries.length` mark calls this right after recording it,
+    // and restores the returned, enclosing floor in the same
+    // `scope(exit)` that calls `releaseTemporariesSince` with the same
+    // mark.
+    private size_t raiseTemporariesFloor(in size_t mark) {
+        const previousFloor = _temporariesFloor;
+        _temporariesFloor = mark;
+        return previousFloor;
+    }
+
+    // Releases every temporary reserved since `mark` - the end of the
+    // full expression that created them, which is when D destroys an
+    // rvalue temporary. Every caller records its mark before anything can
+    // reserve a temporary and releases with `scope(exit)`, so a guest
+    // throw from any point of the evaluation releases the same set.
+    private void releaseTemporariesSince(in size_t mark) {
+        if (_temporaries.length <= mark)
+            return;
+
+        _temporaryFrames.release(_temporaries[mark].mark);
+        _temporaries.length = mark;
+        // Shrinking the slice orphans its capacity; reclaiming it keeps
+        // the next reservation from reallocating.
+        _temporaries.assumeSafeAppend;
+    }
+
     // Evaluates `expression` into `type.size` bytes at `place`, then
     // restores the surrounding destination.
     private void evaluate(Expression expression, Type type, void* place) {
@@ -4498,6 +4757,19 @@ extern(C++) private final class Evaluator: Visitor {
         _place = place;
         expression.accept(this);
     }
+}
+
+private void withTemporaryLifetime(
+    Evaluator evaluator,
+    scope void delegate() action,
+) {
+    const mark = evaluator._temporaries.length;
+    const previousFloor = evaluator.raiseTemporariesFloor(mark);
+    scope(exit) {
+        evaluator.releaseTemporariesSince(mark);
+        evaluator._temporariesFloor = previousFloor;
+    }
+    action();
 }
 
 private ulong combine(string op)(

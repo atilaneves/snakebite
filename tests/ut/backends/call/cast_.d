@@ -46,6 +46,68 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("cast.floatToDouble.widensValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.5.shouldBeRetOf!(
+            backend,
+            q{
+                float source() {
+                    return 1.5f;
+                }
+
+                double widened() {
+                    return cast(double) source();
+                }
+            },
+            "widened",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("cast.doubleToFloat.roundsValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        16_777_216.0f.shouldBeRetOf!(
+            backend,
+            q{
+                double source() {
+                    return 16_777_217.0;
+                }
+
+                float narrowed() {
+                    return cast(float) source();
+                }
+            },
+            "narrowed",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed),
+)) {
+    @("cast.floatToIntegral.truncatesTowardZero." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        (-3L).shouldBeRetOf!(
+            backend,
+            q{
+                double source() {
+                    return -3.75;
+                }
+
+                long truncated() {
+                    return cast(long) source();
+                }
+            },
+            "truncated",
+        );
+    }
+}
+
 // Widening a signed operand copies its sign bit into the new high bits, so
 // `cast(long)` of a negative `int` stays negative. An implementation that
 // zero-extends instead answers a large positive value.
@@ -176,7 +238,7 @@ unittest {
 // semantic analysis, so a literal operand would never reach a backend. An
 // implementation that converts through a wider intermediate and rounds
 // once more, or that reinterprets the operand's bits, fails this.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("cast.ulongToFloat.roundsToFloatPrecision." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -200,7 +262,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // significand holds `2^24 + 1` exactly, so the conversion is exact. An
 // implementation that converts every floating destination at `float`
 // precision fails this while passing the `float` test.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("cast.ulongToDouble.isExact." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -227,7 +289,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // `1.5 - 1.0` is exact at every precision, so the expectation does not
 // depend on rounding. The operand comes from a function call because dmd
 // folds literal-only arithmetic during semantic analysis.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("cast.ulongToFloat.thenDivideAndSubtract." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -250,7 +312,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // As above, with a `double` destination: the conversions of `1_000_000`
 // and `1` follow the cast's own type, so the whole chain runs at `double`
 // precision instead.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("cast.ulongToDouble.thenDivideAndSubtract." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

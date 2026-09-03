@@ -107,11 +107,11 @@ unittest {
 
     size_t first;
     interpreter.call(function_, &first, []);
-    first.shouldEqual(1);
+    first.should == 1;
 
     size_t second;
     interpreter.call(function_, &second, []);
-    second.shouldEqual(1);
+    second.should == 1;
 }
 
 static foreach (backend; Matrix!(

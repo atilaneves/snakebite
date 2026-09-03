@@ -125,9 +125,8 @@ public int run(Backend backend, Program program) {
     return runMain(backend, program.main.func);
 }
 
-// Constructors that require code from a dependency image cannot run in the
-// interpreter until that image exists. Keep running the program, but report
-// every skipped constructor loudly so it cannot look like successful startup.
+// A constructor that cannot run is a failed program startup. Report it
+// loudly so the caller cannot mistake a partial run for success.
 private int runModuleConstructors(
     Backend backend,
     imported!"dmd.func".FuncDeclaration[] constructors,
@@ -145,6 +144,7 @@ private int runModuleConstructors(
                 "`: ",
                 exception.msg,
             );
+            return 1;
         }
         catch (Throwable throwable) {
             stderr.writeln(

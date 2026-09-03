@@ -105,6 +105,8 @@ package struct Instruction {
     //    `source` of `opStaticLoad`/`opStaticAddress` and the
     //    `destination` of `opStaticStore`, patched after compilation once
     //    the function's persistent storage has an address.
+    //  - a source offset's width, for floating-point conversions whose
+    //    destination and source widths can differ.
     //  - a resolved instruction address, cast to a `size_t`: `opJump`'s
     //    `destination`, and `opBranchFalse`/`opBranchTrue`'s `source`.
     //    The compiler patches every branch with a plain instruction
@@ -116,13 +118,13 @@ package struct Instruction {
     package size_t destination;
     package size_t source;
     package size_t width;
+    package size_t sourceWidth;
 }
 
 
-// One `assert` site: the message and source location `opAssert` builds a
-// real `AssertError` from when its condition is false, resolved to plain
-// strings and a line number at compile time so this VM never has to reach
-// into dmd's own `Loc` to answer them.
+// One run-time check site, resolved to plain values at compile time so this
+// VM never has to reach into dmd's own `Loc`. Assertions use all fields;
+// range checks only need the source location.
 package struct AssertSite {
     package string message;
     package string file;
@@ -440,6 +442,29 @@ package const(Instruction)* opAssert(
 }
 
 
+// A slice bounds failure must use druntime's range-error path. A backend
+// assertion would have a different D type and could not be caught as the
+// `RangeError` that compiled D specifies.
+package const(Instruction)* opRangeError(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    if (loadUnsigned(frame + pc.destination, pc.width) != 0)
+        return advance(pc, frame, returnPlace, constants, callSites,
+            assertSites, frames);
+
+    import core.exception: onRangeError;
+
+    const site = assertSites[pc.source];
+    onRangeError(site.file, site.line);
+}
+
+
 // Calls `callSites[pc.source]`'s callee: pushes its frame, copies each
 // argument in, runs it to its own return instruction through the nested
 // dispatch loop, then copies the result to `frame + pc.destination`
@@ -664,6 +689,43 @@ package const(Instruction)* opMultiply(
     storeWidth(place, cast(long) (a * b), pc.width);
     return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
+
+private T applyFloatBinary(string operation, T)(T left, T right)
+        @nogc nothrow pure {
+    return mixin("left " ~ operation ~ " right");
+}
+
+private const(Instruction)* opFloatBinary(string operation)(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto place = frame + pc.destination;
+    if (pc.width == float.sizeof)
+        *cast(float*) place = applyFloatBinary!operation(
+            *cast(float*) place,
+            *cast(const float*) (frame + pc.source),
+        );
+    else {
+        assert(pc.width == double.sizeof);
+        *cast(double*) place = applyFloatBinary!operation(
+            *cast(double*) place,
+            *cast(const double*) (frame + pc.source),
+        );
+    }
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package alias opFloatAdd = opFloatBinary!"+";
+package alias opFloatSubtract = opFloatBinary!"-";
+package alias opFloatMultiply = opFloatBinary!"*";
+package alias opFloatDivide = opFloatBinary!"/";
+package alias opFloatModulo = opFloatBinary!"%";
 
 package const(Instruction)* opBitAnd(
     const(Instruction)* pc,
@@ -995,6 +1057,32 @@ package const(Instruction)* opEqual(
     return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
+// Bytewise equality for two native dynamic-array values. The compiler emits
+// this only when DMD left EqualExp.lowering null, which means the element
+// types are safe for memcmp. `destination` holds the left array on entry and
+// the bool result on exit; `source` holds the right array; `width` is the
+// element size.
+package const(Instruction)* opArrayEqual(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    import core.stdc.string: memcmp;
+
+    const left = *cast(const(void)[]*) (frame + pc.destination);
+    const right = *cast(const(void)[]*) (frame + pc.source);
+    const byteLength = left.length * pc.width;
+    const equal = left.length == right.length
+        && (byteLength == 0 || memcmp(left.ptr, right.ptr, byteLength) == 0);
+    *cast(ubyte*) (frame + pc.destination) = equal ? 1 : 0;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
 package const(Instruction)* opNotEqual(
     const(Instruction)* pc,
     ubyte* frame,
@@ -1011,13 +1099,15 @@ package const(Instruction)* opNotEqual(
     return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
-// `==`/`!=` on `float`/`double`: unlike the integral form above, the same
-// bits do not always compare equal to themselves - IEEE 754 makes NaN
-// compare unequal to every value, itself included - so this reads both
-// operands as the floating type their shared `pc.width` (4 or 8) names and
-// lets the host's own float comparison answer, rather than reusing
-// `opEqual`/`opNotEqual`'s bit-pattern test.
-package const(Instruction)* opFloatEqual(
+// Floating comparisons read values in their declared precision instead of
+// reusing integral bit comparisons. This preserves IEEE 754 equality for
+// NaN and signed zero and gives ordering the host's floating semantics.
+private bool applyFloatComparison(string operation, T)(T left, T right)
+        @nogc nothrow pure {
+    return mixin("left " ~ operation ~ " right");
+}
+
+private const(Instruction)* opFloatComparison(string operation)(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -1027,31 +1117,26 @@ package const(Instruction)* opFloatEqual(
     FrameStack* frames,
 ) {
     auto place = frame + pc.destination;
-    const result = pc.width == 4
-        ? *cast(float*) place == *cast(const float*) (frame + pc.source)
-        : *cast(double*) place == *cast(const double*) (frame + pc.source);
+    const result = pc.width == float.sizeof
+        ? applyFloatComparison!operation(
+            *cast(float*) place,
+            *cast(const float*) (frame + pc.source),
+        )
+        : applyFloatComparison!operation(
+            *cast(double*) place,
+            *cast(const double*) (frame + pc.source),
+        );
     *cast(ubyte*) place = result ? 1 : 0;
     return advance(pc, frame, returnPlace, constants, callSites,
         assertSites, frames);
 }
 
-package const(Instruction)* opFloatNotEqual(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
-) {
-    auto place = frame + pc.destination;
-    const result = pc.width == 4
-        ? *cast(float*) place != *cast(const float*) (frame + pc.source)
-        : *cast(double*) place != *cast(const double*) (frame + pc.source);
-    *cast(ubyte*) place = result ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
-}
+package alias opFloatEqual = opFloatComparison!"==";
+package alias opFloatNotEqual = opFloatComparison!"!=";
+package alias opFloatLessThan = opFloatComparison!"<";
+package alias opFloatLessOrEqual = opFloatComparison!"<=";
+package alias opFloatGreaterThan = opFloatComparison!">";
+package alias opFloatGreaterOrEqual = opFloatComparison!">=";
 
 
 // `-x` and `~x`: `destination` holds the one operand on entry and the
@@ -1071,6 +1156,33 @@ package const(Instruction)* opNegate(
     storeWidth(place, cast(long) (-a), pc.width);
     return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
+
+private T applyFloatUnary(string operation, T)(T value) @nogc nothrow pure {
+    return mixin(operation ~ "value");
+}
+
+private const(Instruction)* opFloatUnary(string operation)(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto place = frame + pc.destination;
+    if (pc.width == float.sizeof)
+        *cast(float*) place = applyFloatUnary!operation(*cast(float*) place);
+    else {
+        assert(pc.width == double.sizeof);
+        *cast(double*) place =
+            applyFloatUnary!operation(*cast(double*) place);
+    }
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package alias opFloatNegate = opFloatUnary!"-";
 
 package const(Instruction)* opComplement(
     const(Instruction)* pc,
@@ -1159,6 +1271,83 @@ package const(Instruction)* opCastWidenUnsigned(
     const value = loadUnsigned(place, pc.source);
     storeWidth(place, cast(long) value, pc.width);
     return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+}
+
+private void storeFloating(T)(void* place, in T value, in size_t width)
+        @nogc nothrow {
+    if (width == float.sizeof)
+        *cast(float*) place = cast(float) value;
+    else {
+        assert(width == double.sizeof);
+        *cast(double*) place = cast(double) value;
+    }
+}
+
+private double loadFloating(const(void)* place, in size_t width)
+        @nogc nothrow {
+    if (width == float.sizeof)
+        return *cast(const float*) place;
+
+    assert(width == double.sizeof);
+    return *cast(const double*) place;
+}
+
+private const(Instruction)* opIntegralToFloat(bool unsigned_)(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    static if (unsigned_)
+        const value = loadUnsigned(frame + pc.source, pc.sourceWidth);
+    else
+        const value = loadSigned(frame + pc.source, pc.sourceWidth);
+    storeFloating(frame + pc.destination, value, pc.width);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package alias opIntegralToFloatSigned = opIntegralToFloat!false;
+package alias opIntegralToFloatUnsigned = opIntegralToFloat!true;
+
+private const(Instruction)* opFloatToIntegral(bool unsigned_)(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    const value = loadFloating(frame + pc.source, pc.sourceWidth);
+    static if (unsigned_)
+        const converted = cast(long) cast(ulong) value;
+    else
+        const converted = cast(long) value;
+    storeWidth(frame + pc.destination, converted, pc.width);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package alias opFloatToIntegralSigned = opFloatToIntegral!false;
+package alias opFloatToIntegralUnsigned = opFloatToIntegral!true;
+
+package const(Instruction)* opFloatWidthCast(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    const value = loadFloating(frame + pc.source, pc.sourceWidth);
+    storeFloating(frame + pc.destination, value, pc.width);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
 }
 
 

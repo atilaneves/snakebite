@@ -32,6 +32,26 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!()) {
+    @("arithmetic.floatingUnaryNegation." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        (-2.5f).shouldBeRetOf!(
+            backend,
+            q{
+                float value() {
+                    return 2.5f;
+                }
+
+                float negated() {
+                    return -value();
+                }
+            },
+            "negated",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
     @("arithmetic.subtract." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -370,11 +390,11 @@ unittest {
 
     long quotient;
     interpreter(module_).call(findFunction(module_, "quotient"), &quotient, []);
-    quotient.shouldEqual(long.min);
+    quotient.should == long.min;
 
     long remainder;
     interpreter(module_).call(findFunction(module_, "remainder"), &remainder, []);
-    remainder.shouldEqual(0);
+    remainder.should == 0;
 }
 
 static foreach (backend; Matrix!()) {
@@ -1160,9 +1180,7 @@ static foreach (backend; Matrix!()) {
 // from a call so dmd cannot fold the arithmetic away, and every
 // intermediate value - `7.5`, `3.5`, `6.5` - is exact in binary, so the
 // expectation does not depend on rounding.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.floating." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
