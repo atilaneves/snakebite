@@ -15,7 +15,6 @@ module bench.benchmark;
 
 
 import bench.report: BackendReport;
-import bench.sources: SourceSet;
 import core.time: Duration;
 
 
@@ -54,7 +53,7 @@ public int run(string[] args) {
 
     initialize(Snippets.no);
 
-    Project project;
+    imported!"snakebite.project".Project project;
     try
         project = loadProject(options);
     catch (Exception exception) {
@@ -194,54 +193,20 @@ private string validate(in Options options) {
 // The project under benchmark: its root modules as one `Program`, its
 // sources (the oracle rebuilds from them), and how long parse + semantic
 // analysis took.
-private struct Project {
-    string name;
-    string directory;
-    Duration frontend;
-    SourceSet sources;
-    imported!"snakebite.backends".Program program;
-}
+private imported!"snakebite.project".Project loadProject(in Options options) {
+    import snakebite.project: load = loadProject;
 
-private Project loadProject(in Options options) {
-    import bench.sources: sourceSet;
-    import snakebite.backends: Program;
-    import snakebite.frontend.compiler: FrontendFlags, parseRootModules;
-    import std.algorithm.iteration: map;
-    import std.array: array;
-    import std.datetime.stopwatch: AutoStart, StopWatch;
-    import std.path: absolutePath, baseName, buildNormalizedPath;
-
-    Project project;
-    project.directory =
-        options.projectDirectory.absolutePath.buildNormalizedPath;
-    project.name = project.directory.baseName;
-    project.sources = sourceSet(
-        project.directory,
+    return load(
+        options.projectDirectory,
         options.importPaths,
         options.stringImportPaths,
     );
-
-    // String imports reach the frontend as `-J` flags, like any compiler.
-    const flags = FrontendFlags(
-        project.sources.flags.compilerArguments
-        ~ project.sources.stringImportPaths.map!(path => "-J" ~ path).array,
-    );
-
-    auto stopWatch = StopWatch(AutoStart.yes);
-    auto parsed = parseRootModules(
-        project.sources.files,
-        project.sources.importPaths,
-        flags,
-        project.sources.sourceOverrides,
-    );
-    project.frontend = stopWatch.peek;
-
-    project.program = Program(parsed);
-
-    return project;
 }
 
-private BackendReport[] benchmarkAll(Project project, in Options options) {
+private BackendReport[] benchmarkAll(
+    imported!"snakebite.project".Project project,
+    in Options options,
+) {
     import bench.oracle: oracleName, oracleReport;
 
     BackendReport[] reports;
@@ -339,13 +304,16 @@ private enum knownBackendNames = () {
     return names;
 }();
 
-private string headerLine(in Project project, in Options options) {
+private string headerLine(
+    in imported!"snakebite.project".Project project,
+    in Options options,
+) {
     import bench.report: milliseconds;
     import std.conv: text;
 
     return text(
         project.name,
-        "   frontend ", milliseconds(project.frontend),
+        "   frontend ", milliseconds(project.frontendDuration),
         "   ", hostCompiler,
         "   ", options.warmup, "+", options.runs, " runs",
     );

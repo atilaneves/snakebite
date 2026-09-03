@@ -1,13 +1,126 @@
-module bench.dub;
+module snakebite.project;
 
 
-import bench.sources: SourceSet;
+private:
 
 
-// dub's test configuration: the same sources, import paths and flags
-// `dub test` itself would build with, so the bench mirrors the real
-// workflow.
-SourceSet dubSourceSet(in string directory) {
+public struct SourceSet {
+    public string[] files;
+    public string[] importPaths;
+    public string[] stringImportPaths;
+    public string[] linkerFlags;
+    public imported!"snakebite.frontend.compiler".FrontendFlags flags;
+    public string[string] sourceOverrides;
+}
+
+
+public struct Project {
+    public string name;
+    public string directory;
+    public imported!"core.time".Duration frontendDuration;
+    public SourceSet sources;
+    public imported!"snakebite.backends".Program program;
+}
+
+
+public Project loadProject(
+    in string directory,
+    in string[] importPaths = null,
+    in string[] stringImportPaths = null,
+) {
+    import snakebite.backends: Program;
+    import snakebite.frontend.compiler: FrontendFlags, parseRootModules;
+    import std.algorithm.iteration: map;
+    import std.array: array;
+    import std.datetime.stopwatch: AutoStart, StopWatch;
+    import std.path: absolutePath, baseName, buildNormalizedPath;
+
+    Project project;
+    project.directory = directory.absolutePath.buildNormalizedPath;
+    project.name = project.directory.baseName;
+    project.sources = sourceSet(
+        project.directory,
+        importPaths,
+        stringImportPaths,
+    );
+
+    const flags = FrontendFlags(
+        project.sources.flags.compilerArguments
+        ~ project.sources.stringImportPaths.map!(path => "-J" ~ path).array,
+    );
+
+    auto stopWatch = StopWatch(AutoStart.yes);
+    auto parsed = parseRootModules(
+        project.sources.files,
+        project.sources.importPaths,
+        flags,
+        project.sources.sourceOverrides,
+    );
+    project.frontendDuration = stopWatch.peek;
+    project.program = Program(parsed);
+
+    return project;
+}
+
+
+public SourceSet sourceSet(
+    in string directory,
+    in string[] importPaths,
+    in string[] stringImportPaths,
+) {
+    import std.conv: text;
+    import std.file: exists, isDir;
+
+    if (!directory.exists || !directory.isDir)
+        throw new Exception(text("not a directory: ", directory));
+
+    return isDubProject(directory)
+        ? dubSourceSet(directory)
+        : bareSourceSet(directory, importPaths, stringImportPaths);
+}
+
+
+public bool isDubProject(in string directory) {
+    import std.file: exists;
+    import std.path: buildPath;
+
+    foreach (recipe; ["dub.sdl", "dub.json"])
+        if (buildPath(directory, recipe).exists)
+            return true;
+
+    return false;
+}
+
+
+private SourceSet bareSourceSet(
+    in string directory,
+    in string[] importPaths,
+    in string[] stringImportPaths,
+) {
+    import std.algorithm.iteration: map;
+    import std.algorithm.sorting: sort;
+    import std.array: array;
+    import std.conv: text;
+    import std.file: SpanMode, dirEntries;
+
+    auto files = dirEntries(directory, "*.d", SpanMode.depth)
+        .map!(entry => entry.name)
+        .array
+        .sort
+        .release;
+
+    if (files.length == 0)
+        throw new Exception(text("no D source files under ", directory));
+
+    return SourceSet(
+        files,
+        directory ~ importPaths.dup,
+        stringImportPaths.dup,
+    );
+}
+
+
+private SourceSet dubSourceSet(in string directory) {
     import snakebite.dub: DubConfig, dubDescribe;
     import snakebite.frontend.compiler: FrontendFlags;
     import std.algorithm.iteration: filter, map;
@@ -47,11 +160,13 @@ SourceSet dubSourceSet(in string directory) {
     );
 }
 
+
 private bool isGeneratedTestRoot(in string path) @safe pure {
     import std.path: baseName;
 
     return path.baseName == "dub_test_root.d";
 }
+
 
 private string noIoTestRoot(in string source) @safe pure {
     import std.algorithm.searching: skipOver;
@@ -87,6 +202,7 @@ int main() {
 };
 }
 
+
 private string afterBlock(in string source) @safe pure {
     if (source.length == 0 || source[0] != '{')
         throw new Exception("Dub generated an unknown test root");
@@ -102,12 +218,7 @@ private string afterBlock(in string source) @safe pure {
     throw new Exception("Dub generated an unknown test root");
 }
 
-// `dub describe --data=options` reports dub's own semantic option names
-// (`unittests`, `debugMode`, ...), not compiler flags - every build type
-// (not just configuration) contributes options this way, `-unittest`
-// among them. This table is dub's own dmd binding
-// (dub/source/dub/compilers/dmd.d, `dmdOptions`), copied because dub
-// exposes no public API for it.
+
 private string dmdFlagsForOption(in string option) {
     switch (option) {
         case "debugMode": return "-debug";
@@ -136,9 +247,6 @@ private string dmdFlagsForOption(in string option) {
         case "betterC": return "-betterC";
         case "lowmem": return "-lowmem";
         case "color": return "-color";
-        // pic, singleFileD, _docs, _ddox and any future option: no bench
-        // reason to care yet, and an unhandled dmd flag would be a worse
-        // failure mode than silently dropping a dub-internal one.
         default: return null;
     }
 }

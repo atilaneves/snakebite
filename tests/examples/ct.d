@@ -1,4 +1,4 @@
-// A minimal fixture for `sb tests/examples/ct.d`: declarations only, no
+// A minimal fixture for `sb-repl tests/examples/ct.d`: declarations only, no
 // runtime `main`, so loading it produces no stdout or stderr.
 
 uint factorial(uint i) {

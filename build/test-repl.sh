@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(git -C "$(dirname -- "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 
-dub build -c sb
+dub build -c sb-repl
 
 # `test_interactive_error_label_is_red` needs the interpreter to render a
 # failed comparison assertion with its runtime values (`1 != 2`), the way

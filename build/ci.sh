@@ -13,4 +13,5 @@ ninja bin/ut
 bin/ut
 build/acceptance.sh
 build/test-repl.sh
+build/sb.sh -b bytecode examples/rt-simple
 build/benches.sh

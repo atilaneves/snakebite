@@ -51,10 +51,21 @@ configuration "acceptance-test" {
     dependency "unit-threaded" version="*"
 }
 
-// The interactive REPL: `dub build -c sb` produces `bin/sb`.
+// The test runner: `build/sb.sh` produces `bin/sb` with LDC in release mode.
 configuration "sb" {
     targetType "executable"
     targetName "sb"
+    targetPath "bin"
+    lflags "--export-dynamic" platform="linux"
+
+    mainSourceFile "source/snakebite/main.d"
+    importPaths "."
+}
+
+// The interactive REPL: `dub build -c sb-repl` produces `bin/sb-repl`.
+configuration "sb-repl" {
+    targetType "executable"
+    targetName "sb-repl"
     targetPath "bin"
     lflags "--export-dynamic" platform="linux"
 

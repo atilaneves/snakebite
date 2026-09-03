@@ -78,7 +78,7 @@ public ReplCliResult parseReplArgs(string[] args) {
 
 
 private enum helpText =
-    "Usage: sb [options] [file.d ...]\n" ~
+    "Usage: sb-repl [options] [file.d ...]\n" ~
     "\n" ~
     "Options:\n" ~
     "  -c <command>          Run one D expression and exit\n" ~

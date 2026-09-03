@@ -2,8 +2,8 @@ module bench.oracle;
 
 
 import bench.report: BackendReport, updateTestCounts;
-import bench.sources: SourceSet;
 import core.time: Duration;
+import snakebite.project: SourceSet;
 
 
 // Not a `Backend` (see `oracleReport`), so it needs its own entry in the
@@ -36,7 +36,7 @@ BackendReport oracleReport(
     in uint runs,
 ) {
     import bench.report: timingStatistics;
-    import bench.sources: isDubProject;
+    import snakebite.project: isDubProject;
     import std.conv: text;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.file: exists, remove, tempDir;

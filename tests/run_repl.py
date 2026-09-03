@@ -252,9 +252,9 @@ def run_sb(*args: str, input: str = "") -> subprocess.CompletedProcess[str]:
 
 
 def sb_path() -> str:
-    repl = os.path.join(os.getcwd(), "bin", "sb")
+    repl = os.path.join(os.getcwd(), "bin", "sb-repl")
     if not os.path.exists(repl):
-        pytest.skip("bin/sb does not exist; run `dub build -c sb` first")
+        pytest.skip("bin/sb-repl does not exist; run `dub build -c sb-repl` first")
 
     return repl
 

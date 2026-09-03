@@ -44,6 +44,7 @@ int main(string[] args) {
         "ut.ffi.plan",
         "ut.ffi.symbol",
         "ut.framestack",
+        "ut.cli",
         "ut.bench.timing",
         "ut.bench.report",
         "ut.repl.cli",
