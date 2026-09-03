@@ -4,22 +4,24 @@ module ut.backends.call.cast_;
 import ut.backends;
 
 
-@("cast.staticArrayToSliceAliasesStorage.Interpreter")
-@Tags("Interpreter")
-unittest {
-    24.shouldBeRetOf!(
-        Interpreter,
-        q{
-            int result() {
-                int[2] storage = void;
-                int[] first = cast(int[]) storage;
-                first[0] = 4;
-                int[] second = cast(int[]) storage;
-                return cast(int) second.length * 10 + second[0];
-            }
-        },
-        "result",
-    );
+static foreach (backend; Matrix!()) {
+    @("cast.staticArrayToSliceAliasesStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        24.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int[2] storage = void;
+                    int[] first = cast(int[]) storage;
+                    first[0] = 4;
+                    int[] second = cast(int[]) storage;
+                    return cast(int) second.length * 10 + second[0];
+                }
+            },
+            "result",
+        );
+    }
 }
 
 
