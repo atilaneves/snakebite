@@ -421,7 +421,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import dmd.statement:
         CompoundStatement, ContinueStatement, ExpStatement, ForStatement,
         IfStatement, ImportStatement, ReturnStatement, ScopeStatement,
-        Statement, TryCatchStatement, UnrolledLoopStatement, WhileStatement;
+        Statement, TryCatchStatement, TryFinallyStatement,
+        UnrolledLoopStatement, WhileStatement;
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
         Arg, AssertSite, CallSite, discardResult, ExceptionHandler, Function,
@@ -760,6 +761,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _instructions[skipHandlers].destination = _instructions.length;
 
         _finished = bodyFinished && allHandlersFinished;
+    }
+
+    override void visit(TryFinallyStatement statement) {
+        compileStatement(statement._body);
+        if (_finished)
+            throw rejection(_function, statement.loc, statementText(statement));
+
+        compileStatement(statement.finalbody);
     }
 
     override void visit(ReturnStatement statement) {
