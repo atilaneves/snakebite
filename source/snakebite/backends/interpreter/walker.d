@@ -4498,31 +4498,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return element;
     }
 
-    // `~=` has no `FuncDeclaration` and no call node of its own either,
-    // but for a different reason than `ArrayLiteralExp`: dmd's semantic
-    // pass, not its glue layer, already rewrites `arr ~= x` into a call to
-    // `_d_arrayappendcTX` or `_d_arrayappendT` (`dmd/expression.d`'s
-    // `CatAssignExp.lowering`) - a real AST subtree naming a real,
-    // interpretable `FuncDeclaration`, just not one any visitor reaches by
-    // walking `expression`'s own children. Evaluating `lowering` instead
-    // of `expression` is therefore not a special case for `~=`: it is
-    // running the same tree-walking evaluator over the tree dmd already
-    // built, one dmd itself picked over the operator syntax. Nothing
-    // refuses `~=` by name; a `~=` semantic analysis left unlowered, if
-    // one exists, still falls through to the "cannot evaluate" refusal
-    // below.
-    override void visit(CatAssignExp expression) {
-        import std.conv: text;
-
-        if (expression.lowering is null)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate a `", expression.op,
-                    "` expression: `", expression.toString, "`"),
-            );
-
-        expression.lowering.accept(this);
-    }
-
     // `~=` appending a `dchar` (`CatDcharAssignExp`, `EXP.concatenateDcharAssign`)
     // takes neither of the two paths above: dmd's semantic pass
     // (`expressionsem.d`'s `CatAssignExp.visit`) builds `.lowering` only for

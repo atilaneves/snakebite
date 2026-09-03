@@ -3,7 +3,7 @@ module snakebite.backends.loweringvisitor;
 
 private:
 
-import dmd.expression: EqualExp;
+import dmd.expression: CatAssignExp, EqualExp, Expression;
 import dmd.visitor: Visitor;
 
 
@@ -12,6 +12,18 @@ import dmd.visitor: Visitor;
 // byte-comparable equality path and cannot bypass DMD's decision.
 extern(C++) package abstract class LoweringVisitor: Visitor {
     alias visit = Visitor.visit;
+
+    // DMD's semantic pass records the complete runtime append operation in
+    // `lowering`. An unlowered form belongs to backend code generation, such
+    // as `dchar` append, and follows the normal unsupported-expression path.
+    final override void visit(CatAssignExp expression) {
+        if (expression.lowering is null) {
+            visit(cast(Expression) expression);
+            return;
+        }
+
+        expression.lowering.accept(this);
+    }
 
     final override void visit(EqualExp expression) {
         if (expression.lowering !is null) {
