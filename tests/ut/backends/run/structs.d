@@ -258,6 +258,28 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `static` changes how the local type is represented during semantic
+// analysis, but it does not give an instance static storage. Constructing an
+// instance still creates an ordinary local value with native struct layout.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed),
+)) {
+    @("staticLocalStructConstruction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                static struct Payload {
+                    ubyte value;
+                }
+
+                auto payload = Payload(42);
+                assert(payload.value == 42);
+            }
+        });
+    }
+}
+
 // Assigning one struct local to another copies every field's bytes, not a
 // reference: mutating the copy leaves the original untouched.
 static foreach (backend; Matrix!()) {

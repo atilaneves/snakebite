@@ -1967,7 +1967,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import std.conv: text;
 
         // Semantic analysis has already established a function-local
-        // struct's type, so declaring it needs no runtime action. Likewise,
+        // struct's type, so declaring it needs no runtime action. DMD wraps a
+        // `static struct` in a storage-class declaration, which also needs no
+        // runtime action. Likewise,
         // `alias Unqual_T = Unqual!T;` binds a name to a type, not
         // storage, and `enum mask(ulong lo) = ...;` (an eponymous
         // template, folded to its value at each `mask!x` use rather than
@@ -1992,6 +1994,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // guest calls `lookup`, at which point `visit(CallExp)` reaches
         // it as `expression.f`, not through this declaration at all.
         if (expression.declaration.isStructDeclaration !is null
+                || expression.declaration.isStorageClassDeclaration !is null
                 || expression.declaration.isAliasDeclaration !is null
                 || expression.declaration.isTemplateDeclaration !is null
                 || expression.declaration.isFuncDeclaration !is null
