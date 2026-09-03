@@ -7,7 +7,7 @@ import dmd.mtype: Type;
 import object: TypeInfo, TypeInfo_Array, TypeInfo_Class, TypeInfo_Struct;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.ffi:
-    BoolFunction, BoolFunctionEntry, BoolFunctionTarget, maxArguments, PlanCache;
+    CallbackBridge, maxArguments, PlanCache, supportsBoolFunction;
 
 
 // Whether this compiler can lay `facts` out in a frame slot at all: an
@@ -154,18 +154,23 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private size_t _compilationDepth;
     private size_t _cacheMisses;
     private imported!"core.time".Duration _compilationTime;
-    // This signature-specific cache is temporary support for `rt-simple`.
-    // A general FFI callback implementation must replace it.
-    private BoolFunctionEntry[FuncDeclaration] _boolFunctionEntries;
+    private CallbackBridge _callbacks;
 
     public this(const Program program) {
         super(program);
         _vm = Vm(defaultFrameCapacity);
+        _callbacks = new CallbackBridge(
+            &invokeBoolFunction,
+            cast(void*) this,
+            &isGuestForCallback,
+            cast(void*) this,
+            "bytecode",
+        );
     }
 
     public ~this() {
-        foreach (ref entry_; _boolFunctionEntries.byValue)
-            entry_.release;
+        if (_callbacks !is null)
+            _callbacks.release;
     }
 
     public override imported!"snakebite.backends.backend".CompilationStatistics
@@ -205,17 +210,15 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _program.isInterpreted(function_);
     }
 
-    package BoolFunction boolFunctionEntry(FuncDeclaration function_) {
-        if (auto existing = function_ in _boolFunctionEntries)
-            return existing.address;
+    package void* boolFunctionAddress(FuncDeclaration function_) {
+        return _callbacks.address(function_);
+    }
 
-        auto target = BoolFunctionTarget(
-            &invokeBoolFunction,
-            cast(void*) this,
-            cast(void*) function_,
-        );
-        _boolFunctionEntries[function_] = BoolFunctionEntry.reserve(target);
-        return _boolFunctionEntries[function_].address;
+    extern(C) private static bool isGuestForCallback(
+        void* context,
+        imported!"dmd.func".FuncDeclaration function_,
+    ) {
+        return (cast(Bytecode) context)._program.isInterpreted(function_);
     }
 
     extern(C) private static bool invokeBoolFunction(
@@ -2879,7 +2882,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 if (auto callback = guestFunctionPointer(
                         (*expression.arguments)[i])) {
                     const argumentOffset = reserveTemp(pointerFacts);
-                    const address = _bytecode.boolFunctionEntry(callback);
+                    const address = _bytecode.boolFunctionAddress(callback);
                     emit(&opConstant, argumentOffset,
                         addConstant(cast(long) cast(size_t) address),
                         size_t.sizeof);
@@ -3022,13 +3025,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (function_ is null || !_bytecode.isGuestFunction(function_))
             return null;
 
-        import dmd.astenums: LINK, Tbool;
-        import snakebite.frontend.dmd.functions: typeFunctionOf;
-
-        auto type = typeFunctionOf(function_);
-        const linkage = function_.resolvedLinkage;
-        if (type.parameterList.length != 0 || type.nextOf.ty != Tbool
-                || (linkage != LINK.d && linkage != LINK.default_))
+        if (!supportsBoolFunction(function_))
             throw rejection(_function, argument.loc,
                 expressionText(argument));
 
