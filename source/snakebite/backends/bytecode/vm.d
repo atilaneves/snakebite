@@ -12,7 +12,10 @@ extern(C) void executeCallPlan(
 );
 
 import snakebite.ffi.limits: maxArguments;
+import snakebite.nativevalue: loadSigned, loadUnsigned, storeIntegral;
 import object: Throwable, TypeInfo_Class;
+
+private alias storeWidth = storeIntegral;
 
 
 // The widest value `opCall` can hand back to its caller: wide enough for
@@ -188,59 +191,6 @@ package struct Vm {
             function_.callSites, function_.assertSites,
             function_.exceptionHandlers, &_frames,
         );
-    }
-}
-
-
-// Stores `value`'s low `width` bytes at `place`, laid out the way compiled
-// D lays out an integral of that width. The VM's own copy of what
-// `snakebite.nativelayout.storeIntegral` does: that module reaches into
-// dmd for `TypeFacts`/`storeValue`, and importing it here would pull dmd
-// frontend modules into a module that must compile without them. Widths
-// are the only numeric fact this VM ever receives, from the compiler that
-// already asked dmd the question - never a dmd `Type` itself.
-private void storeWidth(
-    void* place,
-    in long value,
-    in size_t width,
-) @nogc nothrow {
-    switch (width) {
-        case 1: *cast(ubyte*) place = cast(ubyte) value; return;
-        case 2: *cast(ushort*) place = cast(ushort) value; return;
-        case 4: *cast(uint*) place = cast(uint) value; return;
-        case 8: *cast(ulong*) place = cast(ulong) value; return;
-        default: assert(0, "no native layout for this width");
-    }
-}
-
-
-// Reads `width` bytes at `place`, laid out the way compiled D lays out an
-// integral of that width, widened to 64 bits with the sign bit copied
-// down. The VM's own copy of what `snakebite.nativelayout.loadIntegral`
-// does for a signed operand, kept here for the same reason `storeWidth`
-// is: that module reaches into dmd, and this one must not.
-private long loadSigned(const(void)* place, in size_t width) @nogc nothrow {
-    switch (width) {
-        case 1: return *cast(const(byte)*) place;
-        case 2: return *cast(const(short)*) place;
-        case 4: return *cast(const(int)*) place;
-        case 8: return *cast(const(long)*) place;
-        default: assert(0, "no native layout for this width");
-    }
-}
-
-
-// As `loadSigned`, filling the widened bits with zero instead. The
-// arithmetic and comparison opcodes below read whichever of the two an
-// operator's own signedness calls for - already decided by the compiler,
-// which picked this handler over `loadSigned`'s for exactly that reason.
-private ulong loadUnsigned(const(void)* place, in size_t width) @nogc nothrow {
-    switch (width) {
-        case 1: return *cast(const(ubyte)*) place;
-        case 2: return *cast(const(ushort)*) place;
-        case 4: return *cast(const(uint)*) place;
-        case 8: return *cast(const(ulong)*) place;
-        default: assert(0, "no native layout for this width");
     }
 }
 
