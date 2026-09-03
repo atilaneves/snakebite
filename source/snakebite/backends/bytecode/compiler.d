@@ -1110,6 +1110,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         assert(variable._init !is null,
             "a local variable declaration with no initializer at all");
 
+        if (variable._init.isVoidInitializer !is null)
+            return;
+
         auto expInitializer = variable._init.isExpInitializer;
         if (expInitializer is null)
             throw rejection(_function, expression.loc,

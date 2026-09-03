@@ -7,20 +7,22 @@ import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 
 
-@("locals.voidInitializerPerformsNoValueEvaluation.Interpreter")
-@Tags("Interpreter")
-unittest {
-    43.shouldBeRetOf!(
-        Interpreter,
-        q{
-            int result() {
-                int value = void;
-                value = 43;
-                return value;
-            }
-        },
-        "result",
-    );
+static foreach (backend; Matrix!()) {
+    @("locals.voidInitializerPerformsNoValueEvaluation." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        43.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int value = void;
+                    value = 43;
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
 }
 
 
