@@ -301,21 +301,18 @@ public BackendReport benchmark(BackendType)(
     Duration[] times;
     Duration[] compileTimes;
     foreach (round; 0 .. warmup + runs) {
-        auto stopWatch = StopWatch(AutoStart.yes);
         auto backend = new BackendType(program);
-        const compilationBefore = backend.compilationStatistics;
+        auto stopWatch = StopWatch(AutoStart.yes);
         const result = captureStdout(() => backend.run(program));
         const elapsed = stopWatch.peek;
-        const compilationAfter = backend.compilationStatistics;
-        const compilationElapsed =
-            compilationAfter.duration - compilationBefore.duration;
+        const compilation = backend.compilationStatistics;
+        report.hasCompile = report.hasCompile || compilation.hasCompiler;
         if (round >= warmup) {
             write(result.output);
             report.passed = report.passed && result.status == 0;
-            report.hasCompile = compilationAfter.hasCompiler;
-            if (report.hasCompile)
-                compileTimes ~= compilationElapsed;
             times ~= elapsed;
+            if (compilation.hasCompiler)
+                compileTimes ~= compilation.duration;
             report.updateTestCounts(result.output);
         }
     }
