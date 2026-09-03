@@ -34,12 +34,12 @@ private bool isSupportedFacts(
     in imported!"snakebite.nativelayout".TypeFacts facts,
     imported!"dmd.mtype".Type type,
 ) {
-    import dmd.astenums: Tpointer, Tsarray;
+    import dmd.astenums: Tpointer;
 
     return isSupportedFacts(facts) || isFloatingType(type)
         || type.ty == Tpointer
         || type.isTypeStruct !is null
-        || type.ty == Tsarray;
+        || isPlainStaticArray(type);
 }
 
 // Whether this compiler can treat `type` as plain bytes it never has to
@@ -2139,16 +2139,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // `arr[] = value;`, only for `arr` a static array's own whole slice - a
     // bounded slice or a dynamic array's own runtime fill are both out of
-    // scope. `value` is evaluated once, then copied into every element in
-    // turn; the fill's own value as an expression (the slice `arr[]`
-    // itself) is never needed by either caller that reaches here - an
-    // `ExpStatement` discards it, and a local's own default-init blit
-    // already targets this same array's storage, so there is nothing left
-    // to copy out.
+    // scope. When `value` is itself an array (another static array's own
+    // whole slice, or a dynamic array) of the same element type, every one
+    // of its elements is copied into the matching element of `arr` in
+    // turn; otherwise `value` is a scalar, evaluated once and copied into
+    // every element. `destOffset` gets `arr[]` itself once the fill or
+    // copy is done - the same `{dim, &arr}` pair `visit(SliceExp)`'s
+    // whole-slice case already builds for a bare `arr[]` - since the
+    // assignment's own value is that slice (`int[] s = (a[] = 5);` is
+    // legal D).
     private void compileSliceAssign(
         AssignExp expression, SliceExp target, in size_t destOffset,
     ) {
-        import dmd.astenums: Tsarray;
+        import dmd.astenums: Tarray, Tsarray;
+        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
         if (target.e1.type.ty != Tsarray
                 || target.lwr !is null || target.upr !is null)
@@ -2163,24 +2167,87 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const dim = cast(size_t) sarrayType.dim.toInteger;
 
+        // A local's own default-init blit reaches here with `destOffset`
+        // set to that same local's own frame slot - not a distinct place
+        // to receive the assignment's value, but the very storage this
+        // fill already writes through `baseOffset`. Writing the slice
+        // pair there too would overwrite the elements just filled, the
+        // same hazard `compileAssign`'s plain-variable path already
+        // avoids by comparing `destOffset` against the target's own
+        // offset.
+        auto targetVarExp = target.e1.isVarExp;
+        auto targetVariable = targetVarExp is null
+            ? null : targetVarExp.var.isVarDeclaration;
+        const targetOffset = targetVariable !is null
+                && !targetVariable.isDataseg
+                && !isClosureVariable(targetVariable)
+                && !_layout.isRef(targetVariable)
+                && _layout.hasSlot(targetVariable)
+            ? _layout.offsetOf(targetVariable) : size_t.max;
+
         const baseOffset = compileAddress(target.e1);
 
-        const valueOffset = reserveTemp(elementFacts);
-        evalInto(expression.e2, valueOffset, elementFacts.size);
-
-        foreach (i; 0 .. dim) {
-            const addressOffset = reserveTemp(pointerFacts);
-            emit(&opCopy, addressOffset, baseOffset, size_t.sizeof);
-            if (i != 0) {
-                const byteOffsetOffset = reserveTemp(pointerFacts);
-                emit(&opConstant, byteOffsetOffset,
-                    addConstant(cast(long) (i * elementFacts.size)),
-                    size_t.sizeof);
-                emit(&opAdd, addressOffset, byteOffsetOffset, size_t.sizeof);
+        const rightTy = expression.e2.type.ty;
+        if (rightTy == Tsarray || rightTy == Tarray) {
+            size_t sourceOffset;
+            if (rightTy == Tsarray) {
+                sourceOffset = compileAddress(expression.e2);
+            } else {
+                const arrayFacts = TypeFacts.of(expression.e2.type);
+                const arrayOffset = reserveTemp(arrayFacts);
+                evalInto(expression.e2, arrayOffset, arrayFacts.size);
+                sourceOffset = arrayOffset + arrayPointerOffset;
             }
-            emit(&opStoreIndirect, addressOffset, valueOffset,
-                elementFacts.size);
+
+            foreach (i; 0 .. dim) {
+                const destAddress =
+                    elementAddress(baseOffset, i, elementFacts.size);
+                const sourceAddress =
+                    elementAddress(sourceOffset, i, elementFacts.size);
+                const valueOffset = reserveTemp(elementFacts);
+                emit(&opLoadIndirect, valueOffset, sourceAddress,
+                    elementFacts.size);
+                emit(&opStoreIndirect, destAddress, valueOffset,
+                    elementFacts.size);
+            }
+        } else {
+            const valueOffset = reserveTemp(elementFacts);
+            evalInto(expression.e2, valueOffset, elementFacts.size);
+
+            foreach (i; 0 .. dim) {
+                const addressOffset =
+                    elementAddress(baseOffset, i, elementFacts.size);
+                emit(&opStoreIndirect, addressOffset, valueOffset,
+                    elementFacts.size);
+            }
         }
+
+        if (destOffset != discardResult && destOffset != targetOffset) {
+            emit(&opConstant, destOffset + arrayLengthOffset,
+                addConstant(cast(long) dim), size_t.sizeof);
+            emit(&opCopy, destOffset + arrayPointerOffset, baseOffset,
+                size_t.sizeof);
+        }
+    }
+
+    // The address of the element at `index` within an array whose own
+    // address is `baseOffset` - shared between `compileSliceAssign`'s fill
+    // and copy loops, both of which advance a fresh temporary from the
+    // same base rather than mutating it in place, since `baseOffset` is
+    // read again on every iteration.
+    private size_t elementAddress(
+        in size_t baseOffset, in size_t index, in size_t elementSize,
+    ) {
+        const addressOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, addressOffset, baseOffset, size_t.sizeof);
+        if (index != 0) {
+            const byteOffsetOffset = reserveTemp(pointerFacts);
+            emit(&opConstant, byteOffsetOffset,
+                addConstant(cast(long) (index * elementSize)),
+                size_t.sizeof);
+            emit(&opAdd, addressOffset, byteOffsetOffset, size_t.sizeof);
+        }
+        return addressOffset;
     }
 
     // `+=`, `-=`, ... and every other compound assignment: the target is
@@ -4458,12 +4525,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             size_t.sizeof);
     }
 
-    // `[a, b, c]` typed as a static array: every element evaluated
-    // straight into its own place at `destOffset + i * element size`, in
-    // whatever storage already holds `destOffset` - a local's frame slot,
-    // another array's own element - since a static array is its elements'
-    // own bytes with no separate allocation of its own, unlike a dynamic
-    // array literal's `compileArrayLiteral` above.
+    // `[a, b, c]` typed as a static array: every element evaluated into a
+    // temporary first, then the whole temporary copied to `destOffset` in
+    // one go - the same reason `compileArrayLiteral` above builds a
+    // dynamic array literal's elements in fresh storage rather than
+    // `destOffset` itself. An element expression can read `destOffset`'s
+    // own variable (`a = [a[1], a[0]]`), and until every element is
+    // evaluated, that variable's old contents are the only correct thing
+    // for such a read to see.
     private void compileStaticArrayLiteral(
         ArrayLiteralExp expression, in size_t destOffset,
     ) {
@@ -4475,14 +4544,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const count =
             expression.elements is null ? 0 : expression.elements.length;
+        if (count == 0)
+            return;
 
+        const facts = TypeFacts.of(expression.type);
+        const tempOffset = reserveTemp(facts);
         foreach (i; 0 .. count) {
             auto element = (*expression.elements)[i];
             evalInto(
-                element, destOffset + i * elementFacts.size,
+                element, tempOffset + i * elementFacts.size,
                 elementFacts.size,
             );
         }
+        emit(&opCopy, destOffset, tempOffset, count * elementFacts.size);
     }
 
 }
