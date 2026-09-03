@@ -926,3 +926,754 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A postblit runs once on the copy from an lvalue into a fresh variable:
+// dmd's semantic pass rewrites `Tracked copy = source;` into a blit of
+// `source`'s bytes onto `copy` followed by an explicit call to
+// `Tracked.postblit` with `copy` as `this` (`(copy = source).postblit()`),
+// so this is an ordinary struct-typed variable declaration and an
+// ordinary method call once a struct with a postblit is no longer refused
+// outright.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+)) {
+    @("postblitRunsOnceOnCopyIntoVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* postblits;
+
+                this(this) {
+                    ++*postblits;
+                }
+            }
+
+            void main() {
+                int postblits = 0;
+                Tracked source = Tracked(&postblits);
+                Tracked copy = source;
+                assert(postblits == 1);
+            }
+        });
+    }
+}
+
+// D destroys an rvalue temporary at the end of the full expression that
+// created it, even when nothing ever consumes the value: this temporary's
+// only use is `.get()`, called on the constructor-call rvalue itself, and
+// its destructor still runs once the statement using it is done.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE evaluates the call but never runs the " ~
+        "destructor of a struct-typed rvalue temporary that is only " ~
+        "consumed by a method call on itself and never bound to a " ~
+        "variable - `dtors` stays 0 instead of reaching 1"),
+)) {
+    @("destructorRunsAtFullExpressionEndForUnconsumedTemporary." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* dtors;
+
+                ~this() {
+                    ++*dtors;
+                }
+
+                int get() {
+                    return 42;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                auto value = Tracked(&dtors).get();
+                assert(dtors == 1);
+                assert(value == 42);
+            }
+        });
+    }
+}
+
+// The `TrackerHolder`/`LifetimeTracker` shape from the ct-full corpus
+// (issue #142): a postblit runs exactly once when a field is constructed
+// by copying an lvalue, and not at all when the field is constructed
+// directly from an rvalue - a struct literal or a function's returned
+// value - since there is nothing to copy from in either of those cases.
+// The scope-exit destructor calls dmd inserts for `source`/`copied` and
+// for `moved`/`constructed` account for every increment of `dtors`.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+)) {
+    @("postblitAndDestructorThroughFieldCopyMoveAndDirectConstruction." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct LifetimeTracker {
+                int* postblits;
+                int* dtors;
+
+                this(this) {
+                    ++*postblits;
+                }
+
+                ~this() {
+                    ++*dtors;
+                }
+            }
+
+            struct TrackerHolder {
+                int tag;
+                LifetimeTracker tracker;
+            }
+
+            LifetimeTracker makeTracker(int* postblits, int* dtors) {
+                return LifetimeTracker(postblits, dtors);
+            }
+
+            void main() {
+                int postblits = 0;
+                int dtors = 0;
+
+                {
+                    LifetimeTracker source =
+                        LifetimeTracker(&postblits, &dtors);
+                    TrackerHolder copied = TrackerHolder(1, source);
+
+                    assert(postblits == 1);
+                    assert(dtors == 0);
+                }
+
+                assert(dtors == 2);
+
+                postblits = 0;
+                dtors = 0;
+
+                {
+                    TrackerHolder moved =
+                        TrackerHolder(2, makeTracker(&postblits, &dtors));
+                    TrackerHolder constructed = TrackerHolder(
+                        3, LifetimeTracker(&postblits, &dtors));
+
+                    assert(postblits == 0);
+                    assert(dtors == 0);
+                }
+
+                assert(dtors == 2);
+            }
+        });
+    }
+}
+
+// A guest throw partway through evaluating a call's arguments: the first
+// argument's temporary (the constructor-call rvalue `Tracked` bound to
+// `.get()`'s hidden `this`) is already fully constructed by the time the
+// second argument's call throws, and native D still runs its destructor
+// once as the whole expression unwinds - the temporary is not silently
+// leaked just because nothing ever consumed its value.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE catches the throw but never runs the " ~
+        "destructor of the already-constructed first-argument temporary " ~
+        "while unwinding the call expression - `dtors` stays 0 instead " ~
+        "of reaching 1"),
+)) {
+    @("destructorRunsForAlreadyConstructedTemporaryOnThrowMidExpression." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* dtors;
+
+                ~this() {
+                    ++*dtors;
+                }
+
+                int get() {
+                    return 42;
+                }
+            }
+
+            int take(int a, int b) {
+                return a + b;
+            }
+
+            int throwing() {
+                throw new Exception("boom");
+            }
+
+            void main() {
+                int dtors = 0;
+                bool caught;
+                try {
+                    take(Tracked(&dtors).get(), throwing());
+                } catch (Exception e) {
+                    caught = true;
+                }
+                assert(caught);
+                assert(dtors == 1);
+            }
+        });
+    }
+}
+
+// dmd lowers `foreach (x; Range(...))` to
+// `Range __aggr4 = Range(...); try { for (...) { ... } } finally
+// { __aggr4.__dtor(); }` - `__aggr4` is `STC.temp` with a non-null
+// `edtor`, the same as an `addDtorHook` temporary, but its declaration
+// is the whole statement, not a fragment of a larger one, and its
+// destructor is already called explicitly by the `finally`. Registering
+// it a second time from the declaration would destroy the range twice.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+)) {
+    @("foreachRangeTemporaryDestroyedOnceByItsOwnFinally." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Range {
+                int* dtors;
+                int i;
+
+                ~this() {
+                    ++*dtors;
+                }
+
+                bool empty() {
+                    return i >= 3;
+                }
+
+                int front() {
+                    return i;
+                }
+
+                void popFront() {
+                    ++i;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                int sum = 0;
+                foreach (x; Range(&dtors, 0))
+                    sum += x;
+                assert(dtors == 1);
+                assert(sum == 3);
+            }
+        });
+    }
+}
+
+// dmd lowers `T(&dtors, true).get()`, where `T` has a user-defined
+// constructor, to
+// `((T __slT6 = T(null);), __slT6).__ctor(&dtors, true).get()`: the
+// declaration only default-initializes the temporary, and the real
+// construction is a separate, fallible `__ctor` call afterward. When
+// that call throws, the temporary was never actually constructed, so
+// native D does not run its destructor for it - registering the
+// destructor at the declaration, before the constructor call that can
+// still fail, would run it anyway.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+)) {
+    @("temporaryWithThrowingConstructorRunsNoDestructor." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T {
+                int* dtors;
+
+                this(int* d, bool doThrow) {
+                    dtors = d;
+                    if (doThrow) throw new Exception("ctor");
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                int get() {
+                    return 5;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                bool caught;
+                try
+                    T(&dtors, true).get();
+                catch (Exception e)
+                    caught = true;
+                assert(caught);
+                assert(dtors == 0);
+            }
+        });
+    }
+}
+
+// The result of the temporary's method feeds a declaration
+// (`int r = T(&dtors).get();`), so the constructor-call receiver is
+// evaluated for its address rather than as a statement of its own. The
+// temporary's construction still completes - the `__ctor` call in
+// dmd's `((T __slT = T(null);), __slT).__ctor(&dtors)` lowering
+// returns normally - so its destructor runs exactly once at the end of
+// the full expression, the same as when the result is discarded.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE computes the right value but never runs " ~
+        "the destructor of the user-constructor temporary once its " ~
+        "value feeds a declaration - `dtors` stays 0 instead of " ~
+        "reaching 1"),
+)) {
+    @("userCtorTemporaryConsumedAsValueRunsDestructorOnce." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T {
+                int* dtors;
+
+                this(int* d) {
+                    dtors = d;
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                int get() {
+                    return 5;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                int r = T(&dtors).get();
+                assert(dtors == 1);
+                assert(r == 5);
+            }
+        });
+    }
+}
+
+// The temporary's own `__ctor` call returns normally; the method
+// called on it afterward, still inside the same full expression, is
+// what throws. Native D destroys every temporary whose construction
+// completed when the full expression unwinds, so the destructor runs
+// exactly once - construction finishing, not the expression finishing,
+// is what commits the destructor.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE catches the throw but never runs the " ~
+        "destructor of the user-constructor temporary whose `__ctor` " ~
+        "already completed - `dtors` stays 0 instead of reaching 1"),
+)) {
+    @("userCtorTemporaryDestroyedWhenLaterCallInExpressionThrows." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T {
+                int* dtors;
+
+                this(int* d) {
+                    dtors = d;
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                int boom() {
+                    throw new Exception("later");
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                bool caught;
+                try
+                    T(&dtors).boom();
+                catch (Exception e)
+                    caught = true;
+                assert(caught);
+                assert(dtors == 1);
+            }
+        });
+    }
+}
+
+// A constructor whose body builds another temporary of its own type
+// re-enters the same lowered `((T __slT = T(null);), __slT).__ctor`
+// nodes while an outer activation of them is still live. Each
+// activation owns its own temporary: the two inner recursion levels
+// destroy theirs when their enclosing statement inside the constructor
+// body ends, and the outermost temporary is destroyed at the end of
+// the full expression that created it - three destructor runs in
+// total, never a shared or clobbered slot.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE computes the right return value but " ~
+        "never runs the destructor of any of the three reentrant " ~
+        "user-constructor temporaries - `dtors` stays 0 instead of " ~
+        "reaching 3"),
+)) {
+    @("userCtorTemporaryReentrantConstructionDestroysEachActivation." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T {
+                int* dtors;
+                int depth;
+
+                this(int* d, int dep) {
+                    dtors = d;
+                    depth = dep;
+                    if (dep > 0)
+                        T(d, dep - 1).id();
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                int id() {
+                    return depth;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                int r = T(&dtors, 2).id();
+                assert(dtors == 3);
+                assert(r == 2);
+            }
+        });
+    }
+}
+
+// A callee reached mid-expression runs its own full expressions, each
+// with a constructor-called temporary of its own. The callee's
+// temporary is destroyed when the callee's statement ends, inside the
+// caller's still-evaluating expression; the caller's own temporary is
+// destroyed when the outer full expression ends. Two temporaries, two
+// destructor runs, each owned by its own full expression.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE computes the right return value but " ~
+        "never runs the destructor of either user-constructor " ~
+        "temporary - `dtors` stays 0 instead of reaching 2"),
+)) {
+    @("userCtorTemporaryInCalleeAndCallerDestroyedByTheirOwnExpressions." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T {
+                int* dtors;
+
+                this(int* d) {
+                    dtors = d;
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                int get() {
+                    return 3;
+                }
+            }
+
+            int helper(int* dtors) {
+                return T(dtors).get();
+            }
+
+            void main() {
+                int dtors = 0;
+                int r = helper(&dtors) + T(&dtors).get();
+                assert(dtors == 2);
+                assert(r == 6);
+            }
+        });
+    }
+}
+
+// The user-defined-constructor variant of the `foreach` range shape:
+// dmd declares the range temporary as its own whole statement
+// (`Range __aggr = Range(...);`, the constructor called directly on
+// the named variable) and destroys it in the explicit `finally` it
+// wraps the loop in. The constructor call returning must not commit a
+// second destructor run for a variable whose destruction that
+// `finally` already owns.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+)) {
+    @("foreachRangeWithUserCtorDestroyedOnceByItsOwnFinally." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Range {
+                int* dtors;
+                int i;
+                int n;
+
+                this(int* d, int limit) {
+                    dtors = d;
+                    i = 0;
+                    n = limit;
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                bool empty() {
+                    return i >= n;
+                }
+
+                int front() {
+                    return i;
+                }
+
+                void popFront() {
+                    ++i;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                int sum = 0;
+                foreach (x; Range(&dtors, 3))
+                    sum += x;
+                assert(dtors == 1);
+                assert(sum == 3);
+            }
+        });
+    }
+}
+
+// A temporary of a user-constructor type initialized from an already
+// completed value: dmd lowers `make(&dtors).get()` to
+// `((T __tmpfordtor5 = make(&dtors);) , __tmpfordtor5).get()` - the
+// declaration's initializer is the function's returned value, whole,
+// with no follow-up `__ctor` call anywhere. Whether construction is
+// still pending is a property of the initializer, not of the type
+// having a constructor: this temporary is fully constructed at its
+// declaration, and its destructor runs once at the end of the full
+// expression.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE computes the right return value but " ~
+        "never runs the destructor of the temporary initialized from " ~
+        "`make(&dtors)`'s returned value - `dtors` stays 0 instead of " ~
+        "reaching 1"),
+)) {
+    @("userCtorTypeTemporaryFromReturnedValueRunsDestructorOnce." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T {
+                int* dtors;
+                int v;
+
+                this(int* d, int value) {
+                    dtors = d;
+                    v = value;
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                int get() {
+                    return v;
+                }
+            }
+
+            T make(int* d) {
+                return T(d, 6);
+            }
+
+            void main() {
+                int dtors = 0;
+                int r = make(&dtors).get();
+                assert(dtors == 1);
+                assert(r == 6);
+            }
+        });
+    }
+}
+
+// A ternary between two constructor-called temporaries: dmd hoists the
+// condition into its own temporary and declares one `__slT` per
+// branch, each with a destructor guarded by that condition, since only
+// the branch taken ever constructs its temporary. The taken branch's
+// destructor runs exactly once, at the end of the full expression,
+// while the condition temporary's frame slot is still live - never
+// later, against a frame that is already gone.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE computes the right return value but " ~
+        "never runs the destructor of the taken ternary branch's " ~
+        "user-constructor temporary - `dtors` stays 0 instead of " ~
+        "reaching 1"),
+)) {
+    @("ternaryBetweenUserCtorTemporariesDestroysTakenBranchOnce." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T {
+                int* dtors;
+                int v;
+
+                this(int* d, int value) {
+                    dtors = d;
+                    v = value;
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+
+                int get() {
+                    return v;
+                }
+            }
+
+            void main() {
+                int dtors = 0;
+                bool c = true;
+                int r = (c ? T(&dtors, 1) : T(&dtors, 2)).get();
+                assert(dtors == 1);
+                assert(r == 1);
+            }
+        });
+    }
+}
+
+// A temporary initialized from a compile-time struct value: dmd
+// lowers `g.get()`, `g` an enum of a user-constructor type, to
+// `((G __slG4 = G(5);) , __slG4).get()` - the same
+// declaration-of-a-literal shape its deferred-`__ctor` lowering uses,
+// but with no `__ctor` call following, since the literal already is
+// the whole value. The destructor still runs once: a constructor call
+// that never arrives must not be what the destructor waits for.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE refuses `gdtors` with \"static variable " ~
+        "`gdtors` cannot be read at compile time\" - the enum's " ~
+        "construction runs in the compiler's own CTFE session while " ~
+        "compiling the snippet, and `main()`'s later, separate " ~
+        "`ctfeInterpret` call cannot read a static mutated by a prior " ~
+        "session, not even after replacing `__gshared` with a plain " ~
+        "static (same error either way)"),
+)) {
+    @("userCtorTypeTemporaryFromEnumLiteralRunsDestructorOnce." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int gdtors;
+
+            struct G {
+                int x;
+
+                this(int y) {
+                    x = y;
+                }
+
+                ~this() {
+                    ++gdtors;
+                }
+
+                int get() {
+                    return x;
+                }
+            }
+
+            enum g = G(5);
+
+            void main() {
+                int r = g.get();
+                assert(gdtors == 1);
+                assert(r == 5);
+            }
+        });
+    }
+}
+
+// An inner temporary fully constructed, then moved into an outer
+// constructor's by-value parameter: dmd's `valueNoDtor` transfers
+// ownership to the callee (the argument is not copied, so the caller
+// must not also destroy it), and the callee destroys its parameter
+// exactly once - here while unwinding its own throw. The outer
+// temporary's constructor never returns, so its destructor never runs
+// at all.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+)) {
+    @("temporaryMovedIntoThrowingOuterCtorDestroyedOnceByCallee." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner {
+                int* dtors;
+
+                this(int* d) {
+                    dtors = d;
+                }
+
+                ~this() {
+                    if (dtors) ++*dtors;
+                }
+            }
+
+            struct Outer {
+                int* dtors;
+
+                this(Inner i, int* d) {
+                    dtors = d;
+                    throw new Exception("outer");
+                }
+
+                ~this() {
+                    if (dtors) *dtors += 10;
+                }
+            }
+
+            void main() {
+                int innerDtors = 0;
+                int outerDtors = 0;
+                bool caught;
+                try
+                    Outer(Inner(&innerDtors), &outerDtors);
+                catch (Exception e)
+                    caught = true;
+                assert(caught);
+                assert(outerDtors == 0);
+                assert(innerDtors == 1);
+            }
+        });
+    }
+}
