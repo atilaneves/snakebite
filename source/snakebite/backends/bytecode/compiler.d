@@ -501,20 +501,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private bool _finished;
     // The loop or unrolled `foreach` this compiler is currently inside the
     // body of, innermost last - what a `continue` targets, labelled or
-    // not. A `while`/`do` already knows its own continue target (the
-    // condition it re-checks) the moment it starts compiling its body; a
-    // `for`'s is its increment, compiled only after the body is, so a
-    // `continue` reached first records its own instruction's index here
-    // instead and `resolveContinues` patches every one of them in once the
-    // target is known. An unrolled `foreach` has no re-checked condition
-    // to jump to at all - dmd already unrolled it into one statement per
-    // element, so `continue` there only needs to skip the rest of the
-    // current element's statement, exactly what `_finished` (see its own
-    // doc) already does once `compileUnrolledLoop` resets it before each
-    // element - so `isUnrolled` entries never populate
-    // `continueTarget`/`pendingContinueJumps` at all.
+    // not. A `do` already knows its own continue target (the condition it
+    // re-checks) the moment it starts compiling its body; a `for`'s is its
+    // increment, compiled only after the body is, so a `continue` reached
+    // first records its own instruction's index here instead and
+    // `resolveContinues` patches every one of them in once the target is
+    // known. An unrolled `foreach` has no re-checked condition either -
+    // dmd already unrolled it into one statement per element - so its
+    // `continue` target is the next element's own first instruction,
+    // known only once `compileUnrolledLoop` starts compiling it; that
+    // reuses the same pending/resolve mechanism as `for`.
     private struct LoopContext {
-        bool isUnrolled;
         Identifier label;
         size_t continueTarget = size_t.max;
         size_t[] pendingContinueJumps;
@@ -1244,7 +1241,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opBranchFalse, conditionOffset, 0, width);
         }
 
-        _loops ~= LoopContext(false, label, loopStart);
+        _loops ~= LoopContext(label, loopStart);
         _breakables ~= Breakable(label);
         compileStatement(statement._body);
         const breakable = _breakables[$ - 1];
@@ -1281,7 +1278,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opBranchFalse, conditionOffset, 0, width);
         }
 
-        _loops ~= LoopContext(false, label);
+        _loops ~= LoopContext(label);
         _breakables ~= Breakable(label);
         compileStatement(statement._body);
         const breakable = _breakables[$ - 1];
@@ -1319,7 +1316,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto label = consumeLabel; // auto: const(Identifier) will not implicitly convert back
         const bodyStart = _instructions.length;
 
-        _loops ~= LoopContext(false, label);
+        _loops ~= LoopContext(label);
         _breakables ~= Breakable(label);
         compileStatement(statement._body);
         const breakable = _breakables[$ - 1];
@@ -1353,18 +1350,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // foreach`'s own arguments) into one statement per element at
     // semantic time - see `makeTupleForeach` in `statementsem.d` - so
     // there is no run time loop left to compile, only this fixed sequence
-    // of already-distinct statements. `continue` still means what it
-    // means in any loop body: skip the rest of the current element's own
-    // statement and move to the next one's. Nothing about `_finished`
-    // (see its own doc) needs to change to get that - it already stops a
-    // `compileStatements` sibling walk the same way a `return` would -
-    // this only needs to reset it before each element the same way
-    // `compileSwitchBody` resets it before each case, so one element
-    // ending in `continue`/`return` does not hide every element after it.
-    // `break` does need real code, though: nothing about falling off the
-    // end of one element's statement already stops the rest from running,
-    // so it queues a jump the same way a `switch`'s own `break` does,
-    // patched to land after the last element once that position is known.
+    // of already-distinct statements. A `continue` there still needs a
+    // real jump, the same as `compileFor`'s: it must skip only the rest
+    // of the current element, landing on the next element's own first
+    // instruction (or, from the last element, after the whole
+    // statement) rather than falling into whatever the current element
+    // was itself about to skip (an `else`, a `catch` handler, the next
+    // `case`).
     private void compileUnrolledLoop(UnrolledLoopStatement statement) {
         auto label = consumeLabel; // auto: const(Identifier) will not implicitly convert back
         if (statement.statements is null) {
@@ -1372,15 +1364,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        _loops ~= LoopContext(true, label);
+        _loops ~= LoopContext(label);
         _breakables ~= Breakable(label);
 
         bool lastFinished;
         foreach (child; *statement.statements) {
+            resolveContinues(_instructions.length);
             _finished = false;
             compileStatement(child);
             lastFinished = _finished;
         }
+        const hadContinue = _loops[$ - 1].pendingContinueJumps.length > 0;
+        resolveContinues(_instructions.length);
 
         const breakable = _breakables[$ - 1];
         _breakables = _breakables[0 .. $ - 1];
@@ -1390,7 +1385,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         foreach (index; breakable.pendingBreakJumps)
             patchTarget(index, afterLoop);
 
-        _finished = lastFinished && breakable.pendingBreakJumps.length == 0;
+        _finished = lastFinished && !hadContinue
+            && breakable.pendingBreakJumps.length == 0;
     }
 
     // Consumed by whichever `LabelStatement` directly wraps this one -
@@ -1445,15 +1441,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (index == size_t.max)
             throw rejection(_function, statement.loc, statementText(statement));
 
-        // An unrolled `foreach`'s own "loop" is nothing but the sequence
-        // of statements `compileUnrolledLoop` already walks - `continue`
-        // there needs no jump of its own, only `_finished` (see that
-        // function's own doc).
-        if (_loops[index].isUnrolled) {
-            _finished = true;
-            return;
-        }
-
         const target = _loops[index].continueTarget;
         if (target != size_t.max) {
             emit(&opJump, target, 0, 0);
@@ -1468,6 +1455,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void resolveContinues(in size_t target) {
         foreach (index; _loops[$ - 1].pendingContinueJumps)
             _instructions[index].destination = target;
+        _loops[$ - 1].pendingContinueJumps = [];
     }
 
     // A `switch`'s own body is, once every `ScopeStatement`/

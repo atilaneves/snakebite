@@ -256,6 +256,117 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `continue` in an unrolled `foreach` ends the current element's
+// statement, so an `else` paired with the `if` that continued must not
+// run for that element.
+static foreach (backend; Matrix!()) {
+    @("continueInUnrolledForeachSkipsElse." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            void main() {
+                int sum;
+
+                foreach (value; AliasSeq!(1, 2, 3)) {
+                    if (value == 2)
+                        continue;
+                    else
+                        sum += value;
+                }
+
+                assert(sum == 4);
+            }
+        });
+    }
+}
+
+// `continue` in a `case` of a `switch` inside an unrolled `foreach`
+// leaves the whole `switch` for the current element; it must not fall
+// through into the next case.
+static foreach (backend; Matrix!()) {
+    @("continueInSwitchInUnrolledForeachLeavesSwitch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            void main() {
+                int sum;
+
+                foreach (value; AliasSeq!(1, 2)) {
+                    switch (value) {
+                    case 1:
+                        continue;
+                    default:
+                        sum += 10;
+                    }
+                }
+
+                assert(sum == 10);
+            }
+        });
+    }
+}
+
+// `continue` in a `try` body inside an unrolled `foreach` leaves the
+// `try` normally; no exception was thrown, so no `catch` handler runs.
+static foreach (backend; Matrix!()) {
+    @("continueInTryInUnrolledForeachSkipsCatch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            void main() {
+                int sum;
+
+                foreach (value; AliasSeq!(1, 2)) {
+                    try {
+                        sum += value;
+                        continue;
+                    } catch (Exception) {
+                        sum += 100;
+                    }
+                }
+
+                assert(sum == 3);
+            }
+        });
+    }
+}
+
+// `continue` as the last statement of an unrolled `foreach` body only
+// ends the current element; the statement after the loop still runs.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "returns the wrong value after a trailing continue"),
+)) {
+    @("continueAtEndOfUnrolledForeachFallsOut." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int total() {
+                int sum;
+
+                foreach (value; AliasSeq!(1, 2)) {
+                    sum += value;
+                    continue;
+                }
+
+                return sum;
+            }
+
+            void main() {
+                assert(total == 3);
+            }
+        });
+    }
+}
+
 // `final switch` dispatches to the case matching the value at run time,
 // each case running its own body rather than falling into another's.
 static foreach (backend; Matrix!()) {
