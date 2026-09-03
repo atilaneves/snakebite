@@ -101,6 +101,10 @@ static foreach (backend; Matrix!(
                 offsets["magic"] = 0;
                 offsets["schema"] = 4;
 
+                assert(offsets.length == 2);
+                assert(offsets["magic"] == 0);
+                assert(offsets["schema"] == 4);
+
                 int offsetSum;
                 int nameLengthSum;
                 foreach (name, offset; offsets) {
