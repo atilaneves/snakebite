@@ -26,7 +26,7 @@ public int main(string[] args) {
             parsed.options.stringImportPaths,
         );
         const report = runBackend(parsed.options.backend, project.program);
-        printStatistics(report);
+        printStatistics(project.frontendDuration, report);
         return report.status;
     } catch (Exception exception) {
         stderr.write("snakebite: ", exception.msg, "\n");
@@ -66,17 +66,21 @@ private RunReport runBackend(
 }
 
 
-private void printStatistics(in RunReport report) {
+private void printStatistics(
+    in imported!"core.time".Duration frontendDuration,
+    in RunReport report,
+) {
     import std.stdio: writefln, writeln;
 
-    writefln("run time:     %.1f ms", milliseconds(report.runTime));
+    writefln("frontend time: %8.1f ms", milliseconds(frontendDuration));
+    writefln("run time:      %8.1f ms", milliseconds(report.runTime));
     if (report.compilation.hasCompiler)
         writefln(
-            "compile time: %.1f ms",
+            "compile time:  %8.1f ms",
             milliseconds(report.compilation.duration),
         );
     else
-        writeln("compile time: n/a");
+        writeln("compile time:  n/a");
 }
 
 
