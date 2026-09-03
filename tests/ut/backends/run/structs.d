@@ -9,6 +9,30 @@ module ut.backends.run.structs;
 import ut.backends;
 
 
+// A field of a non-plain aggregate still has the aggregate's native address.
+// The destructor is handled by the DMD-generated cleanup around the local.
+static foreach (backend; Matrix!()) {
+    @("struct.nonPlainFieldAssignment." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Value {
+                int result;
+
+                ~this() {
+                }
+            }
+
+            void main() {
+                Value value;
+                value.result = 42;
+                assert(value.result == 42);
+            }
+        });
+    }
+}
+
+
 // A non-plain aggregate can cross a guest call as native bytes. The
 // destructor is handled by the DMD-generated cleanup around the local.
 static foreach (backend; Matrix!()) {
