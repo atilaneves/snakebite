@@ -6,7 +6,8 @@ private:
 import dmd.mtype: Type;
 import object: TypeInfo, TypeInfo_Array, TypeInfo_Class;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
-import snakebite.ffi: maxArguments, PlanCache;
+import snakebite.ffi:
+    BoolFunction, BoolFunctionEntry, BoolFunctionTarget, maxArguments, PlanCache;
 
 
 // Whether this compiler can lay `facts` out in a frame slot at all: an
@@ -153,10 +154,18 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private size_t _compilationDepth;
     private size_t _cacheMisses;
     private imported!"core.time".Duration _compilationTime;
+    // This signature-specific cache is temporary support for `rt-simple`.
+    // A general FFI callback implementation must replace it.
+    private BoolFunctionEntry[FuncDeclaration] _boolFunctionEntries;
 
     public this(const Program program) {
         super(program);
         _vm = Vm(defaultFrameCapacity);
+    }
+
+    public ~this() {
+        foreach (ref entry_; _boolFunctionEntries.byValue)
+            entry_.release;
     }
 
     public override imported!"snakebite.backends.backend".CompilationStatistics
@@ -190,6 +199,34 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
     package bool hasNativeSymbol(FuncDeclaration function_) {
         return _plans.hasNativeSymbol(function_);
+    }
+
+    package bool isGuestFunction(FuncDeclaration function_) const {
+        return _program.isInterpreted(function_);
+    }
+
+    package BoolFunction boolFunctionEntry(FuncDeclaration function_) {
+        if (auto existing = function_ in _boolFunctionEntries)
+            return existing.address;
+
+        auto target = BoolFunctionTarget(
+            &invokeBoolFunction,
+            cast(void*) this,
+            cast(void*) function_,
+        );
+        _boolFunctionEntries[function_] = BoolFunctionEntry.reserve(target);
+        return _boolFunctionEntries[function_].address;
+    }
+
+    extern(C) private static bool invokeBoolFunction(
+        void* context,
+        void* functionAddress,
+    ) {
+        auto bytecode = cast(Bytecode) context;
+        auto function_ = cast(FuncDeclaration) functionAddress;
+        bool result;
+        bytecode._vm.call(*bytecode.compileFunction(function_), &result);
+        return result;
     }
 
     // The address of druntime's own `gc_malloc`, the real allocator a
@@ -261,6 +298,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // at it too.
     package const(Function)* compileFunction(FuncDeclaration function_) {
         import dmd.astenums: STC, Tvoid;
+        import dmd.funcsem: needsClosure;
         import dmd.typesem: nextOf;
         import snakebite.backends.layout: FrameLayout;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -292,8 +330,12 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         // different context, so keep those outside this backend's scope.
         if (function_.vthis !is null
                 && (function_.isThis is null
-                    || function_.isThis.isStructDeclaration is null))
-            throw rejection(function_, function_.loc, "a method");
+                    || function_.isThis.isStructDeclaration is null)) {
+            auto literal = function_.isFuncLiteralDeclaration;
+            if (literal is null || literal.outerVars.length != 0
+                    || literal.needsClosure)
+                throw rejection(function_, function_.loc, "a method");
+        }
 
         auto functionType = typeFunctionOf(function_);
         auto returnType = function_.type.nextOf;
@@ -1858,6 +1900,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // out of scope; only a whole variable's own address is supported.
     override void visit(SymOffExp expression) {
         requireDestination(expression);
+        if (auto function_ = expression.var.isFuncDeclaration) {
+            if (expression.offset != 0)
+                return visit(cast(Expression) expression);
+
+            emit(&opConstant, _destination,
+                addConstant(cast(long) cast(size_t) cast(void*) function_),
+                _width);
+            return;
+        }
+
         auto variable = expression.var.isVarDeclaration;
         if (variable is null || expression.offset != 0)
             return visit(cast(Expression) expression);
@@ -1872,6 +1924,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const addressOffset = addressOfVariable(variable);
         if (addressOffset != _destination)
             emit(&opCopy, _destination, addressOffset, size_t.sizeof);
+    }
+
+    override void visit(FuncExp expression) {
+        requireDestination(expression);
+        if (expression.fd is null)
+            return visit(cast(Expression) expression);
+
+        emit(&opConstant, _destination,
+            addConstant(cast(long) cast(size_t) cast(void*) expression.fd),
+            _width);
     }
 
     private size_t compileStaticAddress(VarDeclaration variable) {
@@ -2939,6 +3001,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     throw rejection(_function, expression.loc,
                         expressionText(expression));
 
+                if (auto callback = guestFunctionPointer(
+                        (*expression.arguments)[i])) {
+                    const argumentOffset = reserveTemp(pointerFacts);
+                    const address = _bytecode.boolFunctionEntry(callback);
+                    emit(&opConstant, argumentOffset,
+                        addConstant(cast(long) cast(size_t) address),
+                        size_t.sizeof);
+                    args ~= Arg(argumentOffset, 0, size_t.sizeof);
+                    continue;
+                }
+
+                auto pointer = parameter.type.isTypePointer;
+                if (pointer !is null && pointer.next.isTypeFunction !is null
+                        && (*expression.arguments)[i].isNullExp is null)
+                    throw rejection(_function, expression.loc,
+                        expressionText(expression));
+
                 if (parameter.storageClass & STC.ref_) {
                     const argumentOffset =
                         compileAddress((*expression.arguments)[i]);
@@ -3049,6 +3128,36 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _callSites ~=
             CallSite(calleeFunction, args, isVoidCallee ? 0 : returnFacts.size);
         emit(&opCall, destOffset, siteIndex, 0);
+    }
+
+    private FuncDeclaration guestFunctionPointer(Expression argument) {
+        // A guest function has no machine address. Keep its declaration as
+        // the bytecode value, but give native code an executable callback
+        // entry for the one signature the shared FFI layer supports.
+        auto expression = argument;
+        while (auto cast_ = expression.isCastExp)
+            expression = cast_.e1;
+
+        FuncDeclaration function_;
+        if (auto literal = expression.isFuncExp)
+            function_ = literal.fd;
+        else if (auto address = expression.isSymOffExp)
+            function_ = address.var.isFuncDeclaration;
+
+        if (function_ is null || !_bytecode.isGuestFunction(function_))
+            return null;
+
+        import dmd.astenums: LINK, Tbool;
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+        auto type = typeFunctionOf(function_);
+        const linkage = function_.resolvedLinkage;
+        if (type.parameterList.length != 0 || type.nextOf.ty != Tbool
+                || (linkage != LINK.d && linkage != LINK.default_))
+            throw rejection(_function, argument.loc,
+                expressionText(argument));
+
+        return function_;
     }
 
     private TypeFacts pointerFacts() {
