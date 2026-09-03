@@ -864,32 +864,136 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileContinue(statement);
     }
 
+    // A `switch` on a string is fully gone by the time this compiler ever
+    // sees the `SwitchStatement`: dmd's own semantic pass rewrites
+    // `condition` into a call to druntime's `object.__switch`, which
+    // returns the matching case's index as a plain `int`, and rewrites
+    // every `case` expression into that same index - see
+    // `visitSwitch`/`visitCase` in dmd's `statementsem.d`. That call
+    // compiles through the ordinary `CallExp` path below like any other
+    // native call, so nothing here treats a string `switch` differently
+    // from an integral one. A `CaseRangeStatement` is gone the same way,
+    // replaced by one `CaseStatement` per value in the range, chained by
+    // fallthrough - this compiler never sees that node either.
+    //
+    // dmd also always resolves `hasDefault`/`sdefault` before semantic
+    // returns: a `switch` with no `default:` of its own gets one
+    // synthesised (an `assert(0)`, or a call to `object.__switch_error`),
+    // so `statement.sdefault` is never null here, final or not.
+    //
+    // Case dispatch is a linear chain of equality tests against the
+    // already-evaluated condition, each branching straight into its own
+    // case's body once that body's own position is known (see
+    // `recordCaseTarget`) - no jump table, since nothing about this
+    // compiler's `Instruction` stream supports one.
     override void visit(SwitchStatement statement) {
-        compileSwitch(statement);
+        import snakebite.nativelayout: TypeFacts;
+
+        const facts = TypeFacts.of(statement.condition.type);
+        if (!facts.isIntegral || !isIntegralSize(facts.size))
+            throw rejection(_function, statement.loc, statementText(statement));
+
+        const conditionOffset = reserveTemp(facts);
+        evalInto(statement.condition, conditionOffset, facts.size);
+
+        if (statement.cases !is null) {
+            foreach (case_; *statement.cases) {
+                if (case_.exp.isIntegerExp is null)
+                    throw rejection(_function, case_.loc, statementText(case_));
+
+                const testOffset = reserveTemp(facts);
+                emit(&opCopy, testOffset, conditionOffset, facts.size);
+                const literalOffset = reserveTemp(facts);
+                emit(&opConstant, literalOffset,
+                    addConstant(case_.exp.toInteger), facts.size);
+                emit(&opEqual, testOffset, literalOffset, facts.size);
+
+                const branchIndex = _instructions.length;
+                emit(&opBranchTrue, testOffset, 0, 1);
+                jumpToCase(case_, branchIndex);
+            }
+        }
+
+        if (statement.sdefault is null)
+            throw rejection(_function, statement.loc, statementText(statement));
+
+        const defaultJumpIndex = _instructions.length;
+        emit(&opJump, 0, 0, 0);
+        jumpToDefault(statement, defaultJumpIndex);
+
+        _breakables ~= Breakable(true);
+        _switchStack ~= statement;
+        compileSwitchBody(statement._body);
+        const bodyFinished = _finished;
+        const hadBreak = _breakables[$ - 1].pendingBreakJumps.length > 0;
+
+        const afterSwitch = _instructions.length;
+        foreach (index; _breakables[$ - 1].pendingBreakJumps)
+            patchTarget(index, afterSwitch);
+
+        _switchStack = _switchStack[0 .. $ - 1];
+        _breakables = _breakables[0 .. $ - 1];
+
+        _finished = !hadBreak && bodyFinished;
     }
 
     override void visit(CaseStatement statement) {
-        compileCase(statement);
+        recordCaseTarget(statement);
+        _finished = false;
+        compileStatement(statement.statement);
     }
 
     override void visit(DefaultStatement statement) {
-        compileDefault(statement);
+        if (_switchStack.length == 0)
+            throw rejection(_function, statement.loc, statementText(statement));
+
+        recordDefaultTarget(_switchStack[$ - 1]);
+        _finished = false;
+        compileStatement(statement.statement);
     }
 
     override void visit(GotoCaseStatement statement) {
-        compileGotoCase(statement);
+        if (statement.cs is null)
+            throw rejection(_function, statement.loc, statementText(statement));
+
+        const index = _instructions.length;
+        emit(&opJump, 0, 0, 0);
+        jumpToCase(statement.cs, index);
+        _finished = true;
     }
 
     override void visit(GotoDefaultStatement statement) {
-        compileGotoDefault(statement);
+        if (statement.sw is null)
+            throw rejection(_function, statement.loc, statementText(statement));
+
+        const index = _instructions.length;
+        emit(&opJump, 0, 0, 0);
+        jumpToDefault(statement.sw, index);
+        _finished = true;
     }
 
+    // dmd's own synthesised "no case matched" default (see
+    // `visit(SwitchStatement)`'s own doc) wraps a call to
+    // `object.__switch_error` already resolved to a real
+    // `FuncDeclaration` - compiled the same way any other call to a
+    // function this compiler did not itself compile is, through the
+    // native FFI boundary in `compileCall`.
     override void visit(SwitchErrorStatement statement) {
-        compileSwitchError(statement);
+        if (statement.exp !is null)
+            compileEffect(statement.exp);
+
+        _finished = true;
     }
 
     override void visit(BreakStatement statement) {
-        compileBreak(statement);
+        if (statement.ident !is null || _breakables.length == 0
+                || !_breakables[$ - 1].isSwitch)
+            throw rejection(_function, statement.loc, statementText(statement));
+
+        const index = _instructions.length;
+        emit(&opJump, 0, 0, 0);
+        _breakables[$ - 1].pendingBreakJumps ~= index;
+        _finished = true;
     }
 
     extern(D):
@@ -1158,86 +1262,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _instructions[index].destination = target;
     }
 
-    // A `switch` on a string is fully gone by the time this compiler ever
-    // sees the `SwitchStatement`: dmd's own semantic pass rewrites
-    // `condition` into a call to druntime's `object.__switch`, which
-    // returns the matching case's index as a plain `int`, and rewrites
-    // every `case` expression into that same index - see
-    // `visitSwitch`/`visitCase` in dmd's `statementsem.d`. That call
-    // compiles through the ordinary `CallExp` path below like any other
-    // native call, so nothing here treats a string `switch` differently
-    // from an integral one. A `CaseRangeStatement` is gone the same way,
-    // replaced by one `CaseStatement` per value in the range, chained by
-    // fallthrough - this compiler never sees that node either.
-    //
-    // dmd also always resolves `hasDefault`/`sdefault` before semantic
-    // returns: a `switch` with no `default:` of its own gets one
-    // synthesised (an `assert(0)`, or a call to `object.__switch_error`),
-    // so `statement.sdefault` is never null here, final or not.
-    //
-    // Case dispatch is a linear chain of equality tests against the
-    // already-evaluated condition, each branching straight into its own
-    // case's body once that body's own position is known (see
-    // `recordCaseTarget`) - no jump table, since nothing about this
-    // compiler's `Instruction` stream supports one.
-    private void compileSwitch(SwitchStatement statement) {
-        import snakebite.nativelayout: TypeFacts;
-
-        const facts = TypeFacts.of(statement.condition.type);
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
-            throw rejection(_function, statement.loc, statementText(statement));
-
-        const conditionOffset = reserveTemp(facts);
-        evalInto(statement.condition, conditionOffset, facts.size);
-
-        if (statement.cases !is null) {
-            foreach (case_; *statement.cases) {
-                if (case_.exp.isIntegerExp is null)
-                    throw rejection(_function, case_.loc, statementText(case_));
-
-                const testOffset = reserveTemp(facts);
-                emit(&opCopy, testOffset, conditionOffset, facts.size);
-                const literalOffset = reserveTemp(facts);
-                emit(&opConstant, literalOffset,
-                    addConstant(case_.exp.toInteger), facts.size);
-                emit(&opEqual, testOffset, literalOffset, facts.size);
-
-                const branchIndex = _instructions.length;
-                emit(&opBranchTrue, testOffset, 0, 1);
-                jumpToCase(case_, branchIndex);
-            }
-        }
-
-        if (statement.sdefault is null)
-            throw rejection(_function, statement.loc, statementText(statement));
-
-        const defaultJumpIndex = _instructions.length;
-        emit(&opJump, 0, 0, 0);
-        jumpToDefault(statement, defaultJumpIndex);
-
-        _breakables ~= Breakable(true);
-        _switchStack ~= statement;
-        compileSwitchBody(statement._body);
-        const bodyFinished = _finished;
-        const hadBreak = _breakables[$ - 1].pendingBreakJumps.length > 0;
-
-        const afterSwitch = _instructions.length;
-        foreach (index; _breakables[$ - 1].pendingBreakJumps)
-            patchTarget(index, afterSwitch);
-
-        _switchStack = _switchStack[0 .. $ - 1];
-        _breakables = _breakables[0 .. $ - 1];
-
-        _finished = !hadBreak && bodyFinished;
-    }
-
     // A `switch`'s own body is, once every `ScopeStatement`/
     // `CompoundStatement` wrapper around it is looked through, a flat
     // sequence of `CaseStatement`/`DefaultStatement` (and, when dmd had
     // to synthesise a missing `default:`, a plain statement or two
-    // alongside them - see `compileSwitch`'s own doc) each holding only
-    // its own case's statements - fallthrough is simply the next one's
-    // instructions following on directly, with nothing to jump over.
+    // alongside them - see `visit(SwitchStatement)`'s own doc) each
+    // holding only its own case's statements - fallthrough is simply the
+    // next one's instructions following on directly, with nothing to jump
+    // over.
     // `parseStatement`'s own `ParseStatementFlags.scope_` wraps every
     // curly-braced body in a `ScopeStatement`, the same as a
     // `while`/`for`'s own body, and dmd's synthesised default wraps the
@@ -1270,64 +1302,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         _finished = false;
         compileStatement(body_);
-    }
-
-    private void compileCase(CaseStatement statement) {
-        recordCaseTarget(statement);
-        _finished = false;
-        compileStatement(statement.statement);
-    }
-
-    private void compileDefault(DefaultStatement statement) {
-        if (_switchStack.length == 0)
-            throw rejection(_function, statement.loc, statementText(statement));
-
-        recordDefaultTarget(_switchStack[$ - 1]);
-        _finished = false;
-        compileStatement(statement.statement);
-    }
-
-    private void compileGotoCase(GotoCaseStatement statement) {
-        if (statement.cs is null)
-            throw rejection(_function, statement.loc, statementText(statement));
-
-        const index = _instructions.length;
-        emit(&opJump, 0, 0, 0);
-        jumpToCase(statement.cs, index);
-        _finished = true;
-    }
-
-    private void compileGotoDefault(GotoDefaultStatement statement) {
-        if (statement.sw is null)
-            throw rejection(_function, statement.loc, statementText(statement));
-
-        const index = _instructions.length;
-        emit(&opJump, 0, 0, 0);
-        jumpToDefault(statement.sw, index);
-        _finished = true;
-    }
-
-    // dmd's own synthesised "no case matched" default (see
-    // `compileSwitch`'s own doc) wraps a call to `object.__switch_error`
-    // already resolved to a real `FuncDeclaration` - compiled the same
-    // way any other call to a function this compiler did not itself
-    // compile is, through the native FFI boundary in `compileCall`.
-    private void compileSwitchError(SwitchErrorStatement statement) {
-        if (statement.exp !is null)
-            compileEffect(statement.exp);
-
-        _finished = true;
-    }
-
-    private void compileBreak(BreakStatement statement) {
-        if (statement.ident !is null || _breakables.length == 0
-                || !_breakables[$ - 1].isSwitch)
-            throw rejection(_function, statement.loc, statementText(statement));
-
-        const index = _instructions.length;
-        emit(&opJump, 0, 0, 0);
-        _breakables[$ - 1].pendingBreakJumps ~= index;
-        _finished = true;
     }
 
     private void jumpToCase(CaseStatement case_, in size_t instructionIndex) {
