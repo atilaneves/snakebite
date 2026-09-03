@@ -39,6 +39,7 @@ public struct FrameStack {
     private size_t _limit;
     private size_t _reservation;
     private size_t _used;
+    private ubyte[][] _allocations;
 
     @disable this(this);
 
@@ -171,6 +172,23 @@ public struct FrameStack {
     // bytes: a `push`ed `Frame` gives its own back.
     public void release(in Mark mark) {
         popTo(mark);
+    }
+
+    // Allocates aligned storage whose lifetime is the lifetime of this
+    // frame stack. Used for closure objects, which can outlive the frame
+    // that created them while a delegate still refers to them.
+    public ubyte* allocate(in size_t size, in uint alignment) {
+        import core.memory: pageSize;
+
+        if (size == 0)
+            return null;
+        if (alignment == 0 || alignment > pageSize)
+            throw new Exception("frame stack cannot honor this alignment");
+
+        auto allocation = new ubyte[](size + alignment - 1);
+        _allocations ~= allocation;
+        const start = -cast(size_t) allocation.ptr & (alignment - 1);
+        return allocation.ptr + start;
     }
 
     private void popTo(in Mark mark) {

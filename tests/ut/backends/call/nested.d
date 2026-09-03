@@ -8,9 +8,7 @@ import ut.backends;
 // still on the interpreter's frame stack, so reading and then writing
 // `counter` through the static chain reaches the same storage a compiled
 // `bump` would.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("nested.staticChain.readsAndWritesOuterLocal." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -24,6 +22,11 @@ static foreach (backend; Matrix!(
 
                 assert(bump() == 42);
                 assert(counter == 42);
+
+                counter = 10;
+                assert(counter++ == 10);
+                assert(counter == 11);
+                assert((counter = 42) == 42);
             }
         });
     }
@@ -157,9 +160,7 @@ static foreach (backend; Matrix!(
 // which `callInner` calls, does read one, and it reaches it by walking
 // the same link back up from wherever it was called through - here, that
 // is `callInner`'s frame, not `main`'s directly.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("nested.staticChain.transitiveLinkThroughNonCapturingCaller." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

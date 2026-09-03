@@ -61,6 +61,16 @@ package struct CallSite {
 }
 
 
+// One value moved from a function's activation frame into its closure.
+// Both offsets and the width are resolved by the compiler before the VM
+// runs.
+package struct ClosureSlot {
+    package size_t sourceOffset;
+    package size_t closureOffset;
+    package size_t width;
+}
+
+
 // `opCall`'s own `pc.destination` operand, when the caller has nowhere for
 // the call's result to go - a `void` callee, or a non-`void` one run at
 // statement level for its effects alone. Not a byte offset any frame ever
@@ -159,6 +169,14 @@ package struct Function {
     package ubyte[] staticData;
     package size_t frameSize;
     package uint frameAlignment;
+    // `size_t.max` means this function's locals stay in its activation
+    // frame. Otherwise this private frame slot holds its closure pointer.
+    package size_t closureOffset = size_t.max;
+    // The hidden context slot is copied into the first word of the closure.
+    package size_t contextOffset = size_t.max;
+    package size_t closureSize;
+    package uint closureAlignment = 1;
+    package ClosureSlot[] closureSlots;
 }
 
 
@@ -185,6 +203,7 @@ package struct Vm {
             function_.frameSize,
             function_.frameAlignment,
         );
+        initializeClosure(&function_, frame.base, &_frames);
         auto pc = function_.instructions.ptr;
         dispatch(
             pc, frame.base, returnPlace, function_.constants,
@@ -192,6 +211,37 @@ package struct Vm {
             function_.exceptionHandlers, &_frames,
         );
     }
+}
+
+
+private void initializeClosure(
+    const(Function)* function_,
+    ubyte* frame,
+    FrameStack* frames,
+) {
+    import core.stdc.string: memcpy, memset;
+
+    if (function_.closureOffset == size_t.max)
+        return;
+
+    auto closure = frames.allocate(
+        function_.closureSize, function_.closureAlignment);
+    memset(closure, 0, function_.closureSize);
+
+    if (function_.contextOffset != size_t.max)
+        memcpy(
+            closure,
+            frame + function_.contextOffset,
+            size_t.sizeof,
+        );
+    foreach (slot; function_.closureSlots)
+        memcpy(
+            closure + slot.closureOffset,
+            frame + slot.sourceOffset,
+            slot.width,
+        );
+
+    *cast(void**)(frame + function_.closureOffset) = closure;
 }
 
 
@@ -467,6 +517,8 @@ package const(Instruction)* opCall(
             frame + arg.callerOffset,
             arg.width,
         );
+
+    initializeClosure(callee, calleeFrame.base, frames);
 
     // A scratch return buffer that outlives the callee's own frame, unlike
     // one carved from it, since `opCall` reads back out of it after
