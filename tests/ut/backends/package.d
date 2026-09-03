@@ -143,12 +143,12 @@ public void shouldBeStatusOf(
     in size_t line = __LINE__,
 ) {
     static if (is(BackendType == Native))
-        nativeMainStatus!code.shouldEqual(expected, file, line);
+        nativeMainStatus!code.should == expected;
     else {
         enum program_ = RegisterProgram!(module_, code).program;
         auto program = Program([parsedProgram(program_)]);
         asTestFailure(run(new BackendType(program), program), file, line)
-            .shouldEqual(expected, file, line);
+            .should == expected;
     }
 }
 
@@ -210,7 +210,7 @@ public template shouldBeRetOf(
                 mixin(code);
                 return mixin(call);
             }();
-            native.shouldEqual(expected, file, line);
+            native.should == expected;
         } else {
             enum entryPoint = "__snakebite_test_entry";
             enum programCode = Args.length == 0
@@ -250,7 +250,7 @@ public template shouldBeRetOf(
                 (new BackendType(program)).call(function_, &result, []),
                 file, line,
             );
-            result.shouldEqual(expected, file, line);
+            result.should == expected;
         }
     }
 }

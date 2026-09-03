@@ -240,11 +240,11 @@ unittest {
 
     int first;
     backend.call(function_, &first, []);
-    first.shouldEqual(1);
+    first.should == 1;
 
     int second;
     backend.call(function_, &second, []);
-    second.shouldEqual(2);
+    second.should == 2;
 }
 
 static foreach (backend; Matrix!(
