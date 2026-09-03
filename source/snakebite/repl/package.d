@@ -20,7 +20,7 @@ private:
 // not survive a cell boundary. Tracked in
 // https://github.com/atilaneves/snakebite/issues/154.
 public struct Repl {
-    private imported!"snakebite.repl.cli".ReplBackendName _backendName;
+    private imported!"snakebite.backends".BackendName _backendName;
     private string[] _importPaths;
     private string _accumulatedSource;
     private string _pendingInput;
@@ -29,7 +29,7 @@ public struct Repl {
     private imported!"snakebite.backends".Backend _backend;
 
     public this(
-        imported!"snakebite.repl.cli".ReplBackendName backendName,
+        imported!"snakebite.backends".BackendName backendName,
         in string[] importPaths = [],
     ) {
         import dmd.frontend: addImport;
@@ -94,7 +94,7 @@ public struct Repl {
     }
 
     private SubmitResult submitExpression(in string source) {
-        import snakebite.backends.backend: Program;
+        import snakebite.backends: makeBackend, Program;
         import snakebite.frontend.compiler: parseSnippet;
         import snakebite.frontend.dmd.functions: findFunction;
         import snakebite.repl.cell: replCellLineDirective;
@@ -145,7 +145,7 @@ public struct Repl {
     }
 
     private SubmitResult submitDeclaration(in string source) {
-        import snakebite.backends.backend: Program;
+        import snakebite.backends: makeBackend, Program;
         import snakebite.frontend.compiler: parseSnippet;
         import snakebite.repl.cell:
             isIncompleteDeclaration,
@@ -241,26 +241,6 @@ public struct SubmitResult {
 
     public Kind kind;
     public string text;
-}
-
-
-private imported!"snakebite.backends".Backend makeBackend(
-    imported!"snakebite.repl.cli".ReplBackendName name,
-    imported!"snakebite.backends.backend".Program program,
-) {
-    import snakebite.backends.bytecode: Bytecode;
-    import snakebite.backends.ctfe: Ctfe;
-    import snakebite.backends.interpreter: Interpreter;
-    import snakebite.repl.cli: ReplBackendName;
-
-    final switch (name) with (ReplBackendName) {
-        case interpreter:
-            return new Interpreter(program);
-        case bytecode:
-            return new Bytecode(program);
-        case ctfe:
-            return new Ctfe(program);
-    }
 }
 
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(git -C "$(dirname -- "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
 while IFS= read -r benchmark; do
     build/bench.sh "$benchmark" -w 0 -r 1

@@ -2,8 +2,11 @@ module ut.repl.session;
 
 
 import ut;
+import snakebite.backends: BackendName;
 import snakebite.repl: Repl, SubmitResult;
-import snakebite.repl.cli: ReplBackendName;
+
+
+alias ReplBackendName = BackendName;
 
 
 @("submit.evaluatesAnExpression")

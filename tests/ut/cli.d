@@ -2,6 +2,7 @@ module ut.cli;
 
 
 import snakebite.cli: parseArgs;
+import snakebite.backends: BackendName;
 import std.algorithm.searching: startsWith;
 import ut;
 
@@ -11,7 +12,7 @@ unittest {
 
     result.status.should == 0;
     result.options.projectDirectory.should == "examples/rt-simple";
-    result.options.backend.should == "interpreter";
+    result.options.backend.should == BackendName.interpreter;
 }
 
 
@@ -21,7 +22,7 @@ unittest {
     ]);
 
     result.status.should == 0;
-    result.options.backend.should == "bytecode";
+    result.options.backend.should == BackendName.bytecode;
     result.options.importPaths.should == ["imports"];
     result.options.stringImportPaths.should == ["strings"];
     result.options.projectDirectory.should == "project";

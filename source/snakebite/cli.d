@@ -5,7 +5,7 @@ private:
 
 
 public struct Options {
-    public string backend = "interpreter";
+    public imported!"snakebite.backends".BackendName backend;
     public string[] importPaths;
     public string[] stringImportPaths;
     public string projectDirectory;
@@ -21,16 +21,18 @@ public struct CliResult {
 
 
 public CliResult parseArgs(string[] args) {
+    import snakebite.backends: parseBackendName, validBackendNames;
     import std.getopt: getopt, GetOptException;
 
     CliResult result;
+    string backendName = "interpreter";
 
     typeof(getopt(args)) helpInfo;
     try {
         helpInfo = getopt(
             args,
             "b|backend", "Select the backend (default: interpreter).",
-                &result.options.backend,
+                &backendName,
             "I|import-path", "Add an import path.",
                 &result.options.importPaths,
             "J|string-import-path", "Add a string import path.",
@@ -50,37 +52,15 @@ public CliResult parseArgs(string[] args) {
         return CliResult(1, "expected one project directory\n" ~ helpText);
 
     result.options.projectDirectory = args[1];
-    if (!isBackendName(result.options.backend))
+    if (!parseBackendName(backendName, result.options.backend))
         return CliResult(
             1,
-            "unknown backend: " ~ result.options.backend ~ "\n" ~
+            "unknown backend: " ~ backendName ~ "\n" ~
                 "valid backends: " ~ validBackendNames,
         );
 
     return result;
 }
-
-
-private bool isBackendName(in string input) @safe pure nothrow {
-    import std.algorithm.searching: canFind;
-
-    return backendNames.canFind(input);
-}
-
-
-private enum backendName(BackendType) =
-    imported!"std.uni".toLower(BackendType.stringof);
-
-
-private enum backendNames = () {
-    string[] names;
-    static foreach (BackendType; imported!"snakebite.backends".Backends)
-        names ~= backendName!BackendType;
-    return names;
-}();
-
-
-private enum validBackendNames = imported!"std.array".join(backendNames, ", ");
 
 
 private enum helpText =
@@ -90,7 +70,8 @@ private enum helpText =
     "\n" ~
     "Options:\n" ~
     "  -b, --backend <name>      Select the backend (default: interpreter)\n" ~
-    "                            valid: " ~ validBackendNames ~ "\n" ~
+    "                            valid: "
+        ~ imported!"snakebite.backends".validBackendNames ~ "\n" ~
     "  -I, --import-path <path>  Add an import path for a bare directory\n" ~
     "  -J, --string-import-path <path>\n" ~
     "                            Add a string import path for a bare directory\n" ~

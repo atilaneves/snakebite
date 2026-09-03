@@ -32,7 +32,6 @@ struct Options {
 
 public int run(string[] args) {
     import bench.report: printTable;
-    import snakebite.frontend.compiler: Snippets, initialize;
     import std.stdio: stderr, writeln;
 
     Options options;
@@ -51,19 +50,17 @@ public int run(string[] args) {
         return 1;
     }
 
-    initialize(Snippets.no);
-
-    imported!"snakebite.project".Project project;
+    imported!"snakebite.execution".PreparationReport preparation;
     try
-        project = loadProject(options);
+        preparation = loadProject(options);
     catch (Exception exception) {
         stderr.writeln(exception.msg);
         return 1;
     }
 
-    const reports = benchmarkAll(project, options);
+    const reports = benchmarkAll(preparation.project, options);
 
-    writeln(headerLine(project, options));
+    writeln(headerLine(preparation, options));
     writeln;
     printTable(reports);
 
@@ -191,12 +188,13 @@ private string validate(in Options options) {
 }
 
 // The project under benchmark: its root modules as one `Program`, its
-// sources (the oracle rebuilds from them), and how long parse + semantic
-// analysis took.
-private imported!"snakebite.project".Project loadProject(in Options options) {
-    import snakebite.project: load = loadProject;
+// sources (the oracle rebuilds from them), and the complete frontend time.
+private imported!"snakebite.execution".PreparationReport loadProject(
+    in Options options,
+) {
+    import snakebite.execution: prepareProject;
 
-    return load(
+    return prepareProject(
         options.projectDirectory,
         options.importPaths,
         options.stringImportPaths,
@@ -212,8 +210,9 @@ private BackendReport[] benchmarkAll(
     BackendReport[] reports;
     static foreach (BackendType; imported!"snakebite.backends".Backends)
         if (selected(options, backendName!BackendType)) {
-            reports ~= benchmark!BackendType(
+            reports ~= benchmark(
                 backendName!BackendType,
+                imported!"snakebite.backends".backendIdentity!BackendType,
                 project.program,
                 options.warmup,
                 options.runs,
@@ -240,18 +239,16 @@ private bool selected(in Options options, in string name) {
     return wanted.length == 0 || wanted.canFind(name);
 }
 
-public BackendReport benchmark(BackendType)(
+public BackendReport benchmark(
     in string name,
+    in imported!"snakebite.backends".BackendName backendName_,
     imported!"snakebite.backends".Program program,
     in uint warmup,
     in uint runs,
 ) {
     import bench.capture: captureStdout;
     import bench.report: timingStatistics, updateTestCounts;
-    // `run` is a free function over `Backend.call`; UFCS keeps the call
-    // site reading like the interface method it used to be.
-    import snakebite.backends.backend: run;
-    import std.datetime.stopwatch: AutoStart, StopWatch;
+    import snakebite.execution: executeBackend, ExecutionReport;
     import std.stdio: write;
 
     BackendReport report;
@@ -266,16 +263,17 @@ public BackendReport benchmark(BackendType)(
     Duration[] times;
     Duration[] compileTimes;
     foreach (round; 0 .. warmup + runs) {
-        auto backend = new BackendType(program);
-        auto stopWatch = StopWatch(AutoStart.yes);
-        const result = captureStdout(() => backend.run(program));
-        const elapsed = stopWatch.peek;
-        const compilation = backend.compilationStatistics;
+        ExecutionReport execution;
+        const result = captureStdout(() {
+            execution = executeBackend(backendName_, program);
+            return execution.status;
+        });
+        const compilation = execution.compilation;
         report.hasCompile = report.hasCompile || compilation.hasCompiler;
         if (round >= warmup) {
             write(result.output);
             report.passed = report.passed && result.status == 0;
-            times ~= elapsed;
+            times ~= execution.runTime;
             if (compilation.hasCompiler)
                 compileTimes ~= compilation.duration;
             report.updateTestCounts(result.output);
@@ -305,15 +303,15 @@ private enum knownBackendNames = () {
 }();
 
 private string headerLine(
-    in imported!"snakebite.project".Project project,
+    in imported!"snakebite.execution".PreparationReport preparation,
     in Options options,
 ) {
     import bench.report: milliseconds;
     import std.conv: text;
 
     return text(
-        project.name,
-        "   frontend ", milliseconds(project.frontendDuration),
+        preparation.project.name,
+        "   frontend ", milliseconds(preparation.duration),
         "   ", hostCompiler,
         "   ", options.warmup, "+", options.runs, " runs",
     );

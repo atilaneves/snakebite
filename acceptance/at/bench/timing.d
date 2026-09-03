@@ -5,7 +5,7 @@ import bench.benchmark: benchmark;
 import bench.oracle: oracleReport;
 import bench.report: timingStatistics;
 import core.time: Duration;
-import snakebite.backends: Backends, Program;
+import snakebite.backends: backendIdentity, Backends, Program;
 import snakebite.frontend.compiler: parseSnippets;
 import snakebite.project: sourceSet;
 import std.conv: text;
@@ -34,14 +34,16 @@ unittest {
     auto program = Program([module_]);
 
     static foreach (BackendType; Backends) {{
-        const singleRun = benchmark!BackendType(
+        const singleRun = benchmark(
             BackendType.stringof,
+            backendIdentity!BackendType,
             program,
             0,
             1,
         );
-        const repeatedRuns = benchmark!BackendType(
+        const repeatedRuns = benchmark(
             BackendType.stringof,
+            backendIdentity!BackendType,
             program,
             2,
             10,

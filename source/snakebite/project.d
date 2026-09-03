@@ -17,7 +17,6 @@ public struct SourceSet {
 public struct Project {
     public string name;
     public string directory;
-    public imported!"core.time".Duration frontendDuration;
     public SourceSet sources;
     public imported!"snakebite.backends".Program program;
 }
@@ -32,7 +31,6 @@ public Project loadProject(
     import snakebite.frontend.compiler: FrontendFlags, parseRootModules;
     import std.algorithm.iteration: map;
     import std.array: array;
-    import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.path: absolutePath, baseName, buildNormalizedPath;
 
     Project project;
@@ -49,14 +47,12 @@ public Project loadProject(
         ~ project.sources.stringImportPaths.map!(path => "-J" ~ path).array,
     );
 
-    auto stopWatch = StopWatch(AutoStart.yes);
     auto parsed = parseRootModules(
         project.sources.files,
         project.sources.importPaths,
         flags,
         project.sources.sourceOverrides,
     );
-    project.frontendDuration = stopWatch.peek;
     project.program = Program(parsed);
 
     return project;

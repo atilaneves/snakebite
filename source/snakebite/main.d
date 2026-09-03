@@ -6,8 +6,7 @@ private:
 
 public int main(string[] args) {
     import snakebite.cli: parseArgs;
-    import snakebite.frontend.compiler: Snippets, initialize;
-    import snakebite.project: loadProject;
+    import snakebite.execution: executeBackend, prepareProject;
     import std.stdio: stderr, write;
 
     const parsed = parseArgs(args);
@@ -17,16 +16,17 @@ public int main(string[] args) {
     if (parsed.status != 0 || parsed.options.showHelp)
         return parsed.status;
 
-    initialize(Snippets.no);
-
     try {
-        auto project = loadProject(
+        auto preparation = prepareProject(
             parsed.options.projectDirectory,
             parsed.options.importPaths,
             parsed.options.stringImportPaths,
         );
-        const report = runBackend(parsed.options.backend, project.program);
-        printStatistics(project.frontendDuration, report);
+        const report = executeBackend(
+            parsed.options.backend,
+            preparation.project.program,
+        );
+        printStatistics(preparation.duration, report);
         return report.status;
     } catch (Exception exception) {
         stderr.write("snakebite: ", exception.msg, "\n");
@@ -35,42 +35,11 @@ public int main(string[] args) {
 }
 
 
-private struct RunReport {
-    int status;
-    imported!"core.time".Duration runTime;
-    imported!"snakebite.backends".CompilationStatistics compilation;
-}
-
-
-private RunReport runBackend(
-    in string name,
-    imported!"snakebite.backends".Program program,
-) {
-    import snakebite.backends.backend: run;
-    import std.datetime.stopwatch: AutoStart, StopWatch;
-
-    static foreach (BackendType; imported!"snakebite.backends".Backends) {
-        if (name == backendName!BackendType) {
-            auto backend = new BackendType(program);
-            auto stopWatch = StopWatch(AutoStart.yes);
-            const status = run(backend, program);
-            return RunReport(
-                status,
-                stopWatch.peek,
-                backend.compilationStatistics,
-            );
-        }
-    }
-
-    assert(false, "backend name was validated by parseArgs");
-}
-
-
 private void printStatistics(
     in imported!"core.time".Duration frontendDuration,
-    in RunReport report,
+    in imported!"snakebite.execution".ExecutionReport report,
 ) {
-    import std.stdio: writefln, writeln;
+    import std.stdio: writefln;
 
     writefln("frontend time: %8.1f ms", milliseconds(frontendDuration));
     writefln("run time:      %8.1f ms", milliseconds(report.runTime));
@@ -79,15 +48,9 @@ private void printStatistics(
             "compile time:  %8.1f ms",
             milliseconds(report.compilation.duration),
         );
-    else
-        writeln("compile time:  n/a");
 }
 
 
 private double milliseconds(in imported!"core.time".Duration duration) {
     return duration.total!"hnsecs" / 10_000.0;
 }
-
-
-private enum backendName(BackendType) =
-    imported!"std.uni".toLower(BackendType.stringof);

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(git -C "$(dirname -- "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
 # dmd's -cov drops one-only linkage on manifest-constant init symbols,
 # which duplicates across the vendored dmd frontend/backend and fails

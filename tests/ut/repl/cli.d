@@ -2,7 +2,8 @@ module ut.repl.cli;
 
 
 import ut;
-import snakebite.repl.cli: parseReplArgs, ReplBackendName;
+import snakebite.backends: BackendName;
+import snakebite.repl.cli: parseReplArgs;
 
 
 @("backend.defaultsToInterpreter")
@@ -10,7 +11,7 @@ unittest {
     const result = parseReplArgs(["sb"]);
 
     result.status.should == 0;
-    result.options.backend.should == ReplBackendName.interpreter;
+    result.options.backend.should == BackendName.interpreter;
 }
 
 
@@ -19,7 +20,7 @@ unittest {
     const result = parseReplArgs(["sb", "-b", "bytecode"]);
 
     result.status.should == 0;
-    result.options.backend.should == ReplBackendName.bytecode;
+    result.options.backend.should == BackendName.bytecode;
 }
 
 
@@ -28,7 +29,7 @@ unittest {
     const result = parseReplArgs(["sb", "--backend", "ctfe"]);
 
     result.status.should == 0;
-    result.options.backend.should == ReplBackendName.ctfe;
+    result.options.backend.should == BackendName.ctfe;
 }
 
 

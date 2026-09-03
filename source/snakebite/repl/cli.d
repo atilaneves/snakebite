@@ -4,16 +4,8 @@ module snakebite.repl.cli;
 private:
 
 
-// The backends the REPL can select with `-b`/`--backend`.
-public enum ReplBackendName {
-    interpreter,
-    bytecode,
-    ctfe,
-}
-
-
 public struct ReplOptions {
-    public ReplBackendName backend;
+    public imported!"snakebite.backends".BackendName backend;
     public bool hasCommand;
     public string command;
     public string[] importPaths;
@@ -33,6 +25,7 @@ public struct ReplCliResult {
 // Parse the REPL's command line. The default backend is `interpreter`:
 // it is the only backend with no compile step, so it starts fastest.
 public ReplCliResult parseReplArgs(string[] args) {
+    import snakebite.backends: parseBackendName, validBackendNames;
     import std.getopt: getopt, GetOptException;
 
     ReplCliResult result;
@@ -84,29 +77,7 @@ private enum helpText =
     "  -c <command>          Run one D expression and exit\n" ~
     "  -I <path>             Add an import path\n" ~
     "  -b, --backend <name>  Select the backend (default: interpreter)\n" ~
-    "                        valid: " ~ validBackendNames ~ "\n" ~
+    "                        valid: "
+        ~ imported!"snakebite.backends".validBackendNames ~ "\n" ~
     "  -l                    Stay interactive after loading file arguments\n" ~
     "  -h, --help            Show this help\n";
-
-
-private enum validBackendNames = "interpreter, bytecode, ctfe";
-
-
-private bool parseBackendName(
-    in string input,
-    out ReplBackendName backend,
-) @safe pure nothrow {
-    switch (input) with (ReplBackendName) {
-        case "interpreter":
-            backend = interpreter;
-            return true;
-        case "bytecode":
-            backend = bytecode;
-            return true;
-        case "ctfe":
-            backend = ctfe;
-            return true;
-        default:
-            return false;
-    }
-}

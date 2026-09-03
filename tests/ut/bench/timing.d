@@ -2,7 +2,7 @@ module ut.bench.timing;
 
 
 import bench.benchmark: benchmark;
-import snakebite.backends: Backends, Program;
+import snakebite.backends: backendIdentity, Backends, Program;
 import snakebite.frontend.compiler: parseSnippets;
 import std.conv: text;
 import ut;
@@ -19,8 +19,9 @@ unittest {
     auto program = Program([module_]);
 
     static foreach (BackendType; Backends) {{
-        const report = benchmark!BackendType(
+        const report = benchmark(
             BackendType.stringof,
+            backendIdentity!BackendType,
             program,
             0,
             1,
