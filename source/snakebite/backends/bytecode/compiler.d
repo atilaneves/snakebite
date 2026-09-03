@@ -3400,11 +3400,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: STC, Tvoid;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        if (expression.f is null)
+        auto callee = expression.f;
+        if (callee is null) {
+            auto calleeExp = expression.e1.isVarExp;
+            callee = calleeExp is null
+                ? null : calleeExp.var.isFuncDeclaration;
+        }
+        if (callee is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        auto callee = expression.f;
         if (callee.fbody is null || _bytecode.hasNativeSymbol(callee)) {
             auto type = typeFunctionOf(callee);
             const parameterCount = type.parameterList.length;
@@ -3430,6 +3435,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     expressionText(expression));
 
             Arg[] args;
+            if (callee.vthis !is null) {
+                auto dot = expression.e1.isDotVarExp;
+                if (dot is null)
+                    throw rejection(_function, expression.loc,
+                        expressionText(expression));
+
+                const thisOffset = compileAddress(dot.e1);
+                args ~= Arg(thisOffset, 0, size_t.sizeof);
+            }
             foreach (i; 0 .. parameterCount) {
                 auto parameter = type.parameterList[i];
                 if (parameter.storageClass & (STC.out_ | STC.lazy_))
@@ -3712,11 +3726,35 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (auto callExp = expression.isCallExp) {
             import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-            if (callExp.f !is null && typeFunctionOf(callExp.f).isRef) {
+            auto callee = callExp.f;
+            if (callee is null) {
+                auto calleeExp = callExp.e1.isVarExp;
+                callee = calleeExp is null
+                    ? null : calleeExp.var.isFuncDeclaration;
+            }
+            if (callee !is null && typeFunctionOf(callee).isRef) {
                 const offset = reserveTemp(pointerFacts);
                 compileCall(callExp, offset);
                 return offset;
             }
+
+            if (callee !is null) {
+                const facts = TypeFacts.of(callExp.type);
+                const offset = reserveTemp(facts);
+                compileCall(callExp, offset);
+                const address = reserveTemp(pointerFacts);
+                emit(&opFrameAddress, address, offset, size_t.sizeof);
+                return address;
+            }
+        }
+
+        if (expression.type.isTypeStruct !is null) {
+            const facts = TypeFacts.of(expression.type);
+            const offset = reserveTemp(facts);
+            evalInto(expression, offset, facts.size);
+            const address = reserveTemp(pointerFacts);
+            emit(&opFrameAddress, address, offset, size_t.sizeof);
+            return address;
         }
 
         // `*(cond ? &a : &b)`: dmd wraps a `ref` return's own conditional
