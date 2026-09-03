@@ -426,8 +426,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         GotoCaseStatement, GotoDefaultStatement, IfStatement, ImportStatement,
         LabelStatement, ReturnStatement, ScopeStatement, Statement,
         SwitchErrorStatement, SwitchStatement, ThrowStatement,
-        TryCatchStatement, TryFinallyStatement, UnrolledLoopStatement,
-        WhileStatement;
+        TryCatchStatement, TryFinallyStatement, UnrolledLoopStatement;
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
         Arg, AssertSite, CallSite, ClosureSlot, discardResult,
@@ -738,7 +737,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // Every `opJump`/`opBranchFalse`/`opBranchTrue` this compiler emitted
     // still names its target by a plain instruction index at this point -
-    // `compileIf`/`compileWhile`/`compileFor`/`compileContinue` patch
+    // `compileIf`/`compileFor`/`compileContinue` patch
     // that index in once they know it, but never resolve it to an
     // address themselves, since `_instructions` can still grow (and so
     // move, on a reallocation) at any point before `build` returns. Once
@@ -892,10 +891,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     override void visit(IfStatement statement) {
         compileIf(statement);
-    }
-
-    override void visit(WhileStatement statement) {
-        compileWhile(statement);
     }
 
     override void visit(ForStatement statement) {
@@ -1228,56 +1223,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return label;
     }
 
-    private void compileWhile(WhileStatement statement) {
-        auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
-        const loopStart = _instructions.length;
-        // A condition that can never be false - `while (1)` - is never
-        // guarded: the check itself would still compile correctly, but
-        // its false branch would then target the position right after
-        // this loop's own last instruction, which exists only when
-        // something follows the loop in source. Nothing does when a
-        // trivially-true loop is a function's own last statement (its
-        // body returns unconditionally instead), and a branch aimed
-        // one past the last instruction is exactly what `resolveBranches`
-        // exists to catch. A `break` inside such a loop still lands
-        // somewhere real: `build` appends a trailing `opReturnVoid` at
-        // that exact position whenever nothing else already made it
-        // reachable.
-        const guarded = !isTriviallyTrueCondition(statement.condition);
-        size_t branchIndex = size_t.max;
-        if (guarded) {
-            const conditionOffset = compileCondition(statement.condition);
-            const width = conditionWidth(statement.condition);
-            branchIndex = _instructions.length;
-            emit(&opBranchFalse, conditionOffset, 0, width);
-        }
-
-        _loops ~= LoopContext(label, loopStart);
-        _breakables ~= Breakable(label);
-        compileStatement(statement._body);
-        const breakable = _breakables[$ - 1];
-        _breakables = _breakables[0 .. $ - 1];
-        _loops = _loops[0 .. $ - 1];
-        _finished = false;
-
-        emit(&opJump, loopStart, 0, 0);
-        const afterLoop = _instructions.length;
-        if (branchIndex != size_t.max)
-            _instructions[branchIndex].source = afterLoop;
-
-        foreach (index; breakable.pendingBreakJumps)
-            patchTarget(index, afterLoop);
-
-        _finished = !guarded && breakable.pendingBreakJumps.length == 0;
-    }
-
     private void compileFor(ForStatement statement) {
         auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
         if (statement._init !is null)
             compileStatement(statement._init);
 
-        // See `compileWhile`'s own doc for why a trivially-true condition
-        // is never guarded.
+        // A condition that can never be false - `while (1)`, always
+        // rewritten by dmd to a `for` (see `visitWhile` in
+        // `statementsem.d`), or a bare `for (;;)` - is never guarded: the
+        // check itself would still compile correctly, but its false
+        // branch would then target the position right after this loop's
+        // own last instruction, which exists only when something follows
+        // the loop in source. Nothing does when a trivially-true loop is
+        // a function's own last statement (its body returns
+        // unconditionally instead), and a branch aimed one past the last
+        // instruction is exactly what `resolveBranches` exists to catch.
+        // A `break` inside such a loop still lands somewhere real:
+        // `build` appends a trailing `opReturnVoid` at that exact
+        // position whenever nothing else already made it reachable.
         const guarded = statement.condition !is null
             && !isTriviallyTrueCondition(statement.condition);
         const conditionIndex = _instructions.length;
