@@ -1,4 +1,5 @@
 name "rt-cerealed-1"
+description "as many real cerealed tests as we can do right now"
 targetType "library"
 targetPath "bin"
 dflags "-checkaction=context"

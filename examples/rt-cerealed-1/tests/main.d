@@ -4,12 +4,16 @@ import std.array: join;
 
 static import cerealed;
 static import unit_threaded;
+static import tests.multidimensional_array;
+static import tests.compile_time;
 static import tests.property;
 static import tests.utils;
 
 alias allModules = AliasSeq!(
     cerealed,
     unit_threaded,
+    tests.multidimensional_array,
+    tests.compile_time,
     tests.property,
     tests.utils,
 );

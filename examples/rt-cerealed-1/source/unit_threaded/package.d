@@ -3,6 +3,13 @@ module unit_threaded;
 private:
 
 
+public enum SingleThreaded;
+
+
+public void writelnUt(T...)(auto ref T) {
+}
+
+
 public void check(alias F)() @safe {
     import std.traits: Parameters, ReturnType;
 
@@ -16,8 +23,77 @@ public void check(alias F)() @safe {
 }
 
 
-public void shouldEqual(T, U)(in T actual, in U expected) @safe {
-    assert(actual == expected);
+public void shouldEqual(T, U)(auto ref T actual, auto ref U expected) @safe {
+    static if (is(T == class) || is(U == class)) {
+        bool equal() @trusted {
+            return actual == expected;
+        }
+
+        assert(equal);
+    } else {
+        assert(cast(const) actual == cast(const) expected);
+    }
+}
+
+
+public auto should(T)(lazy T expression) {
+    struct Should {
+        bool opEquals(U)(auto ref U expected) {
+            expression.shouldEqual(expected);
+            return true;
+        }
+    }
+
+    return Should();
+}
+
+
+public void shouldNotEqual(T, U)(auto ref T actual, auto ref U expected) @safe {
+    assert(actual != expected);
+}
+
+
+public void shouldBeTrue(T)(lazy T condition) @safe {
+    assert(cast(bool) condition);
+}
+
+
+public void shouldThrow(E : Throwable = Exception, T)(lazy T expression) {
+    bool threw;
+
+    try {
+        expression;
+    } catch (E) {
+        threw = true;
+    }
+
+    assert(threw);
+}
+
+
+public void shouldNotThrow(E : Throwable = Exception, T)(lazy T expression) {
+    try {
+        expression;
+    } catch (E) {
+        assert(false);
+    }
+}
+
+
+public void shouldThrowWithMessage(E : Throwable = Exception, T)(
+    lazy T expression,
+    in string expected,
+) {
+    E thrown;
+
+    try {
+        expression;
+    } catch (E exception) {
+        thrown = exception;
+    }
+
+    assert(thrown !is null);
+    assert(thrown.msg == expected);
 }
 
 
