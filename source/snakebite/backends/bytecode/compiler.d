@@ -3897,7 +3897,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // that class (`snakebite.backends.loweringvisitor`) for why `NewExp` is
     // excluded there.
     override void visit(NewExp expression) {
-        import dmd.astenums: Tclass;
+        import dmd.astenums: Tclass, Tpointer;
 
         // `expression.lowering` for a class is the allocation alone
         // (`core.lifetime._d_newclassT!T()`, no constructor arguments -
@@ -3908,6 +3908,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // back out of a vtable slot.
         if (expression.type.ty == Tclass) {
             compileNewClass(expression);
+            return;
+        }
+
+        // `new S(args)`, whether `S` has its own constructor
+        // (`expression.member`, the same split as a class's `new`) or is
+        // plain-old data initialised positionally from `args` (dmd sets no
+        // `member` then - the same shape `visit(StructLiteralExp)` fills a
+        // value destination from, just through a pointer here since `new`
+        // allocates first). Skipping either would leave a field at its
+        // `.init` value, which druntime's own associative-array
+        // implementation relies on not happening: its `Impl!(K, V)`
+        // allocates its bucket array in exactly such a constructor, and
+        // its `Entry!(K, V)` copies the key positionally the same way.
+        if (expression.type.ty == Tpointer
+                && expression.newtype.isTypeStruct !is null) {
+            compileNewStruct(expression);
             return;
         }
 
@@ -3955,6 +3971,68 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 expression.member, expression.arguments, expression.loc,
                 expressionText(expression), true, () => objectOffset,
                 discardResult);
+    }
+
+    // `new S(args)`: the struct counterpart of `compileNewClass` - a
+    // struct's `this` is never virtual either, so the same "evaluate the
+    // allocation lowering, then run the constructor directly on it" shape
+    // applies when `S` declares one. `expression.lowering` here is
+    // `_d_newitemT!S()`.
+    //
+    // A struct with no constructor still accepts `args` positionally, one
+    // per field in declaration order - dmd leaves `expression.member` null
+    // then, the same as `StructLiteralExp` does for `Point(3, 4)`, so this
+    // writes each argument through the allocation's own address at that
+    // field's offset, the pointer version of what `visit(StructLiteralExp)`
+    // already does directly into a value destination.
+    private void compileNewStruct(NewExp expression) {
+        if (expression.placement !is null || expression.thisexp !is null
+                || expression.onstack || expression.lowering is null)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        auto structType = expression.newtype.isTypeStruct;
+        if (structType is null)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const objectOffset = _destination == discardResult
+            ? reserveTemp(pointerFacts) : _destination;
+
+        evalInto(expression.lowering, objectOffset, pointerFacts.size);
+
+        if (expression.member !is null) {
+            compileResolvedCall(
+                expression.member, expression.arguments, expression.loc,
+                expressionText(expression), true, () => objectOffset,
+                discardResult);
+            return;
+        }
+
+        if (expression.arguments is null)
+            return;
+
+        if (expression.arguments.length > structType.sym.fields.length)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        foreach (i, argument; *expression.arguments) {
+            auto field = structType.sym.fields[i];
+            const facts = TypeFacts.of(field.type);
+            if (!isSupportedFacts(facts, field.type))
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const valueOffset = reserveTemp(facts);
+            evalInto(argument, valueOffset, facts.size);
+
+            const fieldAddressOffset = reserveTemp(pointerFacts);
+            emit(&opConstant, fieldAddressOffset,
+                addConstant(cast(long) field.offset), size_t.sizeof);
+            emit(&opAdd, fieldAddressOffset, objectOffset, size_t.sizeof);
+            emit(&opStoreIndirect, fieldAddressOffset, valueOffset,
+                facts.size);
+        }
     }
 
     // `null` is all-zero bytes whatever it means - a pointer, a class
