@@ -334,17 +334,10 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// The bytecode compiler's own type switch recognises only `float` and
-// `double` as floating types - `real` has no case there at all, so a
-// program using it cannot be compiled for that backend.
-private alias RealOmit = Omit!(Bytecode, Because.unconfirmed,
-    "the bytecode compiler recognises only `float`/`double` as floating "
-        ~ "types, not `real`");
-
 // `real` widening to `double`: exact, since `double` is narrower than
 // `real` but the operand here fits in both. The operand comes from a
 // call because dmd folds a cast of a literal during semantic analysis.
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("cast.realToDouble." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -367,7 +360,7 @@ static foreach (backend; Matrix!(RealOmit)) {
 // `real` narrowing to `float`, and back again to `real`. `1.5` is exact
 // at every one of the three widths, so the round trip does not depend on
 // rounding.
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("cast.realToFloat." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -387,7 +380,7 @@ static foreach (backend; Matrix!(RealOmit)) {
     }
 }
 
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("cast.doubleToReal." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -407,7 +400,7 @@ static foreach (backend; Matrix!(RealOmit)) {
     }
 }
 
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("cast.floatToReal." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

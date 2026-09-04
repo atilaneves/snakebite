@@ -1208,20 +1208,13 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// The bytecode compiler's own type switch recognises only `float` and
-// `double` as floating types - `real` has no case there at all, so a
-// program using it cannot be compiled for that backend.
-private alias RealOmit = Omit!(Bytecode, Because.unconfirmed,
-    "the bytecode compiler recognises only `float`/`double` as floating "
-        ~ "types, not `real`");
-
 // `real` locals and literals: on x86-64 the 80-bit x87 format, with its
 // own native size and alignment distinct from `float` and `double`. A
 // backend that reduced every floating width to `double` would still
 // pass the narrower tests above by accident but lose precision here -
 // `real.epsilon` is far smaller than `double.epsilon`, so adding it to
 // one does not change the value while adding it to the other would.
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.real.localsAndLiterals." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1247,7 +1240,7 @@ static foreach (backend; Matrix!(RealOmit)) {
 // dividend's sign). Every operand comes from a call so dmd cannot fold
 // the arithmetic away, and every intermediate value is exact in binary,
 // so the expectation does not depend on rounding.
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.real.add." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1271,7 +1264,7 @@ static foreach (backend; Matrix!(RealOmit)) {
     }
 }
 
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.real.subtract." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1295,7 +1288,7 @@ static foreach (backend; Matrix!(RealOmit)) {
     }
 }
 
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.real.multiply." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1319,7 +1312,7 @@ static foreach (backend; Matrix!(RealOmit)) {
     }
 }
 
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.real.divide." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1343,7 +1336,7 @@ static foreach (backend; Matrix!(RealOmit)) {
     }
 }
 
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.real.modulo." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1370,7 +1363,7 @@ static foreach (backend; Matrix!(RealOmit)) {
 // `%`'s sign follows the dividend, not the divisor: `-6.0L % 4.0L` is
 // `-2.0L`, distinguishing this from a remainder that always answers
 // non-negative.
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.real.modulo.negativeDividend." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1394,7 +1387,7 @@ static foreach (backend; Matrix!(RealOmit)) {
     }
 }
 
-static foreach (backend; Matrix!(RealOmit)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.real.negate." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
