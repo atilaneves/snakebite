@@ -25,11 +25,12 @@ static foreach (backend; Matrix!()) {
 }
 
 
-@("tryFinally.scopeExitRuns.Interpreter")
-@Tags("Interpreter")
-unittest {
+static foreach (backend; Matrix!()) {
+    @("tryFinally.scopeExitRuns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
     3.shouldBeRetOf!(
-        Interpreter,
+        backend,
         q{
             int result() {
                 int value;
@@ -42,14 +43,20 @@ unittest {
         },
         "result",
     );
+    }
 }
 
 
-@("tryFinally.scopeExitRunsDuringReturnAndThrow.Interpreter")
-@Tags("Interpreter")
-unittest {
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot mutate a module-level variable at run time"),
+)) {
+    @("tryFinally.scopeExitRunsDuringReturnAndThrow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
     23.shouldBeRetOf!(
-        Interpreter,
+        backend,
         q{
             int value;
 
@@ -74,14 +81,16 @@ unittest {
         },
         "result",
     );
+    }
 }
 
 
-@("tryFinally.scopeExitRunsDuringContinue.Interpreter")
-@Tags("Interpreter")
-unittest {
+static foreach (backend; Matrix!(Omit!(Bytecode, Because.unconfirmed))) {
+    @("tryFinally.scopeExitRunsDuringContinue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
     3.shouldBeRetOf!(
-        Interpreter,
+        backend,
         q{
             int result() {
                 int exits;
@@ -94,14 +103,16 @@ unittest {
         },
         "result",
     );
+    }
 }
 
 
-@("loop.doWhileBreaksAndContinues.Interpreter")
-@Tags("Interpreter")
-unittest {
+static foreach (backend; Matrix!()) {
+    @("loop.doWhileBreaksAndContinues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
     8.shouldBeRetOf!(
-        Interpreter,
+        backend,
         q{
             int result() {
                 int i;
@@ -124,14 +135,16 @@ unittest {
         },
         "result",
     );
+    }
 }
 
 
-@("loop.labelledBreakExitsOuterLoop.Interpreter")
-@Tags("Interpreter")
-unittest {
+static foreach (backend; Matrix!()) {
+    @("loop.labelledBreakExitsOuterLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
     2.shouldBeRetOf!(
-        Interpreter,
+        backend,
         q{
             int result() {
                 int count;
@@ -150,14 +163,16 @@ unittest {
         },
         "result",
     );
+    }
 }
 
 
-@("loop.labelledContinueRepeatsOuterLoop.Interpreter")
-@Tags("Interpreter")
-unittest {
+static foreach (backend; Matrix!()) {
+    @("loop.labelledContinueRepeatsOuterLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
     6.shouldBeRetOf!(
-        Interpreter,
+        backend,
         q{
             int result() {
                 int count;
@@ -177,14 +192,16 @@ unittest {
         },
         "result",
     );
+    }
 }
 
 
-@("unrolledLoop.staticForeachRunsInOrder.Interpreter")
-@Tags("Interpreter")
-unittest {
+static foreach (backend; Matrix!()) {
+    @("unrolledLoop.staticForeachRunsInOrder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
     123.shouldBeRetOf!(
-        Interpreter,
+        backend,
         q{
             int result() {
                 int value;
@@ -195,6 +212,7 @@ unittest {
         },
         "result",
     );
+    }
 }
 
 

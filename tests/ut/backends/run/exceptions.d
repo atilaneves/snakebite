@@ -9,36 +9,41 @@ module ut.backends.run.exceptions;
 import ut.backends;
 
 
-@("catchMatchesGuestClassByBaseType.Interpreter")
-@Tags(Interpreter.stringof)
-unittest {
-    0.shouldBeStatusOf!(Interpreter, q{
-        class Expected : Exception {
-            this() {
-                super(null);
-            }
-        }
-
-        class Other : Exception {
-            this() {
-                super(null);
-            }
-        }
-
-        void main() {
-            int value = 1;
-
-            try {
-                throw new Expected;
-            } catch (Other) {
-                value = 100;
-            } catch (Exception) {
-                value = 9;
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("catchMatchesGuestClassByBaseType." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Expected : Exception {
+                this() {
+                    super(null);
+                }
             }
 
-            assert(value == 9);
-        }
-    });
+            class Other : Exception {
+                this() {
+                    super(null);
+                }
+            }
+
+            void main() {
+                int value = 1;
+
+                try {
+                    throw new Expected;
+                } catch (Other) {
+                    value = 100;
+                } catch (Exception) {
+                    value = 9;
+                }
+
+                assert(value == 9);
+            }
+        });
+    }
 }
 
 

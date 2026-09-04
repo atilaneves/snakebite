@@ -11,11 +11,17 @@ import ut.backends;
 // alone.
 
 
-@("assign.resultIsLvalue.Interpreter")
-@Tags("Interpreter")
-unittest {
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.inexpressible,
+        "bytecode cannot compile an assignment to a ref-returning call"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the call counters after evaluating the assignment"),
+)) {
+    @("assign.resultIsLvalue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
     117.shouldBeRetOf!(
-        Interpreter,
+        backend,
         q{
             int calls;
             int targetCalls;
@@ -39,6 +45,7 @@ unittest {
         },
         "result",
     );
+    }
 }
 
 

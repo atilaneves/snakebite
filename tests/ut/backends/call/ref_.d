@@ -192,11 +192,13 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 
 // Taking the address of a ref-returning call must evaluate the call once and
 // keep the returned alias, not a copy of its value.
-@("ref.return.addressEvaluatedOnce.Interpreter")
-@Tags("Interpreter")
-unittest {
+static foreach (backend; Matrix!(BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed))) {
+    @("ref.return.addressEvaluatedOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
     17.shouldBeRetOf!(
-        Interpreter,
+        backend,
         q{
             int calls;
             int value;
@@ -214,6 +216,7 @@ unittest {
         },
         "takeAddress",
     );
+    }
 }
 
 // `static` storage lives outside any frame, so a `ref` parameter bound to

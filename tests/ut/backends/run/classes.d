@@ -243,25 +243,27 @@ static foreach (backend; Matrix!(
     }
 }
 
-@("classCastUsesGuestClassHierarchy.Interpreter")
-@Tags(Interpreter.stringof)
-unittest {
-    0.shouldBeStatusOf!(Interpreter, q{
-        class Base {
-        }
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.unconfirmed))) {
+    @("classCastUsesGuestClassHierarchy." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+            }
 
-        class Derived : Base {
-        }
+            class Derived : Base {
+            }
 
-        class Other {
-        }
+            class Other {
+            }
 
-        void main() {
-            Base base = new Derived;
-            assert(cast(Derived) base !is null);
-            assert(cast(Other) base is null);
-        }
-    });
+            void main() {
+                Base base = new Derived;
+                assert(cast(Derived) base !is null);
+                assert(cast(Other) base is null);
+            }
+        });
+    }
 }
 
 static foreach (backend; Matrix!(
