@@ -346,3 +346,26 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// `a[] += b[]` for two dynamic arrays of the same length adds `b`'s
+// elements into `a`'s, in place, at a length known only at run time.
+// druntime lowers this to `core.internal.array.operations`'s `arrayOp`
+// mixin, which also has a `core.simd` branch for long arrays - a
+// backend must still compile that branch even for a two-element array
+// short enough to never run it.
+static foreach (backend; Matrix!(
+)) {
+    @("arrayOpAssignAddsElementwise." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] a = [1, 2];
+                int[] b = [10, 20];
+                a[] += b[];
+                assert(a[0] == 11);
+                assert(a[1] == 22);
+            }
+        });
+    }
+}
