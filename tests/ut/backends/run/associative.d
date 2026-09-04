@@ -37,6 +37,34 @@ static foreach (backend; Matrix!(
     }
 }
 
+// Duplicating an associative array preserves its type, including when a
+// struct is the key type. An empty table isolates the cast from AA lookup.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+)) {
+    @("assocArrayDupCopiesStructKeyContents." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Pair {
+                string name;
+                int number;
+            }
+
+            int[Pair] duplicate(int[Pair] source) {
+                return source.dup;
+            }
+
+            void main() {
+                int[Pair] source;
+
+                auto copy = duplicate(source);
+                assert(copy.length == 0);
+            }
+        });
+    }
+}
+
 // A struct key hashes and compares by its contents, so two separately
 // built strings with the same characters are the same key.
 static foreach (backend; Matrix!(

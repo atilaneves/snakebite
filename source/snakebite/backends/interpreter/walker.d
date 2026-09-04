@@ -3140,6 +3140,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
+        // An associative-array value is a single native pointer, so a cast
+        // between equivalent AA types copies that pointer. A null AA cast
+        // must clear the complete destination slot.
+        if (_type.ty == Taarray) {
+            if (sourceType.ty == Taarray) {
+                evaluate(
+                    expression.e1, sourceType, factsOf(sourceType), _place);
+                return;
+            }
+
+            if (expression.e1.isNullExp) {
+                storeValue(_type, _facts, expression.e1, _place);
+                return;
+            }
+        }
+
         if (sourceType.ty == Tclass && _type.ty == Tclass) {
             auto value = classReferenceOf(expression.e1);
             if (value is null) {
