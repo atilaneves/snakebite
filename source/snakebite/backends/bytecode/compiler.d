@@ -3886,11 +3886,25 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg[] args;
         foreach (i; 0 .. parameterCount) {
             auto parameter = functionType.parameterList[i];
-            if (parameter.storageClass & (STC.out_ | STC.lazy_ | STC.ref_))
+            if (parameter.storageClass & (STC.out_ | STC.lazy_))
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
             auto slot = calleeLayout.parameters[i];
+
+            // `slot.isRef` comes from the same `packParameter` a resolved
+            // callee's own `FrameLayout.of` packs its `ref` parameters
+            // with (see `FrameLayout.ofParameters`), so the address
+            // `compileAddress` computes here lands in the same slot shape
+            // `compileCall`'s guest branch already builds for a direct
+            // call.
+            if (slot.isRef) {
+                const argumentOffset =
+                    compileAddress((*expression.arguments)[i]);
+                args ~= Arg(argumentOffset, slot.offset, size_t.sizeof);
+                continue;
+            }
+
             if (!isSupportedFacts(slot.facts, parameter.type))
                 throw rejection(_function, expression.loc,
                     expressionText(expression));

@@ -611,6 +611,30 @@ unittest {
                 "supported (see issue #9)");
 }
 
+// `FrameLayout.ofParameters` packs a `ref` parameter the same way
+// `FrameLayout.of` does (both go through `packParameter`), so a call
+// through a function pointer can hand a `ref` parameter its argument's
+// address the same way a direct call does.
+static foreach (backend; Matrix!()) {
+    @("pointers.functionPointer.refParameter.call." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void increment(ref int x) {
+                x = x + 1;
+            }
+
+            int main() {
+                void function(ref int) fp = &increment;
+                int v = 3;
+                fp(v);
+                assert(v == 4);
+                return 0;
+            }
+        });
+    }
+}
+
 // A lambda written without `function` or `delegate` and bound to `auto`
 // keeps dmd's `TOK.reserved`: semantic proved it reads no enclosing local,
 // so its type is a plain function pointer, but the context slot dmd
