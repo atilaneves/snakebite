@@ -105,6 +105,55 @@ private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
     return true;
 }
 
+// Whether this compiler can construct `type` as a struct literal (`T(a,
+// b)`, dmd's node for direct construction with no user-defined
+// constructor) by writing straight into each field's own slot: as
+// `isPlainOldStruct`, but without ruling out a postblit, copy
+// constructor, destructor or user-defined assignment. Direct construction
+// invokes none of those - dmd only ever calls a postblit to run an
+// elaborate *copy*, never to build a fresh value from its own field
+// expressions - so this asks only whether every field's own type can be
+// laid out and evaluated directly, recursing into a nested struct field
+// through this same relaxed rule rather than `isPlainOldStruct`'s
+// stricter one, so `LifetimeTracker(&postblits, &dtors)` and its holder
+// `TrackerHolder(1, tracker)` both qualify even though neither is a
+// plain-old struct on its own.
+private bool isSupportedStructLiteral(imported!"dmd.mtype".Type type) {
+    import dmd.astenums: STC, Tarray, Tpointer;
+    import snakebite.nativelayout: isIntegralSize, TypeFacts;
+
+    auto structType = type.isTypeStruct;
+    if (structType is null)
+        return false;
+
+    auto declaration = structType.sym;
+    if (!declaration.zeroInit
+            || declaration.isUnionDeclaration !is null
+            || declaration.enclosing !is null)
+        return false;
+
+    foreach (field; declaration.fields) {
+        if (field.isBitFieldDeclaration !is null
+                || (field.storage_class & STC.ref_))
+            return false;
+
+        if (field.type.isTypeStruct !is null) {
+            if (!isSupportedStructLiteral(field.type))
+                return false;
+            continue;
+        }
+
+        if (field.type.ty == Tarray || field.type.ty == Tpointer)
+            continue;
+
+        const facts = TypeFacts.of(field.type);
+        if (!facts.isIntegral || !isIntegralSize(facts.size))
+            return false;
+    }
+
+    return true;
+}
+
 // Whether `type` is `float`/`double`/`real` - `TypeFacts` has no notion of
 // its own for this, unlike `isIntegral`/`isDynamicArray`, which drive
 // checks all over this compiler.
@@ -2773,6 +2822,46 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
+        // `*postblits += 1`, a destructor or postblit's own field-pointer
+        // dereferenced and updated in place: the pointee has no frame
+        // slot of its own either, read, modified through `handler` and
+        // stored back through its address the same way `res[pos] += value`
+        // below is - `compileAddress`'s own `PtrExp` dispatch already
+        // resolves the pointer value to dereference.
+        if (auto ptrTarget = target.isPtrExp) {
+            const storageFacts = TypeFacts.of(ptrTarget.type);
+            if (!storageFacts.isIntegral || !isIntegralSize(storageFacts.size))
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const operationFacts = promotion is null
+                ? storageFacts : TypeFacts.of(promotion.type);
+
+            auto handler = compoundHandler(
+                expression, operationFacts.isUnsigned);
+            if (handler is null)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const rightOffset = reserveTemp(operationFacts);
+            evalInto(expression.e2, rightOffset, operationFacts.size);
+
+            const addressOffset = compileAddress(ptrTarget);
+            const valueOffset = reserveTemp(operationFacts);
+            if (promotion is null)
+                emit(&opLoadIndirect, valueOffset, addressOffset,
+                    storageFacts.size);
+            else
+                evalInto(promotion, valueOffset, operationFacts.size);
+            emit(handler, valueOffset, rightOffset, operationFacts.size);
+            emit(&opStoreIndirect, addressOffset, valueOffset,
+                storageFacts.size);
+
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, storageFacts.size);
+            return;
+        }
+
         // `res[pos] += value`: an indexed array element has no frame slot
         // of its own, the same as a field, so it is read, modified
         // through `handler` and stored back through its own address -
@@ -3508,7 +3597,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(StructLiteralExp expression) {
         requireDestination(expression);
 
-        if (!isPlainOldStruct(expression.type))
+        if (!isSupportedStructLiteral(expression.type))
             return visit(cast(Expression) expression);
 
         emit(&opZero, _destination, 0, _width);
