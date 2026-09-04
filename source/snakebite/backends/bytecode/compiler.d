@@ -3828,6 +3828,29 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         auto constructor = expression.member;
+        auto calleeType = typeFunctionOf(constructor);
+        const parameterCount = calleeType.parameterList.length;
+        const argumentCount =
+            expression.arguments is null ? 0 : expression.arguments.length;
+        if (argumentCount != parameterCount)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        // A constructor druntime already supplies as native code
+        // (`Exception.this`, reached constructing a guest exception
+        // class's base) is called through FFI, the same as any other
+        // native callee `compileCall` dispatches to on
+        // `hasNativeSymbol` - never compiled as a guest body. Compiling
+        // its body would walk druntime's own `object.d` a second time
+        // (the first is this compiler's own lookups of
+        // `Throwable`/`Exception`) and reach constructs this compiler
+        // does not support there.
+        if (constructor.fbody is null || _bytecode.hasNativeSymbol(constructor)) {
+            compileNativeConstructorCall(
+                expression, constructor, calleeType, objectOffset);
+            return;
+        }
+
         auto calleeFunction = _bytecode.compileFunction(constructor);
         auto calleeLayout = FrameLayout.of(constructor);
 
@@ -3840,14 +3863,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             objectOffset, calleeLayout.hiddenThis.parameter.offset,
             size_t.sizeof,
         );
-
-        auto calleeType = typeFunctionOf(constructor);
-        const parameterCount = calleeType.parameterList.length;
-        const argumentCount =
-            expression.arguments is null ? 0 : expression.arguments.length;
-        if (argumentCount != parameterCount)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
 
         foreach (i; 0 .. parameterCount) {
             auto parameter = calleeLayout.parameters[i];
@@ -3873,6 +3888,54 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const siteIndex = _callSites.length;
         _callSites ~= CallSite(calleeFunction, args, 0);
+        emit(&opCall, discardResult, siteIndex, 0);
+    }
+
+    // `compileConstructorCall`'s counterpart to `compileCall`'s own
+    // native-callee branch: builds the same FFI call plan for a
+    // constructor call, which carries no `CallExp` to read
+    // `e1`/`arguments`/`f` from directly - `objectOffset` already holds
+    // the receiver's own value (a class reference), the same convention
+    // `compileConstructorCall`'s guest-callee branch above uses for its
+    // own hidden-`this` argument.
+    private void compileNativeConstructorCall(
+        NewExp expression,
+        FuncDeclaration constructor,
+        imported!"dmd.mtype".TypeFunction calleeType,
+        in size_t objectOffset,
+    ) {
+        import dmd.astenums: STC;
+
+        Arg[] args;
+        args ~= Arg(objectOffset, 0, size_t.sizeof);
+
+        const parameterCount = calleeType.parameterList.length;
+        foreach (i; 0 .. parameterCount) {
+            auto parameter = calleeType.parameterList[i];
+            if (parameter.storageClass & STC.lazy_)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            if (parameter.storageClass & (STC.ref_ | STC.out_)) {
+                const argumentOffset =
+                    compileAddress((*expression.arguments)[i]);
+                args ~= Arg(argumentOffset, 0, size_t.sizeof);
+                continue;
+            }
+
+            const facts = TypeFacts.of(parameter.type);
+            if (!isSupportedFacts(facts, parameter.type))
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const argumentOffset = reserveTemp(facts);
+            evalInto((*expression.arguments)[i], argumentOffset, facts.size);
+            args ~= Arg(argumentOffset, 0, facts.size);
+        }
+
+        auto plan = &_bytecode._plans.of(constructor);
+        const siteIndex = _callSites.length;
+        _callSites ~= CallSite(null, args, 0, cast(const(void)*) plan);
         emit(&opCall, discardResult, siteIndex, 0);
     }
 
