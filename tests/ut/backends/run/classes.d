@@ -259,6 +259,36 @@ unittest {
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.inexpressible,
+        "bytecode cannot compile class parameters"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot dereference classinfo"),
+)) {
+    @("classValueClassInfo." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Dummy {
+            }
+
+            bool info(ref Dummy value) {
+                bool[string] names;
+                assert((value.classinfo.name in names) is null);
+                return true;
+            }
+
+            bool forward(Dummy value) {
+                return info(value);
+            }
+
+            void main() {
+                assert(forward(new Dummy));
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the mutable static destruction counter"),

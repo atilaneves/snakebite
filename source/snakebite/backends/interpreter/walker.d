@@ -3445,6 +3445,33 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // where `*p = ...` writes.
     override void visit(PtrExp expression) {
         import core.stdc.string: memcpy;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+
+        if (_type.ty == Tpointer && expression.e1.type.ty == Tclass) {
+            auto object = classReferenceOf(expression.e1);
+            if (object is null) {
+                storeIntegral(_place, 0, _facts.size);
+                return;
+            }
+
+            auto declaration = object in _classes;
+            if (declaration !is null) {
+                auto info = classRuntimeInfo(*declaration);
+                storeIntegral(
+                    _place, cast(size_t) cast(void*) info, _facts.size);
+                return;
+            }
+
+            auto vtable = cast(void*) loadIntegral(
+                object, size_t.sizeof, false);
+            storeIntegral(
+                _place,
+                vtable is null
+                    ? 0 : loadIntegral(vtable, size_t.sizeof, false),
+                _facts.size,
+            );
+            return;
+        }
 
         memcpy(_place, asPointer(expression.e1), _facts.size);
     }
