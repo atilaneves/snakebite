@@ -118,6 +118,22 @@ static foreach (backend; Matrix!(
 
 
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot inspect host class metadata"),
+)) {
+    @("hostClassTypeInfoIsClassMetadata." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                assert(typeid(Exception).name == "object.Exception");
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("interfaceDispatchFindsCovariantOverride." ~ backend.stringof)

@@ -585,16 +585,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const isGuest = _program.isInterpreted(function_);
         const isTemplate = function_.isInstantiated() !is null
             && function_.fbody !is null;
+        const interpretsDelegateArgument = function_.fbody !is null
+            && hasInterpretedDelegateArgument(callSite);
         // A template instance can inherit the guest module of its call site,
         // even when dmd also emitted a native specialization for it. Check
         // the process symbol for every instantiated body so guest ownership
         // does not force a duplicate walk of code druntime already provides.
         const interpretsTemplate = isTemplate
             && (!hasNativeSymbol(function_)
-                || hasInterpretedDelegateArgument(callSite));
+                || interpretsDelegateArgument);
         const interprets = isGuest && !isTemplate
             || interpretsTemplate
-            || hasInterpretedDelegateArgument(callSite)
+            || interpretsDelegateArgument
             || isNestedInCurrentlyWalkedFunction(function_);
         if (!interprets) {
             const plan = callSite is null
@@ -723,17 +725,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         runForEffect(expression);
     }
 
-    // dmd lowers `foreach` over an associative array to a call to a
-    // druntime helper (e.g. `_aaApply2`) that invokes the loop body
-    // through a delegate parameter. That helper is native code, but the
-    // delegate it calls back into is the guest's loop body, whose
-    // closure a native ABI call cannot reach. Walking the helper's own
-    // body here, instead of calling it natively, keeps every call to the
-    // delegate going through this evaluator. Only a delegate whose
-    // declaration is itself guest-owned selects this: a native delegate
-    // argument of the same opApply shape (an unrelated library call, for
-    // instance) has no guest closure to reach and must still run
-    // natively, since this evaluator may not have its body at all.
+    // A guest delegate's function word holds its declaration, not an
+    // executable address. Walking the available callee keeps every call to
+    // that delegate in this evaluator. Native delegates still use FFI.
     private bool hasInterpretedDelegateArgument(CallExp callSite) {
         if (callSite is null || callSite.arguments is null)
             return false;
@@ -749,14 +743,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             else if (auto delegateExp = expression.isDelegateExp)
                 delegateFunction = delegateExp.func;
 
-            if (delegateFunction is null
-                    || !_program.isInterpreted(delegateFunction))
-                continue;
-
-            auto functionType = typeFunctionOf(delegateFunction);
-            if (functionType !is null
-                    && functionType.parameterList.length != 0
-                    && functionType.nextOf.isIntegral)
+            if (delegateFunction !is null
+                    && _program.isInterpreted(delegateFunction))
                 return true;
         }
 
@@ -1684,6 +1672,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // `typeid` - this reads it back rather than emitting a second copy
         // of it.
         if (auto symbol = expression.var.isSymbolDeclaration) {
+            if (symbol.type.isTypeStruct !is null) {
+                import dmd.typesem: defaultInitLiteral;
+
+                evaluate(
+                    symbol.dsym.type.defaultInitLiteral(expression.loc),
+                    _type,
+                    _facts,
+                    _place,
+                );
+                return;
+            }
+
             auto classDeclaration = symbol.dsym.isClassDeclaration;
             if (classDeclaration is null)
                 throw new SnakebiteException(
@@ -2260,16 +2260,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return false;
 
         auto declaration = structType.sym;
-        // A non-zero `.init` needs field initializers that this bytewise
-        // evaluator does not run for omitted fields. A postblit or a
-        // destructor is fine: dmd's own semantic pass already emits the
-        // raw byte copy (`BlitExp`/`ConstructExp`, still handled bytewise
-        // below) and the call to `sd.postblit`/`sd.dtor` as separate,
+        // A postblit or a destructor is fine: dmd's own semantic pass already
+        // emits the raw byte copy (`BlitExp`/`ConstructExp`, still handled
+        // bytewise below) and the call to `sd.postblit`/`sd.dtor` as separate,
         // explicit AST nodes - an ordinary method call this interpreter
         // already runs like any other - so nothing here has to run either
         // lifecycle hook itself. A copy constructor is a different guest
-        // feature this interpreter does not support yet, so it still
-        // refuses.
+        // feature this interpreter does not support yet, so it still refuses.
         // `hasIdentityAssign`/`hasBlitAssign` are set whenever dmd builds
         // the `opAssign` a postblit or a destructor needs on its own
         // (clone.d's `buildOpAssign`), not only for a guest-written one -
@@ -2281,8 +2278,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const hasElaborateAssign = declaration.postblit is null
             && declaration.dtor is null
             && (declaration.hasIdentityAssign || declaration.hasBlitAssign);
-        if (!declaration.zeroInit
-                || declaration.isUnionDeclaration !is null
+        if (declaration.isUnionDeclaration !is null
                 || declaration.hasCopyCtor
                 || hasElaborateAssign)
             return false;
@@ -3610,11 +3606,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // its linker name: `TypeInfoDeclaration` is declared `extern(C)` with
     // that identifier standing in directly for a mangled name
     // (`declaration.d`'s `getTypeInfoIdent`), not a plain D identifier
-    // this evaluator would have to mangle itself. Resolving it is then
+    // this evaluator would have to mangle itself. Class TypeInfo is the
+    // exception: codegen aliases its synthetic declaration to the class
+    // declaration's `__Class` metadata symbol. Resolving it is then
     // the same question `execute`'s FFI branch already asks of any other
     // symbol compiled elsewhere: is it in this process.
     override void visit(TypeidExp expression) {
+        import dmd.common.outbuffer: OutBuffer;
         import dmd.dtemplate: isType;
+        import dmd.mangle: mangleToBuffer;
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
@@ -3647,6 +3647,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         auto name = type.vtinfo.ident.toString;
+        if (classType !is null
+                && classType.sym.isInterfaceDeclaration is null) {
+            OutBuffer mangled;
+            mangleToBuffer(classType.sym, mangled);
+            name = text("_D", mangled[], "7__ClassZ");
+        }
         countForeignNameLookup;
         auto address = _plans.resolve(name);
         if (address is null) {
