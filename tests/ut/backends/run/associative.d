@@ -70,9 +70,11 @@ static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.unconfirmed,
         "inserting a struct-keyed entry (`ages[Name(a())] = 30`) compiles "
             ~ "druntime's own `_d_aaGetY`, whose first insert grows the "
-            ~ "table through `Impl.grow`/`resize` - and `resize` shrinks "
-            ~ "the old bucket array with `obuckets.length = 0`, an "
-            ~ "assignment to `.length` this compiler does not build"),
+            ~ "table through `Impl.grow`/`resize`, then `_aaGetX` runs "
+            ~ "`aa.used++` on the freshly-grown table - a `PostExp` whose "
+            ~ "target is `(*aa.impl).used`, a struct field reached through "
+            ~ "a pointer deref rather than a bare local `compilePost` "
+            ~ "requires (`expression.e1.isVarExp`)"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("structKeyedLookupComparesContents." ~ backend.stringof)
@@ -230,9 +232,11 @@ static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.unconfirmed,
         "inserting `spans[\"header\"] = Span(0, 4)` compiles druntime's "
             ~ "own `_d_aaGetY`, whose first insert grows the table through "
-            ~ "`Impl.grow`/`resize` - and `resize` shrinks the old bucket "
-            ~ "array with `obuckets.length = 0`, an assignment to "
-            ~ "`.length` this compiler does not build"),
+            ~ "`Impl.grow`/`resize`, then `_aaGetX` runs `aa.used++` on the "
+            ~ "freshly-grown table - a `PostExp` whose target is "
+            ~ "`(*aa.impl).used`, a struct field reached through a "
+            ~ "pointer deref rather than a bare local `compilePost` "
+            ~ "requires (`expression.e1.isVarExp`)"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("assocArrayIndexedValueFieldWriteAndMethodCall." ~ backend.stringof)
@@ -271,9 +275,11 @@ static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.unconfirmed,
         "inserting `counts[ArrayKey([1, 2])] = 1` compiles druntime's own "
             ~ "`_d_aaGetY`, whose first insert grows the table through "
-            ~ "`Impl.grow`/`resize` - and `resize` shrinks the old bucket "
-            ~ "array with `obuckets.length = 0`, an assignment to "
-            ~ "`.length` this compiler does not build"),
+            ~ "`Impl.grow`/`resize`, then `_aaGetX` runs `aa.used++` on "
+            ~ "the freshly-grown table - a `PostExp` whose target is "
+            ~ "`(*aa.impl).used`, a struct field reached through a "
+            ~ "pointer deref rather than a bare local `compilePost` "
+            ~ "requires (`expression.e1.isVarExp`)"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("arrayKeyedLookupComparesContents." ~ backend.stringof)
