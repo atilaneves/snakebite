@@ -1257,7 +1257,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         bool allHandlersFinished = true;
-        foreach (catch_; *statement.catches) {
+        // A handler that falls off its own end (no `return`/`throw`/...)
+        // would otherwise run straight into the next catch clause's own
+        // instructions - the compiled catches sit back to back in the
+        // instruction stream, with nothing between them but this jump.
+        // The last handler needs none: whatever follows the whole
+        // statement already sits right after it.
+        size_t[] skipRemainingHandlers;
+        const catchCount = statement.catches.length;
+        foreach (i, catch_; *statement.catches) {
             const handler = _instructions.length;
             const catchOffset = catch_.var is null
                 ? size_t.max
@@ -1270,10 +1278,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _finished = false;
             compileStatement(catch_.handler);
             allHandlersFinished &= _finished;
+
+            if (!_finished && i + 1 != catchCount) {
+                skipRemainingHandlers ~= _instructions.length;
+                emit(&opJump, 0, 0, 0);
+            }
         }
 
+        const afterHandlers = _instructions.length;
         if (skipHandlers != size_t.max)
-            _instructions[skipHandlers].destination = _instructions.length;
+            _instructions[skipHandlers].destination = afterHandlers;
+        foreach (index; skipRemainingHandlers)
+            _instructions[index].destination = afterHandlers;
 
         _finished = bodyFinished && allHandlersFinished;
     }
