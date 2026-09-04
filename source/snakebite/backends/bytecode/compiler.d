@@ -3767,9 +3767,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // (`core.lifetime._d_newclassT!T()`, no constructor arguments -
         // see that function's own doc in `core/lifetime.d`); the
         // constructor call dmd leaves outside it, on `expression.member`
-        // itself, is never virtual, so `compileConstructorCall` always
-        // binds `this` to the compiled callee directly rather than
-        // reading it back out of a vtable slot.
+        // itself, is never virtual, so `compileNewClass` always binds
+        // `this` to the compiled callee directly rather than reading it
+        // back out of a vtable slot.
         if (expression.type.ty == Tclass) {
             compileNewClass(expression);
             return;
@@ -3789,7 +3789,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // native-symbol lookup) and `__traits(initSymbol, T)` (served by
     // `visit(VarExp)`'s `SymbolDeclaration` case from `classRuntimeInfo`'s
     // own `.init` bytes). Then runs `expression.member` on the allocated
-    // object, the constructor dmd left outside the lowering.
+    // object, the constructor dmd left outside the lowering, through
+    // `compileResolvedCall` - the same call-emission code `compileCall`
+    // uses for every other call, with the receiver pre-bound to the
+    // object just allocated rather than read off a `CallExp`'s own `e1`.
     private void compileNewClass(NewExp expression) {
         if (expression.placement !is null || expression.thisexp !is null
                 || expression.onstack || expression.lowering is null)
@@ -3812,88 +3815,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         evalInto(expression.lowering, objectOffset, pointerFacts.size);
 
         if (expression.member !is null)
-            compileConstructorCall(expression, objectOffset);
-    }
-
-    // `expression.member(args)`, `this` already at `objectOffset` - the
-    // same argument-binding `compileCall`'s own guest-callee branch does
-    // for an ordinary bound method call (`callee.vthis`, one `Arg` per
-    // parameter), just without a `CallExp` to read `e1`/`arguments` from:
-    // a constructor is never virtual, so this always calls
-    // `expression.member` itself rather than something read back out of a
-    // vtable.
-    private void compileConstructorCall(
-        NewExp expression, in size_t objectOffset,
-    ) {
-        import snakebite.frontend.dmd.functions: typeFunctionOf;
-
-        auto constructor = expression.member;
-        auto calleeType = typeFunctionOf(constructor);
-        const parameterCount = calleeType.parameterList.length;
-        const argumentCount =
-            expression.arguments is null ? 0 : expression.arguments.length;
-        if (argumentCount != parameterCount)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        // A constructor druntime already supplies as native code
-        // (`Exception.this`, reached constructing a guest exception
-        // class's base) is called through FFI, through the very same
-        // `compileNativeCall` helper `compileCall`'s own native-callee
-        // branch below uses for an ordinary call - never compiled as a
-        // guest body. Compiling its body would walk druntime's own
-        // `object.d` a second time (the first is this compiler's own
-        // lookups of `Throwable`/`Exception`) and reach constructs this
-        // compiler does not support there. `objectOffset` already holds
-        // the receiver's own value (a class reference), so it stands in
-        // for the hidden `this` argument a `DotVarExp` receiver would
-        // otherwise supply.
-        if (constructor.fbody is null || _bytecode.hasNativeSymbol(constructor)) {
-            compileNativeCall(
-                constructor, calleeType, expression.arguments,
-                expression.loc, expressionText(expression),
-                [Arg(objectOffset, 0, size_t.sizeof)], discardResult);
-            return;
-        }
-
-        auto calleeFunction = _bytecode.compileFunction(constructor);
-        auto calleeLayout = FrameLayout.of(constructor);
-
-        if (calleeLayout.hiddenThis.variable is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        Arg[] args;
-        args ~= Arg(
-            objectOffset, calleeLayout.hiddenThis.parameter.offset,
-            size_t.sizeof,
-        );
-
-        foreach (i; 0 .. parameterCount) {
-            auto parameter = calleeLayout.parameters[i];
-            if (parameter.isRef) {
-                const argumentOffset =
-                    compileAddress((*expression.arguments)[i]);
-                args ~= Arg(argumentOffset, parameter.offset, size_t.sizeof);
-                continue;
-            }
-
-            if (!isSupportedFacts(
-                    parameter.facts, calleeType.parameterList[i].type))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            const argumentOffset = reserveTemp(parameter.facts);
-            evalInto(
-                (*expression.arguments)[i], argumentOffset,
-                parameter.facts.size,
-            );
-            args ~= Arg(argumentOffset, parameter.offset, parameter.facts.size);
-        }
-
-        const siteIndex = _callSites.length;
-        _callSites ~= CallSite(calleeFunction, args, 0);
-        emit(&opCall, discardResult, siteIndex, 0);
+            compileResolvedCall(
+                expression.member, expression.arguments, expression.loc,
+                expressionText(expression), true, () => objectOffset,
+                discardResult);
     }
 
     // `null` is all-zero bytes whatever it means - a pointer, a class
@@ -5072,51 +4997,128 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // for a call run at statement level, whose result (`void` or
     // otherwise) is discarded.
     private void compileCall(CallExp expression, in size_t destOffset) {
-        import dmd.astenums: STC, Tvoid;
-        import snakebite.frontend.dmd.functions: typeFunctionOf;
-
         auto callee = expression.f;
         if (callee is null) {
             auto calleeExp = expression.e1.isVarExp;
             callee = calleeExp is null
                 ? null : calleeExp.var.isFuncDeclaration;
         }
-        // `super(args)`/`this(args)` constructor delegation: dmd's own
-        // semantic pass always resolves `expression.f` to the constructor
-        // it picked for this call, but a `FuncDeclaration` compiled through
-        // more than one semantic pass over the same source (druntime's
-        // `object.d` is one - see `resolveDelegatingConstructor`'s own doc)
-        // can still reach here with `expression.f` and `expression.e1`'s
-        // own `SuperExp`/`ThisExp.var` both unset. `resolveDelegatingConstructor`
-        // picks the same constructor dmd's semantic pass would have,
-        // straight from the enclosing class.
-        if (callee is null
-                && (expression.e1.isThisExp !is null
-                    || expression.e1.isSuperExp !is null))
-            callee = resolveDelegatingConstructor(expression);
+        // `super(args)`/`this(args)` constructor delegation reaches here
+        // the same as any other call: dmd's own semantic pass always
+        // resolves `expression.f` to the constructor it picked. A `null`
+        // `callee` falls through to `compileIndirectCall`, which rejects
+        // a bare `SuperExp`/`ThisExp` `e1` on its own terms - that shape
+        // is not a function pointer or delegate value to call through.
         if (callee is null)
             return compileIndirectCall(expression, destOffset);
 
         if (isVirtualCall(expression, callee))
             return compileVirtualCall(expression, callee, destOffset);
 
+        compileResolvedCall(
+            callee, expression.arguments, expression.loc,
+            expressionText(expression), callee.vthis !is null,
+            () => receiverOffsetOf(expression, callee, destOffset),
+            destOffset);
+    }
+
+    // The address of `callee`'s own hidden `this` argument for `expression`
+    // - a bound method's receiver, a delegating `super(args)`/`this(args)`
+    // constructor call's, or the `this` a nested function reads implicitly
+    // from an enclosing member function. `compileResolvedCall`'s native and
+    // guest branches alike call this at most once, only when `callee`
+    // actually reserves a slot for it.
+    private size_t receiverOffsetOf(
+        CallExp expression, FuncDeclaration callee, in size_t destOffset,
+    ) {
+        // A lambda or nested function reading `this` implicitly names an
+        // outer member function's own hidden `this`, reached through the
+        // static chain rather than through `expression.e1` - the same
+        // reach `contextAddressOf` gives any other captured variable.
+        if (callee.isThis is null) {
+            auto parent = callee.toParent2();
+            auto parentFunction =
+                parent is null ? null : parent.isFuncDeclaration;
+            if (parentFunction is null)
+                throw rejection(_function, expression.loc, "a static chain");
+            return contextAddressOf(parentFunction);
+        }
+
+        // An ordinary bound method call wraps its receiver in a
+        // `DotVarExp` (`expression.e1.isDotVarExp.e1`); `super(args)`/
+        // `this(args)` constructor delegation instead leaves `expression.e1`
+        // a bare `ThisExp`/`SuperExp` with no wrapper, the receiver being
+        // this very function's own hidden `this` - `compileAddress`
+        // resolves either shape, its own `ThisExp`/`SuperExp` case falling
+        // back to `hiddenThisOffset` the same way the plain fallback below
+        // does.
+        auto dot = expression.e1.isDotVarExp;
+        auto receiver = dot is null ? expression.e1 : dot.e1;
+        if (dot !is null || receiver.isThisExp !is null
+                || receiver.isSuperExp !is null)
+            return compileAddress(receiver);
+
+        // A struct literal's own `S(1, 2)`: there is no receiver
+        // expression at all, only the destination the value is being
+        // constructed into. Never reached with `destOffset ==
+        // discardResult` - constructing a new value always needs
+        // somewhere to put it, unlike a `new C(...)` object.
+        if (callee.isCtorDeclaration !is null) {
+            if (destOffset == discardResult)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const thisOffset = reserveTemp(pointerFacts);
+            emit(&opFrameAddress, thisOffset, destOffset, size_t.sizeof);
+            return thisOffset;
+        }
+
+        // An ordinary method called with no explicit receiver at all
+        // (`foo()` from inside another member of the same class) - sugar
+        // for `this.foo()`.
+        return hiddenThisOffset;
+    }
+
+    // Compiles a call to `callee` with `arguments` already resolved -
+    // `compileCall`'s own dispatch for an ordinary `CallExp` and
+    // `compileNewClass`'s call to the constructor a `NewExp` leaves
+    // outside its own allocation lowering both reach this. The "allocate,
+    // then call the constructor" split a `NewExp` makes is only about
+    // where the receiver comes from, never about how the call itself is
+    // compiled: `hasThis`/`thisOffsetOf` supply the receiver the same way
+    // for either caller, read off `expression.e1` for an ordinary call or
+    // already known as the freshly allocated object's own slot for a
+    // constructor call. `thisOffsetOf` is only ever evaluated once, by
+    // whichever branch below actually needs it.
+    private void compileResolvedCall(
+        FuncDeclaration callee,
+        imported!"dmd.arraytypes".Expressions* arguments,
+        imported!"dmd.location".Loc loc,
+        string exprText,
+        bool hasThis,
+        size_t delegate() thisOffsetOf,
+        in size_t destOffset,
+    ) {
+        import dmd.astenums: Tvoid;
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+        // A callee druntime already supplies as native code (`Exception.
+        // this`, reached constructing a guest exception class's base, or
+        // an ordinary FFI-backed function) is called through FFI rather
+        // than compiled as a guest body - compiling a native constructor's
+        // body would walk druntime's own `object.d` a second time (the
+        // first is this compiler's own lookups of `Throwable`/`Exception`)
+        // and reach constructs this compiler does not support there.
         if (callee.fbody is null || _bytecode.hasNativeSymbol(callee)) {
             auto type = typeFunctionOf(callee);
 
             Arg[] initialArgs;
-            if (callee.vthis !is null) {
-                auto dot = expression.e1.isDotVarExp;
-                if (dot is null)
-                    throw rejection(_function, expression.loc,
-                        expressionText(expression));
-
-                const thisOffset = compileAddress(dot.e1);
-                initialArgs ~= Arg(thisOffset, 0, size_t.sizeof);
-            }
+            if (hasThis)
+                initialArgs ~= Arg(thisOffsetOf(), 0, size_t.sizeof);
 
             compileNativeCall(
-                callee, type, expression.arguments, expression.loc,
-                expressionText(expression), initialArgs, destOffset);
+                callee, type, arguments, loc, exprText, initialArgs,
+                destOffset);
             return;
         }
         auto calleeFunction = _bytecode.compileFunction(callee);
@@ -5124,73 +5126,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto calleeType = typeFunctionOf(callee);
 
         const parameterCount = calleeType.parameterList.length;
-        const argumentCount =
-            expression.arguments is null ? 0 : expression.arguments.length;
+        const argumentCount = arguments is null ? 0 : arguments.length;
         if (argumentCount != parameterCount)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+            throw rejection(_function, loc, exprText);
 
         Arg[] args;
         const isConstructor = callee.isCtorDeclaration !is null;
-        // `calleeLayout.hiddenThis.variable`, not `callee.vthis`: a
+        // `calleeLayout.hiddenThis.variable`, not `hasThis`: a
         // `FuncLiteralDeclaration` bound through `auto` can keep a dead
         // `vthis` semantic proved nothing reads (see `FrameLayout.of`'s
         // own `hasDeadContext`), and `calleeLayout` is what actually
         // knows whether this callee's frame reserved it a slot.
         if (calleeLayout.hiddenThis.variable !is null) {
-            size_t thisOffset;
-            if (callee.isThis is null) {
-                auto parent = callee.toParent2();
-                auto parentFunction = parent is null
-                    ? null : parent.isFuncDeclaration;
-                if (parentFunction is null)
-                    throw rejection(_function, expression.loc,
-                        "a static chain");
-                thisOffset = contextAddressOf(parentFunction);
-            } else if (isConstructor) {
-                // `this(...)`/`super(...)`: a constructor delegating to
-                // another one on the very object it is already
-                // constructing, not a fresh value going into `destOffset`
-                // - dmd represents the receiver as an explicit `this` on
-                // the call, the same address a plain method call already
-                // reads through `compileAddress`. Two shapes reach here:
-                // dmd's semantic pass normally wraps the receiver in a
-                // `DotVarExp` (`expression.e1.isDotVarExp.e1`), but a call
-                // resolved through `resolveDelegatingConstructor` instead
-                // (see that function's own doc) leaves `expression.e1` a
-                // bare `ThisExp`/`SuperExp` with no wrapper - `compileAddress`
-                // resolves either shape, and its own `hiddenThisOffset`
-                // falls back to `_function`'s hidden `this` when a bare
-                // `ThisExp`/`SuperExp` has no resolved `.var` either. Never
-                // reached with `destOffset == discardResult` for any other
-                // constructor call: a struct literal's own `S(1, 2)` is
-                // always compiled into a destination, since it constructs a
-                // new value rather than delegating on an existing one.
-                auto delegatingDot = expression.e1.isDotVarExp;
-                auto receiver = delegatingDot is null
-                    ? expression.e1 : delegatingDot.e1;
-                if (receiver.isThisExp !is null
-                        || receiver.isSuperExp !is null) {
-                    thisOffset = compileAddress(receiver);
-                } else {
-                    if (destOffset == discardResult)
-                        throw rejection(_function, expression.loc,
-                            expressionText(expression));
-
-                    thisOffset = reserveTemp(pointerFacts);
-                    emit(&opFrameAddress, thisOffset, destOffset,
-                        size_t.sizeof);
-                }
-            } else {
-                auto dot = expression.e1.isDotVarExp;
-                if (dot !is null)
-                    thisOffset = compileAddress(dot.e1);
-                else
-                    thisOffset = hiddenThisOffset;
-            }
+            if (!hasThis)
+                throw rejection(_function, loc, exprText);
 
             args ~= Arg(
-                thisOffset,
+                thisOffsetOf(),
                 calleeLayout.hiddenThis.parameter.offset,
                 size_t.sizeof,
             );
@@ -5205,20 +5157,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // that check is for, and `Bytecode.compileFunction` already
             // made it of the callee's declared parameter type.
             if (parameter.isRef) {
-                const argumentOffset =
-                    compileAddress((*expression.arguments)[i]);
+                const argumentOffset = compileAddress((*arguments)[i]);
                 args ~= Arg(argumentOffset, parameter.offset, size_t.sizeof);
                 continue;
             }
 
             if (!isSupportedFacts(parameter.facts,
                     calleeType.parameterList[i].type))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+                throw rejection(_function, loc, exprText);
 
             const argumentOffset = reserveTemp(parameter.facts);
             evalInto(
-                (*expression.arguments)[i], argumentOffset,
+                (*arguments)[i], argumentOffset,
                 parameter.facts.size,
             );
             args ~= Arg(argumentOffset, parameter.offset, parameter.facts.size);
@@ -5237,11 +5187,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             : isVoidCallee ? TypeFacts.init : TypeFacts.of(calleeReturnType);
         if (!isRefCallee && !isVoidCallee
                 && !isSupportedFacts(returnFacts, calleeReturnType))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+            throw rejection(_function, loc, exprText);
         if (isVoidCallee && !isConstructor && destOffset != discardResult)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+            throw rejection(_function, loc, exprText);
 
         const siteIndex = _callSites.length;
         _callSites ~=
@@ -5249,63 +5197,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCall, destOffset, siteIndex, 0);
     }
 
-    // `super(args)`/`this(args)`, when dmd's semantic pass has already run
-    // (setting `expression.f` to the constructor it picked) but the
-    // `FuncDeclaration` this compiler is walking is a second, independent
-    // semantic pass over the same declaration - druntime's `object.d` is
-    // analysed once for the guest program's own module graph and again for
-    // this compiler's own lookups of `Throwable`/`Exception`, and the
-    // second pass's `super(...)`/`this(...)` nodes keep the pre-semantic
-    // shape: a bare `SuperExp`/`ThisExp` `e1` with neither `.var` nor
-    // `expression.f` set. Picks the same constructor dmd's own semantic
-    // pass would (`expressionsem.d`'s `CallExp` handling for a `super_`/
-    // `this_` receiver): the enclosing class's own constructor for
-    // `this(...)`, or its base class's for `super(...)`, matched by
-    // parameter count - a delegating call always supplies every argument
-    // explicitly, so no default-argument application ever has to break a
-    // tie between overloads here. Returns `null`, the same as an
-    // unresolved ordinary call, when no constructor matches.
-    private imported!"dmd.func".FuncDeclaration resolveDelegatingConstructor(
-        CallExp expression,
-    ) {
-        import snakebite.frontend.dmd.functions: typeFunctionOf;
-
-        const isSuper = expression.e1.isSuperExp !is null;
-        auto aggregate = _function.isThis();
-        auto class_ = aggregate is null ? null : aggregate.isClassDeclaration();
-
-        auto ctorHead = isSuper
-            ? (class_ is null || class_.baseClass is null
-                ? null : class_.baseClass.ctor)
-            : (aggregate is null ? null : aggregate.ctor);
-
-        const argumentCount =
-            expression.arguments is null ? 0 : expression.arguments.length;
-
-        for (auto symbol = ctorHead; symbol !is null; ) {
-            auto candidate = symbol.isFuncDeclaration();
-            symbol = candidate is null ? null : candidate.overnext;
-            if (candidate is null || candidate.isCtorDeclaration is null)
-                continue;
-
-            if (typeFunctionOf(candidate).parameterList.length == argumentCount)
-                return candidate;
-        }
-
-        return null;
-    }
-
     // Builds the FFI call plan for a native callee - one druntime already
     // supplies as compiled code, so this compiler calls out to it rather
     // than compiling a guest body - and emits `opCall` against it.
-    // `compileCall`'s own native-callee branch and
-    // `compileConstructorCall`'s share this: a `NewExp` allocates the
-    // object, but the "call the constructor" part is the same call this
-    // helper already knows how to make for a plain `CallExp`, just with
-    // `initialArgs` supplying whatever hidden-`this` argument the callee
-    // takes - read off a `DotVarExp` receiver for an ordinary call, or
-    // already known as the freshly allocated object's own address for a
-    // constructor call.
+    // `compileResolvedCall`'s own native branch is this helper's one
+    // caller, for both an ordinary `CallExp` and a `NewExp`'s constructor
+    // call alike; `initialArgs` supplies whatever hidden-`this` argument
+    // the callee takes.
     private void compileNativeCall(
         FuncDeclaration callee,
         imported!"dmd.mtype".TypeFunction type,
