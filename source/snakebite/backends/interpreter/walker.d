@@ -1694,6 +1694,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // `typeid` - this reads it back rather than emitting a second copy
         // of it.
         if (auto symbol = expression.var.isSymbolDeclaration) {
+            if (symbol.type.isTypeStruct !is null) {
+                import dmd.typesem: defaultInitLiteral;
+
+                evaluate(
+                    symbol.dsym.type.defaultInitLiteral(expression.loc),
+                    _type,
+                    _facts,
+                    _place,
+                );
+                return;
+            }
+
             auto classDeclaration = symbol.dsym.isClassDeclaration;
             if (classDeclaration is null)
                 throw new SnakebiteException(
@@ -2263,16 +2275,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return false;
 
         auto declaration = structType.sym;
-        // A non-zero `.init` needs field initializers that this bytewise
-        // evaluator does not run for omitted fields. A postblit or a
-        // destructor is fine: dmd's own semantic pass already emits the
-        // raw byte copy (`BlitExp`/`ConstructExp`, still handled bytewise
-        // below) and the call to `sd.postblit`/`sd.dtor` as separate,
+        // A postblit or a destructor is fine: dmd's own semantic pass already
+        // emits the raw byte copy (`BlitExp`/`ConstructExp`, still handled
+        // bytewise below) and the call to `sd.postblit`/`sd.dtor` as separate,
         // explicit AST nodes - an ordinary method call this interpreter
         // already runs like any other - so nothing here has to run either
         // lifecycle hook itself. A copy constructor is a different guest
-        // feature this interpreter does not support yet, so it still
-        // refuses.
+        // feature this interpreter does not support yet, so it still refuses.
         // `hasIdentityAssign`/`hasBlitAssign` are set whenever dmd builds
         // the `opAssign` a postblit or a destructor needs on its own
         // (clone.d's `buildOpAssign`), not only for a guest-written one -
@@ -2284,8 +2293,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const hasElaborateAssign = declaration.postblit is null
             && declaration.dtor is null
             && (declaration.hasIdentityAssign || declaration.hasBlitAssign);
-        if (!declaration.zeroInit
-                || declaration.isUnionDeclaration !is null
+        if (declaration.isUnionDeclaration !is null
                 || declaration.hasCopyCtor
                 || hasElaborateAssign)
             return false;

@@ -257,6 +257,25 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A local struct without an explicit initializer starts with each field's
+// declared nonzero default value, not with zero-filled storage.
+static foreach (backend; Matrix!(Omit!(Bytecode, Because.unconfirmed))) {
+    @("localStructUsesNonzeroFieldDefault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Value {
+                int number = 42;
+            }
+
+            void main() {
+                Value value;
+                assert(value.number == 42);
+            }
+        });
+    }
+}
+
 // `static` changes how the local type is represented during semantic
 // analysis, but it does not give an instance static storage. Constructing an
 // instance still creates an ordinary local value with native struct layout.
