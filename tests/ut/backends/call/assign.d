@@ -117,7 +117,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("assign.dynamicArrayElementCompound." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
