@@ -2940,6 +2940,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         else if (type.ty == Tclass)
             equal = classReferenceOf(expression.e1)
                 == classReferenceOf(expression.e2);
+        else if (type.ty == Tarray) {
+            const a = evaluateArray(expression.e1, factsOf(type));
+            const b = evaluateArray(
+                expression.e2, factsOf(expression.e2.type));
+            equal = a.length == b.length && a.elements == b.elements;
+        }
         else if (type.ty == Tpointer)
             equal = asPointer(expression.e1) == asPointer(expression.e2);
         else if (factsOf(type).isIntegral)

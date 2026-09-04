@@ -69,6 +69,31 @@ static foreach (backend; Matrix!(
     }
 }
 
+static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+    @("struct.dynamicArrayFieldIdentity.null." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                struct Cerealiser {
+                    ubyte[] _bytes;
+
+                    bool empty() {
+                        return this._bytes is null;
+                    }
+                }
+
+                bool answer() {
+                    auto cerealiser = Cerealiser();
+                    return cerealiser.empty();
+                }
+            },
+            "answer",
+        );
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run mutable struct methods through interpreter frames"),
