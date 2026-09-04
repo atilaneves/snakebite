@@ -75,6 +75,48 @@ package struct CallSite {
     // function's value - read back here in place of `callee`.
     package bool isIndirect;
     package size_t calleeSlotOffset;
+    // A fifth shape: a call through an interface reference
+    // (`compileVirtualCall`'s interface branch). The concrete override a
+    // guest class gives an interface method is not at a fixed vtable
+    // index the way a class's own virtual method is - the same interface
+    // method sits at a different index in every implementing class's own
+    // vtable, and a call site only ever knows the interface's own index,
+    // never which class it will reach at run time. `resolveInterfaceMethod`
+    // (this module's own, so no dmd frontend access is needed here) walks
+    // the object's real `TypeInfo_Class.interfaces` to find the override
+    // `classRuntimeInfo` built for that (class, interface) pair, the same
+    // shape druntime's own interface dispatch reads, just addressed by
+    // `methodIndex` rather than an ABI thunk. `args[0]` is the receiver
+    // object's own address.
+    package bool isInterfaceResolve;
+    package void* interfaceInfo;
+    package size_t methodIndex;
+}
+
+
+// Finds `object`'s own override of the interface method at `methodIndex`
+// (`interfaceInfo`'s own vtable order - see `CallSite.isInterfaceResolve`'s
+// doc) by walking `object`'s real class hierarchy, base first to most
+// derived... actually most-derived first, since `object`'s own vptr names
+// its most-derived `TypeInfo_Class` directly, and `.base` walks upward
+// from there. `TypeInfo_Class`/`Interface` are plain druntime shapes, so
+// this needs nothing from dmd's frontend to read them.
+package extern(C) void* resolveInterfaceMethod(
+    void* object, void* interfaceInfo, size_t methodIndex,
+) {
+    import object: Interface;
+
+    if (object is null)
+        return null;
+
+    auto target = cast(TypeInfo_Class) interfaceInfo;
+    for (auto info = *cast(TypeInfo_Class*) (*cast(void**) object);
+            info !is null; info = info.base)
+        foreach (entry; info.interfaces)
+            if (entry.classinfo is target)
+                return entry.vtbl[methodIndex];
+
+    return null;
 }
 
 
@@ -527,6 +569,15 @@ package const(Instruction)* opCall(
             size, site.allocationBits, null);
         if (pc.destination != discardResult)
             *cast(void**) (frame + pc.destination) = block;
+        return pc + 1;
+    }
+    if (site.isInterfaceResolve) {
+        assert(site.args.length == 1);
+        auto object = *cast(void**) (frame + site.args[0].callerOffset);
+        auto result = resolveInterfaceMethod(
+            object, cast(void*) site.interfaceInfo, site.methodIndex);
+        if (pc.destination != discardResult)
+            *cast(void**) (frame + pc.destination) = result;
         return pc + 1;
     }
     if (site.isAppendDchar) {
