@@ -2893,6 +2893,39 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // an expression - goes, captured before the target changes;
     // `discardResult` when a caller at statement level does not want it.
     private void compilePost(PostExp expression, in size_t destOffset) {
+        // `(*aa.impl).used++`: a field reached through a receiver lvalue
+        // (here a pointer dereference), the same address
+        // `compileCompoundAssign`'s own `DotVarExp` branch already reads
+        // and writes through `compileFieldAddress` rather than any frame
+        // slot.
+        if (auto fieldTarget = expression.e1.isDotVarExp) {
+            auto field = fieldTarget.var.isVarDeclaration;
+            if (field is null || field.isBitFieldDeclaration !is null)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const facts = TypeFacts.of(field.type);
+            if (!facts.isIntegral || !isIntegralSize(facts.size))
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const addressOffset = compileFieldAddress(fieldTarget);
+            const valueOffset = reserveTemp(facts);
+            emit(&opLoadIndirect, valueOffset, addressOffset, facts.size);
+
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, facts.size);
+
+            const stepOffset = reserveTemp(facts);
+            evalInto(expression.e2, stepOffset, facts.size);
+
+            auto handler = expression.op == EXP.plusPlus
+                ? &opAdd : &opSubtract;
+            emit(handler, valueOffset, stepOffset, facts.size);
+            emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
+            return;
+        }
+
         auto varExp = expression.e1.isVarExp;
         auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
         if (variable is null)

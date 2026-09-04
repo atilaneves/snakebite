@@ -68,13 +68,13 @@ static foreach (backend; Matrix!(
 // built strings with the same characters are the same key.
 static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.unconfirmed,
-        "inserting a struct-keyed entry (`ages[Name(a())] = 30`) compiles "
-            ~ "druntime's own `_d_aaGetY`, whose first insert grows the "
-            ~ "table through `Impl.grow`/`resize`, then `_aaGetX` runs "
-            ~ "`aa.used++` on the freshly-grown table - a `PostExp` whose "
-            ~ "target is `(*aa.impl).used`, a struct field reached through "
-            ~ "a pointer deref rather than a bare local `compilePost` "
-            ~ "requires (`expression.e1.isVarExp`)"),
+        "inserting and looking up now compile - `compilePost` handles "
+            ~ "`(*aa.impl).used++` through `compileFieldAddress` - but "
+            ~ "`ages.remove(Name(\"Alice\"))` compiles druntime's own "
+            ~ "`_d_aaDel`, whose `ref key2 = compat_key!(K)(key);` is a "
+            ~ "local variable declared `ref` and bound to a call's return "
+            ~ "value, a shape this compiler's local-declaration handling "
+            ~ "does not cover yet"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("structKeyedLookupComparesContents." ~ backend.stringof)
@@ -230,13 +230,12 @@ static foreach (backend; Matrix!(
 // table rather than a copy of it.
 static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.unconfirmed,
-        "inserting `spans[\"header\"] = Span(0, 4)` compiles druntime's "
-            ~ "own `_d_aaGetY`, whose first insert grows the table through "
-            ~ "`Impl.grow`/`resize`, then `_aaGetX` runs `aa.used++` on the "
-            ~ "freshly-grown table - a `PostExp` whose target is "
-            ~ "`(*aa.impl).used`, a struct field reached through a "
-            ~ "pointer deref rather than a bare local `compilePost` "
-            ~ "requires (`expression.e1.isVarExp`)"),
+        "inserting `spans[\"header\"] = Span(0, 4)` now compiles - "
+            ~ "`compilePost` handles `(*aa.impl).used++` through "
+            ~ "`compileFieldAddress` - but a later lookup runs into "
+            ~ "`findSlotLookup`'s own `buckets[i]` with `i` out of bounds "
+            ~ "(`newaa.d:304`), a runtime table-state bug rather than an "
+            ~ "unsupported construct"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("assocArrayIndexedValueFieldWriteAndMethodCall." ~ backend.stringof)
@@ -273,13 +272,12 @@ static foreach (backend; Matrix!(
 // built arrays with the same elements are the same key.
 static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.unconfirmed,
-        "inserting `counts[ArrayKey([1, 2])] = 1` compiles druntime's own "
-            ~ "`_d_aaGetY`, whose first insert grows the table through "
-            ~ "`Impl.grow`/`resize`, then `_aaGetX` runs `aa.used++` on "
-            ~ "the freshly-grown table - a `PostExp` whose target is "
-            ~ "`(*aa.impl).used`, a struct field reached through a "
-            ~ "pointer deref rather than a bare local `compilePost` "
-            ~ "requires (`expression.e1.isVarExp`)"),
+        "inserting `counts[ArrayKey([1, 2])] = 1` now compiles - "
+            ~ "`compilePost` handles `(*aa.impl).used++` through "
+            ~ "`compileFieldAddress` - but the `in` lookup runs into "
+            ~ "`findSlotLookup`'s own `buckets[i]` with `i` out of bounds "
+            ~ "(`newaa.d:304`), a runtime table-state bug rather than an "
+            ~ "unsupported construct"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("arrayKeyedLookupComparesContents." ~ backend.stringof)
