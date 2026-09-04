@@ -3487,6 +3487,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
+        if (_type.ty == Tclass && expression.e1.type.ty == Tpointer) {
+            storeIntegral(
+                _place,
+                cast(size_t) asPointer(expression.e1),
+                _facts.size,
+            );
+            return;
+        }
+
         memcpy(_place, asPointer(expression.e1), _facts.size);
     }
 

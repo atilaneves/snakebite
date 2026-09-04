@@ -290,6 +290,34 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.inexpressible,
+        "bytecode cannot compile associative arrays of delegates"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot execute associative arrays of delegates"),
+)) {
+    @("classValueClassInfoCanBeUsedAsAssociativeArrayKey."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+            }
+
+            class Derived: Base {
+            }
+
+            void main() {
+                void delegate()[string] handlers;
+                Base value = new Derived;
+
+                handlers[value.classinfo.name] = () {};
+                assert(value.classinfo.name in handlers);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.inexpressible,
         "bytecode cannot compile class parameters"),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot dereference classinfo"),
