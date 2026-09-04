@@ -46,6 +46,47 @@ static foreach (backend; Matrix!(
 }
 
 
+// A `catch` naming a guest class two levels up the hierarchy still matches:
+// the middle guest class's own runtime type must appear in the thrown
+// leaf's base chain, not be skipped in favour of jumping straight to the
+// native `Exception` it eventually derives from.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("catchMatchesGuestGrandchildClassByBaseType." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Root : Exception {
+                this() {
+                    super(null);
+                }
+            }
+
+            class Leaf : Root {
+                this() {
+                    super();
+                }
+            }
+
+            void main() {
+                int value = 1;
+
+                try {
+                    throw new Leaf;
+                } catch (Root) {
+                    value = 9;
+                } catch (Exception) {
+                    value = 100;
+                }
+
+                assert(value == 9);
+            }
+        });
+    }
+}
+
+
 // `catch` matches a thrown class against the declared type by walking the
 // base-class chain, not by exact type, so a `catch` naming a base class
 // catches a derived exception while a `catch` naming a sibling class does
@@ -55,8 +96,9 @@ static foreach (backend; Matrix!(
     Omit!(Interpreter, Because.unconfirmed,
         "DMD's native constructor ABI needs stack-word support"),
     Omit!(Bytecode, Because.unconfirmed,
-        "the native constructor call no longer crashes, but the guest " ~
-        "still exits with status 1 instead of 0"),
+        "catch matching is correct, but the guest exception's own `msg` " ~
+        "field reads as garbage - a native constructor call passing " ~
+        "more than six integer ABI words is unconfirmed"),
 )) {
     @("catchMatchesThrownClassByBaseType." ~ backend.stringof)
     @Tags(backend.stringof)

@@ -465,20 +465,22 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         // `classRuntimeInfo` does, rather than recursing into this
         // function and reconstructing an incomplete vtable from dmd's own
         // (only partially resolved) `ClassDeclaration.vtbl` for them.
+        // Only the exact native declaration routes to druntime's own
+        // `typeid`: a guest class over a guest class that itself derives
+        // from `Exception` (`OutOfBytesError : MinicerealError :
+        // Exception`) must still recurse into `classRuntimeInfo` for its
+        // own guest base, or `MinicerealError`'s own runtime info - the
+        // one every `catch (MinicerealError)` clause names - never gets
+        // built, and its slot in the base chain silently becomes
+        // `Exception` instead.
         if (declaration.baseClass is null
                 || declaration.baseClass is ClassDeclaration.object)
             typeInfo.base = cast(TypeInfo_Class) cast() typeid(Object);
         else if (declaration.baseClass is ClassDeclaration.throwable)
             typeInfo.base = cast(TypeInfo_Class) cast() typeid(Throwable);
-        else if (declaration.baseClass is ClassDeclaration.exception
-                || (ClassDeclaration.exception !is null
-                    && ClassDeclaration.exception.isBaseOf(
-                        declaration.baseClass, null)))
+        else if (declaration.baseClass is ClassDeclaration.exception)
             typeInfo.base = cast(TypeInfo_Class) cast() typeid(Exception);
-        else if (declaration.baseClass is ClassDeclaration.errorException
-                || (ClassDeclaration.errorException !is null
-                    && ClassDeclaration.errorException.isBaseOf(
-                        declaration.baseClass, null)))
+        else if (declaration.baseClass is ClassDeclaration.errorException)
             typeInfo.base = cast(TypeInfo_Class) cast() typeid(Error);
         else
             typeInfo.base = classRuntimeInfo(declaration.baseClass);
@@ -1258,7 +1260,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         bool allHandlersFinished = true;
-        foreach (catch_; *statement.catches) {
+        // A handler that falls off its own end (no `return`/`throw`/...)
+        // would otherwise run straight into the next catch clause's own
+        // instructions - the compiled catches sit back to back in the
+        // instruction stream, with nothing between them but this jump.
+        // The last handler needs none: whatever follows the whole
+        // statement already sits right after it.
+        size_t[] skipRemainingHandlers;
+        const catchCount = statement.catches.length;
+        foreach (i, catch_; *statement.catches) {
             const handler = _instructions.length;
             const catchOffset = catch_.var is null
                 ? size_t.max
@@ -1271,10 +1281,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _finished = false;
             compileStatement(catch_.handler);
             allHandlersFinished &= _finished;
+
+            if (!_finished && i + 1 != catchCount) {
+                skipRemainingHandlers ~= _instructions.length;
+                emit(&opJump, 0, 0, 0);
+            }
         }
 
+        const afterHandlers = _instructions.length;
         if (skipHandlers != size_t.max)
-            _instructions[skipHandlers].destination = _instructions.length;
+            _instructions[skipHandlers].destination = afterHandlers;
+        foreach (index; skipRemainingHandlers)
+            _instructions[index].destination = afterHandlers;
 
         _finished = bodyFinished && allHandlersFinished;
     }

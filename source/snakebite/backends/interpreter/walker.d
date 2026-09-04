@@ -4174,6 +4174,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (runtime.declaration is declaration)
                 return runtime.typeInfo;
 
+        // Only the exact native declaration routes to druntime's own
+        // `typeid`: a guest class over a guest class that itself derives
+        // from `Exception` (`OutOfBytesError : MinicerealError :
+        // Exception`) must still recurse into `classRuntimeInfo` for its
+        // own guest base, or `MinicerealError`'s own runtime info - the
+        // one every `catch (MinicerealError)` clause names - never gets
+        // built, and its slot in the base chain silently becomes
+        // `Exception` instead.
         TypeInfo_Class baseInfo;
         if (declaration.isInterfaceDeclaration !is null)
             baseInfo = null;
@@ -4182,15 +4190,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             baseInfo = typeid(Object);
         else if (declaration.baseClass is ClassDeclaration.throwable)
             baseInfo = typeid(Throwable);
-        else if (declaration.baseClass is ClassDeclaration.exception
-                || (ClassDeclaration.exception !is null
-                    && ClassDeclaration.exception.isBaseOf(
-                        declaration.baseClass, null)))
+        else if (declaration.baseClass is ClassDeclaration.exception)
             baseInfo = typeid(Exception);
-        else if (declaration.baseClass is ClassDeclaration.errorException
-                || (ClassDeclaration.errorException !is null
-                    && ClassDeclaration.errorException.isBaseOf(
-                        declaration.baseClass, null)))
+        else if (declaration.baseClass is ClassDeclaration.errorException)
             baseInfo = typeid(Error);
         else
             baseInfo = classRuntimeInfo(declaration.baseClass);
