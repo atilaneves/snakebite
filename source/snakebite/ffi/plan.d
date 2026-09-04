@@ -329,6 +329,7 @@ private CallPlan prepare(
     imported!"dmd.func".FuncDeclaration function_,
     ref Resolver resolver,
 ) {
+    import snakebite.backends.delegates: hasHiddenThis;
     import snakebite.ffi.abi:
         ArgumentPlan, Register, contextPrecedesHiddenReturnPointer,
         needsHiddenReturnPointer, reversedDParameters,
@@ -363,7 +364,7 @@ private CallPlan prepare(
             );
 
         const count = type.parameterList.length;
-        const hasContext = function_.vthis !is null;
+        const hasContext = hasHiddenThis(function_);
         const argumentCount = count + hasContext;
         if (argumentCount > maxArguments)
             throw new Exception(
