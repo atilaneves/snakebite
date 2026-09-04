@@ -575,9 +575,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     ) {
         import std.conv: text;
 
-        if (expression.e1.isSliceExp !is null)
-            return assignSlice(expression);
-
         // A template instance used only by interpreted guest code has no
         // machine-code symbol for FFI to find. DMD has already synthesized
         // and analyzed its exact body, so walk that body. This is semantic:
@@ -2075,6 +2072,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // a node this interpreter refuses rather than one it reaches this code
     // with.
     override void visit(AssignExp expression) {
+        if (expression.e1.isSliceExp !is null) {
+            assignSlice(expression);
+            return;
+        }
+
         assign(expression);
     }
 
