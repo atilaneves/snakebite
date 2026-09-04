@@ -4327,9 +4327,35 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `bool` - and the comparison opcode leaves its answer in the first
     // of those, copied out to `destOffset` only when it differs.
     private void compileComparison(BinExp expression, in size_t destOffset) {
-        import dmd.astenums: Tclass, Tpointer;
+        import dmd.astenums: Tclass, Tpointer, Tstruct;
 
         const operandFacts = TypeFacts.of(expression.e1.type);
+
+        // `is`/`!is` on a struct is always a raw byte compare, over the
+        // struct's own native layout - dmd rewrites a field-less `==`
+        // (bitwise-comparable struct, no `opEquals`) into this same
+        // `IdentityExp`, so both arrive here needing exactly what
+        // `opStaticArrayEqual` already does for a static array or a
+        // delegate: `operandFacts.size` bytes at each operand's offset,
+        // memcmp'd whole.
+        if (expression.e1.type.ty == Tstruct) {
+            if (expression.op != EXP.identity && expression.op != EXP.notIdentity)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const leftOffset = reserveTemp(operandFacts);
+            evalInto(expression.e1, leftOffset, operandFacts.size);
+            const rightOffset = reserveTemp(operandFacts);
+            evalInto(expression.e2, rightOffset, operandFacts.size);
+            emit(&opStaticArrayEqual, leftOffset, rightOffset,
+                operandFacts.size);
+            if (expression.op == EXP.notIdentity)
+                emit(&opLogicalNot, leftOffset, 0, 1);
+
+            if (destOffset != leftOffset)
+                emit(&opCopy, destOffset, leftOffset, 1);
+            return;
+        }
 
         // A class reference compares the same way a pointer does - `is`/
         // `==` on two references is identity, the same one pointer width
