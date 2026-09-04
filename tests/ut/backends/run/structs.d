@@ -390,7 +390,6 @@ static foreach (backend; Matrix!()) {
 // compared as its length and pointer, not its contents - unlike `==`,
 // which walks into the array and compares elements.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("structIdentityComparesArrayFieldByReference." ~ backend.stringof)
