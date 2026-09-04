@@ -24,7 +24,7 @@ package struct FrameLayout {
     import snakebite.nativelayout: alignUp, delegateValueSize, TypeFacts;
     import dmd.declaration: VarDeclaration;
     import dmd.func: FuncDeclaration;
-    import dmd.mtype: Type;
+    import dmd.mtype: DmdParameter = Parameter, Type, TypeFunction;
 
     package size_t size;
     package uint alignment = 1;
@@ -86,7 +86,7 @@ package struct FrameLayout {
         FrameLayout layout;
         layout.call = CallAdapter.of(function_);
 
-        if (function_.vthis !is null) {
+        if (function_.vthis !is null && !hasDeadContext(function_)) {
             const isRefThis = (function_.vthis.storage_class & STC.ref_) != 0;
             auto slot = isRefThis
                 ? layout.reserveSlot(
@@ -115,30 +115,14 @@ package struct FrameLayout {
         layout.parameters.length = parameterList.length;
 
         foreach (i; 0 .. parameterList.length) {
-            auto parameter = parameterList[i];
-
-            const isRefParameter = (parameter.storageClass
-                & (STC.ref_ | STC.out_)) != 0;
-
-            auto slot = isRefParameter
-                ? layout.reserveSlot(
-                    TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
-                : parameter.storageClass & STC.lazy_
-                    ? layout.reserveSlot(TypeFacts(
-                        delegateValueSize,
-                        size_t.sizeof, false, false))
-                : layout.reserveSlot(parameter.type);
-
-            layout.parameters[i] =
-                Parameter(
-                    slot.offset, slot.facts, isRefParameter,
-                    CallAdapter.Argument.of(parameter),
-                );
+            layout.parameters[i] = layout.packParameter(parameterList[i]);
 
             if (variables !is null) {
                 auto variable = (*variables)[i];
-                layout._slotOf[variable] =
-                    VariableSlot(slot.offset, isRefParameter);
+                layout._slotOf[variable] = VariableSlot(
+                    layout.parameters[i].offset,
+                    layout.parameters[i].isRef,
+                );
             }
         }
 
@@ -154,6 +138,44 @@ package struct FrameLayout {
         }
 
         return layout;
+    }
+
+    // Lays out a bare `TypeFunction`'s parameters alone, with no hidden
+    // `this` and no locals: the shape a call through a function pointer
+    // packs its arguments into, since there is no `FuncDeclaration` at
+    // that call site to read the rest of a layout from - only the
+    // pointer's own type. Uses the same `packParameter` an ordinary
+    // `of` call packs its own declared parameters with, so a callee
+    // compiled through `of` and a caller packing through this read and
+    // write the same offsets.
+    package static FrameLayout ofParameters(TypeFunction type) {
+        FrameLayout layout;
+        layout.parameters.length = type.parameterList.length;
+
+        foreach (i; 0 .. type.parameterList.length)
+            layout.parameters[i] = layout.packParameter(type.parameterList[i]);
+
+        return layout;
+    }
+
+    // dmd only clears a `FuncLiteralDeclaration`'s `vthis` when the
+    // literal is coerced to a target pointer type at the point it is
+    // written (`expressionsem.d`'s `visit(FuncExp)`); a lambda bound
+    // through `auto`, with no target type to coerce to, keeps a `vthis`
+    // nothing in its body ever reads. Two things must both hold before
+    // this layout treats that `vthis` as dead: `tok` must not have
+    // settled on `TOK.delegate_` - dmd's own lazy-argument lowering
+    // builds its implicit delegate directly with that `tok`, and it does
+    // read the enclosing frame through `vthis` despite never appearing in
+    // `closureVars` the way a written closure's own captures do - and
+    // `closureVars` itself must be empty, proof nothing else is captured
+    // either.
+    private static bool hasDeadContext(FuncDeclaration function_) {
+        import dmd.tokens: TOK;
+
+        auto literal = function_.isFuncLiteralDeclaration;
+        return literal !is null && literal.tok != TOK.delegate_
+            && literal.closureVars.length == 0;
     }
 
     // One slot `reserveSlot` just reserved: its offset into the frame,
@@ -183,6 +205,32 @@ package struct FrameLayout {
             this.alignment = facts.alignment;
 
         return Slot(offset, facts);
+    }
+
+    // Reserves and returns one parameter's own slot, from its declared
+    // type and storage class alone - the one place that decides where a
+    // `ref`, a `lazy`, or a plain parameter's slot goes, whether it is
+    // packed after a callee's hidden `this` (`of`) or on its own, from
+    // nothing but a function pointer's type (`ofParameters`).
+    private Parameter packParameter(DmdParameter parameter) {
+        import dmd.astenums: STC;
+
+        const isRefParameter = (parameter.storageClass
+            & (STC.ref_ | STC.out_)) != 0;
+
+        auto slot = isRefParameter
+            ? reserveSlot(
+                TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
+            : parameter.storageClass & STC.lazy_
+                ? reserveSlot(TypeFacts(
+                    delegateValueSize,
+                    size_t.sizeof, false, false))
+            : reserveSlot(parameter.type);
+
+        return Parameter(
+            slot.offset, slot.facts, isRefParameter,
+            CallAdapter.Argument.of(parameter),
+        );
     }
 
     // Where `variable` lives in a frame built from this layout, as a byte

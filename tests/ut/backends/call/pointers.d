@@ -128,7 +128,7 @@ private enum boolCallbackExceptionCode = q{
 // `&b` is dmd's `SymOffExp`, not a general `&expression`: taking a local's
 // address and reading back through it is the simplest lvalue-to-pointer
 // round trip there is.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("pointers.addressOf.read." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -344,7 +344,7 @@ unittest {
 
 // Writing through the pointer changes the variable it points at, not a
 // copy of it: `p` and `b` name the same storage.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("pointers.write.throughPointer." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -366,7 +366,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // A pointer argument carries the address a `&local` evaluated to, not a
 // copy of the pointee: the callee writes through it and the caller's own
 // local changes.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("pointers.pass.writesCaller." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -390,7 +390,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 
 // A pointer argument also lets the callee hand a value back without a
 // `return`, the read side of the same address the write tests exercise.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("pointers.pass.readsCaller." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -415,7 +415,6 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // address every call shares, so a write through the pointer is visible to
 // a later read of `count` itself.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE interpreter refuses to take the address of a " ~
         "thread-local variable at compile time"),
@@ -485,7 +484,7 @@ unittest {
 // rather than nested inside it, the same way `shouldBeStatusOf` renders any
 // top-level declaration, so its address is a plain function pointer both
 // natively and in the guest.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("pointers.functionPointer.moduleLevel.call." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -506,7 +505,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // A function pointer is an ordinary value once taken: passing it into
 // another function and calling it there reaches the same guest function as
 // calling it directly would.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("pointers.functionPointer.moduleLevel.passAsArgument." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -544,13 +543,16 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // `shouldBeRetOf` cannot express "throws on this backend, succeeds on
 // that one" in a single assertion.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
     Omit!(Interpreter, Because.diverges,
         "pinned in " ~
         "pointers.functionPointer.nativeCallback.refused.Interpreter: " ~
         "the callback's extern(C) int signature is outside the " ~
         "extern(D) bool signature supported by issue #168"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "`&compare`'s signature is `extern(C) int(scope const void*, " ~
+        "scope const void*)`, not the `bool()` callback this backend " ~
+        "supports handing to native code"),
 )) {
     @("pointers.functionPointer.nativeCallback." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -607,4 +609,72 @@ unittest {
                 "pointer argument: callback signature `extern (C) " ~
                 "int(scope const(void*) a, scope const(void*) b)` is not " ~
                 "supported (see issue #9)");
+}
+
+// `FrameLayout.ofParameters` packs a `ref` parameter the same way
+// `FrameLayout.of` does (both go through `packParameter`), so a call
+// through a function pointer can hand a `ref` parameter its argument's
+// address the same way a direct call does.
+static foreach (backend; Matrix!()) {
+    @("pointers.functionPointer.refParameter.call." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void increment(ref int x) {
+                x = x + 1;
+            }
+
+            int main() {
+                void function(ref int) fp = &increment;
+                int v = 3;
+                fp(v);
+                assert(v == 4);
+                return 0;
+            }
+        });
+    }
+}
+
+// A lambda written without `function` or `delegate` and bound to `auto`
+// keeps dmd's `TOK.reserved`: semantic proved it reads no enclosing local,
+// so its type is a plain function pointer, but the context slot dmd
+// declared while that was still undecided stays on the declaration. Calling
+// through the pointer must still hand `x` to the slot the callee's own body
+// reads it from.
+static foreach (backend; Matrix!()) {
+    @("pointers.functionPointer.inferredLambda.call." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                auto increment = (int x) => x + 1;
+                assert(increment(4) == 5);
+                return 0;
+            }
+        });
+    }
+}
+
+// A `ref` return hands back the returned storage's address, whatever the
+// declared return type's own width is. Read through a function pointer,
+// where only the pointer's `TypeFunction` says the return is `ref`, the
+// value must still come from that address rather than from its bytes.
+static foreach (backend; Matrix!()) {
+    @("pointers.functionPointer.refReturn.read." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            ref int first(int[] a) {
+                return a[0];
+            }
+
+            int main() {
+                int[] xs = [7, 8];
+                auto fp = &first;
+                int v = fp(xs);
+                assert(v == 7);
+                return 0;
+            }
+        });
+    }
 }

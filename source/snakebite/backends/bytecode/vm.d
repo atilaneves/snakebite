@@ -66,6 +66,15 @@ package struct CallSite {
     // visitor. `args[0]` is the target array's own storage address (the
     // hook's `ref` parameter) and `args[1]` is the `dchar` value.
     package bool isAppendDchar;
+    // A fourth shape, alongside the three above: an indirect call through
+    // a function pointer value, where dmd leaves no single
+    // `FuncDeclaration` behind for `callee` to name at compile time.
+    // `calleeSlotOffset` is the caller's own frame offset holding the
+    // pointer's run-time value - the very `const(Function)*` the bytecode
+    // compiler's `SymOffExp`/`FuncExp` visitors already store as a guest
+    // function's value - read back here in place of `callee`.
+    package bool isIndirect;
+    package size_t calleeSlotOffset;
 }
 
 
@@ -547,7 +556,9 @@ package const(Instruction)* opCall(
         );
         return pc + 1;
     }
-    auto callee = site.callee;
+    auto callee = site.isIndirect
+        ? *cast(const(Function)**) (frame + site.calleeSlotOffset)
+        : site.callee;
 
     auto calleeFrame = frames.push(callee.frameSize, callee.frameAlignment);
 
