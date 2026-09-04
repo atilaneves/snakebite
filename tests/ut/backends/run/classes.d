@@ -119,28 +119,16 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot return TypeInfo through the backend call API"),
+        "CTFE cannot inspect host class metadata"),
 )) {
     @("hostClassTypeInfoIsClassMetadata." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        enum code = q{
-            TypeInfo info() {
-                return typeid(Exception);
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                assert(typeid(Exception).name == "object.Exception");
             }
-        };
-
-        static if (is(backend == Native)) {
-            mixin(code);
-            assert(info() is Exception.classinfo);
-        } else {
-            auto module_ = parseSnippet(code);
-            auto function_ = findFunction(module_, "info");
-            TypeInfo result;
-            auto runtime = new backend(Program([module_]));
-            runtime.call(function_, &result, []);
-            assert(result is Exception.classinfo);
-        }
+        });
     }
 }
 
