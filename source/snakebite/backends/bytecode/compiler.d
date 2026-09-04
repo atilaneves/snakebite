@@ -5282,16 +5282,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // does.
         auto dot = expression.e1.isDotVarExp;
         auto receiver = dot is null ? expression.e1 : dot.e1;
-        if (dot !is null || receiver.isThisExp !is null
-                || receiver.isSuperExp !is null)
-            return compileAddress(receiver);
 
-        // A struct literal's own `S(1, 2)`: there is no receiver
-        // expression at all, only the destination the value is being
-        // constructed into. Never reached with `destOffset ==
-        // discardResult` - constructing a new value always needs
-        // somewhere to put it, unlike a `new C(...)` object.
-        if (callee.isCtorDeclaration !is null) {
+        // A struct literal's own `S(1, 2)` (no `dot` at all) and a
+        // user-constructor field initializer's own `S(0, 0).__ctor(args)`
+        // (`dot.e1` a bare default-init `StructLiteralExp`) name the same
+        // thing: a temporary with no storage of its own besides the
+        // destination this call is already being compiled into. Reusing
+        // `destOffset` here, rather than `compileAddress(receiver)`'s
+        // generic struct-rvalue fallback (which would reserve a second,
+        // unrelated temporary and construct into that instead), is what
+        // makes the constructor's writes land where the caller - a
+        // struct literal's own field slot, most often - actually reads
+        // them back from afterward.
+        if (callee.isCtorDeclaration !is null
+                && (dot is null || receiver.isStructLiteralExp !is null)) {
             if (destOffset == discardResult)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
@@ -5300,6 +5304,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opFrameAddress, thisOffset, destOffset, size_t.sizeof);
             return thisOffset;
         }
+
+        if (dot !is null || receiver.isThisExp !is null
+                || receiver.isSuperExp !is null)
+            return compileAddress(receiver);
 
         // An ordinary method called with no explicit receiver at all
         // (`foo()` from inside another member of the same class) - sugar
