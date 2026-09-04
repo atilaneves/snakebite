@@ -30,6 +30,7 @@ configuration "unittest" {
     sourcePaths "bench"
     excludedSourceFiles "bench/main.d"
     importPaths "tests"
+    importPaths "acceptance"
     importPaths "."
 
     dependency "unit-threaded" version="*"
@@ -46,6 +47,7 @@ configuration "acceptance-test" {
     sourcePaths "bench"
     excludedSourceFiles "bench/main.d"
     importPaths "acceptance"
+    importPaths "tests"
     importPaths "."
 
     dependency "unit-threaded" version="*"
@@ -59,10 +61,11 @@ configuration "sb" {
     lflags "--export-dynamic" platform="linux"
 
     mainSourceFile "source/snakebite/main.d"
+    dependency "readline" version="0.3.0"
     importPaths "."
 }
 
-// The interactive REPL: `dub build -c sb-repl` produces `bin/sb-repl`.
+// The interactive REPL: the Reggae build produces `bin/sb-repl`.
 configuration "sb-repl" {
     targetType "executable"
     targetName "sb-repl"
@@ -85,5 +88,6 @@ configuration "bench" {
 
     mainSourceFile "bench/main.d"
     sourcePaths "bench"
+    dependency "readline" version="0.3.0"
     importPaths "."
 }
