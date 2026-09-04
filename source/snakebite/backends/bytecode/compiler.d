@@ -5104,26 +5104,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (isVirtualCall(expression, callee))
             return compileVirtualCall(expression, callee, destOffset);
 
-        // `callee.vthis`, generally: it reflects `needThis()`, true for an
-        // ordinary member method and also for a nested function or lambda
-        // that reads an outer method's `this` implicitly (`receiverOffsetOf`
-        // then reaches that `this` through the static chain) - a case
-        // `isThis` alone would miss, since such a callee is not itself a
-        // member of any aggregate.
-        //
-        // `vthis` is a local variable `functionSemantic3` (body semantic)
-        // creates, though, so it stays unset on a native declaration this
-        // compiler never walks the body of - `Exception.this` is one,
-        // reached through `super(...)` delegation from a guest exception
-        // constructor. `isThis` answers the same question (is this a
-        // non-static member function) straight from the declaration, no
-        // body needed, and is reliable there: a native callee is always an
-        // ordinary member function, never a nested closure over some
-        // outer `this`.
-        const isNative =
-            callee.fbody is null || _bytecode.hasNativeSymbol(callee);
-        const hasThis = callee.vthis !is null
-            || (isNative && callee.isThis !is null);
+        // `hasHiddenThis` reflects `needThis()`: true for an ordinary
+        // member method and also for a nested function or lambda that
+        // reads an outer method's `this` implicitly (`receiverOffsetOf`
+        // then reaches that `this` through the static chain), and forces
+        // `functionSemantic3` first so it stays reliable on a native
+        // declaration this compiler never walks the body of - `Exception.
+        // this` is one, reached through `super(...)` delegation from a
+        // guest exception constructor.
+        import snakebite.backends.delegates: hasHiddenThis;
+
+        const hasThis = hasHiddenThis(callee);
         compileResolvedCall(
             callee, expression.arguments, expression.loc,
             expressionText(expression), hasThis,
