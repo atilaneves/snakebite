@@ -415,17 +415,18 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 // ever handed back through `FrameLayout` itself.
 extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import dmd.declaration: VarDeclaration;
+    import dmd.identifier: Identifier;
     import dmd.init: ExpInitializer;
     import dmd.expression;
     import dmd.func: FuncDeclaration;
     import dmd.mtype: Type;
     import dmd.statement:
         BreakStatement, CaseStatement, CompoundStatement, ContinueStatement,
-        DefaultStatement, ExpStatement, ForStatement, GotoCaseStatement,
-        GotoDefaultStatement, IfStatement, ImportStatement, ReturnStatement,
-        ScopeStatement, Statement, SwitchErrorStatement, SwitchStatement,
-        ThrowStatement, TryCatchStatement, TryFinallyStatement,
-        UnrolledLoopStatement, WhileStatement;
+        DefaultStatement, DoStatement, ExpStatement, ForStatement,
+        GotoCaseStatement, GotoDefaultStatement, IfStatement, ImportStatement,
+        LabelStatement, ReturnStatement, ScopeStatement, Statement,
+        SwitchErrorStatement, SwitchStatement, ThrowStatement,
+        TryCatchStatement, TryFinallyStatement, UnrolledLoopStatement;
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
         Arg, AssertSite, CallSite, ClosureSlot, discardResult,
@@ -497,15 +498,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // can still reach past it - a `continue` inside a loop body, say,
     // does not end the loop itself.
     private bool _finished;
-    // The loop this compiler is currently inside the body of, innermost
-    // last - what an unlabelled `continue` targets. A `while` already
-    // knows its own continue target (the condition it re-checks) the
-    // moment it starts compiling its body; a `for`'s is its increment,
-    // compiled only after the body is, so a `continue` reached first
-    // records its own instruction's index here instead and
-    // `resolveContinues` patches every one of them in once the target is
-    // known.
+    // The loop or unrolled `foreach` this compiler is currently inside the
+    // body of, innermost last - what a `continue` targets, labelled or
+    // not. A `do` knows its own continue target (the condition it
+    // re-checks) before it compiles its body; a `for`'s increment and an
+    // unrolled `foreach`'s next element are both only known once the body
+    // ahead of them is already compiled, so a `continue` reached first
+    // queues its own instruction index in `pendingContinueJumps` instead,
+    // and `resolveContinues` patches every one of them in once the target
+    // is known.
     private struct LoopContext {
+        Identifier label;
         size_t continueTarget = size_t.max;
         size_t[] pendingContinueJumps;
     }
@@ -518,18 +521,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         private size_t _catchOffset;
     }
 
-    // What an unlabelled `break` targets: the innermost loop or `switch`
-    // this compiler is currently inside the body of. A loop pushes one of
-    // these so a `switch` nested inside it does not steal a loop's own
-    // `break` once loops implement one of their own, but this compiler
-    // only ever files jumps into `pendingBreakJumps` for a `switch`
-    // (`isSwitch`) - a `break` whose innermost entry is a loop is outside
-    // this compiler's scope and rejected instead.
+    // What a `break` targets: the innermost loop, `switch`, or unrolled
+    // `foreach` this compiler is currently inside the body of, or - given
+    // a label - whichever of those an enclosing `LabelStatement` names.
+    // `pendingBreakJumps` collects every `break` that targets this one,
+    // patched once this construct's own compiled code ends.
     private struct Breakable {
-        bool isSwitch;
+        Identifier label;
         size_t[] pendingBreakJumps;
     }
     private Breakable[] _breakables;
+
+    // A label of a `LabelStatement` this compiler is currently inside,
+    // not yet claimed by the loop/`switch`/unrolled `foreach` it labels.
+    // dmd does not resolve `break ident`/`continue ident` to a target
+    // itself - only `findLoopIndex`/`findBreakableIndex` below do, by
+    // identifier - but it does resolve which statement a label names:
+    // `_pendingLabelTarget` holds that resolved `Statement` (see
+    // `compileLabel`), since a labelled `for` with an init is rewritten
+    // to put the label on the generated `ForStatement` alone, not on
+    // whatever the init itself also compiles (a `switch`, say).
+    private Identifier _pendingLabel;
+    private Statement _pendingLabelTarget;
 
     // The `switch` a `default:` inside its body belongs to - needed only
     // because, unlike `GotoDefaultStatement`, dmd's `DefaultStatement`
@@ -717,7 +730,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // Every `opJump`/`opBranchFalse`/`opBranchTrue` this compiler emitted
     // still names its target by a plain instruction index at this point -
-    // `compileIf`/`compileWhile`/`compileFor`/`compileContinue` patch
+    // `compileIf`/`compileFor`/`compileContinue` patch
     // that index in once they know it, but never resolve it to an
     // address themselves, since `_instructions` can still grow (and so
     // move, on a reallocation) at any point before `build` returns. Once
@@ -786,8 +799,110 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileStatements(statement.statements);
     }
 
+    // dmd unrolls a `foreach` over a tuple (an `AliasSeq`, `static
+    // foreach`'s own arguments) into one statement per element at
+    // semantic time - see `makeTupleForeach` in `statementsem.d` - so
+    // there is no run time loop left to compile, only this fixed sequence
+    // of already-distinct statements. A `continue` there still needs a
+    // real jump, the same as `compileFor`'s: it must skip only the rest
+    // of the current element, landing on the next element's own first
+    // instruction (or, from the last element, after the whole
+    // statement) rather than falling into whatever the current element
+    // was itself about to skip (an `else`, a `catch` handler, the next
+    // `case`).
     override void visit(UnrolledLoopStatement statement) {
-        compileStatements(statement.statements);
+        auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
+        if (statement.statements is null) {
+            _finished = false;
+            return;
+        }
+
+        _loops ~= LoopContext(label);
+        _breakables ~= Breakable(label);
+
+        bool lastFinished;
+        foreach (child; *statement.statements) {
+            resolveContinues(_instructions.length);
+            _finished = false;
+            compileStatement(child);
+            lastFinished = _finished;
+        }
+        const hadContinue = _loops[$ - 1].pendingContinueJumps.length > 0;
+        resolveContinues(_instructions.length);
+
+        const breakable = _breakables[$ - 1];
+        _breakables = _breakables[0 .. $ - 1];
+        _loops = _loops[0 .. $ - 1];
+
+        const afterLoop = _instructions.length;
+        foreach (index; breakable.pendingBreakJumps)
+            patchTarget(index, afterLoop);
+
+        _finished = lastFinished && !hadContinue
+            && breakable.pendingBreakJumps.length == 0;
+    }
+
+    // `do`-`while` always runs its own body once before the condition is
+    // ever checked, so - unlike `compileFor` - there is no upfront branch
+    // to skip the body with, only a trailing one that decides whether to
+    // run it again. `continue` still needs a target distinct from that
+    // trailing branch itself: the spec sends it to the condition check,
+    // not back to the body's own start, so a `continue` reached before
+    // the condition is compiled queues its own jump the same way
+    // `compileFor`'s does for its increment.
+    override void visit(DoStatement statement) {
+        auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
+        const bodyStart = _instructions.length;
+
+        _loops ~= LoopContext(label);
+        _breakables ~= Breakable(label);
+        compileStatement(statement._body);
+        const bodyFinished = _finished;
+        const breakable = _breakables[$ - 1];
+        _breakables = _breakables[0 .. $ - 1];
+        const hadContinue = _loops[$ - 1].pendingContinueJumps.length > 0;
+        _finished = false;
+
+        const conditionIndex = _instructions.length;
+        resolveContinues(conditionIndex);
+        _loops = _loops[0 .. $ - 1];
+
+        // See `compileFor`'s own doc for why a trivially-true condition
+        // is never guarded - here that means the trailing check becomes
+        // an unconditional jump back to the body instead of a real test.
+        const guarded = !isTriviallyTrueCondition(statement.condition);
+        if (guarded) {
+            const conditionOffset = compileCondition(statement.condition);
+            const width = conditionWidth(statement.condition);
+            emit(&opBranchTrue, conditionOffset, bodyStart, width);
+        } else {
+            emit(&opJump, bodyStart, 0, 0);
+        }
+
+        const afterLoop = _instructions.length;
+        foreach (index; breakable.pendingBreakJumps)
+            patchTarget(index, afterLoop);
+
+        // A body that returns on every path, with nothing left to
+        // `continue` past it, never reaches the condition at all - the
+        // whole loop is then finished the same way the body is, the
+        // condition's own instructions being dead code nothing jumps
+        // into.
+        const hadBreak = breakable.pendingBreakJumps.length > 0;
+        _finished = !hadBreak && (bodyFinished && !hadContinue || !guarded);
+    }
+
+    // `gotoTarget` is unset when dmd did not need to rewrite the labelled
+    // statement, so the label names `statement.statement` itself then.
+    override void visit(LabelStatement statement) {
+        auto outerLabel = _pendingLabel; // auto: const(Identifier) will not implicitly convert back
+        auto outerTarget = _pendingLabelTarget;
+        _pendingLabel = statement.ident;
+        _pendingLabelTarget = statement.gotoTarget !is null
+            ? statement.gotoTarget : statement.statement;
+        compileStatement(statement.statement);
+        _pendingLabel = outerLabel;
+        _pendingLabelTarget = outerTarget;
     }
 
     override void visit(ScopeStatement statement) {
@@ -865,10 +980,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileIf(statement);
     }
 
-    override void visit(WhileStatement statement) {
-        compileWhile(statement);
-    }
-
     override void visit(ForStatement statement) {
         compileFor(statement);
     }
@@ -902,6 +1013,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(SwitchStatement statement) {
         import snakebite.nativelayout: TypeFacts;
 
+        auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
         const facts = TypeFacts.of(statement.condition.type);
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             throw rejection(_function, statement.loc, statementText(statement));
@@ -934,7 +1046,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opJump, 0, 0, 0);
         jumpToDefault(statement, defaultJumpIndex);
 
-        _breakables ~= Breakable(true);
+        _breakables ~= Breakable(label);
         _switchStack ~= statement;
         compileSwitchBody(statement._body);
         const bodyFinished = _finished;
@@ -999,13 +1111,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(BreakStatement statement) {
-        if (statement.ident !is null || _breakables.length == 0
-                || !_breakables[$ - 1].isSwitch)
+        if (_breakables.length == 0)
+            throw rejection(_function, statement.loc, statementText(statement));
+
+        const target = findBreakableIndex(statement.ident);
+        if (target == size_t.max)
             throw rejection(_function, statement.loc, statementText(statement));
 
         const index = _instructions.length;
         emit(&opJump, 0, 0, 0);
-        _breakables[$ - 1].pendingBreakJumps ~= index;
+        _breakables[target].pendingBreakJumps ~= index;
         _finished = true;
     }
 
@@ -1180,46 +1295,37 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return integer !is null && integer.toInteger != 0;
     }
 
-    private void compileWhile(WhileStatement statement) {
-        const loopStart = _instructions.length;
-        // A condition that can never be false - `while (1)` - is never
-        // guarded: the check itself would still compile correctly, but
-        // its false branch would then target the position right after
-        // this loop's own last instruction, which exists only when
-        // something follows the loop in source. Nothing does when a
-        // trivially-true loop is a function's own last statement (its
-        // body returns unconditionally instead), and a branch aimed
-        // one past the last instruction is exactly what `resolveBranches`
-        // exists to catch.
-        const guarded = !isTriviallyTrueCondition(statement.condition);
-        size_t branchIndex = size_t.max;
-        if (guarded) {
-            const conditionOffset = compileCondition(statement.condition);
-            const width = conditionWidth(statement.condition);
-            branchIndex = _instructions.length;
-            emit(&opBranchFalse, conditionOffset, 0, width);
-        }
+    // Claims the pending label only when `statement` is what dmd resolved
+    // it to, not merely the first breakable construct compiled while one
+    // is pending.
+    private Identifier consumeLabel(Statement statement) {
+        if (_pendingLabelTarget !is statement)
+            return null;
 
-        _loops ~= LoopContext(loopStart);
-        _breakables ~= Breakable(false);
-        compileStatement(statement._body);
-        _breakables = _breakables[0 .. $ - 1];
-        _loops = _loops[0 .. $ - 1];
-        _finished = false;
-
-        emit(&opJump, loopStart, 0, 0);
-        if (branchIndex != size_t.max)
-            _instructions[branchIndex].source = _instructions.length;
-
-        _finished = !guarded;
+        auto label = _pendingLabel;
+        _pendingLabel = null;
+        _pendingLabelTarget = null;
+        return label;
     }
 
     private void compileFor(ForStatement statement) {
+        auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
         if (statement._init !is null)
             compileStatement(statement._init);
 
-        // See `compileWhile`'s own doc for why a trivially-true condition
-        // is never guarded.
+        // A condition that can never be false - `while (1)`, always
+        // rewritten by dmd to a `for` (see `visitWhile` in
+        // `statementsem.d`), or a bare `for (;;)` - is never guarded: the
+        // check itself would still compile correctly, but its false
+        // branch would then target the position right after this loop's
+        // own last instruction, which exists only when something follows
+        // the loop in source. Nothing does when a trivially-true loop is
+        // a function's own last statement (its body returns
+        // unconditionally instead), and a branch aimed one past the last
+        // instruction is exactly what `resolveBranches` exists to catch.
+        // A `break` inside such a loop still lands somewhere real:
+        // `build` appends a trailing `opReturnVoid` at that exact
+        // position whenever nothing else already made it reachable.
         const guarded = statement.condition !is null
             && !isTriviallyTrueCondition(statement.condition);
         const conditionIndex = _instructions.length;
@@ -1231,9 +1337,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opBranchFalse, conditionOffset, 0, width);
         }
 
-        _loops ~= LoopContext();
-        _breakables ~= Breakable(false);
+        _loops ~= LoopContext(label);
+        _breakables ~= Breakable(label);
         compileStatement(statement._body);
+        const breakable = _breakables[$ - 1];
         _breakables = _breakables[0 .. $ - 1];
         _finished = false;
 
@@ -1246,24 +1353,55 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         emit(&opJump, conditionIndex, 0, 0);
 
+        const afterLoop = _instructions.length;
         if (branchIndex != size_t.max)
-            _instructions[branchIndex].source = _instructions.length;
+            _instructions[branchIndex].source = afterLoop;
 
-        _finished = !guarded;
+        foreach (index; breakable.pendingBreakJumps)
+            patchTarget(index, afterLoop);
+
+        _finished = !guarded && breakable.pendingBreakJumps.length == 0;
+    }
+
+    // dmd resolves neither `break ident` nor `continue ident` to a
+    // target itself, only confirming one exists (`checkLabeledLoop` in
+    // `statementsem.d`), so this compiler searches outward by identifier
+    // for the entry a legally-typed program guarantees is there.
+    private size_t findLoopIndex(Identifier label) {
+        if (label is null)
+            return _loops.length - 1;
+
+        foreach_reverse (i, ref loop; _loops)
+            if (loop.label is label)
+                return i;
+
+        return size_t.max;
+    }
+
+    private size_t findBreakableIndex(Identifier label) {
+        if (label is null)
+            return _breakables.length - 1;
+
+        foreach_reverse (i, ref breakable; _breakables)
+            if (breakable.label is label)
+                return i;
+
+        return size_t.max;
     }
 
     private void compileContinue(ContinueStatement statement) {
-        if (statement.ident !is null)
-            throw rejection(_function, statement.loc, statementText(statement));
-
         if (_loops.length == 0)
             throw rejection(_function, statement.loc, statementText(statement));
 
-        auto target = _loops[$ - 1].continueTarget;
+        const index = findLoopIndex(statement.ident);
+        if (index == size_t.max)
+            throw rejection(_function, statement.loc, statementText(statement));
+
+        const target = _loops[index].continueTarget;
         if (target != size_t.max) {
             emit(&opJump, target, 0, 0);
         } else {
-            _loops[$ - 1].pendingContinueJumps ~= _instructions.length;
+            _loops[index].pendingContinueJumps ~= _instructions.length;
             emit(&opJump, 0, 0, 0);
         }
 
@@ -1273,6 +1411,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void resolveContinues(in size_t target) {
         foreach (index; _loops[$ - 1].pendingContinueJumps)
             _instructions[index].destination = target;
+        _loops[$ - 1].pendingContinueJumps = [];
     }
 
     // A `switch`'s own body is, once every `ScopeStatement`/

@@ -154,11 +154,7 @@ static foreach (backend; Matrix!()) {
 
 // `continue` in a `do`-`while` transfers control to the trailing
 // condition check, not back to the start of the body.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("continueInDoWhileJumpsToCondition." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -177,6 +173,239 @@ static foreach (backend; Matrix!(
                 } while (i < 6);
 
                 assert(sum == 15);
+            }
+        });
+    }
+}
+
+// A `do` body always runs once, so a body that returns on every path
+// makes the whole loop return on every path; the condition is never
+// reached.
+static foreach (backend; Matrix!()) {
+    @("doBodyThatAlwaysReturnsEndsFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int x) {
+                do {
+                    return x + 1;
+                } while (x > 0);
+            }
+
+            void main() {
+                assert(f(1) == 2);
+            }
+        });
+    }
+}
+
+// A plain `break` inside a `for` loop leaves the loop, running nothing
+// after it in the same iteration and none of the loop's own remaining
+// iterations.
+static foreach (backend; Matrix!()) {
+    @("breakExitsForLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int sum;
+
+                for (int i; i < 10; ++i) {
+                    if (i == 5)
+                        break;
+
+                    sum += i;
+                }
+
+                assert(sum == 10);
+            }
+        });
+    }
+}
+
+// A labelled `break` leaves the loop its label names, not just the
+// innermost one it is written inside.
+static foreach (backend; Matrix!()) {
+    @("labelledBreakExitsOuterLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int count;
+
+                outer:
+                for (int i; i < 2; ++i) {
+                    for (int j; j < 2; ++j) {
+                        ++count;
+                        if (i == 0 && j == 1)
+                            break outer;
+                    }
+                }
+
+                assert(count == 2);
+            }
+        });
+    }
+}
+
+// A labelled `continue` moves the loop its label names to its next
+// iteration, skipping the rest of every loop nested inside it too.
+static foreach (backend; Matrix!()) {
+    @("labelledContinueRepeatsOuterLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int count;
+
+                outer:
+                for (int i; i < 3; ++i) {
+                    for (int j; j < 4; ++j) {
+                        if (j == i + 1)
+                            continue outer;
+
+                        ++count;
+                    }
+                }
+
+                assert(count == 6);
+            }
+        });
+    }
+}
+
+// `continue` in an unrolled `foreach` ends the current element's
+// statement, so an `else` paired with the `if` that continued must not
+// run for that element.
+static foreach (backend; Matrix!()) {
+    @("continueInUnrolledForeachSkipsElse." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            void main() {
+                int sum;
+
+                foreach (value; AliasSeq!(1, 2, 3)) {
+                    if (value == 2)
+                        continue;
+                    else
+                        sum += value;
+                }
+
+                assert(sum == 4);
+            }
+        });
+    }
+}
+
+// `continue` in a `case` of a `switch` inside an unrolled `foreach`
+// leaves the whole `switch` for the current element; it must not fall
+// through into the next case.
+static foreach (backend; Matrix!()) {
+    @("continueInSwitchInUnrolledForeachLeavesSwitch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            void main() {
+                int sum;
+
+                foreach (value; AliasSeq!(1, 2)) {
+                    switch (value) {
+                    case 1:
+                        continue;
+                    default:
+                        sum += 10;
+                    }
+                }
+
+                assert(sum == 10);
+            }
+        });
+    }
+}
+
+// `continue` in a `try` body inside an unrolled `foreach` leaves the
+// `try` normally; no exception was thrown, so no `catch` handler runs.
+static foreach (backend; Matrix!()) {
+    @("continueInTryInUnrolledForeachSkipsCatch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            void main() {
+                int sum;
+
+                foreach (value; AliasSeq!(1, 2)) {
+                    try {
+                        sum += value;
+                        continue;
+                    } catch (Exception) {
+                        sum += 100;
+                    }
+                }
+
+                assert(sum == 3);
+            }
+        });
+    }
+}
+
+// `continue` as the last statement of an unrolled `foreach` body only
+// ends the current element; the statement after the loop still runs.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "returns the wrong value after a trailing continue"),
+)) {
+    @("continueAtEndOfUnrolledForeachFallsOut." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            int total() {
+                int sum;
+
+                foreach (value; AliasSeq!(1, 2)) {
+                    sum += value;
+                    continue;
+                }
+
+                return sum;
+            }
+
+            void main() {
+                assert(total == 3);
+            }
+        });
+    }
+}
+
+// A label names the loop it is written on, not the first breakable
+// construct compiled inside it - here a `switch` in the `for` init.
+static foreach (backend; Matrix!()) {
+    @("labelledBreakIgnoresSwitchInForInit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int count;
+                int i;
+
+                outer:
+                for ({ switch (i) { default: break; } } i < 2; ++i) {
+                    for (int j; j < 2; ++j) {
+                        ++count;
+                        if (i == 0 && j == 1)
+                            break outer;
+                    }
+                }
+
+                assert(count == 2);
             }
         });
     }
@@ -259,11 +488,7 @@ static foreach (backend; Matrix!()) {
 // statement's own body and moves to the next element's, while `break`
 // skips every remaining element's statement entirely, exactly like an
 // ordinary loop body.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("breakAndContinueInUnrolledForeach." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
