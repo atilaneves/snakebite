@@ -14,7 +14,6 @@ import ut.backends;
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("moduleArrayInitialisedBeforeFirstUse." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -202,12 +201,10 @@ static foreach (backend; Matrix!(
                 private char[] _elements;
                 private long _length;
 
-                this(char[] values...) {
+                this(size_t capacity) {
                     _elements = cast(char[]) Mallocator.instance.allocate(
-                        values.length,
+                        capacity,
                     );
-                    _elements[] = values[];
-                    _length = values.length;
                 }
 
                 ~this() {
@@ -238,7 +235,10 @@ static foreach (backend; Matrix!(
             }
 
             void main() {
-                auto vector = Vector('f', 'o', 'o');
+                auto vector = Vector(3);
+                vector.put('f');
+                vector.put('o');
+                vector.put('o');
                 vector.put('b');
                 vector.put(['a', 'r']);
                 vector.put("quux");

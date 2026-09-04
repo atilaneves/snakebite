@@ -110,7 +110,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         Error, Exception, Throwable, TypeInfo_Class, TypeInfo_Struct;
     import dmd.root.string: toDString;
     import dmd.astenums:
-        Tarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32, Tfloat64,
+        Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32, Tfloat64,
         Tfloat80, Tnoreturn, Tint64, Tpointer, Tsarray, Tuns32, Tuns8,
         Tvoid, Twchar;
     import dmd.arraytypes: Expressions;
@@ -574,6 +574,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         size_t argumentCount,
     ) {
         import std.conv: text;
+
+        if (expression.e1.isSliceExp !is null)
+            return assignSlice(expression);
 
         // A template instance used only by interpreted guest code has no
         // machine-code symbol for FFI to find. DMD has already synthesized
@@ -2132,6 +2135,48 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
         memcpy(_place, target, _facts.size);
         return target;
+    }
+
+    private void* assignSlice(AssignExp expression) {
+        import core.stdc.string: memcpy;
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset, storeIntegral;
+        import std.conv: text;
+
+        if (expression.e2.type.ty != Tarray)
+            throw new SnakebiteException(
+                text("interpreter cannot assign `", expression.toString,
+                    "`: only a dynamic-array source is supported"),
+            );
+
+        const destination = evaluateArray(
+            expression.e1, factsOf(expression.e1.type));
+        const source = evaluateArray(
+            expression.e2, factsOf(expression.e2.type));
+        if (destination.length != source.length)
+            throw new SnakebiteException(
+                text("interpreter cannot assign `", expression.toString,
+                    "`: array lengths differ (", destination.length,
+                    " and ", source.length, ")"),
+            );
+
+        const elementSize = factsOf(expression.e1.type.nextOf).size;
+        if (destination.length != 0)
+            memcpy(
+                cast(ubyte*) destination.elements,
+                source.elements,
+                destination.length * elementSize,
+            );
+
+        auto bytes = cast(ubyte*) _place;
+        storeIntegral(
+            bytes + arrayLengthOffset,
+            destination.length,
+            size_t.sizeof,
+        );
+        *cast(ubyte**) (bytes + arrayPointerOffset) =
+            cast(ubyte*) destination.elements;
+        return _place;
     }
 
     private bool supportsStruct(Type type) {
