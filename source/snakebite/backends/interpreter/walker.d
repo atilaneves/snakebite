@@ -3416,6 +3416,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
+        if (auto typeInfo = expression.var.isTypeInfoDeclaration) {
+            auto type = typeInfo.tinfo;
+            auto classType = type.isTypeClass;
+            if (classType !is null && isRootOwnedClass(classType.sym)) {
+                auto info = classRuntimeInfo(classType.sym);
+                storeIntegral(
+                    _place,
+                    cast(size_t) cast(void*) info,
+                    _facts.size,
+                );
+                return;
+            }
+        }
+
         const address =
             cast(size_t) slotOf(expression, expression.var) + expression.offset;
         storeIntegral(_place, address, _facts.size);

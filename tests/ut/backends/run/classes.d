@@ -289,6 +289,35 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.inexpressible,
+        "bytecode cannot compile class parameters"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot dereference classinfo"),
+)) {
+    @("genericClassInfoNameWorks." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Dummy {
+            }
+
+            bool info(T)() {
+                bool[string] names;
+                const name = T.classinfo.name;
+                assert(name.length > 6);
+                assert(name[$ - 6 .. $] == ".Dummy", name);
+                assert((name in names) is null);
+                return true;
+            }
+
+            void main() {
+                assert(info!Dummy);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the mutable static destruction counter"),
