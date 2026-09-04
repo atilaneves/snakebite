@@ -458,18 +458,50 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
         import dmd.dclass: ClassDeclaration;
 
-        typeInfo.base = declaration.baseClass is null
-                || declaration.baseClass is ClassDeclaration.object
-            ? cast(TypeInfo_Class) cast() typeid(Object)
-            : classRuntimeInfo(declaration.baseClass);
+        // `Throwable`, `Exception` and `Error` are native classes with no
+        // guest declaration of their own body; a guest class over one of
+        // them (`Expected : Exception`) must build on the real, complete
+        // native `typeid`, the same way the interpreter's own
+        // `classRuntimeInfo` does, rather than recursing into this
+        // function and reconstructing an incomplete vtable from dmd's own
+        // (only partially resolved) `ClassDeclaration.vtbl` for them.
+        if (declaration.baseClass is null
+                || declaration.baseClass is ClassDeclaration.object)
+            typeInfo.base = cast(TypeInfo_Class) cast() typeid(Object);
+        else if (declaration.baseClass is ClassDeclaration.throwable)
+            typeInfo.base = cast(TypeInfo_Class) cast() typeid(Throwable);
+        else if (declaration.baseClass is ClassDeclaration.exception
+                || (ClassDeclaration.exception !is null
+                    && ClassDeclaration.exception.isBaseOf(
+                        declaration.baseClass, null)))
+            typeInfo.base = cast(TypeInfo_Class) cast() typeid(Exception);
+        else if (declaration.baseClass is ClassDeclaration.errorException
+                || (ClassDeclaration.errorException !is null
+                    && ClassDeclaration.errorException.isBaseOf(
+                        declaration.baseClass, null)))
+            typeInfo.base = cast(TypeInfo_Class) cast() typeid(Error);
+        else
+            typeInfo.base = classRuntimeInfo(declaration.baseClass);
 
         // A slot this class never overrides still names druntime's own
-        // `Object` method (`toString`, `opEquals`, ...) - real compiled
-        // code this project neither compiles nor gives a bytecode call
-        // site to invoke through. Left `null`: nothing here ever compiles
-        // a guest class that reaches one of those through a virtual call,
-        // only through its own overrides, which are always guest-owned.
-        auto vtbl = new void*[declaration.vtbl.length];
+        // method (`Throwable.toString`, `Object.opEquals`, ...) - real
+        // compiled code this project never compiles a body for. That slot
+        // keeps the base class's own vtable entry, the real native
+        // function pointer, since native code (a native base class's own
+        // constructor, for one) calls through this vtable directly and
+        // needs a real address there, not a null one.
+        //
+        // `declaration.vtbl` only lists the slots dmd's frontend resolved
+        // while compiling this class; a guest class over a native base
+        // (`Exception`, ...) can end up with a shorter list than the base
+        // class's own real vtable, since dmd never lowers the native
+        // base's full body here. The vtable is always at least as long as
+        // the base's, so every native slot still has a home.
+        const baseVtableLength = typeInfo.base.vtbl.length;
+        const vtableLength = declaration.vtbl.length > baseVtableLength
+            ? declaration.vtbl.length : baseVtableLength;
+        auto vtbl = new void*[vtableLength];
+        vtbl[0 .. baseVtableLength] = typeInfo.base.vtbl[];
         vtbl[0] = cast(void*) typeInfo;
         foreach (i; 1 .. declaration.vtbl.length) {
             auto method = declaration.vtbl[i].isFuncDeclaration;

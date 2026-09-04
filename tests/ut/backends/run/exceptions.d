@@ -11,9 +11,6 @@ import ut.backends;
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Bytecode, Because.unconfirmed,
-        "the native constructor call no longer crashes, but the thrown " ~
-        "class still fails to match `catch (Exception)` by base type"),
 )) {
     @("catchMatchesGuestClassByBaseType." ~ backend.stringof)
     @Tags(backend.stringof)
