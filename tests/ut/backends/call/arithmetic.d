@@ -952,28 +952,90 @@ static foreach (backend; Matrix!()) {
 }
 
 // dmd's integral promotions widen a target narrower than `int` before the
-// operator is applied, so the left side arrives as `cast(int)value`. The
-// interpreter must still write the promoted result back to the byte slot.
-@("arithmetic.addAssign.narrowTarget.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
+// operator is applied, so the left side arrives as `cast(int)value`. Every
+// backend must still write the promoted result back to the byte slot,
+// wrapping the same way native `byte` arithmetic does.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.addAssign.narrowTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        (cast(byte) -56).shouldBeRetOf!(
+            backend,
+            q{
+                byte start() {
+                    return 100;
+                }
 
-    auto module_ = parseSnippet(q{
-        byte start() { return 100; }
-        byte step() { return 100; }
-        byte wrapped() {
-            byte value = start();
-            value += step();
-            return value;
-        }
-    });
-    auto function_ = findFunction(module_, "wrapped");
+                byte step() {
+                    return 100;
+                }
 
-    byte result;
-    interpreter(module_).call(function_, &result, []);
-    result.should == -56;
+                byte wrapped() {
+                    byte value = start();
+                    value += step();
+                    return value;
+                }
+            },
+            "wrapped",
+        );
+    }
+}
+
+// The same promotion applies to `|=`/`<<=` on an unsigned narrow target:
+// `ubyte`'s own operation happens at `int` width, so a shift past its own
+// 8 bits must still truncate on the way back into the byte slot.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.orAssign.narrowUnsignedTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        (cast(ubyte) 0xff).shouldBeRetOf!(
+            backend,
+            q{
+                ubyte low() {
+                    return 0x0f;
+                }
+
+                int shift() {
+                    return 4;
+                }
+
+                ubyte merged() {
+                    ubyte bits = low();
+                    bits |= low() << shift();
+                    return bits;
+                }
+            },
+            "merged",
+        );
+    }
+}
+
+// `short += ` also widens to `int` before the addition, and the D `short`
+// wraps around on overflow, distinct from `byte`'s own narrower wrap.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.addAssign.narrowShortTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        (cast(short)(short.max + 1)).shouldBeRetOf!(
+            backend,
+            q{
+                short start() {
+                    return short.max;
+                }
+
+                short step() {
+                    return 1;
+                }
+
+                short wrapped() {
+                    short value = start();
+                    value += step();
+                    return value;
+                }
+            },
+            "wrapped",
+        );
+    }
 }
 
 // dmd's semantic pass rewrites `--x` into `x -= 1`, so this pins the
