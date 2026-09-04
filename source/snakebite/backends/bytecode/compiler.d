@@ -34,17 +34,21 @@ private bool isSupportedFacts(
     in imported!"snakebite.nativelayout".TypeFacts facts,
     imported!"dmd.mtype".Type type,
 ) {
-    import dmd.astenums: Taarray, Tclass, Tpointer, Tsarray;
+    import dmd.astenums: Taarray, Tclass, Tdelegate, Tpointer, Tsarray;
 
     // An associative array's native layout is one pointer to the runtime's
     // own hash table (`AA` in druntime), the same as a class reference or
     // any other pointer - this compiler never lays out the table itself. A
     // class reference (`Tclass`) is that same one pointer word, holding the
-    // object's own address - not the object's bytes inline.
+    // object's own address - not the object's bytes inline. A delegate is
+    // the native `{context, function}` pair (`nativelayout.
+    // delegateValueSize` bytes) that `visit(DelegateExp)`/`visit(FuncExp)`
+    // fill in and every call through a delegate value reads back out of.
     return isSupportedFacts(facts) || isFloatingType(type)
         || type.ty == Tpointer
         || type.ty == Tclass
         || type.ty == Taarray
+        || type.ty == Tdelegate
         || type.isTypeStruct !is null
         || isSupportedStaticArray(type);
 }
@@ -699,6 +703,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opStoreIndirect, opSubtract, opThrow, opZero;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf;
+    import snakebite.backends.delegates: DelegateTarget, delegateTargetOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout:
@@ -2102,15 +2107,26 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             && _closureLayout.hasSlot(variable);
     }
 
+    // Shared with the interpreter
+    // (`snakebite.backends.delegates.outerFunctionOf`): both walk
+    // `toParent2` the same way to find the function a captured variable
+    // belongs to.
     private FuncDeclaration outerFunctionOf(VarDeclaration variable) const {
-        auto parent = variable.toParent2();
-        return parent is null ? null : parent.isFuncDeclaration;
+        import snakebite.backends.delegates:
+            sharedOuterFunctionOf = outerFunctionOf;
+
+        return sharedOuterFunctionOf(variable);
     }
 
+    // Shared with the interpreter
+    // (`snakebite.backends.delegates.functionNeedsClosure`): both ask
+    // dmd's own escape analysis the same question before deciding whether
+    // a captured variable lives in a frame slot or a heap block.
     private bool functionNeedsClosure(FuncDeclaration function_) const {
-        import dmd.funcsem: needsClosure;
+        import snakebite.backends.delegates:
+            sharedFunctionNeedsClosure = functionNeedsClosure;
 
-        return function_.needsClosure();
+        return sharedFunctionNeedsClosure(function_);
     }
 
     private size_t addPointerOffset(
@@ -3147,14 +3163,101 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     override void visit(FuncExp expression) {
         requireDestination(expression);
-        if (expression.fd is null)
+
+        import dmd.astenums: Tdelegate;
+
+        if (expression.type.ty != Tdelegate) {
+            if (expression.fd is null)
+                return visit(cast(Expression) expression);
+
+            // Same run-time value as `visit(SymOffExp)`'s function case
+            // above: the compiled callee, not the literal's own
+            // declaration.
+            auto compiled = _bytecode.compileFunction(expression.fd);
+            emit(&opConstant, _destination,
+                addConstant(cast(long) cast(size_t) compiled), _width);
+            return;
+        }
+
+        compileDelegateValue(
+            delegateTargetOf(expression.fd, expression.type), expression);
+    }
+
+    // `&nested` (`&obj.method` and a bound `this`-capturing literal are
+    // out of scope, matching the interpreter's own `visit(DelegateExp)`/
+    // `visit(FuncExp)` - see `snakebite.backends.delegates.
+    // delegateTargetOf`'s own doc for why): dmd lowers a nested function's
+    // address-of to this node, naming the function directly in
+    // `expression.func`.
+    override void visit(DelegateExp expression) {
+        requireDestination(expression);
+
+        compileDelegateValue(
+            delegateTargetOf(expression.func, expression.type), expression);
+    }
+
+    // Shared tail of `visit(FuncExp)`/`visit(DelegateExp)`: once
+    // `snakebite.backends.delegates.delegateTargetOf` has decided what the
+    // delegate value needs (frame-independent, dmd-only facts - see its
+    // own doc), this resolves that decision to instructions in this
+    // compiler's own representation - `contextAddressOf` walks the same
+    // static chain `compileCall`'s hidden-`this` argument already follows
+    // for an ordinary call to a nested function, and the function word is
+    // the compiled callee, the same `const(Function)*` `visit(SymOffExp)`'s
+    // function case stores for a plain function pointer.
+    private void compileDelegateValue(
+        DelegateTarget target, Expression expression,
+    ) {
+        import snakebite.nativelayout:
+            delegateContextOffset, delegateFunctionOffset;
+
+        if (target.function_ is null)
             return visit(cast(Expression) expression);
 
-        // Same run-time value as `visit(SymOffExp)`'s function case above:
-        // the compiled callee, not the literal's own declaration.
-        auto compiled = _bytecode.compileFunction(expression.fd);
-        emit(&opConstant, _destination,
-            addConstant(cast(long) cast(size_t) compiled), _width);
+        if (target.needsContext) {
+            if (target.contextOwner is null)
+                throw rejection(_function, expression.loc, "a static chain");
+
+            const contextOffset = contextAddressOf(target.contextOwner);
+            emit(&opCopy, _destination + delegateContextOffset,
+                contextOffset, size_t.sizeof);
+        } else {
+            emit(&opConstant, _destination + delegateContextOffset,
+                addConstant(0), size_t.sizeof);
+        }
+
+        auto compiled = _bytecode.compileFunction(target.function_);
+        emit(&opConstant, _destination + delegateFunctionOffset,
+            addConstant(cast(long) cast(size_t) compiled), size_t.sizeof);
+    }
+
+    // `dg.ptr`/`dg.funcptr`: dmd reads either word straight out of the
+    // delegate value, so this evaluates the delegate itself into a
+    // temporary and copies the one word the caller asked for out of it -
+    // the same two offsets `compileDelegateValue` above fills in.
+    override void visit(DelegatePtrExp expression) {
+        requireDestination(expression);
+
+        import snakebite.nativelayout: delegateContextOffset;
+
+        compileDelegateWord(expression.e1, delegateContextOffset);
+    }
+
+    override void visit(DelegateFuncptrExp expression) {
+        requireDestination(expression);
+
+        import snakebite.nativelayout: delegateFunctionOffset;
+
+        compileDelegateWord(expression.e1, delegateFunctionOffset);
+    }
+
+    private void compileDelegateWord(Expression expression, in size_t offset) {
+        import snakebite.nativelayout: delegateValueSize;
+
+        const delegateOffset = reserveTemp(
+            TypeFacts(delegateValueSize, size_t.sizeof, false, false));
+        evalInto(expression, delegateOffset, delegateValueSize);
+        emit(&opCopy, _destination, delegateOffset + offset, _width);
     }
 
     private size_t compileStaticAddress(VarDeclaration variable) {
@@ -3840,7 +3943,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     protected override void visitUnloweredEqual(EqualExp expression) {
-        import dmd.astenums: Tarray, Tsarray;
+        import dmd.astenums: Tarray, Tdelegate, Tsarray;
 
         requireDestination(expression);
 
@@ -3852,6 +3955,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (expression.e1.type.ty == Tsarray
                 && expression.e2.type.ty == Tsarray) {
+            compileStaticArrayEquality(expression, _destination);
+            return;
+        }
+
+        // A delegate is a plain `{context, function}` pair - dmd's own
+        // native equality for it, like a static array's, is exactly its
+        // bytes compared whole, never a guest-visible `opEquals` call (a
+        // delegate is not an aggregate with one). `compileStaticArrayEquality`
+        // already does nothing but that byte compare, keyed off `facts.size`
+        // rather than anything array-specific, so it serves here unchanged.
+        if (expression.e1.type.ty == Tdelegate
+                && expression.e2.type.ty == Tdelegate) {
             compileStaticArrayEquality(expression, _destination);
             return;
         }
@@ -4965,24 +5080,52 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     // `fn(args)` where dmd left `expression.f` unresolved: a call through a
-    // function pointer's own value rather than a name. dmd lowers this to
-    // `(*fn)(args)` (see the interpreter's own `calleeOf` for the same
-    // shape), so `expression.e1` is a `PtrExp` whose pointee type is the
-    // `TypeFunction` this call's own signature comes from - there is no
+    // function pointer's or a delegate's own value rather than a name.
+    // dmd lowers a function-pointer call to `(*fn)(args)` (see the
+    // interpreter's own `calleeOf` for the same shape), so `expression.e1`
+    // is a `PtrExp` whose pointee type is the `TypeFunction` this call's
+    // own signature comes from; a delegate value is already callable
+    // without that dereferencing lowering, so `expression.e1` is the
+    // delegate-typed expression itself there. Either way there is no
     // `FuncDeclaration` to read a `FrameLayout` from, since more than one
     // could reach this call site at run time. `FrameLayout.ofParameters`
-    // packs from that `TypeFunction` alone, the same packing every callee's
-    // own `FrameLayout.of` uses for its declared parameters, so argument
-    // `i` lands where whichever callee this call reaches at run time reads
-    // it from.
+    // packs from the signature alone, the same packing every callee's own
+    // `FrameLayout.of` uses for its declared parameters, so argument `i`
+    // lands where whichever callee this call reaches at run time reads it
+    // from - and, for a delegate call, so does the context word, packed
+    // first the same way `FrameLayout.of` packs any callee's own hidden
+    // `this` before its declared parameters (see `ofParameters`'s own
+    // `hasContext` doc).
     private void compileIndirectCall(CallExp expression, in size_t destOffset) {
-        import dmd.astenums: STC, Tvoid;
+        import dmd.astenums: STC, Tdelegate, Tvoid;
+        import dmd.mtype: TypeFunction;
+        import snakebite.nativelayout:
+            delegateContextOffset, delegateFunctionOffset, delegateValueSize;
 
         auto deref = expression.e1.isPtrExp;
-        auto functionType = deref is null ? null : deref.type.isTypeFunction;
-        if (functionType is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+        const isDelegateCall = deref is null
+            && expression.e1.type.ty == Tdelegate;
+
+        TypeFunction functionType;
+        size_t calleeOffset;
+        size_t contextOffset;
+        if (isDelegateCall) {
+            functionType = expression.e1.type.nextOf.isTypeFunction;
+
+            const delegateOffset = reserveTemp(
+                TypeFacts(delegateValueSize, size_t.sizeof, false, false));
+            evalInto(expression.e1, delegateOffset, delegateValueSize);
+            contextOffset = delegateOffset + delegateContextOffset;
+            calleeOffset = delegateOffset + delegateFunctionOffset;
+        } else {
+            functionType = deref is null ? null : deref.type.isTypeFunction;
+            if (functionType is null)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            calleeOffset = reserveTemp(pointerFacts);
+            evalInto(deref.e1, calleeOffset, size_t.sizeof);
+        }
 
         const parameterCount = functionType.parameterList.length;
         const argumentCount =
@@ -5009,12 +5152,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        const calleeOffset = reserveTemp(pointerFacts);
-        evalInto(deref.e1, calleeOffset, size_t.sizeof);
-
-        auto calleeLayout = FrameLayout.ofParameters(functionType);
+        auto calleeLayout = FrameLayout.ofParameters(functionType, isDelegateCall);
 
         Arg[] args;
+        if (isDelegateCall)
+            args ~= Arg(
+                contextOffset, calleeLayout.hiddenThis.parameter.offset,
+                size_t.sizeof,
+            );
+
         foreach (i; 0 .. parameterCount) {
             auto parameter = functionType.parameterList[i];
             if (parameter.storageClass & (STC.out_ | STC.lazy_))

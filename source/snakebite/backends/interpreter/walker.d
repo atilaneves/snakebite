@@ -97,6 +97,7 @@ import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 // `Interpreter`-side cache to hold.
 extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.backends.backend: Program;
+    import snakebite.backends.delegates: DelegateTarget;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
@@ -1536,58 +1537,34 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // enclosing frame or closure as its context, and that storage remains
     // reachable through `_allocations` when the enclosing call returns.
     override void visit(FuncExp expression) {
+        import snakebite.backends.delegates: delegateTargetOf;
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, storeIntegral;
         import std.conv: text;
 
-        import dmd.funcsem: needsClosure;
-
         auto literal = expression.fd;
-        if (literal is null || literal.isThis() !is null)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: its function declaration is unsupported"),
-            );
 
-        auto bytes = cast(ubyte*) _place;
-        if (bytes is null)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: it has no destination"),
-            );
-        const functionWord = cast(size_t) cast(void*) literal;
+        if (_type.ty != Tdelegate) {
+            if (literal is null || literal.isThis() !is null
+                    || expression.type.ty != Tpointer)
+                throw new SnakebiteException(
+                    text("interpreter cannot evaluate `", expression.toString,
+                        "` as a `", _type.toString, "`"),
+                );
 
-        if (_type.ty == Tdelegate) {
-            auto context = cast(size_t) 0;
-            if (literal.outerVars.length != 0 || literal.needsClosure()) {
-                auto parent = literal.toParent2;
-                auto parentFunction = parent is null
-                    ? null : parent.isFuncDeclaration;
-                if (parentFunction is null)
-                    throw new SnakebiteException(
-                        text("interpreter cannot evaluate `",
-                            expression.toString,
-                            "`: its enclosing function could not be " ~
-                            "determined"),
-                    );
-                context = cast(size_t) tryContextOf(parentFunction);
-            }
+            auto bytes = cast(ubyte*) _place;
+            if (bytes is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot evaluate `", expression.toString,
+                        "`: it has no destination"),
+                );
             storeIntegral(
-                bytes + delegateContextOffset, context, size_t.sizeof);
-            storeIntegral(
-                bytes + delegateFunctionOffset, functionWord, size_t.sizeof);
+                bytes, cast(size_t) cast(void*) literal, size_t.sizeof);
             return;
         }
 
-        if (expression.type.ty == Tpointer) {
-            storeIntegral(bytes, functionWord, size_t.sizeof);
-            return;
-        }
-
-        throw new SnakebiteException(
-            text("interpreter cannot evaluate `", expression.toString,
-                "` as a `", _type.toString, "`"),
-        );
+        storeDelegateValue(
+            delegateTargetOf(literal, _type), expression, _place);
     }
 
     // `&nested` is lowered by dmd to a DelegateExp whose expression is the
@@ -1595,34 +1572,47 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // closure, just as for a delegate literal. The function declaration is
     // retained in the function word for the interpreter to resolve later.
     override void visit(DelegateExp expression) {
+        import snakebite.backends.delegates: delegateTargetOf;
+
+        storeDelegateValue(
+            delegateTargetOf(expression.func, _type), expression, _place);
+    }
+
+    // Shared tail of `visit(FuncExp)`/`visit(DelegateExp)`: once
+    // `snakebite.backends.delegates.delegateTargetOf` has decided what the
+    // delegate value needs (see its own doc), this resolves that decision
+    // to actual bytes - the interpreter's own context representation
+    // (`tryContextOf`, a native pointer) and its own function-word
+    // convention (the `FuncDeclaration` itself, since this backend has no
+    // machine code for a guest function - `calleeOf` reads it back when the
+    // value is called).
+    private void storeDelegateValue(
+        DelegateTarget target,
+        Expression expression,
+        void* place,
+    ) {
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, storeIntegral;
         import std.conv: text;
 
-        auto function_ = expression.func;
-        if (function_ is null || function_.isThis() !is null
-                || _type.ty != Tdelegate)
+        if (target.function_ is null)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: its delegate declaration is unsupported"),
             );
 
         auto context = cast(size_t) 0;
-        if (function_.outerVars.length != 0
-                || functionNeedsClosure(function_)) {
-            auto parent = function_.toParent2;
-            auto parentFunction = parent is null
-                ? null : parent.isFuncDeclaration;
-            if (parentFunction is null)
+        if (target.needsContext) {
+            if (target.contextOwner is null)
                 throw new SnakebiteException(
                     text("interpreter cannot evaluate `",
                         expression.toString,
                         "`: its enclosing function could not be determined"),
                 );
-            context = cast(size_t) tryContextOf(parentFunction);
+            context = cast(size_t) tryContextOf(target.contextOwner);
         }
 
-        auto bytes = cast(ubyte*) _place;
+        auto bytes = cast(ubyte*) place;
         if (bytes is null)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
@@ -1632,7 +1622,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             bytes + delegateContextOffset, context, size_t.sizeof);
         storeIntegral(
             bytes + delegateFunctionOffset,
-            cast(size_t) cast(void*) function_,
+            cast(size_t) cast(void*) target.function_,
             size_t.sizeof,
         );
     }
@@ -1746,18 +1736,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         memcpy(_place, slot, _facts.size);
     }
 
-    // The function `variable` is a parameter or local of - `toParent2`
-    // walks up past any block or `Catch` scope in between, which are not
-    // `Dsymbol`s of their own, straight to the nearest enclosing function
-    // or aggregate. `null` for anything else it could be a member of
-    // (an aggregate's field, reached through `this` rather than a static
+    // The function `variable` is a parameter or local of - shared with the
+    // bytecode compiler (`snakebite.backends.delegates.outerFunctionOf`)
+    // since both walk `toParent2` the same way, past any block or `Catch`
+    // scope in between, straight to the nearest enclosing function or
+    // aggregate. `null` for anything else it could be a member of (an
+    // aggregate's field, reached through `this` rather than a static
     // chain, or a module-scope symbol) - `frameOf`'s caller is the one
     // that turns that into a refusal, since only it knows whether "not a
     // frame variable at all" or "not on the chain from here" is the
     // right thing to say.
     private FuncDeclaration outerFunctionOf(VarDeclaration variable) {
-        auto parent = variable.toParent2();
-        return parent is null ? null : parent.isFuncDeclaration;
+        import snakebite.backends.delegates: sharedOuterFunctionOf = outerFunctionOf;
+
+        return sharedOuterFunctionOf(variable);
     }
 
     // Where `owner`'s own context is: `owner` itself if it is the function
@@ -1829,10 +1821,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return base;
     }
 
+    // Shared with the bytecode compiler
+    // (`snakebite.backends.delegates.functionNeedsClosure`): both backends
+    // ask dmd's own escape analysis the same question before deciding
+    // whether a captured variable lives in a frame slot or a heap block.
     private bool functionNeedsClosure(FuncDeclaration function_) {
-        import dmd.funcsem: needsClosure;
+        import snakebite.backends.delegates:
+            sharedFunctionNeedsClosure = functionNeedsClosure;
 
-        return function_.needsClosure();
+        return sharedFunctionNeedsClosure(function_);
     }
 
     // Where the variable read or written by `expression` lives: the

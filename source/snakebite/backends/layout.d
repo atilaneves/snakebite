@@ -140,16 +140,40 @@ package struct FrameLayout {
         return layout;
     }
 
-    // Lays out a bare `TypeFunction`'s parameters alone, with no hidden
-    // `this` and no locals: the shape a call through a function pointer
+    // Lays out a bare `TypeFunction`'s parameters alone, with no locals:
+    // the shape a call through a function pointer or a delegate value
     // packs its arguments into, since there is no `FuncDeclaration` at
     // that call site to read the rest of a layout from - only the
-    // pointer's own type. Uses the same `packParameter` an ordinary
-    // `of` call packs its own declared parameters with, so a callee
-    // compiled through `of` and a caller packing through this read and
-    // write the same offsets.
-    package static FrameLayout ofParameters(TypeFunction type) {
+    // pointer's or delegate's own type. Uses the same `packParameter` an
+    // ordinary `of` call packs its own declared parameters with, so a
+    // callee compiled through `of` and a caller packing through this read
+    // and write the same offsets.
+    //
+    // `hasContext` reserves a leading pointer-sized `hiddenThis` slot
+    // before the explicit parameters, `false` by default: a plain function
+    // pointer's own type carries no context word to place, but every
+    // delegate call passes one - whichever guest function the delegate's
+    // own function word names at run time, `FrameLayout.of` always packs
+    // that function's own `vthis` (its hidden context slot) first, before
+    // its declared parameters, so a delegate call site that reserves this
+    // same slot first lines up with whatever callee it actually reaches.
+    package static FrameLayout ofParameters(
+        TypeFunction type, in bool hasContext = false,
+    ) {
         FrameLayout layout;
+
+        if (hasContext) {
+            auto slot = layout.reserveSlot(
+                TypeFacts(size_t.sizeof, size_t.sizeof, false, false));
+            layout.hiddenThis = HiddenThis(
+                Parameter(
+                    slot.offset, slot.facts, false,
+                    CallAdapter.Argument.init,
+                ),
+                null,
+            );
+        }
+
         layout.parameters.length = type.parameterList.length;
 
         foreach (i; 0 .. type.parameterList.length)

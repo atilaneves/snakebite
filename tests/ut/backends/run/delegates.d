@@ -14,7 +14,6 @@ import ut.backends;
 // call binds the parameter afresh, so repeated calls see their own
 // argument, not a stale one.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("nonCapturingDelegateBindsItsParameterEachCall." ~ backend.stringof)
@@ -39,7 +38,6 @@ static foreach (backend; Matrix!(
 // copied delegate is equal, while two closures from separate calls are not,
 // even when they produce the same result.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("delegateEqualityComparesFunctionAndContext." ~ backend.stringof)
@@ -72,7 +70,6 @@ static foreach (backend; Matrix!(
 // template, so `F(value)` is a direct call of the literal - each
 // invocation must see the argument of that invocation.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("nonCapturingLambdaThroughAliasTemplate." ~ backend.stringof)
@@ -96,7 +93,6 @@ static foreach (backend; Matrix!(
 // A delegate to a nested function is a (context, function) pair whose
 // context is the enclosing frame, so calling it reaches the same locals.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("nestedFunctionDelegateCarriesItsFrame." ~ backend.stringof)
