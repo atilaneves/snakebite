@@ -1103,9 +1103,7 @@ static foreach (backend; Matrix!(
 // value - since there is nothing to copy from in either of those cases.
 // The scope-exit destructor calls dmd inserts for `source`/`copied` and
 // for `moved`/`constructed` account for every increment of `dtors`.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("postblitAndDestructorThroughFieldCopyMoveAndDirectConstruction." ~
         backend.stringof)
     @Tags(backend.stringof)
