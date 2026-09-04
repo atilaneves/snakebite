@@ -799,16 +799,110 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileStatements(statement.statements);
     }
 
+    // dmd unrolls a `foreach` over a tuple (an `AliasSeq`, `static
+    // foreach`'s own arguments) into one statement per element at
+    // semantic time - see `makeTupleForeach` in `statementsem.d` - so
+    // there is no run time loop left to compile, only this fixed sequence
+    // of already-distinct statements. A `continue` there still needs a
+    // real jump, the same as `compileFor`'s: it must skip only the rest
+    // of the current element, landing on the next element's own first
+    // instruction (or, from the last element, after the whole
+    // statement) rather than falling into whatever the current element
+    // was itself about to skip (an `else`, a `catch` handler, the next
+    // `case`).
     override void visit(UnrolledLoopStatement statement) {
-        compileUnrolledLoop(statement);
+        auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
+        if (statement.statements is null) {
+            _finished = false;
+            return;
+        }
+
+        _loops ~= LoopContext(label);
+        _breakables ~= Breakable(label);
+
+        bool lastFinished;
+        foreach (child; *statement.statements) {
+            resolveContinues(_instructions.length);
+            _finished = false;
+            compileStatement(child);
+            lastFinished = _finished;
+        }
+        const hadContinue = _loops[$ - 1].pendingContinueJumps.length > 0;
+        resolveContinues(_instructions.length);
+
+        const breakable = _breakables[$ - 1];
+        _breakables = _breakables[0 .. $ - 1];
+        _loops = _loops[0 .. $ - 1];
+
+        const afterLoop = _instructions.length;
+        foreach (index; breakable.pendingBreakJumps)
+            patchTarget(index, afterLoop);
+
+        _finished = lastFinished && !hadContinue
+            && breakable.pendingBreakJumps.length == 0;
     }
 
+    // `do`-`while` always runs its own body once before the condition is
+    // ever checked, so - unlike `compileFor` - there is no upfront branch
+    // to skip the body with, only a trailing one that decides whether to
+    // run it again. `continue` still needs a target distinct from that
+    // trailing branch itself: the spec sends it to the condition check,
+    // not back to the body's own start, so a `continue` reached before
+    // the condition is compiled queues its own jump the same way
+    // `compileFor`'s does for its increment.
     override void visit(DoStatement statement) {
-        compileDo(statement);
+        auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
+        const bodyStart = _instructions.length;
+
+        _loops ~= LoopContext(label);
+        _breakables ~= Breakable(label);
+        compileStatement(statement._body);
+        const bodyFinished = _finished;
+        const breakable = _breakables[$ - 1];
+        _breakables = _breakables[0 .. $ - 1];
+        const hadContinue = _loops[$ - 1].pendingContinueJumps.length > 0;
+        _finished = false;
+
+        const conditionIndex = _instructions.length;
+        resolveContinues(conditionIndex);
+        _loops = _loops[0 .. $ - 1];
+
+        // See `compileFor`'s own doc for why a trivially-true condition
+        // is never guarded - here that means the trailing check becomes
+        // an unconditional jump back to the body instead of a real test.
+        const guarded = !isTriviallyTrueCondition(statement.condition);
+        if (guarded) {
+            const conditionOffset = compileCondition(statement.condition);
+            const width = conditionWidth(statement.condition);
+            emit(&opBranchTrue, conditionOffset, bodyStart, width);
+        } else {
+            emit(&opJump, bodyStart, 0, 0);
+        }
+
+        const afterLoop = _instructions.length;
+        foreach (index; breakable.pendingBreakJumps)
+            patchTarget(index, afterLoop);
+
+        // A body that returns on every path, with nothing left to
+        // `continue` past it, never reaches the condition at all - the
+        // whole loop is then finished the same way the body is, the
+        // condition's own instructions being dead code nothing jumps
+        // into.
+        const hadBreak = breakable.pendingBreakJumps.length > 0;
+        _finished = !hadBreak && (bodyFinished && !hadContinue || !guarded);
     }
 
+    // `gotoTarget` is unset when dmd did not need to rewrite the labelled
+    // statement, so the label names `statement.statement` itself then.
     override void visit(LabelStatement statement) {
-        compileLabel(statement);
+        auto outerLabel = _pendingLabel; // auto: const(Identifier) will not implicitly convert back
+        auto outerTarget = _pendingLabelTarget;
+        _pendingLabel = statement.ident;
+        _pendingLabelTarget = statement.gotoTarget !is null
+            ? statement.gotoTarget : statement.statement;
+        compileStatement(statement.statement);
+        _pendingLabel = outerLabel;
+        _pendingLabelTarget = outerTarget;
     }
 
     override void visit(ScopeStatement statement) {
@@ -1267,112 +1361,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             patchTarget(index, afterLoop);
 
         _finished = !guarded && breakable.pendingBreakJumps.length == 0;
-    }
-
-    // `do`-`while` always runs its own body once before the condition is
-    // ever checked, so - unlike `compileFor` - there is no upfront branch
-    // to skip the body with, only a trailing one that decides whether to
-    // run it again. `continue` still needs a target distinct from that
-    // trailing branch itself: the spec sends it to the condition check,
-    // not back to the body's own start, so a `continue` reached before
-    // the condition is compiled queues its own jump the same way
-    // `compileFor`'s does for its increment.
-    private void compileDo(DoStatement statement) {
-        auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
-        const bodyStart = _instructions.length;
-
-        _loops ~= LoopContext(label);
-        _breakables ~= Breakable(label);
-        compileStatement(statement._body);
-        const bodyFinished = _finished;
-        const breakable = _breakables[$ - 1];
-        _breakables = _breakables[0 .. $ - 1];
-        const hadContinue = _loops[$ - 1].pendingContinueJumps.length > 0;
-        _finished = false;
-
-        const conditionIndex = _instructions.length;
-        resolveContinues(conditionIndex);
-        _loops = _loops[0 .. $ - 1];
-
-        // See `compileFor`'s own doc for why a trivially-true condition
-        // is never guarded - here that means the trailing check becomes
-        // an unconditional jump back to the body instead of a real test.
-        const guarded = !isTriviallyTrueCondition(statement.condition);
-        if (guarded) {
-            const conditionOffset = compileCondition(statement.condition);
-            const width = conditionWidth(statement.condition);
-            emit(&opBranchTrue, conditionOffset, bodyStart, width);
-        } else {
-            emit(&opJump, bodyStart, 0, 0);
-        }
-
-        const afterLoop = _instructions.length;
-        foreach (index; breakable.pendingBreakJumps)
-            patchTarget(index, afterLoop);
-
-        // A body that returns on every path, with nothing left to
-        // `continue` past it, never reaches the condition at all - the
-        // whole loop is then finished the same way the body is, the
-        // condition's own instructions being dead code nothing jumps
-        // into.
-        const hadBreak = breakable.pendingBreakJumps.length > 0;
-        _finished = !hadBreak && (bodyFinished && !hadContinue || !guarded);
-    }
-
-    // dmd unrolls a `foreach` over a tuple (an `AliasSeq`, `static
-    // foreach`'s own arguments) into one statement per element at
-    // semantic time - see `makeTupleForeach` in `statementsem.d` - so
-    // there is no run time loop left to compile, only this fixed sequence
-    // of already-distinct statements. A `continue` there still needs a
-    // real jump, the same as `compileFor`'s: it must skip only the rest
-    // of the current element, landing on the next element's own first
-    // instruction (or, from the last element, after the whole
-    // statement) rather than falling into whatever the current element
-    // was itself about to skip (an `else`, a `catch` handler, the next
-    // `case`).
-    private void compileUnrolledLoop(UnrolledLoopStatement statement) {
-        auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
-        if (statement.statements is null) {
-            _finished = false;
-            return;
-        }
-
-        _loops ~= LoopContext(label);
-        _breakables ~= Breakable(label);
-
-        bool lastFinished;
-        foreach (child; *statement.statements) {
-            resolveContinues(_instructions.length);
-            _finished = false;
-            compileStatement(child);
-            lastFinished = _finished;
-        }
-        const hadContinue = _loops[$ - 1].pendingContinueJumps.length > 0;
-        resolveContinues(_instructions.length);
-
-        const breakable = _breakables[$ - 1];
-        _breakables = _breakables[0 .. $ - 1];
-        _loops = _loops[0 .. $ - 1];
-
-        const afterLoop = _instructions.length;
-        foreach (index; breakable.pendingBreakJumps)
-            patchTarget(index, afterLoop);
-
-        _finished = lastFinished && !hadContinue
-            && breakable.pendingBreakJumps.length == 0;
-    }
-
-    // `gotoTarget` is unset when dmd did not need to rewrite the labelled
-    // statement, so the label names `statement.statement` itself then.
-    private void compileLabel(LabelStatement statement) {
-        auto outerLabel = _pendingLabel; // auto: const(Identifier) will not implicitly convert back
-        auto outerTarget = _pendingLabelTarget;
-        _pendingLabel = statement.ident;
-        _pendingLabelTarget = statement.gotoTarget !is null
-            ? statement.gotoTarget : statement.statement;
-        compileStatement(statement.statement);
-        _pendingLabel = outerLabel;
-        _pendingLabelTarget = outerTarget;
     }
 
     // dmd resolves neither `break ident` nor `continue ident` to a
