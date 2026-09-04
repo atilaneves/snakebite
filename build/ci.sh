@@ -3,11 +3,9 @@ set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
 build/reggae.sh
-
-build/check-bytecode-vm.sh
-ninja bin/ut
+ninja
 bin/ut
-build/acceptance.sh
+bin/at
 build/test-repl.sh
-build/sb.sh -b bytecode examples/rt-simple
+bin/sb -b bytecode examples/rt-simple
 build/benches.sh

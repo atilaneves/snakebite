@@ -2,9 +2,6 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
-build/reggae.sh
-ninja bin/sb-repl
-
 # `test_interactive_error_label_is_red` needs the interpreter to render a
 # failed comparison assertion with its runtime values (`1 != 2`), the way
 # `-checkaction=context` does. The interpreter does not do this yet: DMD
