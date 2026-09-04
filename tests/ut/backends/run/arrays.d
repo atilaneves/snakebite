@@ -256,8 +256,6 @@ static foreach (backend; Matrix!(
 // would need one instruction per element, which a run-time-only length
 // cannot give a compile-time count for.
 static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter cannot take the address of `a[]`"),
 )) {
     @("dynamicSliceCopyFromDynamicSlice." ~ backend.stringof)
     @Tags(backend.stringof)
