@@ -3838,16 +3838,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         // A constructor druntime already supplies as native code
         // (`Exception.this`, reached constructing a guest exception
-        // class's base) is called through FFI, the same as any other
-        // native callee `compileCall` dispatches to on
-        // `hasNativeSymbol` - never compiled as a guest body. Compiling
-        // its body would walk druntime's own `object.d` a second time
-        // (the first is this compiler's own lookups of
-        // `Throwable`/`Exception`) and reach constructs this compiler
-        // does not support there.
+        // class's base) is called through FFI, through the very same
+        // `compileNativeCall` helper `compileCall`'s own native-callee
+        // branch below uses for an ordinary call - never compiled as a
+        // guest body. Compiling its body would walk druntime's own
+        // `object.d` a second time (the first is this compiler's own
+        // lookups of `Throwable`/`Exception`) and reach constructs this
+        // compiler does not support there. `objectOffset` already holds
+        // the receiver's own value (a class reference), so it stands in
+        // for the hidden `this` argument a `DotVarExp` receiver would
+        // otherwise supply.
         if (constructor.fbody is null || _bytecode.hasNativeSymbol(constructor)) {
-            compileNativeConstructorCall(
-                expression, constructor, calleeType, objectOffset);
+            compileNativeCall(
+                constructor, calleeType, expression.arguments,
+                expression.loc, expressionText(expression),
+                [Arg(objectOffset, 0, size_t.sizeof)], discardResult);
             return;
         }
 
@@ -3888,54 +3893,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const siteIndex = _callSites.length;
         _callSites ~= CallSite(calleeFunction, args, 0);
-        emit(&opCall, discardResult, siteIndex, 0);
-    }
-
-    // `compileConstructorCall`'s counterpart to `compileCall`'s own
-    // native-callee branch: builds the same FFI call plan for a
-    // constructor call, which carries no `CallExp` to read
-    // `e1`/`arguments`/`f` from directly - `objectOffset` already holds
-    // the receiver's own value (a class reference), the same convention
-    // `compileConstructorCall`'s guest-callee branch above uses for its
-    // own hidden-`this` argument.
-    private void compileNativeConstructorCall(
-        NewExp expression,
-        FuncDeclaration constructor,
-        imported!"dmd.mtype".TypeFunction calleeType,
-        in size_t objectOffset,
-    ) {
-        import dmd.astenums: STC;
-
-        Arg[] args;
-        args ~= Arg(objectOffset, 0, size_t.sizeof);
-
-        const parameterCount = calleeType.parameterList.length;
-        foreach (i; 0 .. parameterCount) {
-            auto parameter = calleeType.parameterList[i];
-            if (parameter.storageClass & STC.lazy_)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            if (parameter.storageClass & (STC.ref_ | STC.out_)) {
-                const argumentOffset =
-                    compileAddress((*expression.arguments)[i]);
-                args ~= Arg(argumentOffset, 0, size_t.sizeof);
-                continue;
-            }
-
-            const facts = TypeFacts.of(parameter.type);
-            if (!isSupportedFacts(facts, parameter.type))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            const argumentOffset = reserveTemp(facts);
-            evalInto((*expression.arguments)[i], argumentOffset, facts.size);
-            args ~= Arg(argumentOffset, 0, facts.size);
-        }
-
-        auto plan = &_bytecode._plans.of(constructor);
-        const siteIndex = _callSites.length;
-        _callSites ~= CallSite(null, args, 0, cast(const(void)*) plan);
         emit(&opCall, discardResult, siteIndex, 0);
     }
 
@@ -5145,29 +5102,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (callee.fbody is null || _bytecode.hasNativeSymbol(callee)) {
             auto type = typeFunctionOf(callee);
-            const parameterCount = type.parameterList.length;
-            const argumentCount = expression.arguments is null
-                ? 0
-                : expression.arguments.length;
-            if (argumentCount != parameterCount)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
 
-            // A `ref` return hands back its target's address in the
-            // return register, whatever the pointee's own facts are - the
-            // same convention `snakebite.ffi.plan` already prepares for a
-            // native callee (see `CallPlan.prepare`'s own `returnsRef`).
-            const isRefCallee = type.isRef;
-            auto returnType = type.next;
-            const isVoidCallee = returnType is null || returnType.ty == Tvoid;
-            const returnFacts = isRefCallee
-                ? pointerFacts
-                : isVoidCallee ? TypeFacts.init : TypeFacts.of(returnType);
-            if (isVoidCallee && destOffset != discardResult)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            Arg[] args;
+            Arg[] initialArgs;
             if (callee.vthis !is null) {
                 auto dot = expression.e1.isDotVarExp;
                 if (dot is null)
@@ -5175,64 +5111,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                         expressionText(expression));
 
                 const thisOffset = compileAddress(dot.e1);
-                args ~= Arg(thisOffset, 0, size_t.sizeof);
-            }
-            foreach (i; 0 .. parameterCount) {
-                auto parameter = type.parameterList[i];
-                if (parameter.storageClass & STC.lazy_)
-                    throw rejection(_function, expression.loc,
-                        expressionText(expression));
-
-                // The bool-function callback bridge only ever stands in
-                // for a plain function-pointer parameter (the one native
-                // shape `snakebite.ffi`'s shared bridge supports) - never
-                // a delegate one, whose own native layout
-                // (`visit(FuncExp)`/`visit(DelegateExp)` above already
-                // build it) `evalInto` below already knows how to fill in
-                // directly, context word included, with no native
-                // trampoline needed at all.
-                auto pointer = parameter.type.isTypePointer;
-                if (pointer !is null && pointer.next.isTypeFunction !is null) {
-                    if (auto callback = guestFunctionPointer(
-                            (*expression.arguments)[i])) {
-                        const argumentOffset = reserveTemp(pointerFacts);
-                        const address = _bytecode.boolFunctionAddress(callback);
-                        emit(&opConstant, argumentOffset,
-                            addConstant(cast(long) cast(size_t) address),
-                            size_t.sizeof);
-                        args ~= Arg(argumentOffset, 0, size_t.sizeof);
-                        continue;
-                    }
-
-                    if ((*expression.arguments)[i].isNullExp is null)
-                        throw rejection(_function, expression.loc,
-                            expressionText(expression));
-                }
-
-                // `out` and `ref` are the same address-passing convention
-                // at the ABI boundary - a native callee zero-initialises
-                // an `out` argument itself, the same as compiled D's own
-                // caller never does, so this compiler need only hand over
-                // the argument's own address either way.
-                if (parameter.storageClass & (STC.ref_ | STC.out_)) {
-                    const argumentOffset =
-                        compileAddress((*expression.arguments)[i]);
-                    args ~= Arg(argumentOffset, 0, size_t.sizeof);
-                    continue;
-                }
-
-                const facts = TypeFacts.of(parameter.type);
-                const argumentOffset = reserveTemp(facts);
-                evalInto((*expression.arguments)[i], argumentOffset, facts.size);
-                args ~= Arg(argumentOffset, 0, facts.size);
+                initialArgs ~= Arg(thisOffset, 0, size_t.sizeof);
             }
 
-            auto plan = &_bytecode._plans.of(callee);
-            _callSites ~= CallSite(
-                null, args, isVoidCallee ? 0 : returnFacts.size,
-                cast(const(void)*) plan,
-            );
-            emit(&opCall, destOffset, _callSites.length - 1, 0);
+            compileNativeCall(
+                callee, type, expression.arguments, expression.loc,
+                expressionText(expression), initialArgs, destOffset);
             return;
         }
         auto calleeFunction = _bytecode.compileFunction(callee);
@@ -5409,6 +5293,101 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         return null;
+    }
+
+    // Builds the FFI call plan for a native callee - one druntime already
+    // supplies as compiled code, so this compiler calls out to it rather
+    // than compiling a guest body - and emits `opCall` against it.
+    // `compileCall`'s own native-callee branch and
+    // `compileConstructorCall`'s share this: a `NewExp` allocates the
+    // object, but the "call the constructor" part is the same call this
+    // helper already knows how to make for a plain `CallExp`, just with
+    // `initialArgs` supplying whatever hidden-`this` argument the callee
+    // takes - read off a `DotVarExp` receiver for an ordinary call, or
+    // already known as the freshly allocated object's own address for a
+    // constructor call.
+    private void compileNativeCall(
+        FuncDeclaration callee,
+        imported!"dmd.mtype".TypeFunction type,
+        imported!"dmd.arraytypes".Expressions* arguments,
+        imported!"dmd.location".Loc loc,
+        string exprText,
+        Arg[] initialArgs,
+        in size_t destOffset,
+    ) {
+        import dmd.astenums: STC, Tvoid;
+
+        const parameterCount = type.parameterList.length;
+        const argumentCount = arguments is null ? 0 : arguments.length;
+        if (argumentCount != parameterCount)
+            throw rejection(_function, loc, exprText);
+
+        // A `ref` return hands back its target's address in the
+        // return register, whatever the pointee's own facts are - the
+        // same convention `snakebite.ffi.plan` already prepares for a
+        // native callee (see `CallPlan.prepare`'s own `returnsRef`).
+        const isRefCallee = type.isRef;
+        auto returnType = type.next;
+        const isVoidCallee = returnType is null || returnType.ty == Tvoid;
+        const returnFacts = isRefCallee
+            ? pointerFacts
+            : isVoidCallee ? TypeFacts.init : TypeFacts.of(returnType);
+        if (isVoidCallee && destOffset != discardResult)
+            throw rejection(_function, loc, exprText);
+
+        Arg[] args = initialArgs;
+        foreach (i; 0 .. parameterCount) {
+            auto parameter = type.parameterList[i];
+            if (parameter.storageClass & STC.lazy_)
+                throw rejection(_function, loc, exprText);
+
+            // The bool-function callback bridge only ever stands in
+            // for a plain function-pointer parameter (the one native
+            // shape `snakebite.ffi`'s shared bridge supports) - never
+            // a delegate one, whose own native layout
+            // (`visit(FuncExp)`/`visit(DelegateExp)` above already
+            // build it) `evalInto` below already knows how to fill in
+            // directly, context word included, with no native
+            // trampoline needed at all.
+            auto pointer = parameter.type.isTypePointer;
+            if (pointer !is null && pointer.next.isTypeFunction !is null) {
+                if (auto callback = guestFunctionPointer((*arguments)[i])) {
+                    const argumentOffset = reserveTemp(pointerFacts);
+                    const address = _bytecode.boolFunctionAddress(callback);
+                    emit(&opConstant, argumentOffset,
+                        addConstant(cast(long) cast(size_t) address),
+                        size_t.sizeof);
+                    args ~= Arg(argumentOffset, 0, size_t.sizeof);
+                    continue;
+                }
+
+                if ((*arguments)[i].isNullExp is null)
+                    throw rejection(_function, loc, exprText);
+            }
+
+            // `out` and `ref` are the same address-passing convention
+            // at the ABI boundary - a native callee zero-initialises
+            // an `out` argument itself, the same as compiled D's own
+            // caller never does, so this compiler need only hand over
+            // the argument's own address either way.
+            if (parameter.storageClass & (STC.ref_ | STC.out_)) {
+                const argumentOffset = compileAddress((*arguments)[i]);
+                args ~= Arg(argumentOffset, 0, size_t.sizeof);
+                continue;
+            }
+
+            const facts = TypeFacts.of(parameter.type);
+            const argumentOffset = reserveTemp(facts);
+            evalInto((*arguments)[i], argumentOffset, facts.size);
+            args ~= Arg(argumentOffset, 0, facts.size);
+        }
+
+        auto plan = &_bytecode._plans.of(callee);
+        _callSites ~= CallSite(
+            null, args, isVoidCallee ? 0 : returnFacts.size,
+            cast(const(void)*) plan,
+        );
+        emit(&opCall, destOffset, _callSites.length - 1, 0);
     }
 
     // `fn(args)` where dmd left `expression.f` unresolved: a call through a
