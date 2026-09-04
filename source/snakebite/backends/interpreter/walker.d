@@ -2753,6 +2753,40 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
+        if (type.ty == Tdelegate) {
+            import snakebite.nativelayout:
+                delegateContextOffset, delegateFunctionOffset,
+                delegateValueSize, loadIntegral;
+
+            align(size_t.sizeof) ubyte[delegateValueSize] left = void;
+            align(size_t.sizeof) ubyte[delegateValueSize] right = void;
+            const facts = factsOf(type);
+            evaluate(expression.e1, type, facts, left.ptr);
+            evaluate(expression.e2, type, facts, right.ptr);
+            const sameContext = loadIntegral(
+                left.ptr + delegateContextOffset,
+                size_t.sizeof,
+                false,
+            ) == loadIntegral(
+                right.ptr + delegateContextOffset,
+                size_t.sizeof,
+                false,
+            );
+            const sameFunction = loadIntegral(
+                left.ptr + delegateFunctionOffset,
+                size_t.sizeof,
+                false,
+            ) == loadIntegral(
+                right.ptr + delegateFunctionOffset,
+                size_t.sizeof,
+                false,
+            );
+            const equal = sameContext && sameFunction;
+            const answer = expression.op == EXP.equal ? equal : !equal;
+            storeIntegral(_place, answer ? 1 : 0, _facts.size);
+            return;
+        }
+
         bool equal;
         if (type.ty == Tpointer)
             equal = asPointer(expression.e1) == asPointer(expression.e2);
