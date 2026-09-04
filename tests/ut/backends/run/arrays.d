@@ -132,7 +132,6 @@ static foreach (backend; Matrix!(
 // Appending a `dchar` to a `char[]` encodes it as UTF-8, so one append
 // adds as many elements as the code point needs, not one.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("appendingDcharEncodesUtf8." ~ backend.stringof)
@@ -160,7 +159,6 @@ static foreach (backend; Matrix!(
 // point outside the Basic Multilingual Plane becomes a surrogate pair
 // (two elements), not one.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("appendingDcharEncodesUtf16." ~ backend.stringof)
@@ -245,6 +243,39 @@ static foreach (backend; Matrix!(
 
                 assert(vector._length == 10);
                 assert(vector._elements[0 .. vector._length] == "foobarquux");
+            }
+        });
+    }
+}
+
+// `a[] = b[]` for two dynamic arrays copies every element of `b` into `a`
+// in order, at a length known only at run time - the same shape
+// `core.lifetime._d_newclassT`'s own lowering needs for
+// `p[0 .. init.length] = init[]` (`core/lifetime.d`). Element-by-element
+// copying, as a static array's own whole-slice assignment already does,
+// would need one instruction per element, which a run-time-only length
+// cannot give a compile-time count for.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter cannot take the address of `a[]`"),
+)) {
+    @("dynamicSliceCopyFromDynamicSlice." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] a = [0, 0, 0];
+                int[] b = [1, 2, 3];
+                a[] = b[];
+                assert(a[0] == 1);
+                assert(a[1] == 2);
+                assert(a[2] == 3);
+
+                // Copying `b`'s elements into `a`'s own storage does not
+                // alias it: writing through `a` afterwards leaves `b`
+                // alone.
+                a[0] = 99;
+                assert(b[0] == 1);
             }
         });
     }

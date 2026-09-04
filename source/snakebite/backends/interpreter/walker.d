@@ -2085,13 +2085,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         assign(expression);
     }
 
-    // DMD lowers dynamic-array length assignment to a native druntime call
-    // so allocation, prefix preservation, and the array pointer update stay
-    // in druntime rather than being emulated by the interpreter.
-    override void visit(LoweredAssignExp expression) {
-        expression.lowering.accept(this);
-    }
-
     // Assignment is an expression: it yields the value it assigned. A
     // struct right side needs scratch storage so evaluating a literal does
     // not clear an aliased target before all of its fields are read.
@@ -3205,15 +3198,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // twice. Anything else this node could mean - a class downcast, a
     // floating-to-integral cast - is refused the same way an unhandled
     // node already is.
-    override void visit(CastExp expression) {
+    protected override void visitUnloweredCast(CastExp expression) {
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
         import std.conv: text;
-
-        if (expression.lowering !is null) {
-            expression.lowering.accept(this);
-            return;
-        }
 
         auto sourceType = expression.e1.type;
 
@@ -3853,6 +3841,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // would vanish with the call that made it, and this literal's
     // elements need to survive at least as long as whatever slice they
     // are assigned to, `static` or not.
+    //
+    // A key or value array literal nested inside an `AssocArrayLiteralExp`
+    // also reaches here despite carrying a non-null `lowering` of its own:
+    // that lowering's body is `_d_arrayliteralTX`'s real druntime source,
+    // which this backend can only run by tree-walking it as if it were
+    // guest code, and it declares locals of its own
+    // (`snakebite.backends.loweringvisitor` explains the resulting
+    // assertion failure in full) that this evaluator does not compute
+    // correctly outside a guest function's own layout. This ignores that
+    // `lowering` and builds the same array by hand instead, which is safe
+    // here because both key and value are always dynamic arrays of a type
+    // this branch already supports.
     override void visit(ArrayLiteralExp expression) {
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
@@ -3908,6 +3908,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
     }
 
+    // Not one of `LoweringVisitor`'s final overrides - see the comment on
+    // that class (`snakebite.backends.loweringvisitor`) for why a
+    // heap-allocated guest class's `lowering` cannot be compiled here.
     override void visit(NewExp expression) {
         import dmd.astenums: Taarray;
 
@@ -4433,13 +4436,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return element;
     }
 
-    override void visit(CatExp expression) {
-        if (expression.lowering is null) {
-            visit(cast(Expression) expression);
-            return;
-        }
-
-        expression.lowering.accept(this);
+    protected override void visitUnloweredCat(CatExp expression) {
+        visit(cast(Expression) expression);
     }
 
     // `~=` appending a `dchar` (`CatDcharAssignExp`, `EXP.concatenateDcharAssign`)
@@ -4487,26 +4485,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     // An associative-array literal has no glue-layer codegen of its own to
-    // interpret either: dmd's semantic pass lowers it to a call to
-    // `object._d_assocarrayliteralTX!(K, V)` (`AssocArrayLiteralExp.lowering`),
-    // built from the very same key and value `ArrayLiteralExp`s the guest
-    // wrote, the same way `~=` is lowered to a call rather than left as an
-    // operator this interpreter would otherwise have to build the runtime
-    // representation for itself. Evaluating `lowering` runs that call
-    // through the ordinary `CallExp` path, which resolves it as
-    // already-compiled druntime code the same way any other FFI call is
-    // resolved.
-    override void visit(AssocArrayLiteralExp expression) {
+    // interpret: dmd never leaves `AssocArrayLiteralExp.lowering` null once
+    // it finds `object._d_assocarrayliteralTX!(K, V)`, so reaching here
+    // means that lookup itself failed.
+    protected override void visitUnloweredAssocArrayLiteral(
+            AssocArrayLiteralExp expression) {
         import std.conv: text;
 
-        if (expression.lowering is null)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: only a lowered associative-array literal is ",
-                    "supported"),
-            );
-
-        expression.lowering.accept(this);
+        throw new SnakebiteException(
+            text("interpreter cannot evaluate `", expression.toString,
+                "`: only a lowered associative-array literal is ",
+                "supported"),
+        );
     }
 
     override void visit(CommaExp expression) {

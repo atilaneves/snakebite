@@ -27,8 +27,16 @@ public void shouldEqual(T, U)(auto ref T actual, auto ref U expected) @safe {
     static if (is(T == class) || is(U == class)) {
         assert(equalClass(actual, expected));
     } else {
-        assert(cast(const) actual == cast(const) expected);
+        assert(trustedEqual(actual, expected));
     }
+}
+
+
+// AA equality (`_d_aaEqual`) is `@system` in dmd 2.112 druntime and
+// `@safe`/`@trusted` in 2.113. It does not do anything unsafe, so it
+// is fine to trust here.
+private bool trustedEqual(T, U)(auto ref T actual, auto ref U expected) @trusted {
+    return cast(const) actual == cast(const) expected;
 }
 
 
@@ -72,7 +80,7 @@ public auto should(T)(lazy T expression) {
 
 
 public void shouldNotEqual(T, U)(auto ref T actual, auto ref U expected) @safe {
-    assert(actual != expected);
+    assert(!trustedEqual(actual, expected));
 }
 
 

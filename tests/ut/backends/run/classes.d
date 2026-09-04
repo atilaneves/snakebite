@@ -55,7 +55,6 @@ unittest {
 // `shared` is a qualifier, not a distinct class: the shared type's
 // `TypeInfo` names the unshared one as its base.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -77,7 +76,6 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("classConstructionInitializesFieldsAndRunsConstructor."
@@ -120,7 +118,6 @@ static foreach (backend; Matrix!(
 
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("interfaceDispatchFindsCovariantOverride." ~ backend.stringof)
@@ -185,56 +182,65 @@ unittest {
     assert(value.toString.endsWith(".Plain"));
 }
 
-@("classConstructionBindsThisForDependentFieldAssignments.Interpreter")
-@Tags(Interpreter.stringof)
-unittest {
-    0.shouldBeStatusOf!(Interpreter, q{
-        class Base {
-            int first = 7;
-        }
-
-        class Values : Base {
-            int second;
-            int third;
-
-            this() {
-                this.second = this.first + 1;
-                third = second + 1;
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("classConstructionBindsThisForDependentFieldAssignments."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int first = 7;
             }
-        }
 
-        void main() {
-            auto values = new Values;
-            assert(values.first == 7);
-            assert(values.second == 8);
-            assert(values.third == 9);
-        }
-    });
+            class Values : Base {
+                int second;
+                int third;
+
+                this() {
+                    this.second = this.first + 1;
+                    third = second + 1;
+                }
+            }
+
+            void main() {
+                auto values = new Values;
+                assert(values.first == 7);
+                assert(values.second == 8);
+                assert(values.third == 9);
+            }
+        });
+    }
 }
 
-@("classConstructionCallsGuestBaseConstructor.Interpreter")
-@Tags(Interpreter.stringof)
-unittest {
-    0.shouldBeStatusOf!(Interpreter, q{
-        class Base {
-            int value;
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("classConstructionCallsGuestBaseConstructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int value;
 
-            this(int value_) {
-                value = value_;
+                this(int value_) {
+                    value = value_;
+                }
             }
-        }
 
-        class Derived : Base {
-            this() {
-                super(42);
+            class Derived : Base {
+                this() {
+                    super(42);
+                }
             }
-        }
 
-        void main() {
-            auto derived = new Derived;
-            assert(derived.value == 42);
-        }
-    });
+            void main() {
+                auto derived = new Derived;
+                assert(derived.value == 42);
+            }
+        });
+    }
 }
 
 @("classCastUsesGuestClassHierarchy.Interpreter")
@@ -346,9 +352,11 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the mutable static destruction counter"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "`scope class` stack allocation (`NewExp.onstack`) is not " ~
+            "compiled; only the GC-allocated `new C(args)` path is"),
 )) {
     @("scopeClassRunsDestructorAtScopeExit." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -376,7 +384,6 @@ static foreach (backend; Matrix!(
 // A call through an interface reference finds the class's override, which
 // needs the interface's own offset rather than the class vtable.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("interfaceDispatchFindsOverride." ~ backend.stringof)
