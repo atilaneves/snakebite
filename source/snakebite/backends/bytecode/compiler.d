@@ -3128,6 +3128,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         requireDestination(expression);
 
+        // See `snakebite.backends.delegates.isCtfeVariable`: shared with
+        // the interpreter, which folds the same read to a constant.
+        {
+            import snakebite.backends.delegates: isCtfeVariable;
+
+            if (isCtfeVariable(expression.var)) {
+                emit(&opConstant, _destination, addConstant(0L), _width);
+                return;
+            }
+        }
+
         // `__traits(initSymbol, T)` for a class `T`: dmd's own lowering
         // (`traits.d`, `Id.initSymbol`) hands back a `VarExp` on a
         // `SymbolDeclaration` wrapping `T`'s `AggregateDeclaration`, typed

@@ -68,13 +68,16 @@ static foreach (backend; Matrix!(
 // built strings with the same characters are the same key.
 static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.unconfirmed,
-        "inserting and looking up now compile - `compilePost` handles "
-            ~ "`(*aa.impl).used++` through `compileFieldAddress` - but "
-            ~ "`ages.remove(Name(\"Alice\"))` compiles druntime's own "
-            ~ "`_d_aaDel`, whose `ref key2 = compat_key!(K)(key);` is a "
-            ~ "local variable declared `ref` and bound to a call's return "
-            ~ "value, a shape this compiler's local-declaration handling "
-            ~ "does not cover yet"),
+        "inserting, looking up, and now `ages.remove(Name(\"Alice\"))` "
+            ~ "all compile - `compilePost` handles `(*aa.impl).used++` "
+            ~ "through `compileFieldAddress`, and `__ctfe` in druntime's "
+            ~ "`toUbyte` folds to the constant `false` this compiler's "
+            ~ "code generator uses at run time - but the lookup runs into "
+            ~ "`findSlotLookup`'s own `buckets[i]` with `i` out of bounds "
+            ~ "(`newaa.d:304`), the same runtime table-state bug "
+            ~ "`assocArrayIndexedValueFieldWriteAndMethodCall` and "
+            ~ "`arrayKeyedLookupComparesContents` hit, rather than an "
+            ~ "unsupported construct"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("structKeyedLookupComparesContents." ~ backend.stringof)

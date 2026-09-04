@@ -1644,15 +1644,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     override void visit(VarExp expression) {
         import core.stdc.string: memcpy;
-        import dmd.id: Id;
+        import snakebite.backends.delegates: isCtfeVariable;
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
-        // DMD creates this compiler variable during semantic analysis. Its
-        // own native code generator defines it as false at run time; true is
-        // reserved for DMD's CTFE engine. Compare the interned identifier,
-        // not source spelling that guest code could imitate.
-        if (expression.var.ident is Id.ctfe) {
+        // See `snakebite.backends.delegates.isCtfeVariable`: shared with
+        // the bytecode backend.
+        if (isCtfeVariable(expression.var)) {
             storeIntegral(_place, 0, _facts.size);
             return;
         }
