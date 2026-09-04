@@ -14,27 +14,50 @@ import dmd.visitor: Visitor;
 // byte-comparable equality path and cannot bypass DMD's decision.
 //
 // `NewExp` and `ArrayLiteralExp` are deliberately not part of this class.
-// Both can carry a `lowering` whose own body is real druntime source
-// (`_d_newclassT`, `_d_arrayliteralTX`) that this project's interpreter
-// backend tree-walks like any other function with no native symbol to call
-// through, rather than glue-layer codegen turning it into machine code -
-// and that source was written assuming glue-layer codegen. `_d_newclassT`
-// names a `SymbolDeclaration` synthesized for a guest class's init bytes,
-// a symbol no backend here ever gives linkage to, and interpreting it
-// throws inside variable resolution (`slotOf`, "not a parameter or local
-// in the current frame") rather than allocating anything.
-// `_d_arrayliteralTX`, reached through `AssocArrayLiteralExp`'s own
-// lowering for its key and value arrays, gets further - interpreting it
-// does not throw - but produces a result the subsequent
-// `_d_assocarrayliteralTX` call rejects with an internal assertion
-// failure, a wrong answer this project's own rule against silently wrong
-// results forbids returning. Making either lowering interpretable
-// correctly is new capability, not the mechanical wiring this class
-// exists for, so both keep their own `override void visit` in each
-// backend instead of a final one here. `ConstructExp` is left out for a
-// different reason: dmd 2.112.1 has no `ConstructExp.lowering` field
-// (2.113.0 added one), so a final override here would not compile against
-// that version.
+//
+// `NewExp.lowering`, for a class, is a call to `core.lifetime._d_newclassT`
+// (allocation only - the constructor call dmd leaves on `expression.member`
+// itself is never part of it). Both the interpreter (`walker.d`,
+// `visit(NewExp)`) and the bytecode compiler (`compiler.d`,
+// `compileNewClass`) now run that lowering - tree-walked in one, compiled
+// as an ordinary guest call in the other - and then run the constructor
+// call it left out themselves. `_d_newclassT` names a `SymbolDeclaration`
+// for the class's own `.init` bytes (`__traits(initSymbol, T)`); each
+// backend's `visit(VarExp)` reads that back from its own class runtime
+// info (`classRuntimeInfo`/`fillFieldInits` in the interpreter,
+// `classRuntimeInfo`/`fillFieldInits` in the bytecode compiler) rather
+// than resolving a symbol neither backend ever gives linkage to. What
+// keeps `NewExp` out of this class is that extra constructor-call step:
+// a single final `accept(this)` dispatch has nowhere to hang it, and each
+// backend's own override still has to refuse the shapes that leave
+// `lowering` null for a reason of its own (`onstack`/`scope class` here,
+// `-betterC` in general) rather than mechanically falling through to one
+// shared unlowered hook. A struct allocated with `new` (`_d_newitemT`,
+// the same `NewExp.lowering` field) is not routed through its own
+// lowering by either backend yet; both still allocate and initialize it
+// by hand.
+//
+// `ArrayLiteralExp.lowering` is only ever set once, for the key and
+// value array literals inside an `AssocArrayLiteralExp`'s own lowering
+// (`expressionsem.d`, `lowerArrayLiteral`, called only from
+// `AssocArrayLiteralExp` semantic) - an ordinary top-level array literal
+// never gets one; the `_d_arrayliteralTX` call real compiled code makes
+// for one is glue-layer codegen (`e2ir.d`) this project has no glue layer
+// to reach, not anything dmd's semantic pass records here. Even where
+// `lowering` is set, compiling it is confirmed unsafe: the interpreter
+// can tree-walk `_d_arrayliteralTX`'s body without throwing, but the
+// result is one the following `_d_assocarrayliteralTX` call rejects with
+// an internal assertion failure - a wrong answer this project's own rule
+// against silently wrong results forbids returning. Both backends ignore
+// that `lowering` and build the array by hand instead
+// (`snakebite.backends.interpreter.walker`,
+// `snakebite.backends.bytecode.compiler`, each own `visit(ArrayLiteralExp)`
+// comment). Making that lowering safe to interpret is new capability, not
+// the mechanical wiring this class exists for.
+//
+// `ConstructExp` is left out for a different reason: dmd 2.112.1 has no
+// `ConstructExp.lowering` field (2.113.0 added one), so a final override
+// here would not compile against that version.
 extern(C++) package abstract class LoweringVisitor: Visitor {
     alias visit = Visitor.visit;
 
