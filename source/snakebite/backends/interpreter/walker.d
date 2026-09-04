@@ -1762,7 +1762,25 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     size_t.sizeof, false);
             }
             auto parent = fn.toParent2();
-            fn = parent is null ? null : parent.isFuncDeclaration;
+            auto parentFunction = parent is null
+                ? null : parent.isFuncDeclaration;
+            if (parentFunction is null) {
+                auto struct_ = parent is null
+                    ? null : parent.isStructDeclaration;
+                if (struct_ is null || base is null)
+                    return null;
+
+                // A nested struct stores its enclosing context in the
+                // receiver's first word before the method's own context
+                // chain continues through the enclosing function.
+                base = cast(ubyte*) loadIntegral(
+                    base, size_t.sizeof, false);
+                parent = struct_.toParent2();
+                parentFunction = parent is null
+                    ? null : parent.isFuncDeclaration;
+            }
+
+            fn = parentFunction;
             if (fn is null)
                 return null;
         }
@@ -2212,7 +2230,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             && (declaration.hasIdentityAssign || declaration.hasBlitAssign);
         if (!declaration.zeroInit
                 || declaration.isUnionDeclaration !is null
-                || declaration.enclosing !is null
                 || declaration.hasCopyCtor
                 || hasElaborateAssign)
             return false;
@@ -4261,6 +4278,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     override void visit(StructLiteralExp expression) {
         import core.stdc.string: memset;
+        import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
         auto structType = _type.isTypeStruct;
@@ -4272,6 +4290,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
 
         memset(_place, 0, _facts.size);
+
+        // A nested struct carries its enclosing function's context in the
+        // first word, so methods on a returned value can reach captured
+        // locals after the enclosing call has returned.
+        auto parent = expression.sd.toParent2();
+        auto parentFunction = parent is null
+            ? null : parent.isFuncDeclaration;
+        if (parentFunction !is null)
+            storeIntegral(
+                _place,
+                cast(size_t) contextOf(parentFunction),
+                size_t.sizeof,
+            );
+
         if (expression.elements is null || expression.elements.length == 0)
             return;
 
