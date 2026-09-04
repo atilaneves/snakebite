@@ -10,8 +10,10 @@ import ut.backends;
 
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Bytecode, Because.unconfirmed,
+        "the native constructor call no longer crashes, but the thrown " ~
+        "class still fails to match `catch (Exception)` by base type"),
 )) {
     @("catchMatchesGuestClassByBaseType." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -52,10 +54,12 @@ static foreach (backend; Matrix!(
 // catches a derived exception while a `catch` naming a sibling class does
 // not.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed,
         "DMD's native constructor ABI needs stack-word support"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "the native constructor call no longer crashes, but the guest " ~
+        "still exits with status 1 instead of 0"),
 )) {
     @("catchMatchesThrownClassByBaseType." ~ backend.stringof)
     @Tags(backend.stringof)
