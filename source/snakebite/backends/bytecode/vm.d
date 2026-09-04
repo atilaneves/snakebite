@@ -58,6 +58,14 @@ package struct CallSite {
     package void* nativeAddress;
     package bool isAllocation;
     package uint allocationBits;
+    // A third native shape, alongside `isAllocation`: `~=` appending a
+    // `dchar` to a `char[]`/`wchar[]`, whose druntime hook
+    // (`_d_arrayappendcd`/`_d_arrayappendwd`) dmd's own semantic pass never
+    // resolves to a `FuncDeclaration` a `nativePlan` could be built from -
+    // see `snakebite.backends.bytecode.compiler`'s `CatDcharAssignExp`
+    // visitor. `args[0]` is the target array's own storage address (the
+    // hook's `ref` parameter) and `args[1]` is the `dchar` value.
+    package bool isAppendDchar;
 }
 
 
@@ -510,6 +518,21 @@ package const(Instruction)* opCall(
             size, site.allocationBits, null);
         if (pc.destination != discardResult)
             *cast(void**) (frame + pc.destination) = block;
+        return pc + 1;
+    }
+    if (site.isAppendDchar) {
+        assert(site.args.length == 2);
+        alias AppendDchar = extern(C) void[] function(void*, dchar);
+
+        auto array = *cast(void**) (frame + site.args[0].callerOffset);
+        auto value = *cast(const dchar*) (frame + site.args[1].callerOffset);
+        (cast(AppendDchar) site.nativeAddress)(array, value);
+
+        // The hook takes `x` by `ref` and appends into it in place, so
+        // `array` already points at the updated `{length, pointer}` pair -
+        // its own return value is that same pair again, not read here.
+        if (pc.destination != discardResult)
+            memcpy(frame + pc.destination, array, site.returnWidth);
         return pc + 1;
     }
     if (site.nativePlan !is null) {
