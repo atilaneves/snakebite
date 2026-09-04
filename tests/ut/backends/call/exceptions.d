@@ -2,6 +2,8 @@ module ut.backends.call.exceptions;
 
 
 import ut.backends;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
 
 
 static foreach (backend; Matrix!()) {
@@ -26,6 +28,45 @@ static foreach (backend; Matrix!()) {
             },
             "result",
         );
+    }
+}
+
+// `enforce` is an available native template, but its message is a `lazy`
+// parameter. The caller's expression must stay executable when `enforce`
+// reads it.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "bytecode cannot compile `enforce`'s lazy message delegate"),
+)) {
+    @("exception.enforce.lazyMessage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        static if (is(backend == Interpreter)) {
+            auto module_ = parseSnippet(q{
+                void result() {
+                    import std.exception: enforce;
+
+                    enforce(false, "expected");
+                }
+            });
+            auto function_ = findFunction(module_, "result");
+
+            interpreter(module_).call(function_, null, [])
+                .shouldThrowWithMessage("expected");
+        } else {
+            true.shouldBeRetOf!(backend, q{
+                bool result() {
+                    import std.exception: enforce;
+
+                    try
+                        enforce(false, "expected");
+                    catch (Exception exception)
+                        return exception.msg == "expected";
+
+                    return false;
+                }
+            }, "result");
+        }
     }
 }
 
