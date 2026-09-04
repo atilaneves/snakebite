@@ -171,7 +171,13 @@ static foreach (backend; Matrix!(
 // A struct declared inside a function sees that function's locals, so its
 // method can call a delegate the function made.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
+    Omit!(Bytecode, Because.unconfirmed,
+        "`Caller.call` reads `dg`, a variable in `wrap`'s enclosing "
+            ~ "frame, through a static chain rather than through an "
+            ~ "explicit delegate/closure context word - the same static "
+            ~ "chain shape `call`'s own rejection at "
+            ~ "bytecode/compiler.d:5715 refuses for any nested function, "
+            ~ "not something specific to `dg` being a delegate"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("nestedStructMethodSeesEnclosingDelegate." ~ backend.stringof)
