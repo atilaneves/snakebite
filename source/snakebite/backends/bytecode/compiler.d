@@ -694,6 +694,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opModuloUnsigned, opMultiply, opNegate, opNotEqual, opRangeError,
         opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
+        opSliceCopy,
         opStaticAddress, opStaticArrayEqual, opStaticLoad, opStaticStore,
         opStoreIndirect, opSubtract, opThrow, opZero;
     import dmd.expressionsem: toInteger;
@@ -2423,11 +2424,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileSliceAssign(
         AssignExp expression, SliceExp target, in size_t destOffset,
     ) {
-        import dmd.astenums: Tarray, Tsarray;
+        import dmd.astenums: Tsarray;
+
+        // A dynamic-length target - a dynamic array's own whole slice, or
+        // a pointer sliced to a run-time length - has no compile-time
+        // element count to unroll a loop over, unlike a static array's
+        // own fixed `dim` below.
+        if (target.e1.type.ty != Tsarray)
+            return compileDynamicSliceAssign(expression, target, destOffset);
+
+        import dmd.astenums: Tarray;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
-        if (target.e1.type.ty != Tsarray
-                || target.lwr !is null || target.upr !is null)
+        if (target.lwr !is null || target.upr !is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -2471,17 +2480,32 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 sourceOffset = arrayOffset + arrayPointerOffset;
             }
 
-            foreach (i; 0 .. dim) {
-                const destAddress =
-                    elementAddress(baseOffset, i, elementFacts.size);
-                const sourceAddress =
-                    elementAddress(sourceOffset, i, elementFacts.size);
-                const valueOffset = reserveTemp(elementFacts);
-                emit(&opLoadIndirect, valueOffset, sourceAddress,
-                    elementFacts.size);
-                emit(&opStoreIndirect, destAddress, valueOffset,
-                    elementFacts.size);
-            }
+            // `dim` is a compile-time constant for a static array, on
+            // both sides of the copy, so the two synthetic `{length,
+            // pointer}` pairs `opSliceCopy` reads are trusted equal
+            // without a run-time check - unlike
+            // `compileDynamicSliceAssign`'s own use of the same opcode,
+            // where neither side's length is known until run time.
+            import snakebite.nativelayout: arrayValueSize;
+
+            const sliceFacts = TypeFacts(
+                arrayValueSize, size_t.alignof, false, false, true,
+                elementFacts.size,
+            );
+            const destSliceOffset = reserveTemp(sliceFacts);
+            emit(&opConstant, destSliceOffset + arrayLengthOffset,
+                addConstant(cast(long) dim), size_t.sizeof);
+            emit(&opCopy, destSliceOffset + arrayPointerOffset, baseOffset,
+                size_t.sizeof);
+
+            const sourceSliceOffset = reserveTemp(sliceFacts);
+            emit(&opConstant, sourceSliceOffset + arrayLengthOffset,
+                addConstant(cast(long) dim), size_t.sizeof);
+            emit(&opCopy, sourceSliceOffset + arrayPointerOffset,
+                sourceOffset, size_t.sizeof);
+
+            emit(&opSliceCopy, destSliceOffset, sourceSliceOffset,
+                elementFacts.size);
         } else {
             const valueOffset = reserveTemp(elementFacts);
             evalInto(expression.e2, valueOffset, elementFacts.size);
@@ -2502,11 +2526,105 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    // `p[0 .. n] = q[];`/`a[] = b[];` for a dynamic-length target: a
+    // pointer sliced to a run-time length (`_d_newclassT`'s own
+    // `p[0 .. init.length] = init[];`, `core/lifetime.d`) or a dynamic
+    // array's own whole slice. Neither side has a compile-time element
+    // count the way a static array's own whole-slice assignment
+    // (`compileSliceAssign` above) does, so this reads both sides'
+    // lengths at run time, checks them equal the same way a run-time
+    // slice's own bounds are already checked (`visit(SliceExp)`'s
+    // `opRangeError` use), and copies through `opSliceCopy` - the one
+    // opcode this VM has for a byte count that is not known until the
+    // program runs.
+    //
+    // Only a plain-bytes element is supported: `void` (a class `.init`
+    // image's own element type, and every element type this reaches
+    // through, since `isSupportedElementFacts` never accepts `void`) or
+    // anything `isSupportedElementFacts` already lays out elsewhere. dmd's
+    // own semantic pass already rewrites an assignment whose element has
+    // a postblit or destructor into a call to
+    // `_d_arrayassign_l`/`_d_arrayassign_r` before this compiler ever
+    // sees it (`expressionsem.d`'s `lowerArrayAssign`), so a plain
+    // `AssignExp` reaching here is already safe to treat as a raw byte
+    // copy.
+    private void compileDynamicSliceAssign(
+        AssignExp expression, SliceExp target, in size_t destOffset,
+    ) {
+        import dmd.astenums: Tarray, Tpointer, Tvoid;
+        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+        import std.string: fromStringz;
+
+        if ((target.e1.type.ty != Tarray && target.e1.type.ty != Tpointer)
+                || expression.e2.type.ty != Tarray)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        auto elementType = target.type.nextOf;
+        auto sourceElementType = expression.e2.type.nextOf;
+        if (elementType is null || sourceElementType is null)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        if (elementType.ty != Tvoid
+                && !isSupportedElementFacts(
+                    TypeFacts.of(elementType), elementType))
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+        if (sourceElementType.ty != Tvoid
+                && !isSupportedElementFacts(
+                    TypeFacts.of(sourceElementType), sourceElementType))
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const elementSize =
+            elementType.ty == Tvoid ? 1 : TypeFacts.of(elementType).size;
+        const sourceElementSize = sourceElementType.ty == Tvoid
+            ? 1 : TypeFacts.of(sourceElementType).size;
+        if (elementSize != sourceElementSize)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const arrayFacts = TypeFacts.of(target.type);
+        const destSliceOffset = reserveTemp(arrayFacts);
+        evalInto(target, destSliceOffset, arrayFacts.size);
+
+        const sourceFacts = TypeFacts.of(expression.e2.type);
+        const sourceSliceOffset = reserveTemp(sourceFacts);
+        evalInto(expression.e2, sourceSliceOffset, sourceFacts.size);
+
+        // D requires both sides of a dynamic slice assignment to share
+        // one length; a compiled program never proves that at compile
+        // time, so this is the run-time counterpart to
+        // `_d_arraycopy`'s own `RangeError` on a mismatch.
+        const orderOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, orderOffset, destSliceOffset + arrayLengthOffset,
+            size_t.sizeof);
+        emit(&opEqual, orderOffset, sourceSliceOffset + arrayLengthOffset,
+            size_t.sizeof);
+        const site = AssertSite(
+            null,
+            expression.loc.filename.fromStringz.idup,
+            expression.loc.linnum,
+        );
+        _assertSites ~= site;
+        emit(&opRangeError, orderOffset, _assertSites.length - 1, 1);
+
+        emit(&opSliceCopy, destSliceOffset, sourceSliceOffset, elementSize);
+
+        if (destOffset != discardResult) {
+            emit(&opCopy, destOffset + arrayLengthOffset,
+                destSliceOffset + arrayLengthOffset, size_t.sizeof);
+            emit(&opCopy, destOffset + arrayPointerOffset,
+                destSliceOffset + arrayPointerOffset, size_t.sizeof);
+        }
+    }
+
     // The address of the element at `index` within an array whose own
-    // address is `baseOffset` - shared between `compileSliceAssign`'s fill
-    // and copy loops, both of which advance a fresh temporary from the
-    // same base rather than mutating it in place, since `baseOffset` is
-    // read again on every iteration.
+    // address is `baseOffset` - `compileSliceAssign`'s own scalar-fill
+    // loop, which advances a fresh temporary from the same base rather
+    // than mutating it in place, since `baseOffset` is read again on
+    // every iteration.
     private size_t elementAddress(
         in size_t baseOffset, in size_t index, in size_t elementSize,
     ) {

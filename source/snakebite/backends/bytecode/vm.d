@@ -1583,3 +1583,45 @@ package const(Instruction)* opStoreIndirect(
     return advance(pc, frame, returnPlace, constants, callSites,
         assertSites, frames);
 }
+
+
+// `dest[] = src[]`, `{length, pointer}` pairs at `frame + pc.destination`
+// and `frame + pc.source`, with `pc.width` the element size baked in at
+// compile time (both sides share one element size - the compiler checked
+// that before emitting this). The two lengths are trusted equal - the
+// compiler emits an `opRangeError` check immediately before this, the
+// same way it already guards a run-time slice's own bounds - so only
+// `dest`'s own pointer, not its length, is read here.
+//
+// The one opcode a plain-element slice assignment ever reaches for its
+// own copy: dmd's own semantic pass rewrites an assignment whose element
+// type has a postblit or destructor into a call to
+// `_d_arrayassign_l`/`_d_arrayassign_r` before this compiler ever sees it
+// (`expressionsem.d`'s `lowerArrayAssign`), so every element this opcode
+// ever copies is plain bytes - exactly what `_d_newclassT`'s own
+// `p[0 .. init.length] = init[];` (`core/lifetime.d`) needs, since a
+// class's `.init` image is `void[]`, and what a real compiled `a[] =
+// b[]` between two `int[]` locals needs too.
+package const(Instruction)* opSliceCopy(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    import core.stdc.string: memcpy;
+    import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
+
+    auto dest = frame + pc.destination;
+    auto src = frame + pc.source;
+    const length = *cast(const(size_t)*) (src + arrayLengthOffset);
+    auto destPtr = *cast(void**) (dest + arrayPointerOffset);
+    auto srcPtr = *cast(const(void)**) (src + arrayPointerOffset);
+    if (length != 0)
+        memcpy(destPtr, srcPtr, length * pc.width);
+
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
