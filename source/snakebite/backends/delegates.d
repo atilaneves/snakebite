@@ -4,10 +4,28 @@ module snakebite.backends.delegates;
 private:
 
 
-import dmd.declaration: VarDeclaration;
+import dmd.declaration: Declaration, VarDeclaration;
 import dmd.dsymbol: Dsymbol;
 import dmd.func: FuncDeclaration;
 import dmd.mtype: Type;
+
+
+// `__ctfe`: dmd's own semantic pass (`expressionsem.d`) introduces this
+// `VarDeclaration` wherever guest source reads `__ctfe`, sharing one
+// instance across the whole compile rather than declaring it in any
+// function's own frame - `outerFunctionOf` on it resolves to `null`, which
+// both backends would otherwise read as "not a local variable this
+// function can address" and reject outright. dmd's own code generator
+// defines it as `false` at run time (`true` is reserved for dmd's CTFE
+// engine, which never calls into either backend), so both backends fold a
+// read of it to a constant `false` instead of resolving it as a variable.
+// Compare the interned identifier, not source spelling that guest code
+// could imitate.
+public bool isCtfeVariable(Declaration variable) {
+    import dmd.id: Id;
+
+    return variable.ident is Id.ctfe;
+}
 
 
 // Whether `function_` needs a heap-allocated closure rather than living in
