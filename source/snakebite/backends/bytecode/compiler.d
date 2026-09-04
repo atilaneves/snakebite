@@ -3964,11 +3964,25 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(CommaExp expression) {
+        import dmd.sideeffect: hasSideEffect;
+
         compileEffect(expression.e1);
-        if (_destination == discardResult)
-            compileEffect(expression.e2);
-        else
+        if (_destination != discardResult) {
             evalInto(expression.e2, _destination, _width);
+            return;
+        }
+
+        // `arr.length = 0` lowers to `(arr = arr[0 .. 0], 0)` (see
+        // `expressionsem.d`'s `visitAssign`'s `ArrayLengthExp` case): the
+        // trailing `0` only carries the assignment's own result type,
+        // dropped here the same way dmd's own frontend drops it for a
+        // statement-level assignment. Every visitor this compiler has for a
+        // bare value (`visit(IntegerExp)` and the rest) refuses to run for
+        // no destination at all (`requireDestination`'s own rejection), so
+        // a side-effect-free tail like this one is skipped outright rather
+        // than run for an effect it does not have.
+        if (hasSideEffect(expression.e2))
+            compileEffect(expression.e2);
     }
 
     protected override void visitUnloweredCast(CastExp expression) {

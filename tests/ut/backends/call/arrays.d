@@ -607,6 +607,49 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// Shrinking a runtime `.length` assignment keeps the surviving elements
+// in place, unlike growth this only ever narrows the same allocation.
+static foreach (backend; Matrix!()) {
+    @("arrays.length.runtime.shrink." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        23.shouldBeRetOf!(
+            backend,
+            q{
+                int shrinkWords() {
+                    ushort[] words = [10, 11, 12, 13, 14];
+                    words.length = 2;
+                    return cast(int) words.length + words[0] + words[1];
+                }
+            },
+            "shrinkWords",
+        );
+    }
+}
+
+// `arr.length = 0` is dmd's own optimised lowering for the general
+// `.length` assignment (see `expressionsem.d`'s `visitAssign`), rewriting
+// it to `arr = arr[0 .. 0]` rather than a call to
+// `_d_arraysetlengthT` - a shape distinct enough from an ordinary shrink
+// to need its own guest program.
+static foreach (backend; Matrix!()) {
+    @("arrays.length.runtime.toZero." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeRetOf!(
+            backend,
+            q{
+                int clearWords() {
+                    ushort[] words = [10, 11, 12];
+                    words.length = 0;
+                    return cast(int) words.length;
+                }
+            },
+            "clearWords",
+        );
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("arrays.slice.bounded.dynamicArray." ~ backend.stringof)
     @Tags(backend.stringof)
