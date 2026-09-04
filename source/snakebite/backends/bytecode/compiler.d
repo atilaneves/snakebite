@@ -613,14 +613,15 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
         foreach (i; 0 .. functionType.parameterList.length) {
             auto parameter = functionType.parameterList[i];
-            // `out`, like `ref`, is one address-sized frame slot the body
-            // reads and writes through - `FrameLayout.of` already lays
-            // both out the same way (see its own `STC.ref_ | STC.out_`
-            // check). Only `lazy` has no frame representation at all: it
-            // needs an implicit delegate this compiler does not build.
+            // A `lazy` parameter's frame slot holds dmd's own implicit
+            // delegate (see `FrameLayout.packParameter` and the
+            // `hasDeadContext` comment above it), never a value of the
+            // declared type itself - a read inside the body already comes
+            // through as a `CallExp` on that delegate (dmd's own semantic
+            // rewrite), so nothing here needs to check the declared
+            // type's own facts.
             if (parameter.storageClass & STC.lazy_)
-                throw rejection(function_, function_.loc,
-                    "a `lazy` parameter");
+                continue;
 
             const facts = TypeFacts.of(parameter.type);
             if (!isSupportedFacts(facts, parameter.type))
@@ -5557,6 +5558,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
         }
 
+        // `*(cond ? &a : &b)`: dmd wraps a `ref` return's own conditional
+        // expression this way (see `_isRefReturn` in `compileReturn`) -
+        // `expression.e1` is itself a pointer-typed value (a ternary of
+        // addresses, an ordinary expression `evalInto` already knows how
+        // to compile through `visit(SymOffExp)`/`visit(CondExp)`), and the
+        // address `*p` names is exactly `p`'s own value, not a further
+        // indirection. Checked before the struct-rvalue fallback below,
+        // which would otherwise re-enter `visit(PtrExp)` on this very
+        // node when `*p`'s pointee is a struct - `evalInto(expression, ...)`
+        // dispatches straight back to `compileAddress(expression)`, an
+        // infinite recursion for every struct-typed `*p` rather than the
+        // one instruction this branch already resolves it to.
+        if (auto ptrExp = expression.isPtrExp) {
+            const offset = reserveTemp(pointerFacts);
+            evalInto(ptrExp.e1, offset, size_t.sizeof);
+            return offset;
+        }
+
         if (expression.type.isTypeStruct !is null) {
             const facts = TypeFacts.of(expression.type);
             const offset = reserveTemp(facts);
@@ -5564,19 +5583,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const address = reserveTemp(pointerFacts);
             emit(&opFrameAddress, address, offset, size_t.sizeof);
             return address;
-        }
-
-        // `*(cond ? &a : &b)`: dmd wraps a `ref` return's own conditional
-        // expression this way (see `_isRefReturn` in `compileReturn`) -
-        // `expression.e1` is itself a pointer-typed value (a ternary of
-        // addresses, an ordinary expression `evalInto` already knows how
-        // to compile through `visit(SymOffExp)`/`visit(CondExp)`), and the
-        // address `*p` names is exactly `p`'s own value, not a further
-        // indirection.
-        if (auto ptrExp = expression.isPtrExp) {
-            const offset = reserveTemp(pointerFacts);
-            evalInto(ptrExp.e1, offset, size_t.sizeof);
-            return offset;
         }
 
         throw rejection(_function, expression.loc, expressionText(expression));
