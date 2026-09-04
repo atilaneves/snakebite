@@ -8,10 +8,8 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 # instead, sidestepping the compiler entirely.
 command -v kcov > /dev/null
 
-if [[ ! -f build.ninja ]]; then
-    dub run "reggae@~>0.14.0" --compiler="${DC:-ldc}" -- -b ninja
-fi
-ninja bin/ut
+build/reggae.sh
+ninja bin/ut bin/bench
 
 rm -rf coverage coverage-runs
 mkdir coverage-runs
