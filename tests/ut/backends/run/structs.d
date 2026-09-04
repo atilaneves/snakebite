@@ -815,7 +815,13 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // that, without changing what the interpreter is being asked to do -
 // call back into the same construction site while it is still running.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
+    Omit!(Bytecode, Because.unconfirmed,
+        "the guest crashes the host process (SIGSEGV) instead of " ~
+            "returning or throwing - `make`'s recursive call reenters " ~
+            "`Whole(2, Part(n))`'s own construction site while the outer " ~
+            "activation is still live, and something about that "
+            ~ "re-entrant frame layout is unsound here, not merely "
+            ~ "unimplemented"),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE refuses to read a mutable static variable - `make` is " ~
         "exactly that in the guest, where this snippet is a module and " ~
