@@ -16,9 +16,7 @@ import ut.backends;
 // exact shape `examples/ct-full/source/corpus.d`'s own `int[3][2]`
 // unittest exercises, since the interpreter refused every one of these
 // before it could run through them.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("staticArray.rowAssignElementWriteAndEquality." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -51,9 +49,7 @@ static foreach (backend; Matrix!(
 // that row's elements, at their own position - `a[1][2]` is the row
 // `a` was assigned, indexed a second time, not some other row's or
 // column's byte.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("staticArray.nestedElementReadAfterRowAssign." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -80,7 +76,6 @@ static foreach (backend; Matrix!(
 // not a bug in either of this project's backends, so `Ctfe` disagrees
 // here on purpose.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "dmd's CTFE engine evaluates a[i][j]'s indices in the opposite " ~
         "order from its runtime codegen for the same expression"),
@@ -117,7 +112,6 @@ static foreach (backend; Matrix!(
 // this backend. `Ctfe` calls that same engine, so it disagrees here on
 // purpose.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "dmd's CTFE engine aliases a static-array local on `=` " ~
         "instead of copying it, unlike its runtime codegen"),
@@ -141,9 +135,7 @@ static foreach (backend; Matrix!(
 // `int[3].init` is every element's own `.init` - zero for `int` - so a
 // freshly declared static array reads back as all zero bytes before
 // anything writes to it.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("staticArray.defaultInitIsZero." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -152,6 +144,97 @@ static foreach (backend; Matrix!(
                 int[3][2] a;
                 assert(a[0][0] == 0);
                 assert(a[1][2] == 0);
+            }
+        });
+    }
+}
+
+// An array literal assigned to a static array is one whole value: every
+// element is evaluated from the array's old contents before any of
+// them is written, so `a = [a[1], a[0]]` swaps the two elements rather
+// than writing `a[1]` into `a[0]` and then reading that new `a[0]` back
+// as the second element.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter writes the literal's elements straight into " ~
+        "`a` one by one, so the second element reads the first one's " ~
+        "new value"),
+)) {
+    @("staticArray.assignLiteralReadingItself." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[2] a = [1, 2];
+                a = [a[1], a[0]];
+                assert(a[0] == 2);
+                assert(a[1] == 1);
+            }
+        });
+    }
+}
+
+// `a[] = b[]` copies every element of `b` into `a` in order. It is not
+// a fill: `b[]` is an array, so no single value of it is written into
+// every element of `a`.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter cannot take the address of `a[]`"),
+)) {
+    @("staticArray.sliceCopyFromSlice." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3] a;
+                int[3] b = [1, 2, 3];
+                a[] = b[];
+                assert(a[0] == 1);
+                assert(a[1] == 2);
+                assert(a[2] == 3);
+            }
+        });
+    }
+}
+
+// `a[] = d` with a dynamic array `d` on the right is the same element
+// copy as `a[] = b[]`, not a fill with `d`'s length word.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter cannot take the address of `a[]`"),
+)) {
+    @("staticArray.sliceCopyFromDynamicArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3] a;
+                int[] d = [1, 2, 3];
+                a[] = d;
+                assert(a[0] == 1);
+                assert(a[2] == 3);
+            }
+        });
+    }
+}
+
+// `a[] = v` is an expression whose value is the slice `a[]` after the
+// fill, so it can initialise a dynamic array that aliases `a`.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter cannot take the address of `a[]`"),
+)) {
+    @("staticArray.fillValueIsTheSlice." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3] a;
+                int[] s = (a[] = 5);
+                assert(s.length == 3);
+                assert(s[2] == 5);
+                s[0] = 1;
+                assert(a[0] == 1);
             }
         });
     }

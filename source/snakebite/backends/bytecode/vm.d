@@ -1141,6 +1141,31 @@ package const(Instruction)* opArrayEqual(
         assertSites, frames);
 }
 
+// Bytewise equality for two native static-array values, laid out in place
+// in the frame with no length/pointer header of their own - unlike
+// `opArrayEqual`'s dynamic arrays, `destination` and `source` already are
+// the arrays' own bytes, not a `{length, pointer}` pair pointing at them.
+// `width` is the whole array's own byte size, every element's bytes
+// together, since a static array's dimension is part of its type rather
+// than a run-time value to compare separately.
+package const(Instruction)* opStaticArrayEqual(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    import core.stdc.string: memcmp;
+
+    const equal = pc.width == 0
+        || memcmp(frame + pc.destination, frame + pc.source, pc.width) == 0;
+    *cast(ubyte*) (frame + pc.destination) = equal ? 1 : 0;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
 package const(Instruction)* opNotEqual(
     const(Instruction)* pc,
     ubyte* frame,

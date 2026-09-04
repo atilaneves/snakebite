@@ -549,6 +549,13 @@ static foreach (backend; Matrix!(
         "pointers.functionPointer.nativeCallback.refused.Interpreter: " ~
         "the callback's extern(C) int signature is outside the " ~
         "extern(D) bool signature supported by issue #168"),
+    // `qsort` is reached and `xs` (a static array, now supported) is laid
+    // out and sliced correctly, but `&compare`'s own callback bridge
+    // (`guestFunctionPointer`/`supportsBoolFunction`) only accepts a
+    // guest function returning `bool` - the same `extern(D) bool`
+    // restriction issue #168 already names for `Interpreter` above.
+    // `compare` returns `extern(C) int`, so this compiler refuses the
+    // call before `qsort` ever runs, unrelated to static arrays.
     Omit!(Bytecode, Because.unconfirmed,
         "`&compare`'s signature is `extern(C) int(scope const void*, " ~
         "scope const void*)`, not the `bool()` callback this backend " ~
