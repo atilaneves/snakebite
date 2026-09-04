@@ -2980,6 +2980,34 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
 
         requireDestination(expression);
+
+        // `__traits(initSymbol, T)` for a class `T`: dmd's own lowering
+        // (`traits.d`, `Id.initSymbol`) hands back a `VarExp` on a
+        // `SymbolDeclaration` wrapping `T`'s `AggregateDeclaration`, typed
+        // `const(void[])` - a byte range over linked static data dmd's own
+        // code generator would normally emit for the class's `.init`
+        // image. `classRuntimeInfo` already builds that same image, for a
+        // `new` expression's own allocation and for the class's vtable and
+        // `typeid` - this reads it back rather than emitting a second copy
+        // of it.
+        if (auto symbol = expression.var.isSymbolDeclaration) {
+            auto classDeclaration = symbol.dsym.isClassDeclaration;
+            if (classDeclaration is null)
+                return visit(cast(Expression) expression);
+
+            import snakebite.nativelayout:
+                arrayLengthOffset, arrayPointerOffset;
+
+            auto runtime = _bytecode.classRuntimeInfo(classDeclaration);
+            emit(&opConstant, _destination + arrayLengthOffset,
+                addConstant(cast(long) runtime.m_init.length),
+                size_t.sizeof);
+            emit(&opConstant, _destination + arrayPointerOffset,
+                addConstant(cast(long) cast(size_t) runtime.m_init.ptr),
+                size_t.sizeof);
+            return;
+        }
+
         auto variable = expression.var.isVarDeclaration;
         if (variable is null)
             return visit(cast(Expression) expression);
@@ -3444,16 +3472,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(NewExp expression) {
         import dmd.astenums: Tclass;
 
-        // `expression.lowering` for a class is only the allocation
+        // `expression.lowering` for a class is the allocation alone
         // (`core.lifetime._d_newclassT!T()`, no constructor arguments -
-        // see that function's own doc in `core/lifetime.d`), a template
-        // whose body reaches `__traits(initSymbol, T)`: a byte range over
-        // linked static data dmd's own code generator would normally
-        // emit, which nothing here ever asks it to. `compileNewClass`
-        // builds the same object shape directly - `classRuntimeInfo`'s
-        // own `.init` bytes and instance vtable stand in for that never-
-        // emitted symbol - and then compiles `expression.member`'s own
-        // call itself, the constructor dmd left outside the lowering.
+        // see that function's own doc in `core/lifetime.d`); the
+        // constructor call dmd leaves outside it, on `expression.member`
+        // itself, is never virtual, so `compileConstructorCall` always
+        // binds `this` to the compiled callee directly rather than
+        // reading it back out of a vtable slot.
         if (expression.type.ty == Tclass) {
             compileNewClass(expression);
             return;
@@ -3465,28 +3490,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         expression.lowering.accept(this);
     }
 
-    // `new C(args)`: allocates `declaration.structsize` bytes, copies in
-    // the class's own `.init` bytes (`classRuntimeInfo`'s `m_init`, vptr
-    // included), then runs `expression.member` - the constructor dmd
-    // resolved, `null` for a class with none - the same way any other
-    // guest method call binds `this`, since a constructor is never
-    // virtual.
+    // `new C(args)`: compiles `expression.lowering`
+    // (`_d_newclassT!C()`) as an ordinary guest call, the same way
+    // `visit(AssocArrayLiteralExp)` compiles its own lowering rather than
+    // building the object by hand - `_d_newclassT`'s own body reaches
+    // `GC.malloc` (an FFI call, resolved by `Bytecode.allocatorAddress`'s
+    // native-symbol lookup) and `__traits(initSymbol, T)` (served by
+    // `visit(VarExp)`'s `SymbolDeclaration` case from `classRuntimeInfo`'s
+    // own `.init` bytes). Then runs `expression.member` on the allocated
+    // object, the constructor dmd left outside the lowering.
     private void compileNewClass(NewExp expression) {
-        import core.memory: GC;
-        import dmd.astenums: Tclass;
-
         if (expression.placement !is null || expression.thisexp !is null
-                || expression.onstack)
+                || expression.onstack || expression.lowering is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        auto classType = expression.newtype.isTypeClass;
-        if (classType is null)
+        if (expression.newtype.isTypeClass is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
-
-        auto declaration = classType.sym;
-        auto runtime = _bytecode.classRuntimeInfo(declaration);
 
         // A `new Foo();` run for its side effects alone still has to
         // allocate and construct - unlike a value this compiler would
@@ -3497,20 +3518,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const objectOffset = _destination == discardResult
             ? reserveTemp(pointerFacts) : _destination;
 
-        const sizeOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, sizeOffset,
-            addConstant(cast(long) runtime.m_init.length), size_t.sizeof);
-        emitAllocate(sizeOffset, objectOffset, GC.BlkAttr.NONE);
-
-        const initAddressOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, initAddressOffset,
-            addConstant(cast(long) cast(size_t) runtime.m_init.ptr),
-            size_t.sizeof);
-        const initFacts =
-            TypeFacts(runtime.m_init.length, size_t.sizeof, false, false);
-        const initOffset = reserveTemp(initFacts);
-        emit(&opLoadIndirect, initOffset, initAddressOffset, initFacts.size);
-        emit(&opStoreIndirect, objectOffset, initOffset, initFacts.size);
+        evalInto(expression.lowering, objectOffset, pointerFacts.size);
 
         if (expression.member !is null)
             compileConstructorCall(expression, objectOffset);
@@ -4347,6 +4355,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // reached through an adjusted `this`), so the cast is a plain
         // copy of the same one pointer, never an address adjustment.
         if (sourceType.ty == Tclass && destType.ty == Tclass)
+            return evalInto(expression.e1, destOffset, width);
+
+        // `cast(T) p`: `_d_newclassT`'s own final step
+        // (`core/lifetime.d`), reinterpreting the `void*` its allocation
+        // returned as the guest class reference it hands back. A class
+        // reference's native layout is one pointer word, the same as any
+        // other pointer (`isSupportedFacts` already treats `Tclass` that
+        // way), so this is a plain copy in either direction, never an
+        // address adjustment.
+        if ((sourceType.ty == Tclass && destType.ty == Tpointer)
+                || (sourceType.ty == Tpointer && destType.ty == Tclass))
             return evalInto(expression.e1, destOffset, width);
 
         if (isFloatingType(destType)) {
@@ -5288,17 +5307,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // Calls druntime's allocator for `size` bytes and leaves the resulting
     // pointer at `resultOffset` - `destOffset + arrayPointerOffset`, for
-    // every array caller here, so the array's own pointer word is filled
-    // in directly rather than through an extra copy. `bits` is the
-    // `GC.BlkAttr` value that call's second argument passes: `NO_SCAN` for
-    // every array caller here, since every element type this compiler
-    // accepts for one is a scalar with no pointers of its own, but plain
-    // `NONE` for a class object (`compileNewClass`), which can hold guest
-    // fields that are themselves references the collector must follow.
-    private void emitAllocate(
-        in size_t sizeOffset, in size_t resultOffset,
-        in imported!"core.memory".GC.BlkAttr bits,
-    ) {
+    // every caller here, so the array's own pointer word is filled in
+    // directly rather than through an extra copy. Always `GC.BlkAttr.
+    // NO_SCAN`: every element type this compiler accepts for a `new T[]`/
+    // an array literal is a scalar with no pointers of its own. A class
+    // object's own allocation is no longer built here - `compileNewClass`
+    // compiles `_d_newclassT`'s own `GC.malloc` call as part of its
+    // lowering instead, which computes its own `GC.BlkAttr` per class
+    // (`BlkAttr.FINALIZE` for one with a destructor) the same way real
+    // compiled D does.
+    private void emitAllocate(in size_t sizeOffset, in size_t resultOffset) {
+        import core.memory: GC;
+
         const siteIndex = _callSites.length;
         _callSites ~= CallSite(
             null,
@@ -5307,7 +5327,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             null,
             _bytecode.allocatorAddress,
             true,
-            bits,
+            GC.BlkAttr.NO_SCAN,
         );
         emit(&opCall, resultOffset, siteIndex, 0);
     }
@@ -5363,9 +5383,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opConstant, sizeOffset,
             addConstant(cast(long) (count * elementFacts.size)),
             size_t.sizeof);
-        import core.memory: GC;
 
-        emitAllocate(sizeOffset, pointerOffset, GC.BlkAttr.NO_SCAN);
+        emitAllocate(sizeOffset, pointerOffset);
 
         foreach (i; 0 .. count) {
             auto element = (*expression.elements)[i];
