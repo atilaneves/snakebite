@@ -13,7 +13,6 @@ import ut.backends;
 // the table from those run-time values, rather than from anything fixed
 // at compile time.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("assocArrayLiteralWithRuntimeKeys." ~ backend.stringof)
@@ -40,7 +39,13 @@ static foreach (backend; Matrix!(
 // A struct key hashes and compares by its contents, so two separately
 // built strings with the same characters are the same key.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
+    Omit!(Bytecode, Because.unconfirmed,
+        "inserting a struct-keyed entry (`ages[Name(a())] = 30`) compiles "
+            ~ "druntime's own `_d_aaGetY`, which for a key type with no "
+            ~ "already-linked instantiation falls back to compiling "
+            ~ "`_aaGetX`'s body - and `_aaGetX` takes `lazy V2 v2`, a "
+            ~ "parameter shape this compiler does not build a delegate "
+            ~ "for"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("structKeyedLookupComparesContents." ~ backend.stringof)
@@ -89,7 +94,11 @@ static foreach (backend; Matrix!(
 // or overwrites that key's value, and `foreach` over the array yields
 // every key/value pair.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
+    Omit!(Bytecode, Because.unconfirmed,
+        "the index assignments compile, but `foreach (name, offset; "
+            ~ "offsets)` lowers to a call to `_d_aaApply2` with a delegate "
+            ~ "literal as its loop body, and this compiler does not build "
+            ~ "closures/delegates yet"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("stringKeyedIndexAssignmentAndForeach." ~ backend.stringof)
@@ -154,7 +163,6 @@ static foreach (backend; Matrix!(
 // them - the pairing between a key and its value is what a test can
 // pin, not the order.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("assocArrayKeysAndValues." ~ backend.stringof)
@@ -185,7 +193,13 @@ static foreach (backend; Matrix!(
 // methods through the index, both mutate the value already in the
 // table rather than a copy of it.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
+    Omit!(Bytecode, Because.unconfirmed,
+        "inserting `spans[\"header\"] = Span(0, 4)` compiles druntime's "
+            ~ "own `_d_aaGetY`, which for a `(string, Span)` pair with no "
+            ~ "already-linked instantiation falls back to compiling "
+            ~ "`_aaGetX`'s body - and `_aaGetX` takes `lazy V2 v2`, a "
+            ~ "parameter shape this compiler does not build a delegate "
+            ~ "for"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("assocArrayIndexedValueFieldWriteAndMethodCall." ~ backend.stringof)
@@ -221,7 +235,12 @@ static foreach (backend; Matrix!(
 // array's contents, the same as any other struct key, so two separately
 // built arrays with the same elements are the same key.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
+    Omit!(Bytecode, Because.unconfirmed,
+        "inserting `counts[ArrayKey([1, 2])] = 1` compiles druntime's own "
+            ~ "`_d_aaGetY`, which for a key type with no already-linked "
+            ~ "instantiation falls back to compiling `_aaGetX`'s body - "
+            ~ "and `_aaGetX` takes `lazy V2 v2`, a parameter shape this "
+            ~ "compiler does not build a delegate for"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("arrayKeyedLookupComparesContents." ~ backend.stringof)

@@ -34,10 +34,14 @@ private bool isSupportedFacts(
     in imported!"snakebite.nativelayout".TypeFacts facts,
     imported!"dmd.mtype".Type type,
 ) {
-    import dmd.astenums: Tpointer;
+    import dmd.astenums: Taarray, Tpointer, Tsarray;
 
+    // An associative array's native layout is one pointer to the runtime's
+    // own hash table (`AA` in druntime), the same as a class reference or
+    // any other pointer - this compiler never lays out the table itself.
     return isSupportedFacts(facts) || isFloatingType(type)
         || type.ty == Tpointer
+        || type.ty == Taarray
         || type.isTypeStruct !is null
         || isPlainStaticArray(type);
 }
@@ -388,9 +392,14 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
         foreach (i; 0 .. functionType.parameterList.length) {
             auto parameter = functionType.parameterList[i];
-            if (parameter.storageClass & (STC.out_ | STC.lazy_))
+            // `out`, like `ref`, is one address-sized frame slot the body
+            // reads and writes through - `FrameLayout.of` already lays
+            // both out the same way (see its own `STC.ref_ | STC.out_`
+            // check). Only `lazy` has no frame representation at all: it
+            // needs an implicit delegate this compiler does not build.
+            if (parameter.storageClass & STC.lazy_)
                 throw rejection(function_, function_.loc,
-                    "an `out`/`lazy` parameter");
+                    "a `lazy` parameter");
 
             const facts = TypeFacts.of(parameter.type);
             if (!isSupportedFacts(facts, parameter.type))
@@ -2092,10 +2101,31 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileIndexAssign(
         AssignExp expression, IndexExp target, in size_t destOffset,
     ) {
-        import dmd.astenums: Tsarray;
+        import dmd.astenums: Tpointer, Tsarray;
 
         if (target.e1.type.ty == Tsarray)
             return compileStaticIndexAssign(expression, target, destOffset);
+
+        // `_d_aaGetY(...)[0] = value`: dmd's own lvalue-AA-index lowering
+        // (`aa[key] = value`) ends in exactly this shape - an `IndexExp`
+        // at a literal `0` on the pointer druntime's insert-or-lookup
+        // hook returned, the same pointer indexing `compileAddress` and
+        // `visit(IndexExp)` already read through.
+        if (target.e1.type.ty == Tpointer) {
+            const addressOffset = compilePointerElementAddress(target);
+            const facts = TypeFacts.of(expression.e1.type);
+            if (!isSupportedFacts(facts, expression.e1.type))
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const valueOffset = reserveTemp(facts);
+            evalInto(expression.e2, valueOffset, facts.size);
+            emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
+
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, facts.size);
+            return;
+        }
 
         const arrayFacts = TypeFacts.of(target.e1.type);
         if (!arrayFacts.isDynamicArray)
@@ -2938,7 +2968,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         requireDestination(expression);
 
-        import dmd.astenums: Tsarray;
+        import dmd.astenums: Tpointer, Tsarray;
 
         if (expression.e1.type.ty == Tsarray) {
             const addressOffset = compileStaticElementAddress(expression);
@@ -2947,11 +2977,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const facts = TypeFacts.of(expression.e1.type);
-        if (!facts.isDynamicArray)
-            return visit(cast(Expression) expression);
+        if (facts.isDynamicArray) {
+            const addressOffset = compileElementAddress(expression, facts);
+            emit(&opLoadIndirect, _destination, addressOffset, _width);
+            return;
+        }
 
-        const addressOffset = compileElementAddress(expression, facts);
-        emit(&opLoadIndirect, _destination, addressOffset, _width);
+        if (expression.e1.type.ty == Tpointer) {
+            const addressOffset = compilePointerElementAddress(expression);
+            emit(&opLoadIndirect, _destination, addressOffset, _width);
+            return;
+        }
+
+        return visit(cast(Expression) expression);
     }
 
     // `[a, b, c]`. Every element is evaluated in order into the block this
@@ -2965,6 +3003,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileArrayLiteral(expression, _destination);
     }
 
+    // An associative-array literal has no glue-layer codegen of its own:
+    // dmd's semantic pass lowers it to a call to
+    // `object._d_assocarrayliteralTX!(K, V)` (`AssocArrayLiteralExp.lowering`),
+    // built from the key and value expressions the guest wrote as ordinary
+    // `ArrayLiteralExp`s. Compiling `lowering` runs that call through the
+    // ordinary `CallExp` path, which resolves it as already-compiled
+    // druntime code the same way any other native call is resolved -
+    // never a hash table this compiler builds itself.
+    override void visit(AssocArrayLiteralExp expression) {
+        if (expression.lowering is null)
+            return visit(cast(Expression) expression);
+
+        expression.lowering.accept(this);
+    }
+
     override void visit(NewExp expression) {
         if (expression.lowering is null)
             return visit(cast(Expression) expression);
@@ -2972,29 +3025,30 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         expression.lowering.accept(this);
     }
 
-    // `null`: pointers and class references are one zero word, while a
-    // dynamic array is two zero words. These are the native representations
-    // the host expects for their null values.
+    // `null` is all-zero bytes whatever it means - a pointer, a class
+    // reference, an associative array, or a dynamic array's `{length,
+    // pointer}` pair - so this fills the destination's own width with
+    // zero rather than asking `expression.type` what shape to write.
+    // `expression.type` is not always the destination's own type: dmd
+    // infers an `auto`-return function's return type from every `return`
+    // statement together, so an earlier `return null;` before a later
+    // `return` of the real pointer type keeps `typeof(null)` on its own
+    // `NullExp` even once the function's inferred return type is settled
+    // - `_width`, supplied by whichever caller is evaluating this `null`
+    // into a destination, is what actually applies here.
     override void visit(NullExp expression) {
-        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
-        import dmd.astenums: Tclass, Tpointer;
-
         requireDestination(expression);
 
-        const facts = TypeFacts.of(expression.type);
-        if (expression.type.ty == Tpointer || expression.type.ty == Tclass) {
-            emit(&opConstant, _destination,
-                addConstant(0), facts.size);
+        // `opConstant`'s `storeWidth` only lays out up to 8 bytes, so a
+        // wider destination - a dynamic array's own 16-byte `{length,
+        // pointer}` pair - reaches for `opZero` instead, the same choice
+        // `visit(IntegerExp)` makes for its own zero-init case.
+        if (_width > long.sizeof) {
+            emit(&opZero, _destination, 0, _width);
             return;
         }
 
-        if (!facts.isDynamicArray)
-            return visit(cast(Expression) expression);
-
-        emit(&opConstant, _destination + arrayLengthOffset,
-            addConstant(0), size_t.sizeof);
-        emit(&opConstant, _destination + arrayPointerOffset,
-            addConstant(0), size_t.sizeof);
+        emit(&opConstant, _destination, addConstant(0), _width);
     }
 
     override void visit(TypeidExp expression) {
@@ -3931,7 +3985,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
             foreach (i; 0 .. parameterCount) {
                 auto parameter = type.parameterList[i];
-                if (parameter.storageClass & (STC.out_ | STC.lazy_))
+                if (parameter.storageClass & STC.lazy_)
                     throw rejection(_function, expression.loc,
                         expressionText(expression));
 
@@ -3952,7 +4006,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     throw rejection(_function, expression.loc,
                         expressionText(expression));
 
-                if (parameter.storageClass & STC.ref_) {
+                // `out` and `ref` are the same address-passing convention
+                // at the ABI boundary - a native callee zero-initialises
+                // an `out` argument itself, the same as compiled D's own
+                // caller never does, so this compiler need only hand over
+                // the argument's own address either way.
+                if (parameter.storageClass & (STC.ref_ | STC.out_)) {
                     const argumentOffset =
                         compileAddress((*expression.arguments)[i]);
                     args ~= Arg(argumentOffset, 0, size_t.sizeof);
@@ -4260,6 +4319,36 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return addressOffset;
     }
 
+    // Where `expression`'s element lives when `expression.e1` is a plain
+    // pointer, not a dynamic array: no `{length, pointer}` header, and no
+    // bound to check against - a pointer index is `@system` in compiled D
+    // for exactly this reason, so this reads `expression.e1`'s own value
+    // and adds the index times the pointee's size, the same as compiled D
+    // would. dmd's own rvalue-AA-index lowering (`aa[key]`, see
+    // `visit(AssocArrayLiteralExp)` for the literal's own lowering) takes
+    // exactly this shape: `_d_aaGetRvalueX!(K, V)(aa, key)[0]`, a pointer
+    // returned by a druntime call and indexed at a literal `0`.
+    private size_t compilePointerElementAddress(IndexExp expression) {
+        const pointerOffset = reserveTemp(pointerFacts);
+        evalInto(expression.e1, pointerOffset, size_t.sizeof);
+
+        const elementFacts = TypeFacts.of(expression.e1.type.nextOf);
+
+        const indexOffset = reserveTemp(pointerFacts);
+        evalOperandInto(expression.e2, indexOffset, size_t.sizeof);
+
+        const elementSizeOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, elementSizeOffset,
+            addConstant(cast(long) elementFacts.size), size_t.sizeof);
+        emit(&opMultiply, indexOffset, elementSizeOffset, size_t.sizeof);
+
+        const addressOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, addressOffset, pointerOffset, size_t.sizeof);
+        emit(&opAdd, addressOffset, indexOffset, size_t.sizeof);
+
+        return addressOffset;
+    }
+
     // Where `expression`'s element lives when `expression.e1` is a static
     // array: no `{length, pointer}` header to read at run time, since a
     // static array's own bytes sit directly in whatever storage holds it -
@@ -4345,7 +4434,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // address once `compileCall` compiles it into a pointer-sized slot -
     // see `_isRefReturn` in `compileReturn`.
     private size_t compileAddress(Expression expression) {
-        import dmd.astenums: Tclass, Tsarray;
+        import dmd.astenums: Tclass, Tpointer, Tsarray;
 
         if (auto varExp = expression.isVarExp) {
             auto variable = varExp.var.isVarDeclaration;
@@ -4375,6 +4464,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return compileElementAddress(indexExp, arrayFacts);
             if (indexExp.e1.type.ty == Tsarray)
                 return compileStaticElementAddress(indexExp);
+            if (indexExp.e1.type.ty == Tpointer)
+                return compilePointerElementAddress(indexExp);
         }
 
         if (auto callExp = expression.isCallExp) {
