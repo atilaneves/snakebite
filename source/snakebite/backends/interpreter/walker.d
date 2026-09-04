@@ -957,8 +957,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (typeClass is null)
             return false;
 
-        if (exception._class is null)
-            return typeClass.sym is ClassDeclaration.throwable;
+        if (exception._class is null) {
+            if (typeClass.sym is ClassDeclaration.throwable)
+                return true;
+
+            auto expected = classRuntimeInfo(typeClass.sym);
+            for (auto actual = exception._guest.classinfo;
+                    actual !is null; actual = actual.base)
+                if (actual.name == expected.name)
+                    return true;
+
+            return false;
+        }
 
         return typeClass.sym is exception._class
             || typeClass.sym.isBaseOf(exception._class, null);
@@ -2450,6 +2460,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private ElementAddress indexAddressOf(IndexExp expression) {
+        import core.exception: ArrayIndexError;
         import std.conv: text;
 
         auto array = expression.e1;
@@ -2505,11 +2516,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const index = indexOf(expression, value.length);
 
         if (index < 0 || cast(size_t) index >= value.length)
-            throw new SnakebiteException(
-                text("interpreter cannot index `", array.toString,
-                    "` at ", index, ": the array is ", value.length,
-                    " long"),
-            );
+            throw new GuestException(new ArrayIndexError(
+                cast(size_t) index,
+                value.length,
+                __FILE__,
+                __LINE__,
+            ));
 
         const stride = factsOf(array.type.nextOf).size;
         return ElementAddress(
@@ -3736,11 +3748,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // stride work an assignment's left side (`addressOf`) needs to
         // find this same element's address; a read just copies out of it
         // instead of writing through it. Compiled D throws a `RangeError`
-        // on an out-of-range index, which needs guest exceptions this
-        // interpreter does not have - `indexAddressOf` refuses instead,
-        // since an unchecked read would hand back a byte of the host's
-        // own memory as a guest value, or fault the host process
-        // outright.
+        // on an out-of-range index. `indexAddressOf` raises the same guest
+        // exception, so a guest catch can handle it and a host caller sees
+        // the unwrapped `RangeError`.
         //
         // The array's own element width, not the destination's: they
         // agree only because dmd wraps this in a `CastExp` for any change
