@@ -3918,6 +3918,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     protected override void visitUnloweredCast(CastExp expression) {
+        import dmd.astenums: Tvoid;
+
+        // `cast(void) call();`: dmd's own `foreach`-over-associative-array
+        // lowering casts `_d_aaApply2`'s `int` result to `void` when the
+        // loop's own value is never read, the same discard a bare
+        // `call();` statement already gets through `compileEffect` - only
+        // here `expression.e1` sits behind an explicit `CastExp` instead of
+        // being the statement's own expression. Nothing about a `void`
+        // cast's own destination needs `requireDestination`'s ordinary
+        // refusal: there is no value for a `void` cast to produce in the
+        // first place, so running `expression.e1` for effect is already
+        // everything this cast means.
+        if (_destination == discardResult && expression.type.ty == Tvoid) {
+            compileEffect(expression.e1);
+            return;
+        }
+
         requireDestination(expression);
         compileCast(expression, _destination, _width);
     }
@@ -4914,22 +4931,31 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     throw rejection(_function, expression.loc,
                         expressionText(expression));
 
-                if (auto callback = guestFunctionPointer(
-                        (*expression.arguments)[i])) {
-                    const argumentOffset = reserveTemp(pointerFacts);
-                    const address = _bytecode.boolFunctionAddress(callback);
-                    emit(&opConstant, argumentOffset,
-                        addConstant(cast(long) cast(size_t) address),
-                        size_t.sizeof);
-                    args ~= Arg(argumentOffset, 0, size_t.sizeof);
-                    continue;
-                }
-
+                // The bool-function callback bridge only ever stands in
+                // for a plain function-pointer parameter (the one native
+                // shape `snakebite.ffi`'s shared bridge supports) - never
+                // a delegate one, whose own native layout
+                // (`visit(FuncExp)`/`visit(DelegateExp)` above already
+                // build it) `evalInto` below already knows how to fill in
+                // directly, context word included, with no native
+                // trampoline needed at all.
                 auto pointer = parameter.type.isTypePointer;
-                if (pointer !is null && pointer.next.isTypeFunction !is null
-                        && (*expression.arguments)[i].isNullExp is null)
-                    throw rejection(_function, expression.loc,
-                        expressionText(expression));
+                if (pointer !is null && pointer.next.isTypeFunction !is null) {
+                    if (auto callback = guestFunctionPointer(
+                            (*expression.arguments)[i])) {
+                        const argumentOffset = reserveTemp(pointerFacts);
+                        const address = _bytecode.boolFunctionAddress(callback);
+                        emit(&opConstant, argumentOffset,
+                            addConstant(cast(long) cast(size_t) address),
+                            size_t.sizeof);
+                        args ~= Arg(argumentOffset, 0, size_t.sizeof);
+                        continue;
+                    }
+
+                    if ((*expression.arguments)[i].isNullExp is null)
+                        throw rejection(_function, expression.loc,
+                            expressionText(expression));
+                }
 
                 // `out` and `ref` are the same address-passing convention
                 // at the ABI boundary - a native callee zero-initialises
