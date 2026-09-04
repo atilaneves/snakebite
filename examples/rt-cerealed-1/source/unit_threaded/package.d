@@ -25,14 +25,37 @@ public void check(alias F)() @safe {
 
 public void shouldEqual(T, U)(auto ref T actual, auto ref U expected) @safe {
     static if (is(T == class) || is(U == class)) {
-        bool equal() @trusted {
-            return actual == expected;
-        }
-
-        assert(equal);
+        assert(equalClass(actual, expected));
     } else {
         assert(cast(const) actual == cast(const) expected);
     }
+}
+
+
+private bool equalClass(T, U)(T actual, U expected) @trusted {
+    import std.traits: BaseClassesTuple, FieldNameTuple;
+
+    if (actual is null || expected is null)
+        return actual is null && expected is null;
+
+    bool result = true;
+
+    static foreach (name; FieldNameTuple!T)
+        result = result && equalValue(__traits(getMember, actual, name),
+                                      __traits(getMember, expected, name));
+
+    static foreach (Base; BaseClassesTuple!T)
+        result = result && equalClass(cast(Base) actual, cast(Base) expected);
+
+    return result;
+}
+
+
+private bool equalValue(T, U)(auto ref T actual, auto ref U expected) @trusted {
+    static if (is(T == class) && is(U == class))
+        return equalClass(actual, expected);
+    else
+        return cast(const) actual == cast(const) expected;
 }
 
 
