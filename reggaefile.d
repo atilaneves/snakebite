@@ -55,7 +55,7 @@ Target dubTarget(string compiler, string config, string objectSet,
 Build reggaeBuild() {
     auto build = Build(
         dubTarget("dmd", "unittest", "unittest", "ut"),
-        dubTarget("dmd", "acceptance-test", "unittest", "at"),
+        dubTarget("dmd", "acceptance-test", "acceptance", "at"),
         dubTarget("ldc2", "sb", "release", "sb", CompilerFlags("-release", "-O")),
         dubTarget("ldc2", "sb-repl", "release", "sb-repl", CompilerFlags("-release", "-O")),
         dubTarget("ldc2", "bench", "release", "bench", CompilerFlags("-release", "-O")),
