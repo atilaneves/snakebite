@@ -2707,8 +2707,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // evaluates the left side of one of these a single time. The right
     // side is evaluated into a temporary first, before the target's
     // current value is touched, since evaluating it can itself change
-    // what the target holds (`a[f()] += 1`, though this compiler does not
-    // yet support an indexed target). `destOffset` is where the
+    // what the target holds (`a[f()] += 1`). `destOffset` is where the
     // assignment's own value - the *new* one, unlike `PostExp`'s own old
     // one below - goes too, `discardResult` when nothing wants it.
     private void compileCompoundAssign(
@@ -2759,6 +2758,45 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto(expression.e2, rightOffset, operationFacts.size);
 
             const addressOffset = compileFieldAddress(fieldTarget);
+            const valueOffset = reserveTemp(operationFacts);
+            if (promotion is null)
+                emit(&opLoadIndirect, valueOffset, addressOffset,
+                    storageFacts.size);
+            else
+                evalInto(promotion, valueOffset, operationFacts.size);
+            emit(handler, valueOffset, rightOffset, operationFacts.size);
+            emit(&opStoreIndirect, addressOffset, valueOffset,
+                storageFacts.size);
+
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, storageFacts.size);
+            return;
+        }
+
+        // `res[pos] += value`: an indexed array element has no frame slot
+        // of its own, the same as a field, so it is read, modified
+        // through `handler` and stored back through its own address -
+        // `compileAddress`'s own `IndexExp` dispatch already covers every
+        // shape (dynamic array, static array, pointer) this needs.
+        if (auto indexTarget = target.isIndexExp) {
+            const storageFacts = TypeFacts.of(indexTarget.type);
+            if (!storageFacts.isIntegral || !isIntegralSize(storageFacts.size))
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const operationFacts = promotion is null
+                ? storageFacts : TypeFacts.of(promotion.type);
+
+            auto handler = compoundHandler(
+                expression, operationFacts.isUnsigned);
+            if (handler is null)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const rightOffset = reserveTemp(operationFacts);
+            evalInto(expression.e2, rightOffset, operationFacts.size);
+
+            const addressOffset = compileAddress(indexTarget);
             const valueOffset = reserveTemp(operationFacts);
             if (promotion is null)
                 emit(&opLoadIndirect, valueOffset, addressOffset,
