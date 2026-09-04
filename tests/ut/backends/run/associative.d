@@ -67,17 +67,6 @@ static foreach (backend; Matrix!(
 // A struct key hashes and compares by its contents, so two separately
 // built strings with the same characters are the same key.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "inserting, looking up, and now `ages.remove(Name(\"Alice\"))` "
-            ~ "all compile - `compilePost` handles `(*aa.impl).used++` "
-            ~ "through `compileFieldAddress`, and `__ctfe` in druntime's "
-            ~ "`toUbyte` folds to the constant `false` this compiler's "
-            ~ "code generator uses at run time - but the lookup runs into "
-            ~ "`findSlotLookup`'s own `buckets[i]` with `i` out of bounds "
-            ~ "(`newaa.d:304`), the same runtime table-state bug "
-            ~ "`assocArrayIndexedValueFieldWriteAndMethodCall` and "
-            ~ "`arrayKeyedLookupComparesContents` hit, rather than an "
-            ~ "unsupported construct"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("structKeyedLookupComparesContents." ~ backend.stringof)
@@ -232,13 +221,6 @@ static foreach (backend; Matrix!(
 // methods through the index, both mutate the value already in the
 // table rather than a copy of it.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "inserting `spans[\"header\"] = Span(0, 4)` now compiles - "
-            ~ "`compilePost` handles `(*aa.impl).used++` through "
-            ~ "`compileFieldAddress` - but a later lookup runs into "
-            ~ "`findSlotLookup`'s own `buckets[i]` with `i` out of bounds "
-            ~ "(`newaa.d:304`), a runtime table-state bug rather than an "
-            ~ "unsupported construct"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("assocArrayIndexedValueFieldWriteAndMethodCall." ~ backend.stringof)
@@ -274,13 +256,6 @@ static foreach (backend; Matrix!(
 // array's contents, the same as any other struct key, so two separately
 // built arrays with the same elements are the same key.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "inserting `counts[ArrayKey([1, 2])] = 1` now compiles - "
-            ~ "`compilePost` handles `(*aa.impl).used++` through "
-            ~ "`compileFieldAddress` - but the `in` lookup runs into "
-            ~ "`findSlotLookup`'s own `buckets[i]` with `i` out of bounds "
-            ~ "(`newaa.d:304`), a runtime table-state bug rather than an "
-            ~ "unsupported construct"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("arrayKeyedLookupComparesContents." ~ backend.stringof)
