@@ -171,7 +171,13 @@ static foreach (backend; Matrix!(
 // A struct declared inside a function sees that function's locals, so its
 // method can call a delegate the function made.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
+    Omit!(Bytecode, Because.unconfirmed,
+        "`Caller.call` reads `dg`, a variable in `wrap`'s enclosing "
+            ~ "frame, through a static chain rather than through an "
+            ~ "explicit delegate/closure context word - the same static "
+            ~ "chain shape `call`'s own rejection at "
+            ~ "bytecode/compiler.d:5715 refuses for any nested function, "
+            ~ "not something specific to `dg` being a delegate"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("nestedStructMethodSeesEnclosingDelegate." ~ backend.stringof)
@@ -828,7 +834,13 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // that, without changing what the interpreter is being asked to do -
 // call back into the same construction site while it is still running.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
+    Omit!(Bytecode, Because.unconfirmed,
+        "the guest crashes the host process (SIGSEGV) instead of " ~
+            "returning or throwing - `make`'s recursive call reenters " ~
+            "`Whole(2, Part(n))`'s own construction site while the outer " ~
+            "activation is still live, and something about that "
+            ~ "re-entrant frame layout is unsound here, not merely "
+            ~ "unimplemented"),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE refuses to read a mutable static variable - `make` is " ~
         "exactly that in the guest, where this snippet is a module and " ~

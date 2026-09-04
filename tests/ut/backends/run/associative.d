@@ -123,10 +123,17 @@ static foreach (backend; Matrix!(
 // every key/value pair.
 static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.unconfirmed,
-        "the index assignments compile, but `foreach (name, offset; "
-            ~ "offsets)` lowers to a call to `_d_aaApply2` with a delegate "
-            ~ "literal as its loop body, and this compiler does not build "
-            ~ "closures/delegates yet"),
+        "the index assignments and the delegate literal both compile - "
+            ~ "`visit(DelegateExp)`/`visit(FuncExp)` build the "
+            ~ "`{context, function}` pair the same as for any other "
+            ~ "delegate - but `foreach (name, offset; offsets)` lowers to "
+            ~ "a native call to druntime's `_d_aaApply2`, passing that "
+            ~ "delegate as an ordinary argument for `_d_aaApply2` itself "
+            ~ "to call back into: this compiler has no native trampoline "
+            ~ "for a general delegate value the way `CallbackBridge`'s "
+            ~ "bool-function bridge covers one specific signature, so the "
+            ~ "call reaches native code with a function word `_d_aaApply2` "
+            ~ "cannot actually invoke"),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("stringKeyedIndexAssignmentAndForeach." ~ backend.stringof)

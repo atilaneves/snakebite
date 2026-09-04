@@ -139,9 +139,7 @@ static foreach (backend; Matrix!()) {
 // `call`, a function with no static chain of its own to `main`, must
 // still be able to run it - the delegate's own body needs nothing from
 // `call`'s frame, or from any frame at all.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("nested.staticChain.nonCapturingDelegateNeedsNoLink." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -179,7 +177,6 @@ static foreach (backend; Matrix!()) {
 // closure. Returning the delegate proves that the captured storage remains
 // available after the function that created it has returned.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("nested.staticChain.escapingCaptureOutlivesCreator." ~ backend.stringof)
@@ -197,14 +194,14 @@ static foreach (backend; Matrix!(
                 return &next;
             }
 
-            int main() {
+            int run() {
                 auto counter = makeCounter();
                 int first = counter();
                 int second = counter();
                 return first * 10 + second;
             }
             },
-            "main",
+            "run",
         );
     }
 }
