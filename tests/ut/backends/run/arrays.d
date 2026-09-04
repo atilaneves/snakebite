@@ -248,6 +248,74 @@ static foreach (backend; Matrix!(
     }
 }
 
+// Reserving empty storage before the first append grows through the same
+// element and slice paths without relying on variadic slice assignment.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("manualReallocationFromReservedCapacityKeepsContents."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.experimental.allocator: expandArray;
+            import std.experimental.allocator.mallocator: Mallocator;
+
+            struct Vector {
+                private char[] _elements;
+                private long _length;
+
+                this(size_t capacity) {
+                    _elements = cast(char[]) Mallocator.instance.allocate(
+                        capacity,
+                    );
+                }
+
+                ~this() {
+                    Mallocator.instance.deallocate(cast(void[]) _elements);
+                }
+
+                void put(char value) {
+                    expand(_length + 1);
+                    _elements[_length - 1] = value;
+                }
+
+                void put(const(char)[] values) {
+                    const oldLength = _length;
+                    expand(_length + values.length);
+                    _elements[oldLength .. _length] = values[];
+                }
+
+                private void expand(long newLength) {
+                    if (newLength > _elements.length) {
+                        const newCapacity = (newLength * 3) / 2;
+                        Mallocator.instance.expandArray(
+                            _elements,
+                            newCapacity - _elements.length,
+                        );
+                    }
+                    _length = newLength;
+                }
+            }
+
+            void main() {
+                auto vector = Vector(3);
+                vector.put('f');
+                vector.put('o');
+                vector.put('o');
+                vector.put('b');
+                vector.put(['a', 'r']);
+                vector.put("quux");
+
+                assert(vector._length == 10);
+                assert(vector._elements[0 .. vector._length]
+                    == "foobarquux");
+            }
+        });
+    }
+}
+
 // `a[] = b[]` for two dynamic arrays copies every element of `b` into `a`
 // in order, at a length known only at run time - the same shape
 // `core.lifetime._d_newclassT`'s own lowering needs for

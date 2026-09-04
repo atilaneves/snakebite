@@ -35,6 +35,39 @@ static foreach (backend; Matrix!(
 }
 
 
+// Delegate equality compares both the function and context pointers. A
+// copied delegate is equal, while two closures from separate calls are not,
+// even when they produce the same result.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("delegateEqualityComparesFunctionAndContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int delegate(int) make(int seed) {
+                int add(int value) {
+                    return seed + value;
+                }
+
+                return &add;
+            }
+
+            void main() {
+                auto first = make(10);
+                auto copy = first;
+                auto second = make(10);
+
+                assert(first == copy);
+                assert(first != second);
+                assert(first(2) == second(2));
+            }
+        });
+    }
+}
+
+
 // The alias-template form `check!F` hands the literal itself to the
 // template, so `F(value)` is a direct call of the literal - each
 // invocation must see the argument of that invocation.

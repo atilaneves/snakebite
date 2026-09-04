@@ -197,11 +197,10 @@ static foreach (backend; Matrix!(
     }
 }
 
-// Compiled D throws a `RangeError` for an index outside the array, which
-// needs guest exceptions the interpreter does not have. It refuses the
-// index rather than reading the host address the guest asked for, so this
-// pins a refusal where the test above pins the throw.
-@("arrays.index.outOfRange.refused.Interpreter")
+// Compiled D throws a `RangeError` for an index outside the array. The
+// interpreter propagates that same exception to a host caller, while the
+// test above catches it inside guest code.
+@("arrays.index.outOfRange.propagates.RangeError.Interpreter")
 @Tags("Interpreter")
 unittest {
     import snakebite.frontend.compiler: parseSnippet;
@@ -217,14 +216,16 @@ unittest {
     auto function_ = findFunction(module_, "past");
 
     char result;
+    import core.exception: RangeError;
+
     interpreter(module_).call(function_, &result, [])
-        .shouldThrow;
+        .shouldThrow!RangeError;
 }
 
 // A `null` array is zero-length with a null pointer, so an index into it
 // is out of range like any other. Reading it instead would dereference
 // null and take down the host process, not the guest.
-@("arrays.index.nullArray.refused.Interpreter")
+@("arrays.index.nullArray.propagates.RangeError.Interpreter")
 @Tags("Interpreter")
 unittest {
     import snakebite.frontend.compiler: parseSnippet;
@@ -240,8 +241,10 @@ unittest {
     auto function_ = findFunction(module_, "nothing");
 
     char result;
+    import core.exception: RangeError;
+
     interpreter(module_).call(function_, &result, [])
-        .shouldThrow;
+        .shouldThrow!RangeError;
 }
 
 // Bytecode does not yet have guest try/catch (see the `RangeError` test

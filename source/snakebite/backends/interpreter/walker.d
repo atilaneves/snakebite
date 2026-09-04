@@ -110,7 +110,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         Error, Exception, Throwable, TypeInfo_Class, TypeInfo_Struct;
     import dmd.root.string: toDString;
     import dmd.astenums:
-        Tarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32, Tfloat64,
+        Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32, Tfloat64,
         Tfloat80, Tnoreturn, Tint64, Tpointer, Tsarray, Tuns32, Tuns8,
         Tvoid, Twchar;
     import dmd.arraytypes: Expressions;
@@ -957,8 +957,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (typeClass is null)
             return false;
 
-        if (exception._class is null)
-            return typeClass.sym is ClassDeclaration.throwable;
+        if (exception._class is null) {
+            if (typeClass.sym is ClassDeclaration.throwable)
+                return true;
+
+            auto expected = classRuntimeInfo(typeClass.sym);
+            for (auto actual = exception._guest.classinfo;
+                    actual !is null; actual = actual.base)
+                if (actual.name == expected.name)
+                    return true;
+
+            return false;
+        }
 
         return typeClass.sym is exception._class
             || typeClass.sym.isBaseOf(exception._class, null);
@@ -1793,7 +1803,25 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     size_t.sizeof, false);
             }
             auto parent = fn.toParent2();
-            fn = parent is null ? null : parent.isFuncDeclaration;
+            auto parentFunction = parent is null
+                ? null : parent.isFuncDeclaration;
+            if (parentFunction is null) {
+                auto struct_ = parent is null
+                    ? null : parent.isStructDeclaration;
+                if (struct_ is null || base is null)
+                    return null;
+
+                // A nested struct stores its enclosing context in the
+                // receiver's first word before the method's own context
+                // chain continues through the enclosing function.
+                base = cast(ubyte*) loadIntegral(
+                    base, size_t.sizeof, false);
+                parent = struct_.toParent2();
+                parentFunction = parent is null
+                    ? null : parent.isFuncDeclaration;
+            }
+
+            fn = parentFunction;
             if (fn is null)
                 return null;
         }
@@ -2096,6 +2124,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // a node this interpreter refuses rather than one it reaches this code
     // with.
     override void visit(AssignExp expression) {
+        if (expression.e1.isSliceExp !is null) {
+            assignSlice(expression);
+            return;
+        }
+
         assign(expression);
     }
 
@@ -2253,7 +2286,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             && (declaration.hasIdentityAssign || declaration.hasBlitAssign);
         if (!declaration.zeroInit
                 || declaration.isUnionDeclaration !is null
-                || declaration.enclosing !is null
                 || declaration.hasCopyCtor
                 || hasElaborateAssign)
             return false;
@@ -2474,6 +2506,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private ElementAddress indexAddressOf(IndexExp expression) {
+        import core.exception: ArrayIndexError;
         import std.conv: text;
 
         auto array = expression.e1;
@@ -2529,11 +2562,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const index = indexOf(expression, value.length);
 
         if (index < 0 || cast(size_t) index >= value.length)
-            throw new SnakebiteException(
-                text("interpreter cannot index `", array.toString,
-                    "` at ", index, ": the array is ", value.length,
-                    " long"),
-            );
+            throw new GuestException(new ArrayIndexError(
+                cast(size_t) index,
+                value.length,
+                __FILE__,
+                __LINE__,
+            ));
 
         const stride = factsOf(array.type.nextOf).size;
         return ElementAddress(
@@ -2796,6 +2830,40 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
+        if (type.ty == Tdelegate) {
+            import snakebite.nativelayout:
+                delegateContextOffset, delegateFunctionOffset,
+                delegateValueSize, loadIntegral;
+
+            align(size_t.sizeof) ubyte[delegateValueSize] left = void;
+            align(size_t.sizeof) ubyte[delegateValueSize] right = void;
+            const facts = factsOf(type);
+            evaluate(expression.e1, type, facts, left.ptr);
+            evaluate(expression.e2, type, facts, right.ptr);
+            const sameContext = loadIntegral(
+                left.ptr + delegateContextOffset,
+                size_t.sizeof,
+                false,
+            ) == loadIntegral(
+                right.ptr + delegateContextOffset,
+                size_t.sizeof,
+                false,
+            );
+            const sameFunction = loadIntegral(
+                left.ptr + delegateFunctionOffset,
+                size_t.sizeof,
+                false,
+            ) == loadIntegral(
+                right.ptr + delegateFunctionOffset,
+                size_t.sizeof,
+                false,
+            );
+            const equal = sameContext && sameFunction;
+            const answer = expression.op == EXP.equal ? equal : !equal;
+            storeIntegral(_place, answer ? 1 : 0, _facts.size);
+            return;
+        }
+
         bool equal;
         if (type.ty == Tpointer)
             equal = asPointer(expression.e1) == asPointer(expression.e2);
@@ -2930,6 +2998,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         else if (type.ty == Tclass)
             equal = classReferenceOf(expression.e1)
                 == classReferenceOf(expression.e2);
+        else if (type.ty == Tarray) {
+            const a = evaluateArray(expression.e1, factsOf(type));
+            const b = evaluateArray(
+                expression.e2, factsOf(expression.e2.type));
+            equal = a.length == b.length && a.elements == b.elements;
+        }
         else if (type.ty == Tpointer)
             equal = asPointer(expression.e1) == asPointer(expression.e2);
         else if (factsOf(type).isIntegral)
@@ -2973,6 +3047,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(MinExp expression) {
+        import snakebite.nativelayout: storeIntegral;
+
+        if (expression.e1.type.ty == Tpointer
+                && expression.e2.type.ty == Tpointer) {
+            const stride = factsOf(expression.e1.type.nextOf).size;
+            assert(stride != 0, "pointer subtraction has zero-sized elements");
+
+            const left = cast(ubyte*) asPointer(expression.e1);
+            const right = cast(ubyte*) asPointer(expression.e2);
+            const difference = (left - right) / cast(ptrdiff_t) stride;
+            storeIntegral(_place, cast(ulong) difference, _facts.size);
+            return;
+        }
+
         storeBinaryExp!"-"(expression);
     }
 
@@ -3178,6 +3266,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
+        // An associative-array value is a single native pointer, so a cast
+        // between equivalent AA types copies that pointer. A null AA cast
+        // must clear the complete destination slot.
+        if (_type.ty == Taarray) {
+            if (sourceType.ty == Taarray) {
+                evaluate(
+                    expression.e1, sourceType, factsOf(sourceType), _place);
+                return;
+            }
+
+            if (expression.e1.isNullExp) {
+                storeValue(_type, _facts, expression.e1, _place);
+                return;
+            }
+        }
+
         if (sourceType.ty == Tclass && _type.ty == Tclass) {
             auto value = classReferenceOf(expression.e1);
             if (value is null) {
@@ -3376,6 +3480,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
+        if (auto typeInfo = expression.var.isTypeInfoDeclaration) {
+            auto type = typeInfo.tinfo;
+            auto classType = type.isTypeClass;
+            if (classType !is null && isRootOwnedClass(classType.sym)) {
+                auto info = classRuntimeInfo(classType.sym);
+                storeIntegral(
+                    _place,
+                    cast(size_t) cast(void*) info,
+                    _facts.size,
+                );
+                return;
+            }
+        }
+
         const address =
             cast(size_t) slotOf(expression, expression.var) + expression.offset;
         storeIntegral(_place, address, _facts.size);
@@ -3405,6 +3523,42 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // where `*p = ...` writes.
     override void visit(PtrExp expression) {
         import core.stdc.string: memcpy;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+
+        if (_type.ty == Tpointer && expression.e1.type.ty == Tclass) {
+            auto object = classReferenceOf(expression.e1);
+            if (object is null) {
+                storeIntegral(_place, 0, _facts.size);
+                return;
+            }
+
+            auto declaration = object in _classes;
+            if (declaration !is null) {
+                auto info = classRuntimeInfo(*declaration);
+                storeIntegral(
+                    _place, cast(size_t) cast(void*) info, _facts.size);
+                return;
+            }
+
+            auto vtable = cast(void*) loadIntegral(
+                object, size_t.sizeof, false);
+            storeIntegral(
+                _place,
+                vtable is null
+                    ? 0 : loadIntegral(vtable, size_t.sizeof, false),
+                _facts.size,
+            );
+            return;
+        }
+
+        if (_type.ty == Tclass && expression.e1.type.ty == Tpointer) {
+            storeIntegral(
+                _place,
+                cast(size_t) asPointer(expression.e1),
+                _facts.size,
+            );
+            return;
+        }
 
         memcpy(_place, asPointer(expression.e1), _facts.size);
     }
@@ -3646,11 +3800,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // stride work an assignment's left side (`addressOf`) needs to
         // find this same element's address; a read just copies out of it
         // instead of writing through it. Compiled D throws a `RangeError`
-        // on an out-of-range index, which needs guest exceptions this
-        // interpreter does not have - `indexAddressOf` refuses instead,
-        // since an unchecked read would hand back a byte of the host's
-        // own memory as a guest value, or fault the host process
-        // outright.
+        // on an out-of-range index. `indexAddressOf` raises the same guest
+        // exception, so a guest catch can handle it and a host caller sees
+        // the unwrapped `RangeError`.
         //
         // The array's own element width, not the destination's: they
         // agree only because dmd wraps this in a `CastExp` for any change
@@ -4319,6 +4471,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     override void visit(StructLiteralExp expression) {
         import core.stdc.string: memset;
+        import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
         auto structType = _type.isTypeStruct;
@@ -4330,6 +4483,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
 
         memset(_place, 0, _facts.size);
+
+        // A nested struct carries its enclosing function's context in the
+        // first word, so methods on a returned value can reach captured
+        // locals after the enclosing call has returned.
+        auto parent = expression.sd.toParent2();
+        auto parentFunction = parent is null
+            ? null : parent.isFuncDeclaration;
+        if (parentFunction !is null)
+            storeIntegral(
+                _place,
+                cast(size_t) contextOf(parentFunction),
+                size_t.sizeof,
+            );
+
         if (expression.elements is null || expression.elements.length == 0)
             return;
 

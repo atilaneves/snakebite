@@ -265,6 +265,93 @@ unittest {
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.inexpressible,
+        "bytecode cannot compile class parameters"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot dereference classinfo"),
+)) {
+    @("classValueClassInfo." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Dummy {
+            }
+
+            bool info(ref Dummy value) {
+                bool[string] names;
+                assert((value.classinfo.name in names) is null);
+                return true;
+            }
+
+            bool forward(Dummy value) {
+                return info(value);
+            }
+
+            void main() {
+                assert(forward(new Dummy));
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.inexpressible,
+        "bytecode cannot compile associative arrays of delegates"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot execute associative arrays of delegates"),
+)) {
+    @("classValueClassInfoCanBeUsedAsAssociativeArrayKey."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+            }
+
+            class Derived: Base {
+            }
+
+            void main() {
+                void delegate()[string] handlers;
+                Base value = new Derived;
+
+                handlers[value.classinfo.name] = () {};
+                assert(value.classinfo.name in handlers);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.inexpressible,
+        "bytecode cannot compile class parameters"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot dereference classinfo"),
+)) {
+    @("genericClassInfoNameWorks." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Dummy {
+            }
+
+            bool info(T)() {
+                bool[string] names;
+                const name = T.classinfo.name;
+                assert(name.length > 6);
+                assert(name[$ - 6 .. $] == ".Dummy", name);
+                assert((name in names) is null);
+                return true;
+            }
+
+            void main() {
+                assert(info!Dummy);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the mutable static destruction counter"),
     Omit!(Bytecode, Because.unconfirmed,

@@ -147,6 +147,30 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// Subtracting pointers gives the distance in elements, not bytes.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "bytecode cannot evaluate pointer subtraction"),
+)) {
+    @("pointers.dynamicArray.pointerDifference." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2L.shouldBeRetOf!(
+            backend,
+            q{
+                long distance() {
+                    ubyte[] arr = [1, 2, 3];
+                    auto start = arr.ptr;
+                    auto end = start + 2;
+                    return end - start;
+                }
+            },
+            "distance",
+        );
+    }
+}
+
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
     Omit!(Interpreter, Because.unconfirmed,
