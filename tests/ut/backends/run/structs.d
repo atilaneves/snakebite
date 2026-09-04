@@ -1776,3 +1776,60 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A lambda inside a struct method that reads a field with no explicit
+// `this.` reaches it through the enclosing method's own hidden `this` -
+// dmd resolves the bare identifier to `this.field` (`hasThis` finds the
+// method, not the lambda itself, since the lambda has no `this` of its
+// own) and treats that `this` as a variable the lambda captures, the same
+// as any other local of the enclosing method.
+static foreach (backend; Matrix!()) {
+    @("structLambdaReadsFieldThroughEnclosingThis." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Cursor {
+                size_t offset;
+
+                size_t readOffset() {
+                    auto nested = () => offset;
+                    return nested();
+                }
+            }
+
+            void main() {
+                auto cursor = Cursor(7);
+                assert(cursor.readOffset() == 7);
+            }
+        });
+    }
+}
+
+// As above, for a nested function (not a lambda) that writes a field
+// through the same implicit `this` rather than only reading one.
+static foreach (backend; Matrix!()) {
+    @("structNestedFunctionWritesFieldThroughEnclosingThis." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Counter {
+                int total;
+
+                void addTwice(int amount) {
+                    void bump() {
+                        total += amount;
+                    }
+
+                    bump();
+                    bump();
+                }
+            }
+
+            void main() {
+                auto counter = Counter(1);
+                counter.addTwice(4);
+                assert(counter.total == 9);
+            }
+        });
+    }
+}

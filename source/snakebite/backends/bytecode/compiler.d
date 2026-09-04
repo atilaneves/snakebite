@@ -2254,6 +2254,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // class branch below) - `FrameLayout.isRef` only decides whether this
     // slot needs one more `opLoadIndirect` first to reach it, for a
     // struct's own hidden `this` alone.
+    //
+    // `variable` names `_function`'s own `vthis` for an ordinary member
+    // method, but a lambda or nested function reading `this` implicitly
+    // (`dmd`'s own `hasThis` resolves such a read to the nearest
+    // enclosing *member* function's `vthis`, not the lambda's own) names
+    // an outer function's `vthis` instead - one this compiler's own frame
+    // never reserved a slot for. `contextThisOffset` reaches that one
+    // through the static chain, the same way any other captured variable
+    // is reached.
     private size_t hiddenThisOffset(VarDeclaration variable = null) {
         auto hiddenThis = variable is null
             ? cast() _layout.hiddenThis.variable
@@ -2261,7 +2270,43 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (hiddenThis is null)
             throw rejection(_function, _function.loc, "a `this`");
 
-        return _layout.offsetOf(hiddenThis);
+        if (hiddenThis is _layout.hiddenThis.variable)
+            return _layout.offsetOf(hiddenThis);
+
+        return contextThisOffset(hiddenThis);
+    }
+
+    // As `hiddenThisOffset`, when `hiddenThis` belongs to an outer
+    // function reached through the static chain rather than to
+    // `_function`'s own frame - the same reach `addressOfVariable` gives
+    // any other captured variable, except `hiddenThis`'s own slot is
+    // always read exactly once here regardless of `FrameLayout.isRef`:
+    // a frame slot read (the own-frame branch above) costs no
+    // instruction at all, whatever it holds, so the one memory read this
+    // performs to cross into another frame or closure is the equivalent
+    // cost, not an extra dereference layered on top of it.
+    private size_t contextThisOffset(VarDeclaration hiddenThis) {
+        auto owner = outerFunctionOf(hiddenThis);
+        if (owner is null)
+            throw rejection(_function, _function.loc, "a `this`");
+
+        auto context = contextAddressOf(owner);
+        if (functionNeedsClosure(owner)) {
+            const closure = ClosureLayout.of(owner);
+            if (!closure.hasSlot(hiddenThis))
+                throw rejection(_function, _function.loc, "a `this`");
+
+            context = addPointerOffset(context, closure.slotOf(hiddenThis).offset);
+        } else {
+            const layout = FrameLayout.of(owner);
+            if (!layout.hasSlot(hiddenThis))
+                throw rejection(_function, _function.loc, "a `this`");
+
+            context = addPointerOffset(context, layout.offsetOf(hiddenThis));
+        }
+
+        emit(&opLoadIndirect, context, context, size_t.sizeof);
+        return context;
     }
 
     private size_t compileThisFieldAddress(VarDeclaration field) {
@@ -3282,9 +3327,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // `VarDeclaration.isThis` (`hiddenThis.isThis`) answers for an
         // ordinary member field, not for `vthis` itself - its own parent
         // is the method, not the aggregate, so it always answers `null`.
-        // `_function.isThis` is the one that actually names the aggregate
-        // a method's own hidden `this` belongs to.
-        auto owner = _function.isThis;
+        // The function that owns `hiddenThis` is the one that actually
+        // names the aggregate this `this` belongs to - `_function` itself
+        // for an ordinary member method, but a lambda or nested function
+        // reading `this` implicitly names the enclosing member method's
+        // `vthis` instead (see `hiddenThisOffset`'s own doc), so asking
+        // `_function.isThis` directly would answer `null` even for a
+        // class method's own receiver in that case.
+        auto hiddenThis = expression.var is null
+            ? cast() _layout.hiddenThis.variable : expression.var;
+        auto ownerFunction = outerFunctionOf(hiddenThis);
+        auto owner = ownerFunction is null ? null : ownerFunction.isThis;
         if (owner !is null && owner.isClassDeclaration !is null) {
             if (offset != _destination)
                 emit(&opCopy, _destination, offset, _width);

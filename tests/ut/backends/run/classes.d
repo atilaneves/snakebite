@@ -431,3 +431,35 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// As `structLambdaReadsFieldThroughEnclosingThis` (`ut.backends.run.
+// structs`), for a class method's own `this` instead of a struct's: dmd
+// resolves the bare field the same way regardless of which kind of
+// aggregate declares it, but a class's hidden `this` is already the
+// receiver reference rather than a `ref` to it, so the two are worth
+// covering separately even though the guest source differs only in one
+// keyword.
+static foreach (backend; Matrix!()) {
+    @("classLambdaReadsFieldThroughEnclosingThis." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Tag {
+                int code;
+
+                this(int code) {
+                    this.code = code;
+                }
+
+                int readCode() {
+                    return (() => code)();
+                }
+            }
+
+            void main() {
+                auto tag = new Tag(9);
+                assert(tag.readCode() == 9);
+            }
+        });
+    }
+}
