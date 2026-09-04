@@ -1668,6 +1668,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import core.stdc.string: memcpy;
         import dmd.id: Id;
         import snakebite.nativelayout: storeIntegral;
+        import std.conv: text;
 
         // DMD creates this compiler variable during semantic analysis. Its
         // own native code generator defines it as false at run time; true is
@@ -1680,6 +1681,36 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         if (expression.var is _dollar.var) {
             storeIntegral(_place, _dollar.length, _facts.size);
+            return;
+        }
+
+        // `__traits(initSymbol, T)` for a class `T`: dmd's own lowering
+        // (`traits.d`, `Id.initSymbol`) hands back a `VarExp` on a
+        // `SymbolDeclaration` wrapping `T`'s `AggregateDeclaration`, typed
+        // `const(void[])` - a byte range over linked static data dmd's own
+        // code generator would normally emit for the class's `.init`
+        // image. `classRuntimeInfo` already builds that same image, for a
+        // `new` expression's own allocation and for the class's vtable and
+        // `typeid` - this reads it back rather than emitting a second copy
+        // of it.
+        if (auto symbol = expression.var.isSymbolDeclaration) {
+            auto classDeclaration = symbol.dsym.isClassDeclaration;
+            if (classDeclaration is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot evaluate `", expression.toString,
+                        "`: only a class's own `initSymbol` is supported"),
+                );
+
+            import snakebite.nativelayout:
+                arrayLengthOffset, arrayPointerOffset;
+
+            auto runtime = classRuntimeInfo(classDeclaration);
+            auto bytes = cast(ubyte*) _place;
+            storeIntegral(
+                bytes + arrayLengthOffset, runtime.m_init.length,
+                size_t.sizeof);
+            *cast(const(void)**) (bytes + arrayPointerOffset) =
+                runtime.m_init.ptr;
             return;
         }
 
@@ -2105,6 +2136,24 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import core.stdc.string: memcpy;
         import std.conv: text;
 
+        // `a[] = b[]`: dmd gives this the same `AssignExp` shape as
+        // `a = b`, but its meaning is different - `a`'s own storage keeps
+        // its identity and every element of `b` is copied into it, rather
+        // than `a` being rebound to `b`'s storage. `_type.ty == Tarray`
+        // alone does not tell the two apart (`a = b` has the same target
+        // type), so the left side's own shape does: only a slice
+        // expression on the left names storage this way. Guarding on the
+        // right side's type as well as the left rules out `a[] = v`, an
+        // element fill dmd gives the same `AssignExp` shape again, whose
+        // right side is the element type, not an array - a different
+        // operation this evaluator does not support yet. This is the
+        // shape `_d_newclassT`'s own lowering needs, copying a guest
+        // class's `.init` bytes into its freshly allocated storage
+        // (`p[0 .. init.length] = cast(void[]) init[];`, `core/lifetime.d`).
+        if (_type.ty == Tarray && expression.e1.isSliceExp !is null
+                && expression.e2.type.ty == Tarray)
+            return assignSlice(expression);
+
         // `ConstructExp` and `BlitExp` arrive as this same node. Over a
         // type with a destructor or an overloaded assignment, running
         // either as a plain store would be a wrong answer, not a
@@ -2160,46 +2209,50 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return target;
     }
 
+    // `a[] = b[]`: both sides are evaluated as ordinary dynamic-array
+    // values first - `visit(SliceExp)` already knows how to find a
+    // slice's own base and length, bounded or not, so this reuses it
+    // rather than re-deriving the same address and length by hand.
+    // D requires the two lengths to agree at run time; a mismatch is a
+    // guest fault, not silently truncated or padded, so it is refused
+    // rather than guessed at. What is left is a plain byte range copy -
+    // `memmove`, not `memcpy`, since `a[] = a[1 .. $]` and similar
+    // self-overlapping copies are valid D and must still read every
+    // source byte before it is overwritten.
     private void* assignSlice(AssignExp expression) {
-        import core.stdc.string: memcpy;
+        import core.stdc.string: memcpy, memmove;
         import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset, storeIntegral;
+            arrayLengthOffset, arrayPointerOffset, loadIntegral;
         import std.conv: text;
 
-        if (expression.e2.type.ty != Tarray)
+        auto destination = _frames.push(_facts.size, _facts.alignment);
+        evaluate(expression.e1, _type, _facts, destination.base);
+        auto source = _frames.push(_facts.size, _facts.alignment);
+        evaluate(expression.e2, _type, _facts, source.base);
+
+        const destinationLength = loadIntegral(
+            destination.base + arrayLengthOffset, size_t.sizeof, false);
+        const sourceLength = loadIntegral(
+            source.base + arrayLengthOffset, size_t.sizeof, false);
+        if (destinationLength != sourceLength)
             throw new SnakebiteException(
-                text("interpreter cannot assign `", expression.toString,
-                    "`: only a dynamic-array source is supported"),
+                text("interpreter cannot evaluate `", expression.toString,
+                    "`: lengths do not match (", destinationLength, " vs ",
+                    sourceLength, ")"),
             );
 
-        const destination = evaluateArray(
-            expression.e1, factsOf(expression.e1.type));
-        const source = evaluateArray(
-            expression.e2, factsOf(expression.e2.type));
-        if (destination.length != source.length)
-            throw new SnakebiteException(
-                text("interpreter cannot assign `", expression.toString,
-                    "`: array lengths differ (", destination.length,
-                    " and ", source.length, ")"),
-            );
-
-        const elementSize = factsOf(expression.e1.type.nextOf).size;
-        if (destination.length != 0)
-            memcpy(
-                cast(ubyte*) destination.elements,
-                source.elements,
-                destination.length * elementSize,
-            );
-
-        auto bytes = cast(ubyte*) _place;
-        storeIntegral(
-            bytes + arrayLengthOffset,
-            destination.length,
-            size_t.sizeof,
+        auto destinationPointer =
+            *cast(void**) (destination.base + arrayPointerOffset);
+        auto sourcePointer =
+            *cast(const(void)**) (source.base + arrayPointerOffset);
+        const elementSize = factsOf(_type.nextOf).size;
+        memmove(
+            destinationPointer, sourcePointer,
+            cast(size_t) destinationLength * elementSize,
         );
-        *cast(ubyte**) (bytes + arrayPointerOffset) =
-            cast(ubyte*) destination.elements;
-        return _place;
+
+        memcpy(_place, destination.base, _facts.size);
+        return destination.base;
     }
 
     private bool supportsStruct(Type type) {
@@ -3255,6 +3308,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
+        // `cast(T) p`: `_d_newclassT`'s own final step (`core/lifetime.d`),
+        // reinterpreting the `void*` its allocation returned as the guest
+        // class reference it hands back. A class reference's native layout
+        // is one pointer word, the same as any other pointer, so this is a
+        // plain copy in either direction, never an address adjustment.
+        if ((sourceType.ty == Tclass && _type.ty == Tpointer)
+                || (sourceType.ty == Tpointer && _type.ty == Tclass)) {
+            evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
+            return;
+        }
+
         if (sourceType.ty == Tsarray && _type.ty == Tarray
                 && sourceType.nextOf.equals(_type.nextOf)) {
             import snakebite.nativelayout:
@@ -3790,11 +3854,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             base = cast(ubyte*) value.elements;
             sourceLength = value.length;
             knownLength = true;
+        } else if (sourceType.ty == Tsarray) {
+            // A static array's elements are the array's own bytes, not a
+            // separately allocated block - `addressOf` already finds that
+            // storage the same way any other lvalue's address is found,
+            // and the length is part of the type itself rather than
+            // something to read back from a run-time value.
+            base = cast(ubyte*) addressOf(array);
+            const elementSize = factsOf(sourceType.nextOf).size;
+            sourceLength = factsOf(sourceType).size / elementSize;
+            knownLength = true;
         } else
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
-                    "`: only slicing a pointer or a dynamic array is ",
-                    "supported"),
+                    "`: only slicing a pointer, a dynamic array or a ",
+                    "static array is supported"),
             );
 
         auto lengthVar = expression.lengthVar;
@@ -3909,8 +3983,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     // Not one of `LoweringVisitor`'s final overrides - see the comment on
-    // that class (`snakebite.backends.loweringvisitor`) for why a
-    // heap-allocated guest class's `lowering` cannot be compiled here.
+    // that class (`snakebite.backends.loweringvisitor`) for why: the
+    // constructor call dmd leaves outside a class's own `lowering` still
+    // has to run afterwards, which a single final `accept(this)` dispatch
+    // has nowhere to express. The heap-allocated class case below does
+    // tree-walk `expression.lowering` (`_d_newclassT!T()`) like any other
+    // call.
     override void visit(NewExp expression) {
         import dmd.astenums: Taarray;
 
@@ -3952,7 +4030,35 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 );
                 memcpy(object, runtime.m_init.ptr, runtime.m_init.length);
             } else {
-                object = cast(ubyte*) cast(void*) runtime.create;
+                // `scope class`/`-betterC` are the only shapes dmd leaves
+                // `lowering` null for here (`expressionsem.d`, `NewExp`
+                // semantic) - both stay refused, same as any other
+                // unsupported node, since neither is this evaluator's own
+                // allocation to perform. `expression.lowering` is
+                // `core.lifetime._d_newclassT!T()`
+                // (`snakebite.backends.loweringvisitor` on why `NewExp` is
+                // not one of that visitor's final overrides): a call this
+                // evaluator tree-walks like any other, reaching
+                // `__traits(initSymbol, T)` (`visit(VarExp)`'s
+                // `SymbolDeclaration` case, reading `classRuntimeInfo`'s
+                // own `.init` image, fields already baked in by
+                // `fillFieldInits`) and `GC.malloc` (an ordinary FFI call,
+                // resolved the same way as any other native symbol).
+                if (expression.lowering is null)
+                    throw new SnakebiteException(
+                        text("interpreter cannot evaluate `",
+                            expression.toString,
+                            "`: only heap allocation is supported"),
+                    );
+
+                import snakebite.nativelayout: loadIntegral;
+
+                auto scratch = _frames.push(_facts.size, _facts.alignment);
+                evaluate(
+                    expression.lowering, expression.type, _facts,
+                    scratch.base);
+                object = cast(ubyte*) loadIntegral(
+                    scratch.base, size_t.sizeof, false);
                 if (object is null)
                     throw new SnakebiteException(
                         text("interpreter cannot allocate `",
@@ -3961,7 +4067,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     );
             }
 
-            initializeClass(declaration, object, expression.loc);
             _classes[object] = declaration;
 
             if (expression.member !is null)
@@ -4102,7 +4207,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         typeInfo.vtbl[0] = cast(void*) typeInfo;
         if (declaration.isInterfaceDeclaration is null) {
             typeInfo.m_init = new byte[](declaration.structsize);
+            if (baseInfo !is null && baseInfo.m_init.length != 0)
+                typeInfo.m_init[0 .. baseInfo.m_init.length] =
+                    baseInfo.m_init[];
             *cast(void**) typeInfo.m_init.ptr = typeInfo.vtbl.ptr;
+            fillFieldInits(declaration, cast(ubyte*) typeInfo.m_init.ptr);
         }
 
         if (declaration.interfaces.length != 0) {
@@ -4159,14 +4268,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return false;
     }
 
-    private void initializeClass(
-        ClassDeclaration declaration,
-        ubyte* object,
-        in Loc loc,
-    ) {
-        if (declaration.baseClass !is null)
-            initializeClass(declaration.baseClass, object, loc);
-
+    // Every field's own default value, written once into `classRuntimeInfo`'s
+    // own `.init` image rather than run fresh on every `new` - real
+    // compiled D bakes the same values into the class's linked `.init`
+    // data at compile time, which is exactly what `_d_newclassT`'s own
+    // lowering (`core/lifetime.d`) then blits into a freshly allocated
+    // object. Base-class fields are already present in `base` by the time
+    // this runs (`classRuntimeInfo` copies the base's own `.init` image
+    // in first), so only `declaration`'s own fields are walked here.
+    private void fillFieldInits(ClassDeclaration declaration, ubyte* base) {
         foreach (field; declaration.fields) {
             if (field._init is null)
                 continue;
@@ -4180,7 +4290,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 initializerValueOf(initializer),
                 field.type,
                 facts,
-                object + field.offset,
+                base + field.offset,
             );
         }
     }

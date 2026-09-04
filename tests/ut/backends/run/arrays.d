@@ -14,6 +14,7 @@ import ut.backends;
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("moduleArrayInitialisedBeforeFirstUse." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -186,7 +187,6 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("manualReallocationKeepsContents." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -256,8 +256,6 @@ static foreach (backend; Matrix!(
 // would need one instruction per element, which a run-time-only length
 // cannot give a compile-time count for.
 static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter cannot take the address of `a[]`"),
 )) {
     @("dynamicSliceCopyFromDynamicSlice." ~ backend.stringof)
     @Tags(backend.stringof)

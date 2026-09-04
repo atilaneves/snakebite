@@ -225,7 +225,7 @@ unittest {
 // A `null` array is zero-length with a null pointer, so an index into it
 // is out of range like any other. Reading it instead would dereference
 // null and take down the host process, not the guest.
-@("arrays.index.nullArray.refused.Interpreter")
+@("arrays.index.nullArray.propagates.RangeError.Interpreter")
 @Tags("Interpreter")
 unittest {
     import snakebite.frontend.compiler: parseSnippet;
@@ -241,8 +241,10 @@ unittest {
     auto function_ = findFunction(module_, "nothing");
 
     char result;
+    import core.exception: RangeError;
+
     interpreter(module_).call(function_, &result, [])
-        .shouldThrow;
+        .shouldThrow!RangeError;
 }
 
 // Bytecode does not yet have guest try/catch (see the `RangeError` test

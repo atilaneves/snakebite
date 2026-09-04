@@ -178,8 +178,6 @@ static foreach (backend; Matrix!(
 // a fill: `b[]` is an array, so no single value of it is written into
 // every element of `a`.
 static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter cannot take the address of `a[]`"),
 )) {
     @("staticArray.sliceCopyFromSlice." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -200,8 +198,6 @@ static foreach (backend; Matrix!(
 // `a[] = d` with a dynamic array `d` on the right is the same element
 // copy as `a[] = b[]`, not a fill with `d`'s length word.
 static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter cannot take the address of `a[]`"),
 )) {
     @("staticArray.sliceCopyFromDynamicArray." ~ backend.stringof)
     @Tags(backend.stringof)
