@@ -3,6 +3,6 @@
 	"versions": {
 		"dmd": "2.113.0",
 		"readline": "0.3.0",
-		"unit-threaded": "2.2.4"
+		"unit-threaded": "2.2.5"
 	}
 }
