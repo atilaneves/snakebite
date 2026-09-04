@@ -3613,11 +3613,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // its linker name: `TypeInfoDeclaration` is declared `extern(C)` with
     // that identifier standing in directly for a mangled name
     // (`declaration.d`'s `getTypeInfoIdent`), not a plain D identifier
-    // this evaluator would have to mangle itself. Resolving it is then
+    // this evaluator would have to mangle itself. Class TypeInfo is the
+    // exception: codegen aliases its synthetic declaration to the class
+    // declaration's `__Class` metadata symbol. Resolving it is then
     // the same question `execute`'s FFI branch already asks of any other
     // symbol compiled elsewhere: is it in this process.
     override void visit(TypeidExp expression) {
+        import dmd.common.outbuffer: OutBuffer;
         import dmd.dtemplate: isType;
+        import dmd.mangle: mangleToBuffer;
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
@@ -3650,6 +3654,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         auto name = type.vtinfo.ident.toString;
+        if (classType !is null
+                && classType.sym.isInterfaceDeclaration is null) {
+            OutBuffer mangled;
+            mangleToBuffer(classType.sym, mangled);
+            name = text("_D", mangled[], "7__ClassZ");
+        }
         countForeignNameLookup;
         auto address = _plans.resolve(name);
         if (address is null) {
