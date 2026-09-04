@@ -5304,9 +5304,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize;
 
+        // `super(args)`/`this(args)` constructor delegation is neither
+        // shape below: dmd leaves `e1` a bare `SuperExp`/`ThisExp` with no
+        // `.type` at all, since dmd's own glue layer picks the constructor
+        // to call without reading it. Such a call reaches here only when
+        // `compileCall` already found no `FuncDeclaration` to call
+        // directly, so it falls through to the `functionType is null`
+        // rejection below instead of dereferencing a null `.type`.
         auto deref = expression.e1.isPtrExp;
         const isDelegateCall = deref is null
-            && expression.e1.type.ty == Tdelegate;
+            && expression.e1.type !is null && expression.e1.type.ty == Tdelegate;
 
         TypeFunction functionType;
         size_t calleeOffset;
