@@ -2652,6 +2652,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileCompoundAssign(
         BinAssignExp expression, in size_t destOffset,
     ) {
+        // A small-integer target (`ubyte`, `short`, ...) reaches dmd's
+        // semantic pass as a bare lvalue, but `typeCombine`'s own
+        // `integralPromotions` (dmd `dcast.d`) rewrites `expression.e1`
+        // into a `CastExp` promoting it to `int` for the operation itself
+        // - `expression.type` stays the original narrow storage type
+        // (`visit(BinAssignExp)` in dmd `expressionsem.d` captures it
+        // before that rewrite runs), so the value is combined at the
+        // promoted width and only the store back to the target is
+        // truncated to its own. `promotion` is that wrapping `CastExp`,
+        // null when the target's own width already covers `int` and no
+        // promotion was needed.
+        auto promotion = expression.e1.isCastExp;
+        auto target = promotion is null ? expression.e1 : promotion.e1;
+
         // `this.calls` (a bare `calls` inside a class method, the same
         // `DotVarExp` rewrite `compileFieldAssign` already reads through
         // `compileFieldAddress`) - a field, unlike every other target
@@ -2659,63 +2673,78 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // read, modified through `handler` and stored back through its
         // own address, rather than through any of the frame-offset
         // shapes below.
-        if (auto fieldTarget = expression.e1.isDotVarExp) {
+        if (auto fieldTarget = target.isDotVarExp) {
             auto field = fieldTarget.var.isVarDeclaration;
             if (field is null || field.isBitFieldDeclaration !is null)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
-            const facts = TypeFacts.of(field.type);
-            if (!facts.isIntegral || !isIntegralSize(facts.size))
+            const storageFacts = TypeFacts.of(field.type);
+            if (!storageFacts.isIntegral || !isIntegralSize(storageFacts.size))
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
-            auto handler = compoundHandler(expression, facts.isUnsigned);
+            const operationFacts = promotion is null
+                ? storageFacts : TypeFacts.of(promotion.type);
+
+            auto handler = compoundHandler(
+                expression, operationFacts.isUnsigned);
             if (handler is null)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
-            const rightOffset = reserveTemp(facts);
-            evalInto(expression.e2, rightOffset, facts.size);
+            const rightOffset = reserveTemp(operationFacts);
+            evalInto(expression.e2, rightOffset, operationFacts.size);
 
             const addressOffset = compileFieldAddress(fieldTarget);
-            const valueOffset = reserveTemp(facts);
-            emit(&opLoadIndirect, valueOffset, addressOffset, facts.size);
-            emit(handler, valueOffset, rightOffset, facts.size);
-            emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
+            const valueOffset = reserveTemp(operationFacts);
+            if (promotion is null)
+                emit(&opLoadIndirect, valueOffset, addressOffset,
+                    storageFacts.size);
+            else
+                evalInto(promotion, valueOffset, operationFacts.size);
+            emit(handler, valueOffset, rightOffset, operationFacts.size);
+            emit(&opStoreIndirect, addressOffset, valueOffset,
+                storageFacts.size);
 
             if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, facts.size);
+                emit(&opCopy, destOffset, valueOffset, storageFacts.size);
             return;
         }
 
-        auto varExp = expression.e1.isVarExp;
+        auto varExp = target.isVarExp;
         auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
         if (variable is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        const facts = TypeFacts.of(variable.type);
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
+        const storageFacts = TypeFacts.of(variable.type);
+        if (!storageFacts.isIntegral || !isIntegralSize(storageFacts.size))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        auto handler = compoundHandler(expression, facts.isUnsigned);
+        const operationFacts = promotion is null
+            ? storageFacts : TypeFacts.of(promotion.type);
+
+        auto handler = compoundHandler(expression, operationFacts.isUnsigned);
         if (handler is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        const rightOffset = reserveTemp(facts);
-        evalInto(expression.e2, rightOffset, facts.size);
+        const rightOffset = reserveTemp(operationFacts);
+        evalInto(expression.e2, rightOffset, operationFacts.size);
 
         if (variable.isDataseg) {
-            const valueOffset = reserveTemp(facts);
-            emitStaticLoad(variable, valueOffset, facts.size);
-            emit(handler, valueOffset, rightOffset, facts.size);
-            emitStaticStore(variable, valueOffset, facts.size);
+            const valueOffset = reserveTemp(operationFacts);
+            if (promotion is null)
+                emitStaticLoad(variable, valueOffset, storageFacts.size);
+            else
+                evalInto(promotion, valueOffset, operationFacts.size);
+            emit(handler, valueOffset, rightOffset, operationFacts.size);
+            emitStaticStore(variable, valueOffset, storageFacts.size);
 
             if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, facts.size);
+                emit(&opCopy, destOffset, valueOffset, storageFacts.size);
             return;
         }
 
@@ -2726,21 +2755,44 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (!_layout.hasSlot(variable) || isClosureVariable(variable)
                 || _layout.isRef(variable)) {
             const refOffset = addressOfVariable(variable);
-            const valueOffset = reserveTemp(facts);
-            emit(&opLoadIndirect, valueOffset, refOffset, facts.size);
-            emit(handler, valueOffset, rightOffset, facts.size);
-            emit(&opStoreIndirect, refOffset, valueOffset, facts.size);
+            const valueOffset = reserveTemp(operationFacts);
+            if (promotion is null)
+                emit(&opLoadIndirect, valueOffset, refOffset,
+                    storageFacts.size);
+            else
+                evalInto(promotion, valueOffset, operationFacts.size);
+            emit(handler, valueOffset, rightOffset, operationFacts.size);
+            emit(&opStoreIndirect, refOffset, valueOffset, storageFacts.size);
 
             if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, facts.size);
+                emit(&opCopy, destOffset, valueOffset, storageFacts.size);
             return;
         }
 
-        const varOffset = _layout.offsetOf(variable);
-        emit(handler, varOffset, rightOffset, facts.size);
+        if (promotion is null) {
+            const varOffset = _layout.offsetOf(variable);
+            emit(handler, varOffset, rightOffset, operationFacts.size);
 
-        if (destOffset != discardResult && destOffset != varOffset)
-            emit(&opCopy, destOffset, varOffset, facts.size);
+            if (destOffset != discardResult && destOffset != varOffset)
+                emit(&opCopy, destOffset, varOffset, operationFacts.size);
+            return;
+        }
+
+        // A promoted target still has a frame slot, but the operation
+        // happens at the promoted width while the slot itself is only
+        // `storageFacts.size` wide: the in-place single-instruction form
+        // the plain frame-slot case above uses would read and write past
+        // the slot's own bytes, so this reads through `promotion` (dmd's
+        // own widening cast) into a wide temporary first, same as the
+        // dataseg/ref cases.
+        const varOffset = _layout.offsetOf(variable);
+        const valueOffset = reserveTemp(operationFacts);
+        evalInto(promotion, valueOffset, operationFacts.size);
+        emit(handler, valueOffset, rightOffset, operationFacts.size);
+        emit(&opCopy, varOffset, valueOffset, storageFacts.size);
+
+        if (destOffset != discardResult)
+            emit(&opCopy, destOffset, valueOffset, storageFacts.size);
     }
 
     private void emitStaticLoad(

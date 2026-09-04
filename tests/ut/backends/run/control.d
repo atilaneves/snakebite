@@ -11,20 +11,12 @@ import ut.backends;
 
 // An ordinary switch selects one case, falls through until `break`, and
 // takes `default` when no case matches.
-static foreach (backend; Matrix!(
-    // `fellThrough += value;` sums an `int` with the `uint` a `foreach`
-    // over `[0u, 1u, 3u]` hands out. dmd's semantic pass represents that
-    // compound assignment's own target as `cast(uint) fellThrough`
-    // (confirmed with `dmd -vcg-ast`), not the bare `VarExp` this
-    // compiler's `compileCompoundAssign` requires - a mixed-width `+=`
-    // target gap, unrelated to static arrays (which this test also
-    // exercises, by way of `foreach`'s own lowering over an array
-    // literal, and which this compiler now supports).
-    Omit!(Bytecode, Because.unconfirmed,
-        "a compound assignment whose target dmd wraps in a cast for a " ~
-        "mixed-width operand, `cast(uint) fellThrough += value`, is " ~
-        "unimplemented"),
-)) {
+// `fellThrough += value;` sums an `int` with the `uint` a `foreach` over
+// `[0u, 1u, 3u]` hands out. dmd's semantic pass represents that compound
+// assignment's own target as `cast(uint) fellThrough` (confirmed with
+// `dmd -vcg-ast`), not a bare `VarExp` - `compileCompoundAssign` unwraps
+// that cast and operates at its promoted width.
+static foreach (backend; Matrix!()) {
     @("switchDispatchesAndFallsThrough." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
