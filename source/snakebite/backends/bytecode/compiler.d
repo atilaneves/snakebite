@@ -39,7 +39,7 @@ private bool isSupportedFacts(
     return isSupportedFacts(facts) || isFloatingType(type)
         || type.ty == Tpointer
         || type.isTypeStruct !is null
-        || isPlainStaticArray(type);
+        || isSupportedStaticArray(type);
 }
 
 // Whether this compiler can treat `type` as plain bytes it never has to
@@ -125,15 +125,27 @@ private bool isSupportedElementFacts(
     return (facts.isIntegral && isIntegralSize(facts.size))
         || isFloatingType(type)
         || isPlainOldStruct(type)
-        || isPlainStaticArray(type);
+        || isSupportedStaticArray(type);
 }
 
 // Whether this compiler can lay `type` out as a static array's own
 // in-place bytes: `T[N]` whose element `T` is itself one this compiler
-// already lays out - an integral, `float`/`double`/`real`, a plain-old
-// struct, or another static array (`int[3][2]`, nested). Mutually
-// recursive with `isSupportedElementFacts` for exactly that nesting.
-private bool isPlainStaticArray(imported!"dmd.mtype".Type type) {
+// already lays out - an integral, `float`/`double`/`real`, a struct, or
+// another static array (`int[3][2]`, nested). Mutually recursive with
+// `isSupportedElementFacts` for exactly that nesting.
+//
+// This asks nothing about postblits or destructors on its own: dmd's own
+// semantic pass (`expressionsem.d`'s `lowerArrayAssign`, and the
+// `ConstructExp` handling next to it) already rewrites an assignment,
+// construction or literal whose element has one of those into a call to
+// `_d_array{setassign,assign_l,assign_r,ctor,setctor}` before this
+// compiler ever sees the expression. A plain `AssignExp`/`ArrayLiteralExp`
+// node reaching this compiler is therefore already an element type with
+// no postblit or destructor to run - `isPlainOldStruct`'s check for that,
+// reached through `isSupportedElementFacts` below, is about laying a
+// struct's fields out at all, not a second guard against the same thing
+// dmd's lowering already ruled out.
+private bool isSupportedStaticArray(imported!"dmd.mtype".Type type) {
     import snakebite.nativelayout: TypeFacts;
 
     auto sarrayType = type.isTypeSArray;
@@ -3556,11 +3568,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opCopy, destOffset, leftOffset, 1);
     }
 
-    // A static array has no `{length, pointer}` header of its own to
-    // compare - `expression.e1`/`e2` are already the whole array's own
-    // bytes once evaluated, so this compares that many bytes directly
-    // rather than reaching through a pointer the way
-    // `compileMemcmpDynamicArrayEquality` does.
+    // dmd's semantic pass (`expressionsem.d`'s `shouldUseMemcmp`, guarding
+    // the `object.__equals` lowering) treats `T[N] == T[N]` exactly as it
+    // treats `T[] == T[]`: whenever the element type is not safely
+    // memcmp-able, the whole `EqualExp` is rewritten into an `__equals`
+    // call before this compiler ever sees it. A plain `EqualExp` reaching
+    // here with `lowering is null` is therefore already one dmd itself
+    // would compare byte for byte - the same guarantee
+    // `compileMemcmpDynamicArrayEquality` relies on for `T[]`.
+    //
+    // Unlike that dynamic-array sibling, there is no pointer word to read
+    // first: `expression.e1`/`e2` are already the whole array's own bytes
+    // once evaluated (`arrayLengthOffset`/`arrayPointerOffset` name a
+    // dynamic array's two-word header, and a static array has none), so
+    // this compares that many bytes directly.
     private void compileStaticArrayEquality(
         EqualExp expression, in size_t destOffset,
     ) {
@@ -4261,10 +4282,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     // Where `expression`'s element lives when `expression.e1` is a static
-    // array: no `{length, pointer}` header to read at run time, since a
-    // static array's own bytes sit directly in whatever storage holds it -
-    // so the dimension comes from `expression.e1.type` itself, known at
-    // compile time, and the base address is `expression.e1`'s own address,
+    // array. dmd has no `IndexExp` lowering to reuse here - unlike
+    // assignment, construction or equality, indexing keeps no `.lowering`
+    // field at all, and `glue/e2ir.d`'s own `visitIndex` does exactly this
+    // arithmetic itself at codegen time: the bound comes from
+    // `TypeSArray.dim`, not a runtime length word, and the base address is
+    // the array's own address rather than a pointer read through a
+    // header. So this compiler has to do the same arithmetic dmd's
+    // codegen does, not reuse a lowering that does not exist. The
+    // dimension comes from `expression.e1.type` itself, known at compile
+    // time, and the base address is `expression.e1`'s own address,
     // recursed through `compileAddress` since `expression.e1` can itself be
     // a nested static-array index (`a[i][j]`, `expression.e1` is `a[i]`).
     //
@@ -4525,14 +4552,26 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             size_t.sizeof);
     }
 
-    // `[a, b, c]` typed as a static array: every element evaluated into a
-    // temporary first, then the whole temporary copied to `destOffset` in
-    // one go - the same reason `compileArrayLiteral` above builds a
-    // dynamic array literal's elements in fresh storage rather than
-    // `destOffset` itself. An element expression can read `destOffset`'s
-    // own variable (`a = [a[1], a[0]]`), and until every element is
-    // evaluated, that variable's old contents are the only correct thing
-    // for such a read to see.
+    // `[a, b, c]` typed as a static array. dmd's own `lowerArrayLiteral`
+    // (`expressionsem.d`) only ever runs for an associative array
+    // literal's key/value arrays; a bare array literal's `.lowering` is
+    // otherwise left null, and `glue/e2ir.d`'s `visitArrayLiteral` shows
+    // why a `T[N]`-typed one needs none: it builds the elements straight
+    // into the destination's own stack storage (`ExpressionsToStaticArray`)
+    // and asserts if it ever sees a static array literal without a
+    // lowering reach the branch that expects one - that branch is for
+    // `Tarray` only, to call `_d_arrayliteralTX` for the heap allocation.
+    // So this compiler's job for `T[N]` is the same one dmd's own codegen
+    // does, not the reuse of a lowering that only ever exists for `T[]`.
+    //
+    // Every element is evaluated into a temporary first, then the whole
+    // temporary copied to `destOffset` in one go - the same reason
+    // `compileArrayLiteral` above builds a dynamic array literal's
+    // elements in fresh storage rather than `destOffset` itself. An
+    // element expression can read `destOffset`'s own variable (`a =
+    // [a[1], a[0]]`), and until every element is evaluated, that
+    // variable's old contents are the only correct thing for such a read
+    // to see.
     private void compileStaticArrayLiteral(
         ArrayLiteralExp expression, in size_t destOffset,
     ) {
