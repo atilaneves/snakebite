@@ -3010,6 +3010,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // something this compiler need never see as an `ArrayLiteralExp` at
     // all, so one that does reach here may have an element like `x + 1`
     // that only evaluating can produce.
+    //
+    // A key or value array literal nested inside an `AssocArrayLiteralExp`
+    // also reaches here despite carrying a non-null `lowering` of its own.
+    // No test here exercises that path through the bytecode backend yet,
+    // but the interpreter's own `visit(ArrayLiteralExp)`
+    // (`snakebite.backends.interpreter.walker`) hits a confirmed assertion
+    // failure compiling the equivalent lowering, so this keeps the same,
+    // already-correct hand-written array build rather than risk the same
+    // failure here untested.
     override void visit(ArrayLiteralExp expression) {
         requireDestination(expression);
         compileArrayLiteral(expression, _destination);
@@ -3022,14 +3031,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `ArrayLiteralExp`s. Compiling `lowering` runs that call through the
     // ordinary `CallExp` path, which resolves it as already-compiled
     // druntime code the same way any other native call is resolved -
-    // never a hash table this compiler builds itself.
-    override void visit(AssocArrayLiteralExp expression) {
-        if (expression.lowering is null)
-            return visit(cast(Expression) expression);
-
-        expression.lowering.accept(this);
+    // never a hash table this compiler builds itself. Reaching here means
+    // dmd could not find that hook.
+    protected override void visitUnloweredAssocArrayLiteral(
+            AssocArrayLiteralExp expression) {
+        visit(cast(Expression) expression);
     }
 
+    // Not one of `LoweringVisitor`'s final overrides - see the comment on
+    // that class (`snakebite.backends.loweringvisitor`) for why `NewExp` is
+    // excluded there.
     override void visit(NewExp expression) {
         if (expression.lowering is null)
             return visit(cast(Expression) expression);
@@ -3145,18 +3156,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileAssign(expression, _destination);
     }
 
-    // DMD lowers a dynamic-array length assignment to the druntime call
-    // that owns allocation, prefix preservation, and the native array
-    // representation. Compile that call instead of trying to infer the
-    // lowering from the source assignment node.
-    override void visit(LoweredAssignExp expression) {
-        if (expression.lowering is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        expression.lowering.accept(this);
-    }
-
     override void visit(BinAssignExp expression) {
         compileCompoundAssign(expression, _destination);
     }
@@ -3210,11 +3209,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCall, _destination, _callSites.length - 1, 0);
     }
 
-    override void visit(CatExp expression) {
-        if (expression.lowering is null)
-            return visit(cast(Expression) expression);
-
-        expression.lowering.accept(this);
+    protected override void visitUnloweredCat(CatExp expression) {
+        visit(cast(Expression) expression);
     }
 
     override void visit(PostExp expression) {
@@ -3229,12 +3225,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto(expression.e2, _destination, _width);
     }
 
-    override void visit(CastExp expression) {
-        if (expression.lowering !is null) {
-            expression.lowering.accept(this);
-            return;
-        }
-
+    protected override void visitUnloweredCast(CastExp expression) {
         requireDestination(expression);
         compileCast(expression, _destination, _width);
     }
