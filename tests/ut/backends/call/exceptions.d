@@ -388,3 +388,36 @@ static foreach (backend; Matrix!(
         );
     }
 }
+
+
+// A native call that throws an `Error`, not an `Exception`, must still
+// pass a guest `catch (Exception)` untouched and reach a guest
+// `catch (Error)` - the same rule `assert.fails.is.not.caught.by.catching
+// .Exception` above pins for a guest-thrown `AssertError`, here for an
+// `Error` thrown by druntime itself from inside a native call.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a failing assertion into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("nativeThrow.errorSkipsCatchException." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(backend, q{
+            int result() {
+                import core.exception: onRangeError;
+
+                try {
+                    try
+                        onRangeError();
+                    catch (Exception e)
+                        return 1;
+                } catch (Error e) {
+                    return 2;
+                }
+
+                return 0;
+            }
+        }, "result");
+    }
+}

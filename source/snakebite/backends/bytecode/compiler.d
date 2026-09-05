@@ -788,15 +788,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // How many `throw`/`break`/`continue`/`goto case`/`goto default`/
     // switch-error exits this compiler has compiled anywhere in the
     // program so far. `visit(TryFinallyStatement)` snapshots this before
-    // and after compiling `_body`: unlike a `return`, none of those exits
-    // run a `finally` on its way out, so if that count moved while `_body`
-    // was compiled, some exit from it - however deeply nested in an `if`
-    // or a loop - would skip `finalbody` outright, and the whole
-    // statement stays rejected. Never decremented, so a `break`/`continue`
-    // that only ever reaches a loop nested inside `_body` still counts as
-    // one - stricter than necessary, but the same rejection either way
-    // would follow from checking `_finished` once every exit kind here
-    // learns to run its own pending `finally` bodies too.
+    // and after compiling `_body`, and only checks it when `_body` itself
+    // finished (`_finished` still set): unlike a `return`, none of those
+    // exits run a `finally` on its way out, so if the count moved while
+    // `_finished` did too, `_body`'s own last statement was one of those
+    // exits, and it would skip `finalbody` outright - the whole statement
+    // stays rejected. This does not catch every such exit: an `if` with no
+    // `else` resets `_finished` to `false` once it falls through, so an
+    // exit reached only through that `if`'s taken branch (a loop-local
+    // `break`, say) leaves `_finished` clear and this check never runs -
+    // `finalbody` is then skipped silently on that path instead of being
+    // rejected. Never decremented, so a `break`/`continue` that only ever
+    // reaches a loop nested inside `_body` still counts as one, on the
+    // paths this does catch.
     private size_t _unflushedExitCount;
     // The loop or unrolled `foreach` this compiler is currently inside the
     // body of, innermost last - what a `continue` targets, labelled or
@@ -819,6 +823,64 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         private size_t _bodyEnd;
         private size_t _handler;
         private size_t _catchOffset;
+    }
+
+    // Where `runPendingFinallyBodies` last inlined a `finally` for a
+    // `return`, and which `try`/`finally` (by its index into
+    // `_pendingFinallyBodies` at the moment it was pushed) it belongs to.
+    // `visit(TryCatchStatement)` reads this to keep an inlined `finally`'s
+    // own instructions out of a `catch` nested inside that same
+    // `try`/`finally`'s `_body` - see `protectedRanges`'s own doc for why
+    // a `catch` further out still needs to keep protecting them.
+    private struct FinallyHole {
+        size_t start;
+        size_t end;
+        size_t finallyIndex;
+    }
+    private FinallyHole[] _finallyHoles;
+
+    // The sub-ranges of a `catch`'s own `[bodyStart, bodyEnd)` that are
+    // still genuinely inside its protection, once every `FinallyHole`
+    // punched into it by a `return` further in is cut back out.
+    //
+    // A `finally` runs after its own `try`/`finally` statement is left, so
+    // nothing it throws can be caught by a `catch` nested inside that same
+    // `try`/`finally`'s `_body` - `finallyIndex < finallyDepthAtStart`
+    // below is exactly that nesting test, `finallyDepthAtStart` being how
+    // many `try`/`finally`s were already open when this `catch`'s own body
+    // started. A `catch` further out, one that itself encloses the whole
+    // `try`/`finally` statement, was not yet inside it at that point -
+    // `finallyDepthAtStart` is smaller than the hole's own index then, so
+    // the hole is left untouched and that `catch` keeps protecting it, the
+    // same as a real stack unwind reaching it once the `finally` is done.
+    private static struct ProtectedRange {
+        size_t start;
+        size_t end;
+    }
+    private ProtectedRange[] protectedRanges(
+        size_t bodyStart, size_t bodyEnd, size_t finallyDepthAtStart,
+    ) {
+        import std.algorithm: filter, sort;
+        import std.array: array;
+
+        auto holes = _finallyHoles
+            .filter!(hole =>
+                hole.finallyIndex < finallyDepthAtStart &&
+                hole.start >= bodyStart && hole.end <= bodyEnd)
+            .array;
+        sort!((a, b) => a.start < b.start)(holes);
+
+        ProtectedRange[] ranges;
+        size_t cursor = bodyStart;
+        foreach (hole; holes) {
+            if (hole.start > cursor)
+                ranges ~= ProtectedRange(cursor, hole.start);
+            if (hole.end > cursor)
+                cursor = hole.end;
+        }
+        if (cursor < bodyEnd)
+            ranges ~= ProtectedRange(cursor, bodyEnd);
+        return ranges;
     }
 
     // What a `break` targets: the innermost loop, `switch`, or unrolled
@@ -1213,6 +1275,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(TryCatchStatement statement) {
+        const finallyDepthAtStart = _pendingFinallyBodies.length;
         const bodyStart = _instructions.length;
         compileStatement(statement._body);
         const bodyFinished = _finished;
@@ -1239,9 +1302,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 ? size_t.max
                 : _layout.offsetOf(catch_.var);
             auto type = runtimeClassInfo(catch_.type);
-            _exceptionHandlers ~= PendingExceptionHandler(
-                type, bodyStart, bodyEnd, handler, catchOffset,
-            );
+            foreach (range; protectedRanges(bodyStart, bodyEnd, finallyDepthAtStart))
+                _exceptionHandlers ~= PendingExceptionHandler(
+                    type, range.start, range.end, handler, catchOffset,
+                );
 
             _finished = false;
             compileStatement(catch_.handler);
@@ -1271,11 +1335,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // A `return` inside `_body` already inlined this `finally` itself
         // (`compileReturn`/`runPendingFinallyBodies`) on its way out, so
         // `_finished` alone cannot tell a handled exit from one that is
-        // not: a `throw`/`break`/`continue`/`goto case`/`goto default`/
-        // switch-error anywhere in `_body` - however deeply nested in an
-        // `if` or a loop - leaves this `try` without ever running
-        // `finalbody`, and none of those learnt to run it the way
-        // `return` did.
+        // not: when `_body` itself finished on a `throw`/`break`/
+        // `continue`/`goto case`/`goto default`/switch-error, none of
+        // those learnt to run `finalbody` the way `return` did, so this
+        // rejects rather than skip it silently. See `_unflushedExitCount`'s
+        // own doc for the paths this still misses.
         if (_finished && _unflushedExitCount != unflushedExitsBefore)
             throw rejection(_function, statement.loc, statementText(statement));
 
@@ -1522,8 +1586,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // of a `try/finally` its own copy of `finally` rather than a single
     // one every exit jumps through.
     private void runPendingFinallyBodies() {
-        foreach_reverse (finalbody; _pendingFinallyBodies)
+        foreach_reverse (index, finalbody; _pendingFinallyBodies) {
+            const start = _instructions.length;
             compileStatement(finalbody);
+            _finallyHoles ~= FinallyHole(start, _instructions.length, index);
+        }
     }
 
     // The condition of an `if`, a `while`/`for`, or a ternary: read at its
