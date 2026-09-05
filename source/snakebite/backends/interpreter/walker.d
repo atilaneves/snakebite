@@ -2325,6 +2325,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (field.type.ty == Tpointer)
                 continue;
 
+            // An associative-array field is a plain machine word too - a
+            // pointer to druntime's own hash table, with no copy hook of
+            // its own - the same reason `Tpointer` above is a bytewise
+            // copy rather than a rejection.
+            if (field.type.ty == Taarray)
+                continue;
+
             const facts = factsOf(field.type);
             if (!facts.isIntegral || !isIntegralSize(facts.size))
                 return false;

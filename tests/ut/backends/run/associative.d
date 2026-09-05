@@ -37,7 +37,10 @@ static foreach (backend; Matrix!(
 }
 
 // Duplicating an associative array preserves its type, including when a
-// struct is the key type. An empty table isolates the cast from AA lookup.
+// struct is the key type and the parameter is `const`: `object.d`'s own
+// `dup` casts its internal `_aaDup` result from a `const`-qualified AA
+// type back to the caller's unqualified one, a qualifier-only cast a
+// backend has to compile even though it moves no different bytes.
 static foreach (backend; Matrix!()) {
     @("assocArrayDupCopiesStructKeyContents." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -48,15 +51,17 @@ static foreach (backend; Matrix!()) {
                 int number;
             }
 
-            int[Pair] duplicate(int[Pair] source) {
+            int[Pair] duplicate(const(int[Pair]) source) {
                 return source.dup;
             }
 
             void main() {
                 int[Pair] source;
+                source[Pair("a", 1)] = 10;
 
                 auto copy = duplicate(source);
-                assert(copy.length == 0);
+                assert(copy.length == 1);
+                assert(copy[Pair("a", 1)] == 10);
             }
         });
     }
@@ -270,6 +275,34 @@ static foreach (backend; Matrix!(
 
                 assert((ArrayKey([1, 2]) in counts) !is null);
                 assert(counts[ArrayKey([1, 2])] == 1);
+            }
+        });
+    }
+}
+
+// A struct literal can initialize a field of its own AA-typed field
+// (self-referentially, through the AA's value type) from an associative
+// array literal - the AA field is a plain pointer-sized handle to
+// druntime's own hash table, no different from any other field this
+// literal writes.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "`isSupportedStructLiteral` rejects every field but an integral, " ~
+            "a dynamic array, a pointer or a nested plain-old struct - an " ~
+            "AA-typed field falls through that list"),
+)) {
+    @("structLiteralInitializesAssociativeArrayField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Nested {
+                Nested[int] aa;
+            }
+
+            void main() {
+                auto n = Nested([7: Nested()]);
+                assert(n.aa.length == 1);
+                assert(7 in n.aa);
             }
         });
     }
