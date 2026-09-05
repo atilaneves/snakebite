@@ -456,32 +456,31 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         if (declaration.isInterfaceDeclaration !is null)
             return typeInfo;
 
-        import dmd.dclass: ClassDeclaration;
-
-        // `Throwable`, `Exception` and `Error` are native classes with no
-        // guest declaration of their own body; a guest class over one of
-        // them (`Expected : Exception`) must build on the real, complete
-        // native `typeid`, the same way the interpreter's own
-        // `classRuntimeInfo` does, rather than recursing into this
-        // function and reconstructing an incomplete vtable from dmd's own
-        // (only partially resolved) `ClassDeclaration.vtbl` for them.
-        if (declaration.baseClass is null
-                || declaration.baseClass is ClassDeclaration.object)
-            typeInfo.base = cast(TypeInfo_Class) cast() typeid(Object);
-        else if (declaration.baseClass is ClassDeclaration.throwable)
-            typeInfo.base = cast(TypeInfo_Class) cast() typeid(Throwable);
-        else if (declaration.baseClass is ClassDeclaration.exception
-                || (ClassDeclaration.exception !is null
-                    && ClassDeclaration.exception.isBaseOf(
-                        declaration.baseClass, null)))
-            typeInfo.base = cast(TypeInfo_Class) cast() typeid(Exception);
-        else if (declaration.baseClass is ClassDeclaration.errorException
-                || (ClassDeclaration.errorException !is null
-                    && ClassDeclaration.errorException.isBaseOf(
-                        declaration.baseClass, null)))
-            typeInfo.base = cast(TypeInfo_Class) cast() typeid(Error);
-        else
-            typeInfo.base = classRuntimeInfo(declaration.baseClass);
+        // A guest class's base can itself be a native class this project
+        // never compiles a body for - not only `Object`, but any native
+        // class the guest program reaches (`Throwable`, `Exception`,
+        // `Error`; `RangeError`, a native exception `core.exception`
+        // declares; a native class exposed to the guest through FFI).
+        // `TypeInfo_Class.find` (druntime's `object.d`) answers that
+        // question the same way `hasNativeSymbol` answers it for a
+        // function: a class already registered in some linked, natively
+        // compiled module's own `ModuleInfo` is native, and this reaches
+        // for its real, complete `TypeInfo_Class` there instead of
+        // recursing into this function and reconstructing an incomplete
+        // vtable from dmd's own (only partially resolved)
+        // `ClassDeclaration.vtbl` for it. A guest declaration is never
+        // registered in any `ModuleInfo`, so `find` only ever answers a
+        // base this function itself did not just build - the recursive
+        // call below is still how a guest class over a guest class over a
+        // native base (`OutOfBytesError : MinicerealError : Exception`)
+        // reaches its own guest base's runtime info.
+        auto nativeBase = declaration.baseClass is null
+            ? cast(TypeInfo_Class) cast() typeid(Object)
+            : cast(TypeInfo_Class) TypeInfo_Class.find(
+                declaration.baseClass.toPrettyChars.toDString);
+        typeInfo.base = nativeBase !is null
+            ? nativeBase
+            : classRuntimeInfo(declaration.baseClass);
 
         // A slot this class never overrides still names druntime's own
         // method (`Throwable.toString`, `Object.opEquals`, ...) - real
