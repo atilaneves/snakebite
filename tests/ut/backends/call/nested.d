@@ -173,6 +173,41 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `build!Local` is textually inside `main`'s enclosing module, not `main`
+// itself, but dmd still attaches it to `main`'s own scope: instantiating a
+// template with a locally-declared type argument makes the instantiation
+// itself nested whichever function declared that type. `Local` is a
+// `static struct`, so it has no actual outer-context field to fill in
+// (`AggregateDeclaration.isNested` is `false`) - only its lexical position
+// makes it look nested. Constructing a `Local` value must not try to reach
+// a context nothing captured.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "the bytecode compiler rejects any local struct declaration "
+            ~ "statement outright, unrelated to this test's own construct - "
+            ~ "`static struct Local { ... }` never reaches the code this "
+            ~ "test means to exercise"),
+)) {
+    @("nested.staticChain.localStaticStructNeedsNoOuterContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int build(T)() {
+                T t;
+                return t.i;
+            }
+
+            int main() {
+                static struct Local {
+                    int i = 42;
+                }
+
+                return build!Local() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
 // Taking `captureIt`'s address makes dmd move `x` to a heap-allocated
 // closure. Returning the delegate proves that the captured storage remains
 // available after the function that created it has returned.
