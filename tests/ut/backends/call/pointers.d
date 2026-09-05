@@ -387,6 +387,92 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `p[0 .. n] = q[]` copies element by element the same way any other
+// dynamic slice assignment does, whether the element itself is an integral
+// or, as here, a pointer: a pointer element is exactly as copyable in bulk
+// as any other fixed-size value.
+static foreach (backend; Matrix!()) {
+    @("pointers.slice.pointerElementBulkAssign." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int a = 1;
+                int b = 2;
+                int c = 3;
+                int d = 4;
+                int*[4] storage = [&a, &b, &a, &b];
+                int*[2] source = [&c, &d];
+                int** ptr = storage.ptr;
+                ptr[0 .. 2] = source[];
+                assert(*storage[0] == 3);
+                assert(*storage[1] == 4);
+                assert(*storage[2] == 1);
+                assert(*storage[3] == 2);
+            }
+        });
+    }
+}
+
+// A static array's whole-array assign and slice assign both copy a
+// pointer element the same way they copy any other fixed-size element.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter cannot lay out a static array of pointers wider "
+            ~ "than one machine word as a single native integral"),
+    Omit!(Ctfe, Because.unconfirmed,
+        "the ctfe backend cannot assign a static array of pointers"),
+)) {
+    @("pointers.slice.pointerElementStaticArrayAssign." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int a = 1;
+                int b = 2;
+                int*[2] src = [&a, &b];
+                int*[2] dst;
+                dst = src;
+                dst[] = src[];
+                assert(*dst[0] == 1);
+                assert(*dst[1] == 2);
+            }
+        });
+    }
+}
+
+// Native D raises a range error when a dynamic slice assignment's source
+// and destination overlap, whatever the element type is: assigning through
+// an ordinary forward copy would silently corrupt the already-written
+// overlap region.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "the bytecode compiler does not check a slice assignment's source "
+            ~ "and destination for overlap"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter does not check a slice assignment's source and "
+            ~ "destination for overlap"),
+)) {
+    @("pointers.slice.overlappingAssignRaises." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeStatusOf!(backend, q{
+            void main() {
+                int a = 1;
+                int b = 2;
+                int c = 3;
+                int*[3] storage = [&a, &b, &c];
+                int** p = storage.ptr;
+                int*[] src = p[0 .. 2];
+                int*[] dst = p[1 .. 3];
+                dst[] = src[];
+                assert(*storage[1] == 1);
+                assert(*storage[2] == 2);
+            }
+        });
+    }
+}
+
 // A pointer argument carries the address a `&local` evaluated to, not a
 // copy of the pointee: the callee writes through it and the caller's own
 // local changes.

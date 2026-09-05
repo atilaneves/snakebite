@@ -852,6 +852,35 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// Native D raises a range error when a dynamic slice assignment's source
+// and destination overlap: an ordinary forward copy would silently
+// corrupt the already-written overlap region. Not a pointer-element-only
+// case: an integral element must be checked the same way.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "the bytecode compiler does not check a slice assignment's source "
+            ~ "and destination for overlap"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter does not check a slice assignment's source and "
+            ~ "destination for overlap"),
+)) {
+    @("arrays.slice.overlappingAssignRaises." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3] storage = [1, 2, 3];
+                int* p = storage.ptr;
+                int[] src = p[0 .. 2];
+                int[] dst = p[1 .. 3];
+                dst[] = src[];
+                assert(storage[1] == 1);
+                assert(storage[2] == 2);
+            }
+        });
+    }
+}
+
 // `~=` appending a whole slice lowers to `_d_arrayappendT` instead of
 // `_d_arrayappendcTX` - a different hook, over the same `lowering` field,
 // for a different `CatAssignExp.op` (`concatenateAssign` rather than
