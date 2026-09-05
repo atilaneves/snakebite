@@ -778,6 +778,26 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // can still reach past it - a `continue` inside a loop body, say,
     // does not end the loop itself.
     private bool _finished;
+    // The `finalbody` of every `TryFinallyStatement` this compiler is
+    // currently inside the `_body` of, outermost first - what
+    // `compileReturn` inlines, innermost first, before a `return` inside
+    // one of these actually leaves the function. Pushed/popped around
+    // `_body` alone (see `visit(TryFinallyStatement)`): a `return` inside
+    // `finalbody` itself must not re-run the `finally` it is already in.
+    private Statement[] _pendingFinallyBodies;
+    // How many `throw`/`break`/`continue`/`goto case`/`goto default`/
+    // switch-error exits this compiler has compiled anywhere in the
+    // program so far. `visit(TryFinallyStatement)` snapshots this before
+    // and after compiling `_body`: unlike a `return`, none of those exits
+    // run a `finally` on its way out, so if that count moved while `_body`
+    // was compiled, some exit from it - however deeply nested in an `if`
+    // or a loop - would skip `finalbody` outright, and the whole
+    // statement stays rejected. Never decremented, so a `break`/`continue`
+    // that only ever reaches a loop nested inside `_body` still counts as
+    // one - stricter than necessary, but the same rejection either way
+    // would follow from checking `_finished` once every exit kind here
+    // learns to run its own pending `finally` bodies too.
+    private size_t _unflushedExitCount;
     // The loop or unrolled `foreach` this compiler is currently inside the
     // body of, innermost last - what a `continue` targets, labelled or
     // not. A `do` knows its own continue target (the condition it
@@ -1243,9 +1263,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(TryFinallyStatement statement) {
+        _pendingFinallyBodies ~= statement.finalbody;
+        const unflushedExitsBefore = _unflushedExitCount;
         compileStatement(statement._body);
-        if (_finished)
+        _pendingFinallyBodies.length -= 1;
+
+        // A `return` inside `_body` already inlined this `finally` itself
+        // (`compileReturn`/`runPendingFinallyBodies`) on its way out, so
+        // `_finished` alone cannot tell a handled exit from one that is
+        // not: a `throw`/`break`/`continue`/`goto case`/`goto default`/
+        // switch-error anywhere in `_body` - however deeply nested in an
+        // `if` or a loop - leaves this `try` without ever running
+        // `finalbody`, and none of those learnt to run it the way
+        // `return` did.
+        if (_finished && _unflushedExitCount != unflushedExitsBefore)
             throw rejection(_function, statement.loc, statementText(statement));
+
+        if (_finished)
+            return;
 
         compileStatement(statement.finalbody);
     }
@@ -1261,6 +1296,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         evalInto(statement.exp, offset, facts.size);
         emit(&opThrow, offset, 0, 0);
         _finished = true;
+        ++_unflushedExitCount;
     }
 
     override void visit(ReturnStatement statement) {
@@ -1381,6 +1417,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opJump, 0, 0, 0);
         jumpToCase(statement.cs, index);
         _finished = true;
+        ++_unflushedExitCount;
     }
 
     override void visit(GotoDefaultStatement statement) {
@@ -1391,6 +1428,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opJump, 0, 0, 0);
         jumpToDefault(statement.sw, index);
         _finished = true;
+        ++_unflushedExitCount;
     }
 
     // dmd's own synthesised "no case matched" default (see
@@ -1404,6 +1442,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             compileEffect(statement.exp);
 
         _finished = true;
+        ++_unflushedExitCount;
     }
 
     override void visit(BreakStatement statement) {
@@ -1418,6 +1457,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opJump, 0, 0, 0);
         _breakables[target].pendingBreakJumps ~= index;
         _finished = true;
+        ++_unflushedExitCount;
     }
 
     extern(D):
@@ -1442,25 +1482,48 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private void compileReturn(ReturnStatement statement) {
-        _finished = true;
-
         // A `void` return's own expression, when it has one, is only the
         // synthetic `0` dmd appends to `main` - nowhere to write it, so it
         // is discarded the same way the interpreter discards it.
         if (_isVoidReturn || statement.exp is null) {
+            runPendingFinallyBodies();
             emit(&opReturnVoid, 0, 0, 0);
+            _finished = true;
             return;
         }
 
         if (_isRefReturn) {
             const addressOffset = compileAddress(statement.exp);
+            runPendingFinallyBodies();
             emit(&opReturn, 0, addressOffset, size_t.sizeof);
+            _finished = true;
             return;
         }
 
+        // The return value is computed before any enclosing `finally`
+        // runs, exactly as a compiled `return` inside a `try` does: the
+        // finally can go on to use its own temporaries, or even run
+        // another `return`, without disturbing the value already on its
+        // way out.
         const offset = reserveTemp(_returnFacts);
         evalInto(statement.exp, offset, _returnFacts.size);
+        runPendingFinallyBodies();
         emit(&opReturn, 0, offset, _returnFacts.size);
+        _finished = true;
+    }
+
+    // Runs every `try`'s `finally` block this `return` is nested inside,
+    // innermost first - the order a real stack unwind runs them in, and
+    // why `_pendingFinallyBodies` reads back to front. Each one is
+    // compiled again here, in addition to wherever
+    // `visit(TryFinallyStatement)` itself already placed it for that
+    // `try`'s own normal, fall-through exit: the two exits share no
+    // instructions, the same way dmd's own codegen gives every exit out
+    // of a `try/finally` its own copy of `finally` rather than a single
+    // one every exit jumps through.
+    private void runPendingFinallyBodies() {
+        foreach_reverse (finalbody; _pendingFinallyBodies)
+            compileStatement(finalbody);
     }
 
     // The condition of an `if`, a `while`/`for`, or a ternary: read at its
@@ -1702,6 +1765,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         _finished = true;
+        ++_unflushedExitCount;
     }
 
     private void resolveContinues(in size_t target) {

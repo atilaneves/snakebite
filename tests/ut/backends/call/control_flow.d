@@ -25,6 +25,117 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// The value a `return` inside a `try` carries out must be the one
+// computed before the `finally` runs, not whatever the `finally` itself
+// leaves lying around in the same local - the shape `cerealed`'s
+// `ScopeBuffer.cat` uses to return a slice built before its own
+// `scope(exit)` frees the buffer it was built from.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.returnValueSurvivesFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(backend, q{
+            int result() {
+                int value = 1;
+                try {
+                    return value;
+                } finally {
+                    value = 2;
+                }
+            }
+        }, "result");
+    }
+}
+
+
+// The `finally` runs exactly once, and strictly before the caller ever
+// observes the `return`ed value - not zero times (skipped), not twice
+// (once inlined at the `return`, once more for a "fall through" copy
+// that should not exist on this path).
+static foreach (backend; Matrix!()) {
+    @("tryFinally.runsExactlyOnceBeforeCallerObservesReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        71.shouldBeRetOf!(backend, q{
+            int result(ref int cleanups) {
+                try {
+                    return 7;
+                } finally {
+                    ++cleanups;
+                }
+            }
+
+            int cleanupCount() {
+                int cleanups;
+                const returned = result(cleanups);
+                return returned * 10 + cleanups;
+            }
+        }, "cleanupCount");
+    }
+}
+
+
+// A `return` reached through an `if` inside the `try` still runs the
+// `finally` on its way out - the `if` is not itself a `try`, so nothing
+// about entering it changes which `finally` bodies are pending. `ranFinally`
+// is read back by the caller, after `result` itself already returned:
+// a `return`ed value on its own cannot tell "the finally ran" apart from
+// "the finally was skipped and nobody noticed", when, as here, that value
+// does not depend on anything the finally touches.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.returnInsideIfRunsFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        121.shouldBeRetOf!(backend, q{
+            int result(ref int ranFinally) {
+                try {
+                    if (true)
+                        return 12;
+                } finally {
+                    ranFinally = 1;
+                }
+                return 0;
+            }
+
+            int check() {
+                int ranFinally;
+                const returned = result(ranFinally);
+                return returned * 10 + ranFinally;
+            }
+        }, "check");
+    }
+}
+
+
+// A `return` reached through a loop inside the `try` still runs the
+// `finally` on its way out - the same requirement as the `if` case
+// above, for a loop instead.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.returnInsideLoopRunsFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        231.shouldBeRetOf!(backend, q{
+            int result(ref int ranFinally) {
+                try {
+                    for (int i; i < 5; ++i)
+                        if (i == 2)
+                            return 23;
+                } finally {
+                    ranFinally = 1;
+                }
+                return 0;
+            }
+
+            int check() {
+                int ranFinally;
+                const returned = result(ranFinally);
+                return returned * 10 + ranFinally;
+            }
+        }, "check");
+    }
+}
+
+
 static foreach (backend; Matrix!()) {
     @("tryFinally.scopeExitRuns." ~ backend.stringof)
     @Tags(backend.stringof)

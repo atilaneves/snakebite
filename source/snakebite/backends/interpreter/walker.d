@@ -676,7 +676,25 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _callbacks.adaptArguments(
             hostFunction, arguments[0 .. argumentCount], adapted,
         );
-        plan.call(returnPlace, adapted.values);
+
+        // Native code throws a real `Throwable`, not the `GuestException`
+        // wrapper a guest `throw` or a failed native `assert` produces
+        // (`throwGuest`, `visit(HaltStatement)`) - a guest `catch` only
+        // ever looks for that wrapper (`visit(TryCatchStatement)`). A
+        // callback re-entering the interpreter (`callBoolFunction` and
+        // friends) can also unwind through here with a `GuestException`
+        // already, or with a `SnakebiteException` reporting that the
+        // interpreter itself could not run the callback - both must reach
+        // the host exactly as thrown, not double-wrapped or reinterpreted
+        // as a guest-catchable exception.
+        try
+            plan.call(returnPlace, adapted.values);
+        catch (SnakebiteException exception)
+            throw exception;
+        catch (GuestException exception)
+            throw exception;
+        catch (Throwable guest)
+            throw new GuestException(guest);
     }
 
     extern(C) private static bool isGuestFunction(

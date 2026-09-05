@@ -41,32 +41,18 @@ static foreach (backend; Matrix!(
     @("exception.enforce.lazyMessage." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        static if (is(backend == Interpreter)) {
-            auto module_ = parseSnippet(q{
-                void result() {
-                    import std.exception: enforce;
+        true.shouldBeRetOf!(backend, q{
+            bool result() {
+                import std.exception: enforce;
 
+                try
                     enforce(false, "expected");
-                }
-            });
-            auto function_ = findFunction(module_, "result");
+                catch (Exception exception)
+                    return exception.msg == "expected";
 
-            interpreter(module_).call(function_, null, [])
-                .shouldThrowWithMessage("expected");
-        } else {
-            true.shouldBeRetOf!(backend, q{
-                bool result() {
-                    import std.exception: enforce;
-
-                    try
-                        enforce(false, "expected");
-                    catch (Exception exception)
-                        return exception.msg == "expected";
-
-                    return false;
-                }
-            }, "result");
-        }
+                return false;
+            }
+        }, "result");
     }
 }
 
