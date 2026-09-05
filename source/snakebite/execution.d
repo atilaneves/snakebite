@@ -23,12 +23,19 @@ public PreparationReport prepareProject(
     in string[] stringImportPaths = null,
 ) {
     import snakebite.frontend.compiler: Snippets, initialize;
-    import snakebite.project: loadProject;
+    import snakebite.project: loadProject, sourceSet;
     import std.datetime.stopwatch: AutoStart, StopWatch;
+
+    // `duration` is the frontend's time and nothing else. Finding the
+    // sources is not frontend work - for a dub project it is a series of
+    // `dub describe` subprocesses, each of which also spawns the compiler
+    // to identify it - and once counted here it inflated the reported
+    // frontend time by up to half.
+    auto sources = sourceSet(directory, importPaths, stringImportPaths);
 
     auto stopWatch = StopWatch(AutoStart.yes);
     initialize(Snippets.no);
-    auto project = loadProject(directory, importPaths, stringImportPaths);
+    auto project = loadProject(directory, sources);
     return PreparationReport(project, stopWatch.peek);
 }
 
