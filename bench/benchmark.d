@@ -263,6 +263,19 @@ public BackendReport benchmark(
     Duration[] times;
     Duration[] compileTimes;
     foreach (round; 0 .. warmup + runs) {
+        // Each round throws away a whole backend's worth of garbage in this
+        // same long-lived process. Left where it falls, that garbage
+        // accumulates until the GC's own threshold trips mid-round, and
+        // whichever round that lands on pays for every prior round's
+        // litter - turning a stop-the-world pause into that round's
+        // reported run/compile time instead of a steady per-round cost.
+        // Collecting up front, before the timer starts, resets every round
+        // to the same clean heap so a collection - if this round's own
+        // allocation needs one - happens on every round alike rather than
+        // on an unlucky one in ten.
+        import core.memory: GC;
+        GC.collect();
+
         ExecutionReport execution;
         const result = captureStdout(() {
             execution = executeBackend(backendName_, program);
