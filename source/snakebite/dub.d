@@ -21,8 +21,23 @@ public string[] dubDescribe(
     in string dataKind,
     in DubConfig config = DubConfig.test,
 ) {
+    return dubDescribe(pkgDir, [dataKind], config)[0];
+}
+
+// One `dub describe` for several data kinds at once, one list of lines per
+// kind, in the order asked. Every describe is a dub process that also
+// spawns the compiler to identify it, around 10ms each; asking for
+// everything in one call is what keeps finding a project's sources from
+// costing as much as parsing them.
+public string[][] dubDescribe(
+    in string pkgDir,
+    in string[] dataKinds,
+    in DubConfig config = DubConfig.test,
+) {
+    import std.array: join;
+
     const describe = ["dub", "describe"];
-    const dataArgs = ["--data=" ~ dataKind, "--data-list"];
+    const dataArgs = ["--data=" ~ dataKinds.join(","), "--data-list"];
 
     if (config == DubConfig.test) {
         // `--build=unittest` too: without it, describe reports the default
@@ -33,17 +48,17 @@ public string[] dubDescribe(
             describe ~ ["--config=unittest", "--build=unittest"] ~ dataArgs, pkgDir,
         );
         if (withUnittest.status == 0)
-            return parseDescribeList(withUnittest.output);
+            return parseDescribeLists(withUnittest.output, dataKinds.length);
     }
 
     const fallback = describeCapturingStdout(describe ~ dataArgs, pkgDir);
     if (fallback.status != 0)
         throw new Exception(
-            "dub describe " ~ dataKind ~ " failed in " ~ pkgDir ~ ": "
-            ~ fallback.output,
+            "dub describe " ~ dataKinds.join(",") ~ " failed in " ~ pkgDir
+            ~ ": " ~ fallback.output,
         );
 
-    return parseDescribeList(fallback.output);
+    return parseDescribeLists(fallback.output, dataKinds.length);
 }
 
 // Run a `dub describe` command in pkgDir, capturing its stdout and discarding
@@ -72,6 +87,35 @@ private auto describeCapturingStdout(in string[] command, in string pkgDir) {
     const status = wait(pid);
     stdoutFile.close();
     return tuple!("status", "output")(status, readText(stdoutPath));
+}
+
+// Split the `--data-list` output for several data kinds into one list per
+// kind. dub prints each kind's lines joined by newlines, the kinds joined
+// by one blank line, then a final newline: an empty kind is nothing between
+// two blank lines (or nothing before the final newline when it is last).
+// Splitting on the blank line keeps empty kinds in their place instead of
+// collapsing them away.
+public string[][] parseDescribeLists(in string output, in size_t kinds) @safe pure {
+    import std.algorithm.iteration: map;
+    import std.algorithm.searching: endsWith;
+    import std.array: array, split;
+    import std.conv: text;
+
+    // Exactly the expected shape, or dub's format has changed and the lists
+    // would land on the wrong kinds.
+    if (!output.endsWith("\n"))
+        throw new Exception(
+            "dub describe output does not end in a newline:\n" ~ output,
+        );
+
+    auto lists = output[0 .. $ - 1].split("\n\n").map!parseDescribeList.array;
+    if (lists.length != kinds)
+        throw new Exception(text(
+            "dub describe printed ", lists.length, " lists, expected ",
+            kinds, ":\n", output,
+        ));
+
+    return lists;
 }
 
 // Split a `dub describe --data-list` block into its non-empty, trimmed lines.

@@ -26,7 +26,7 @@ public int main(string[] args) {
             parsed.options.backend,
             preparation.project.program,
         );
-        printStatistics(preparation.duration, report);
+        printStatistics(preparation, report);
         return report.status;
     } catch (Exception exception) {
         stderr.write("snakebite: ", exception.msg, "\n");
@@ -36,12 +36,20 @@ public int main(string[] args) {
 
 
 private void printStatistics(
-    in imported!"core.time".Duration frontendDuration,
+    in imported!"snakebite.execution".PreparationReport preparation,
     in imported!"snakebite.execution".ExecutionReport report,
 ) {
+    import snakebite.execution: discoveryLabel;
     import std.stdio: writefln;
 
-    writefln("frontend time: %8.1f ms", milliseconds(frontendDuration));
+    // Two one-off costs before any backend runs: finding out what to run
+    // the frontend on, then the frontend itself.
+    writefln(
+        "%-14s %8.1f ms",
+        discoveryLabel(preparation) ~ ":",
+        milliseconds(preparation.discovery),
+    );
+    writefln("frontend time: %8.1f ms", milliseconds(preparation.duration));
     writefln("run time:      %8.1f ms", milliseconds(report.runTime));
     if (report.compilation.hasCompiler)
         writefln(

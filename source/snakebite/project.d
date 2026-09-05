@@ -22,21 +22,9 @@ public struct Project {
 }
 
 
-public Project loadProject(
-    in string directory,
-    in string[] importPaths = null,
-    in string[] stringImportPaths = null,
-) {
-    return loadProject(
-        directory,
-        sourceSet(directory, importPaths, stringImportPaths),
-    );
-}
-
-
-// Finding the sources (`dub describe` for a dub project) and running the
-// frontend over them are separate steps so a caller can time the second
-// alone; see `snakebite.execution.prepareProject`.
+// Finding the sources (`sourceSet`: `dub describe` for a dub project) and
+// running the frontend over them are separate steps so a caller can time
+// the second alone; see `snakebite.execution.prepareProject`.
 public Project loadProject(in string directory, SourceSet sources) {
     import snakebite.backends: Program;
     import snakebite.frontend.compiler: FrontendFlags, parseRootModules;
@@ -136,19 +124,36 @@ private SourceSet dubSourceSet(in string directory) {
     import std.conv: text;
     import std.file: readText;
 
-    auto files = dubDescribe(directory, "source-files", DubConfig.test);
+    // One describe for everything: each call is a dub process (which spawns
+    // the compiler too), and eight of them cost as much as the frontend.
+    const described = dubDescribe(
+        directory,
+        [
+            "source-files", "dflags", "versions", "debug-versions", "options",
+            "import-paths", "string-import-paths", "lflags",
+        ],
+        DubConfig.test,
+    );
+    const files = described[0];
+    const dflags = described[1];
+    const versions = described[2];
+    const debugVersions = described[3];
+    const options = described[4];
+    const importPaths = described[5];
+    const stringImportPaths = described[6];
+    const lflags = described[7];
+
     if (files.length == 0)
         throw new Exception(text("dub describe found no sources in ", directory));
 
-    string[] compilerArguments =
-        dubDescribe(directory, "dflags", DubConfig.test);
-    compilerArguments ~= dubDescribe(directory, "versions", DubConfig.test)
+    string[] compilerArguments = dflags.dup;
+    compilerArguments ~= versions
         .map!(version_ => "-version=" ~ version_)
         .array;
-    compilerArguments ~= dubDescribe(directory, "debug-versions", DubConfig.test)
+    compilerArguments ~= debugVersions
         .map!(debugVersion => "-debug=" ~ debugVersion)
         .array;
-    compilerArguments ~= dubDescribe(directory, "options", DubConfig.test)
+    compilerArguments ~= options
         .map!(dmdFlagsForOption)
         .filter!(flag => flag.length > 0)
         .array;
@@ -159,10 +164,10 @@ private SourceSet dubSourceSet(in string directory) {
             sourceOverrides[file] = noIoTestRoot(file.readText);
 
     return SourceSet(
-        files,
-        dubDescribe(directory, "import-paths", DubConfig.test),
-        dubDescribe(directory, "string-import-paths", DubConfig.test),
-        dubDescribe(directory, "lflags", DubConfig.test),
+        files.dup,
+        importPaths.dup,
+        stringImportPaths.dup,
+        lflags.dup,
         FrontendFlags(compilerArguments),
         sourceOverrides,
     );

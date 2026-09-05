@@ -320,10 +320,15 @@ private string headerLine(
     in Options options,
 ) {
     import bench.report: milliseconds;
+    import snakebite.execution: discoveryLabel;
     import std.conv: text;
 
+    // Both one-off costs a user pays before any backend runs: finding out
+    // what to run the frontend on, then the frontend itself.
     return text(
         preparation.project.name,
+        "   ", discoveryLabel(preparation), " ",
+        milliseconds(preparation.discovery),
         "   frontend ", milliseconds(preparation.duration),
         "   ", hostCompiler,
         "   ", options.warmup, "+", options.runs, " runs",
