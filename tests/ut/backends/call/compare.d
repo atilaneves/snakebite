@@ -639,6 +639,36 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `first() == [17, 31, 47]`: the right side is a bare array literal, not
+// a call result like every other array-equality test above. dmd's own
+// `__equals` (`core.internal.array.equality`) takes its right operand by
+// `scope`, so a literal argument there gets hoisted into a compiler
+// temporary (`__arrayliteral_on_stack*`, `expressionsem.d`'s
+// `functionParameters`) before the call - a local this test's frame must
+// account for, unlike every array-equality test above where both sides
+// are already a call result and no such temporary exists.
+static foreach (backend; Matrix!()) {
+    @("compare.scalarDynamicArrayEquality.literalOperand."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                ubyte[] first() {
+                    return [17, 31, 47];
+                }
+
+                bool compareAgainstLiteral() {
+                    return first() == [17, 31, 47]
+                        && first() != [17, 31, 48];
+                }
+            },
+            "compareAgainstLiteral",
+        );
+    }
+}
+
 // rt-simple instantiates array round trips for exactly these six scalar
 // element types. Listing all six here keeps the supported scope explicit.
 static foreach (backend; Matrix!()) {
