@@ -42,6 +42,46 @@ public bool functionNeedsClosure(FuncDeclaration function_) {
     return function_.needsClosure();
 }
 
+// Whether `function_` receives a hidden `this`/context argument before its
+// declared parameters: an ordinary member method or constructor, or a
+// nested function that reads an outer member function's `this` implicitly.
+//
+// `vthis` is a local variable `functionSemantic3` (body semantic) creates,
+// so it stays unset until that pass has run - forcing it here is what lets
+// this answer be trusted for a native declaration neither backend ever
+// walks the body of, such as `object.Exception`'s constructor, reached
+// through a guest exception class's `super(...)`. Forcing it a second time
+// for a function already past that pass is a no-op: `functionSemantic3`
+// checks `semanticRun` itself. `FrameLayout.of`, the FFI call plan, and a
+// call site's own argument count all ask this one function, so the three
+// cannot disagree about whether a given callee takes a hidden `this`.
+public bool hasHiddenThis(FuncDeclaration function_) {
+    import dmd.funcsem: functionSemantic3;
+    import dmd.tokens: TOK;
+
+    functionSemantic3(function_);
+
+    if (function_.vthis is null)
+        return false;
+
+    // dmd only clears a `FuncLiteralDeclaration`'s `vthis` when the
+    // literal is coerced to a target pointer type at the point it is
+    // written (`expressionsem.d`'s `visit(FuncExp)`); a lambda bound
+    // through `auto`, with no target type to coerce to, keeps a `vthis`
+    // nothing in its body ever reads. Two things must both hold before
+    // that `vthis` counts as dead: `tok` must not have settled on
+    // `TOK.delegate_` - dmd's own lazy-argument lowering builds its
+    // implicit delegate directly with that `tok`, and it does read the
+    // enclosing frame through `vthis` despite never appearing in
+    // `closureVars` the way a written closure's own captures do - and
+    // `closureVars` itself must be empty, proof nothing else is captured
+    // either.
+    auto literal = function_.isFuncLiteralDeclaration;
+    const deadContext = literal !is null && literal.tok != TOK.delegate_
+        && literal.closureVars.length == 0;
+    return !deadContext;
+}
+
 // The nearest enclosing function `symbol` (a captured variable or a nested
 // function) is declared in, or `null` if it is declared at module scope -
 // `toParent2` already walks past any block or `Catch` scope that is not a

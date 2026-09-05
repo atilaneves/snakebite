@@ -456,20 +456,51 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         if (declaration.isInterfaceDeclaration !is null)
             return typeInfo;
 
-        import dmd.dclass: ClassDeclaration;
-
-        typeInfo.base = declaration.baseClass is null
-                || declaration.baseClass is ClassDeclaration.object
+        // A guest class's base can itself be a native class this project
+        // never compiles a body for - not only `Object`, but any native
+        // class the guest program reaches (`Throwable`, `Exception`,
+        // `Error`; `RangeError`, a native exception `core.exception`
+        // declares; a native class exposed to the guest through FFI).
+        // `TypeInfo_Class.find` (druntime's `object.d`) answers that
+        // question the same way `hasNativeSymbol` answers it for a
+        // function: a class already registered in some linked, natively
+        // compiled module's own `ModuleInfo` is native, and this reaches
+        // for its real, complete `TypeInfo_Class` there instead of
+        // recursing into this function and reconstructing an incomplete
+        // vtable from dmd's own (only partially resolved)
+        // `ClassDeclaration.vtbl` for it. A guest declaration is never
+        // registered in any `ModuleInfo`, so `find` only ever answers a
+        // base this function itself did not just build - the recursive
+        // call below is still how a guest class over a guest class over a
+        // native base (`OutOfBytesError : MinicerealError : Exception`)
+        // reaches its own guest base's runtime info.
+        auto nativeBase = declaration.baseClass is null
             ? cast(TypeInfo_Class) cast() typeid(Object)
+            : cast(TypeInfo_Class) TypeInfo_Class.find(
+                declaration.baseClass.toPrettyChars.toDString);
+        typeInfo.base = nativeBase !is null
+            ? nativeBase
             : classRuntimeInfo(declaration.baseClass);
 
         // A slot this class never overrides still names druntime's own
-        // `Object` method (`toString`, `opEquals`, ...) - real compiled
-        // code this project neither compiles nor gives a bytecode call
-        // site to invoke through. Left `null`: nothing here ever compiles
-        // a guest class that reaches one of those through a virtual call,
-        // only through its own overrides, which are always guest-owned.
-        auto vtbl = new void*[declaration.vtbl.length];
+        // method (`Throwable.toString`, `Object.opEquals`, ...) - real
+        // compiled code this project never compiles a body for. That slot
+        // keeps the base class's own vtable entry, the real native
+        // function pointer, since native code (a native base class's own
+        // constructor, for one) calls through this vtable directly and
+        // needs a real address there, not a null one.
+        //
+        // `declaration.vtbl` only lists the slots dmd's frontend resolved
+        // while compiling this class; a guest class over a native base
+        // (`Exception`, ...) can end up with a shorter list than the base
+        // class's own real vtable, since dmd never lowers the native
+        // base's full body here. The vtable is always at least as long as
+        // the base's, so every native slot still has a home.
+        const baseVtableLength = typeInfo.base.vtbl.length;
+        const vtableLength = declaration.vtbl.length > baseVtableLength
+            ? declaration.vtbl.length : baseVtableLength;
+        auto vtbl = new void*[vtableLength];
+        vtbl[0 .. baseVtableLength] = typeInfo.base.vtbl[];
         vtbl[0] = cast(void*) typeInfo;
         foreach (i; 1 .. declaration.vtbl.length) {
             auto method = declaration.vtbl[i].isFuncDeclaration;
@@ -5104,9 +5135,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (isVirtualCall(expression, callee))
             return compileVirtualCall(expression, callee, destOffset);
 
+        // `hasHiddenThis` reflects `needThis()`: true for an ordinary
+        // member method and also for a nested function or lambda that
+        // reads an outer method's `this` implicitly (`receiverOffsetOf`
+        // then reaches that `this` through the static chain), and forces
+        // `functionSemantic3` first so it stays reliable on a native
+        // declaration this compiler never walks the body of - `Exception.
+        // this` is one, reached through `super(...)` delegation from a
+        // guest exception constructor.
+        import snakebite.backends.delegates: hasHiddenThis;
+
+        const hasThis = hasHiddenThis(callee);
         compileResolvedCall(
             callee, expression.arguments, expression.loc,
-            expressionText(expression), callee.vthis !is null,
+            expressionText(expression), hasThis,
             () => receiverOffsetOf(expression, callee, destOffset),
             destOffset);
     }

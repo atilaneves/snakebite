@@ -10,7 +10,6 @@ import ut.backends;
 
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("catchMatchesGuestClassByBaseType." ~ backend.stringof)
@@ -47,15 +46,57 @@ static foreach (backend; Matrix!(
 }
 
 
+// A guest class over a native class further from `Object` than
+// `Throwable`, `Exception` or `Error` themselves (`RangeError`, a native
+// class `core.exception` declares) must still carry that native
+// grandparent's own identity in its ancestor chain, the same as one
+// directly over `Exception` does: `catch` matches by walking a chain of
+// real `TypeInfo_Class` objects, so collapsing the guest class's native
+// base to a nearer well-known ancestor (`Error`) instead of the native
+// class actually named would make a `catch` naming that native class
+// silently stop matching.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("catchMatchesNativeGrandparentClass." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
+            class GuestRangeError : RangeError {
+                this() {
+                    super();
+                }
+            }
+
+            void main() {
+                int value = 1;
+
+                try {
+                    throw new GuestRangeError;
+                } catch (RangeError) {
+                    value = 9;
+                }
+
+                assert(value == 9);
+            }
+        });
+    }
+}
+
+
 // `catch` matches a thrown class against the declared type by walking the
 // base-class chain, not by exact type, so a `catch` naming a base class
 // catches a derived exception while a `catch` naming a sibling class does
 // not.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed,
         "DMD's native constructor ABI needs stack-word support"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "the native constructor call no longer crashes, but the guest " ~
+        "still exits with status 1 instead of 0"),
 )) {
     @("catchMatchesThrownClassByBaseType." ~ backend.stringof)
     @Tags(backend.stringof)

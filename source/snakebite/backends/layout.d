@@ -79,6 +79,7 @@ package struct FrameLayout {
     private VariableSlot[VarDeclaration] _slotOf;
 
     package static FrameLayout of(FuncDeclaration function_) {
+        import snakebite.backends.delegates: hasHiddenThis;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import dmd.astenums: STC;
         import std.conv: text;
@@ -86,7 +87,7 @@ package struct FrameLayout {
         FrameLayout layout;
         layout.call = CallAdapter.of(function_);
 
-        if (function_.vthis !is null && !hasDeadContext(function_)) {
+        if (hasHiddenThis(function_)) {
             const isRefThis = (function_.vthis.storage_class & STC.ref_) != 0;
             auto slot = isRefThis
                 ? layout.reserveSlot(
@@ -180,26 +181,6 @@ package struct FrameLayout {
             layout.parameters[i] = layout.packParameter(type.parameterList[i]);
 
         return layout;
-    }
-
-    // dmd only clears a `FuncLiteralDeclaration`'s `vthis` when the
-    // literal is coerced to a target pointer type at the point it is
-    // written (`expressionsem.d`'s `visit(FuncExp)`); a lambda bound
-    // through `auto`, with no target type to coerce to, keeps a `vthis`
-    // nothing in its body ever reads. Two things must both hold before
-    // this layout treats that `vthis` as dead: `tok` must not have
-    // settled on `TOK.delegate_` - dmd's own lazy-argument lowering
-    // builds its implicit delegate directly with that `tok`, and it does
-    // read the enclosing frame through `vthis` despite never appearing in
-    // `closureVars` the way a written closure's own captures do - and
-    // `closureVars` itself must be empty, proof nothing else is captured
-    // either.
-    private static bool hasDeadContext(FuncDeclaration function_) {
-        import dmd.tokens: TOK;
-
-        auto literal = function_.isFuncLiteralDeclaration;
-        return literal !is null && literal.tok != TOK.delegate_
-            && literal.closureVars.length == 0;
     }
 
     // One slot `reserveSlot` just reserved: its offset into the frame,
