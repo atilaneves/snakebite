@@ -387,6 +387,35 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `p[0 .. n] = q[]` copies element by element the same way any other
+// dynamic slice assignment does, whether the element itself is an integral
+// or, as here, a pointer: `isSupportedElementFacts` (bytecode) previously
+// only accepted an integral, a float, a struct or a static array as an
+// element type, rejecting a pointer element outright even though it is
+// exactly as copyable in bulk as any other fixed-size value.
+static foreach (backend; Matrix!()) {
+    @("pointers.slice.pointerElementBulkAssign." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int a = 1;
+                int b = 2;
+                int c = 3;
+                int d = 4;
+                int*[4] storage = [&a, &b, &a, &b];
+                int*[2] source = [&c, &d];
+                int** ptr = storage.ptr;
+                ptr[0 .. 2] = source[];
+                assert(*storage[0] == 3);
+                assert(*storage[1] == 4);
+                assert(*storage[2] == 1);
+                assert(*storage[3] == 2);
+            }
+        });
+    }
+}
+
 // A pointer argument carries the address a `&local` evaluated to, not a
 // copy of the pointee: the callee writes through it and the caller's own
 // local changes.

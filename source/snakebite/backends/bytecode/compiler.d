@@ -175,15 +175,21 @@ private imported!"snakebite.nativelayout".TypeFacts pointerFactsOf() {
 
 // An array element type this compiler can lay out: every integral width it
 // already accepts elsewhere, plus `float`/`double`/`real`, which have no
-// `.init` this compiler can write any other way but zero.
+// `.init` this compiler can write any other way but zero, and a pointer -
+// a plain `size_t.sizeof`-wide value copied by value, sharing whatever it
+// points at, the same way `isPlainOldStruct` already treats a pointer
+// *field* as ordinary bytes rather than something needing an element-wise
+// visit.
 private bool isSupportedElementFacts(
     in imported!"snakebite.nativelayout".TypeFacts facts,
     imported!"dmd.mtype".Type type,
 ) {
+    import dmd.astenums: Tpointer;
     import snakebite.nativelayout: isIntegralSize;
 
     return (facts.isIntegral && isIntegralSize(facts.size))
         || isFloatingType(type)
+        || type.ty == Tpointer
         || isPlainOldStruct(type)
         || isSupportedStaticArray(type);
 }

@@ -4446,16 +4446,25 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         // A nested struct carries its enclosing function's context in the
         // first word, so methods on a returned value can reach captured
-        // locals after the enclosing call has returned.
-        auto parent = expression.sd.toParent2();
-        auto parentFunction = parent is null
-            ? null : parent.isFuncDeclaration;
-        if (parentFunction !is null)
-            storeIntegral(
-                _place,
-                cast(size_t) contextOf(parentFunction),
-                size_t.sizeof,
-            );
+        // locals after the enclosing call has returned. `isNested` (true
+        // only when dmd actually gave the struct that hidden field, via
+        // `enclosing`) is the right test here, not merely being declared
+        // lexically inside a function: a `static struct` declared inside a
+        // function is lexically nested the same way but reserves no such
+        // field, so treating it as if it did would read a context for a
+        // function that may not even be reachable and overwrite the
+        // struct's own first field with it.
+        if (expression.sd.isNested()) {
+            auto parent = expression.sd.toParent2();
+            auto parentFunction = parent is null
+                ? null : parent.isFuncDeclaration;
+            if (parentFunction !is null)
+                storeIntegral(
+                    _place,
+                    cast(size_t) contextOf(parentFunction),
+                    size_t.sizeof,
+                );
+        }
 
         if (expression.elements is null || expression.elements.length == 0)
             return;
