@@ -184,11 +184,9 @@ static foreach (backend; Matrix!()) {
 // `else`, the shape a lookup loop with an early exit has.
 static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.diverges,
-        "the bytecode compiler only rejects/inlines a `finally` for an " ~
-        "exit that leaves `_finished` set; an `if` with no `else` resets " ~
-        "`_finished` on its fall-through path, so a `break` reached only " ~
-        "through the taken branch skips the `finally` silently instead " ~
-        "of running it - `finallyRuns` stays 0 instead of reaching 2"),
+        "a `break` reached only through the taken branch of an `if` " ~
+        "with no `else` skips the `finally` silently instead of " ~
+        "running it - `finallyRuns` stays 0 instead of reaching 2"),
 )) {
     @("tryFinally.breakInsideIfRunsFinally." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -266,6 +264,192 @@ static foreach (backend; Matrix!()) {
                 int trace;
                 const returned = result(trace);
                 return returned * 100 + trace;
+            }
+        }, "check");
+    }
+}
+
+
+// A `return` inside an `if` with no `else` inlines the `finally` once
+// there; the same `finally` is then compiled again for the fall-through
+// exit. The `switch` inside it must dispatch each copy to its own case
+// bodies, not the first copy's - a `default:` only, here.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.switchInFinallyDispatchesOwnCaseWhenCompiledTwice." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7101.shouldBeRetOf!(backend, q{
+            int result(ref int trace, bool early, int x) {
+                try {
+                    if (early)
+                        return 7;
+                } finally {
+                    switch (x) {
+                        default: trace = 1;
+                    }
+                }
+                return 0;
+            }
+
+            int check() {
+                int trace;
+                const first = result(trace, true, 5) * 10 + trace;
+                trace = 0;
+                const second = result(trace, false, 5) * 10 + trace;
+                return first * 100 + second;
+            }
+        }, "check");
+    }
+}
+
+
+// As above, with `case` labels and `break`s in the `switch`.
+static foreach (backend; Matrix!()) {
+    @("tryFinally.switchWithBreaksInFinallyDispatchesOwnCaseWhenCompiledTwice." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7202.shouldBeRetOf!(backend, q{
+            int result(ref int trace, bool early, int x) {
+                try {
+                    if (early)
+                        return 7;
+                } finally {
+                    switch (x) {
+                        case 1: trace = 1; break;
+                        case 5: trace = 2; break;
+                        default: trace = 3; break;
+                    }
+                }
+                return 0;
+            }
+
+            int check() {
+                int trace;
+                const first = result(trace, true, 5) * 10 + trace;
+                trace = 0;
+                const second = result(trace, false, 5) * 10 + trace;
+                return first * 100 + second;
+            }
+        }, "check");
+    }
+}
+
+
+// Nested: try/finally F0 { try/catch C1 { try/finally F1 { try/catch C2
+// { return } } } }. A throw from F1 is caught by C1 (F1 sits inside C1's
+// body), never by C2. A throw from F0 escapes both.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "once an earlier `return` has already fixed the value this " ~
+        "function hands back, statements after the first one in " ~
+        "whatever block runs next - here, the catch reached while " ~
+        "unwinding through a `finally` - are skipped, so this catch's " ~
+        "own `return` never overwrites that value"),
+)) {
+    @("tryFinally.nestedFinallyCaughtByMiddleCatchOnly." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        21.shouldBeRetOf!(backend, q{
+            void boom() {
+                throw new Exception("f1");
+            }
+
+            int result(ref int trace) {
+                try {
+                    try {
+                        try {
+                            try {
+                                return 1;
+                            } catch (Exception e) {
+                                return 9;
+                            }
+                        } finally {
+                            boom();
+                        }
+                    } catch (Exception e) {
+                        trace = trace * 10 + 2;
+                        return 2;
+                    }
+                } finally {
+                    trace = trace * 10 + 1;
+                }
+            }
+
+            int check() {
+                int trace;
+                const returned = result(trace);
+                return returned * 10 + trace % 10 + (trace / 10 == 2 ? 0 : 100);
+            }
+        }, "check");
+    }
+}
+
+
+// A `finally` body compiled twice (inlined at the `return`, and again
+// for the fall-through exit) declares its own local: the fall-through
+// copy must still run its own assignment to it.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "once a `return` inside the `try` has already fixed the value " ~
+        "this function hands back, the `finally` that then runs stops " ~
+        "after its first statement, so this local's own assignment " ~
+        "never runs"),
+)) {
+    @("tryFinally.localInFinallyIsSetWhenCompiledTwice." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        73.shouldBeRetOf!(backend, q{
+            int result(ref int trace, bool early) {
+                try {
+                    if (early)
+                        return 7;
+                } finally {
+                    int x = 3;
+                    trace = x;
+                }
+                return 0;
+            }
+
+            int check() {
+                int trace;
+                const returned = result(trace, true);
+                return returned * 10 + trace;
+            }
+        }, "check");
+    }
+}
+
+
+// As above, with a loop in the `finally` instead of a local declaration.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "once a `return` inside the `try` has already fixed the value " ~
+        "this function hands back, the `finally` that then runs stops " ~
+        "after its first statement, so this loop never iterates"),
+)) {
+    @("tryFinally.loopInFinallyRunsWhenCompiledTwice." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7303.shouldBeRetOf!(backend, q{
+            int result(ref int trace, bool early) {
+                try {
+                    if (early)
+                        return 7;
+                } finally {
+                    for (int i; i < 3; ++i)
+                        ++trace;
+                }
+                return 0;
+            }
+
+            int check() {
+                int trace;
+                const first = result(trace, true) * 10 + trace;
+                trace = 0;
+                const second = result(trace, false) * 10 + trace;
+                return first * 100 + second;
             }
         }, "check");
     }

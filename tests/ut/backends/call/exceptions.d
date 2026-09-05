@@ -396,9 +396,7 @@ static foreach (backend; Matrix!(
 // .Exception` above pins for a guest-thrown `AssertError`, here for an
 // `Error` thrown by druntime itself from inside a native call.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE turns a failing assertion into a compile-time error, so " ~
-        "it cannot be expressed the same way as a runtime throw"),
+    Omit!(Ctfe, Because.inexpressible, "CTFE has no native calls"),
 )) {
     @("nativeThrow.errorSkipsCatchException." ~ backend.stringof)
     @Tags(backend.stringof)

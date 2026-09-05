@@ -787,20 +787,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private Statement[] _pendingFinallyBodies;
     // How many `throw`/`break`/`continue`/`goto case`/`goto default`/
     // switch-error exits this compiler has compiled anywhere in the
-    // program so far. `visit(TryFinallyStatement)` snapshots this before
-    // and after compiling `_body`, and only checks it when `_body` itself
-    // finished (`_finished` still set): unlike a `return`, none of those
-    // exits run a `finally` on its way out, so if the count moved while
-    // `_finished` did too, `_body`'s own last statement was one of those
-    // exits, and it would skip `finalbody` outright - the whole statement
-    // stays rejected. This does not catch every such exit: an `if` with no
-    // `else` resets `_finished` to `false` once it falls through, so an
-    // exit reached only through that `if`'s taken branch (a loop-local
-    // `break`, say) leaves `_finished` clear and this check never runs -
-    // `finalbody` is then skipped silently on that path instead of being
-    // rejected. Never decremented, so a `break`/`continue` that only ever
-    // reaches a loop nested inside `_body` still counts as one, on the
-    // paths this does catch.
+    // program so far, since unlike `return` none of them run a
+    // `finally` on their way out (see `visit(TryFinallyStatement)`).
+    // Never decremented, so one nested inside a protected body still
+    // counts. Misses an exit reached only through the taken branch of
+    // an `if` with no `else`, since that clears `_finished` on the
+    // fall-through path before the check below ever runs.
     private size_t _unflushedExitCount;
     // The loop or unrolled `foreach` this compiler is currently inside the
     // body of, innermost last - what a `continue` targets, labelled or
@@ -853,7 +845,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `finallyDepthAtStart` is smaller than the hole's own index then, so
     // the hole is left untouched and that `catch` keeps protecting it, the
     // same as a real stack unwind reaching it once the `finally` is done.
-    private static struct ProtectedRange {
+    private struct ProtectedRange {
         size_t start;
         size_t end;
     }
@@ -1332,14 +1324,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileStatement(statement._body);
         _pendingFinallyBodies.length -= 1;
 
-        // A `return` inside `_body` already inlined this `finally` itself
-        // (`compileReturn`/`runPendingFinallyBodies`) on its way out, so
-        // `_finished` alone cannot tell a handled exit from one that is
-        // not: when `_body` itself finished on a `throw`/`break`/
-        // `continue`/`goto case`/`goto default`/switch-error, none of
-        // those learnt to run `finalbody` the way `return` did, so this
-        // rejects rather than skip it silently. See `_unflushedExitCount`'s
-        // own doc for the paths this still misses.
+        // A `return` inside `_body` already inlined this `finally` on its
+        // way out (`compileReturn`/`runPendingFinallyBodies`); reject
+        // rather than skip `finalbody` silently if `_body`'s own last
+        // exit was one of the other kinds instead (see
+        // `_unflushedExitCount`'s own doc, including what this misses).
         if (_finished && _unflushedExitCount != unflushedExitsBefore)
             throw rejection(_function, statement.loc, statementText(statement));
 
@@ -1454,6 +1443,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         _switchStack = _switchStack[0 .. $ - 1];
         _breakables = _breakables[0 .. $ - 1];
+
+        // A `goto case`/`goto default` can only name a case of the
+        // `switch` it sits in, so every jump to one of this switch's
+        // cases is resolved by now. Forget the targets recorded for
+        // this switch so a second compile of the same AST (a `finally`
+        // inlined at a `return` and again at its own fall-through, say)
+        // records its own targets instead of jumping into this copy's
+        // bodies.
+        if (statement.cases !is null)
+            foreach (case_; *statement.cases)
+                _caseTargets.remove(case_);
+        _defaultTargets.remove(statement);
 
         _finished = !hadBreak && bodyFinished;
     }
