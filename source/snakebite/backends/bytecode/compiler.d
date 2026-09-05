@@ -221,6 +221,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
     import dmd.root.string: toDString;
     import snakebite.backends.backend: Program;
+    import snakebite.backends.classinfo;
     import snakebite.backends.bytecode.vm: Function, maxReturnWidth, Vm;
     import snakebite.exception: SnakebiteException;
     import snakebite.framestack: defaultFrameCapacity;
@@ -247,8 +248,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // real linked data - this builds the same shapes by hand instead, once
     // per `ClassDeclaration`, and every later `new`/virtual call/`typeid`
     // reuses the one already built.
-    private TypeInfo_Class[imported!"dmd.dclass".ClassDeclaration]
-        _classRuntime;
+    private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
     // `dmd` merges every `shared(Scalars)` (or other qualified variant of
     // the same class) parsed anywhere in a program back into the one
     // `Type` object, so keying by that object's own identity, the same as
@@ -430,105 +430,28 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     }
 
     // The native metadata a guest class needs at run time: an instance
-    // vtable (`vtbl[0]` the classinfo pointer, `vtbl[1 .. $]` every guest
-    // override's own compiled `Function*`, in the same slots dmd's own
-    // `ClassDeclaration.vtbl` already assigns them - `vtblOffset` is `1`
-    // for a D class, never `0`), a per-interface vtable built the same way
-    // but indexed by the interface's own method order, and the `.init`
-    // bytes `_d_newclassT`'s real body would otherwise copy from a linked
-    // symbol this project's compiler never emits. Cached by declaration:
-    // every `new`, virtual call and `typeid` of the same class reuses the
-    // one instance built the first time any of them needs it. Registered
-    // in `_classRuntime` before its own vtable/fields are filled in, so a
-    // class that reaches itself again while compiling a method body or
-    // walking a base chain - direct or mutual recursion - finds this same
-    // (possibly still-filling) object instead of recursing forever.
+    // vtable, a per-interface vtable and the `.init` bytes `_d_newclassT`'s
+    // real body would otherwise copy from a linked symbol this project's
+    // compiler never emits. Built by `snakebite.backends.classinfo`,
+    // shared with the interpreter's own version of this same question;
+    // only how a vtable slot gets its callable value is this backend's
+    // own.
     package TypeInfo_Class classRuntimeInfo(
         imported!"dmd.dclass".ClassDeclaration declaration,
     ) {
-        if (auto cached = declaration in _classRuntime)
-            return *cached;
+        import snakebite.backends.classinfo:
+            classRuntimeInfo_ = classRuntimeInfo, Hooks;
 
-        auto typeInfo = new TypeInfo_Class;
-        typeInfo.name = cast(string) declaration.toPrettyChars.toDString;
-        _classRuntime[declaration] = typeInfo;
-
-        if (declaration.isInterfaceDeclaration !is null)
-            return typeInfo;
-
-        import dmd.dclass: ClassDeclaration;
-
-        // `Throwable`, `Exception` and `Error` are native classes with no
-        // guest declaration of their own body; a guest class over one of
-        // them (`Expected : Exception`) must build on the real, complete
-        // native `typeid`, the same way the interpreter's own
-        // `classRuntimeInfo` does, rather than recursing into this
-        // function and reconstructing an incomplete vtable from dmd's own
-        // (only partially resolved) `ClassDeclaration.vtbl` for them.
-        // Only the exact native declaration routes to druntime's own
-        // `typeid`: a guest class over a guest class that itself derives
-        // from `Exception` (`OutOfBytesError : MinicerealError :
-        // Exception`) must still recurse into `classRuntimeInfo` for its
-        // own guest base, or `MinicerealError`'s own runtime info - the
-        // one every `catch (MinicerealError)` clause names - never gets
-        // built, and its slot in the base chain silently becomes
-        // `Exception` instead.
-        if (declaration.baseClass is null
-                || declaration.baseClass is ClassDeclaration.object)
-            typeInfo.base = cast(TypeInfo_Class) cast() typeid(Object);
-        else if (declaration.baseClass is ClassDeclaration.throwable)
-            typeInfo.base = cast(TypeInfo_Class) cast() typeid(Throwable);
-        else if (declaration.baseClass is ClassDeclaration.exception)
-            typeInfo.base = cast(TypeInfo_Class) cast() typeid(Exception);
-        else if (declaration.baseClass is ClassDeclaration.errorException)
-            typeInfo.base = cast(TypeInfo_Class) cast() typeid(Error);
-        else
-            typeInfo.base = classRuntimeInfo(declaration.baseClass);
-
-        // A slot this class never overrides still names druntime's own
-        // method (`Throwable.toString`, `Object.opEquals`, ...) - real
-        // compiled code this project never compiles a body for. That slot
-        // keeps the base class's own vtable entry, the real native
-        // function pointer, since native code (a native base class's own
-        // constructor, for one) calls through this vtable directly and
-        // needs a real address there, not a null one.
-        //
-        // `declaration.vtbl` only lists the slots dmd's frontend resolved
-        // while compiling this class; a guest class over a native base
-        // (`Exception`, ...) can end up with a shorter list than the base
-        // class's own real vtable, since dmd never lowers the native
-        // base's full body here. The vtable is always at least as long as
-        // the base's, so every native slot still has a home.
-        const baseVtableLength = typeInfo.base.vtbl.length;
-        const vtableLength = declaration.vtbl.length > baseVtableLength
-            ? declaration.vtbl.length : baseVtableLength;
-        auto vtbl = new void*[vtableLength];
-        vtbl[0 .. baseVtableLength] = typeInfo.base.vtbl[];
-        vtbl[0] = cast(void*) typeInfo;
-        foreach (i; 1 .. declaration.vtbl.length) {
-            auto method = declaration.vtbl[i].isFuncDeclaration;
-            if (method !is null && isGuestFunction(method))
-                vtbl[i] = cast(void*) compileFunction(method);
-        }
-        typeInfo.vtbl = vtbl;
-
-        typeInfo.m_init = new byte[](declaration.structsize);
-        *cast(void**) typeInfo.m_init.ptr = vtbl.ptr;
-        fillFieldInits(declaration, cast(ubyte*) typeInfo.m_init.ptr);
-
-        if (declaration.interfaces.length != 0) {
-            import object: Interface;
-
-            typeInfo.interfaces = new Interface[declaration.interfaces.length];
-            foreach (i, base; declaration.interfaces)
-                typeInfo.interfaces[i] = Interface(
-                    classRuntimeInfo(base.sym),
-                    interfaceVtable(declaration, base.sym),
-                    base.offset,
-                );
-        }
-
-        return typeInfo;
+        return classRuntimeInfo_(
+            declaration,
+            _classRuntime,
+            Hooks(
+                (method) => isGuestFunction(method)
+                    ? cast(void*) compileFunction(method) : null,
+                &interfaceVtable,
+                &fillFieldInits,
+            ),
+        );
     }
 
     // The concrete overrides `declaration` gives every method `interface_`
@@ -540,10 +463,12 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // overrides another; a slot dmd could never leave unresolved for a
     // class that actually implements the interface stays `null` here
     // rather than throwing, since only a call that is actually made ever
-    // reads it back out.
+    // reads it back out. `interfaceInfo` is unread here: the interface's
+    // own vtable is never a stand-in for the concrete class's overrides.
     private void*[] interfaceVtable(
         imported!"dmd.dclass".ClassDeclaration declaration,
         imported!"dmd.dclass".ClassDeclaration interface_,
+        TypeInfo_Class interfaceInfo,
     ) {
         import dmd.funcsem: overrides;
 
@@ -566,23 +491,22 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return vtbl;
     }
 
-    // Every field's own default value, base class first: the same order
-    // and the same "skip a `void` initializer" rule the interpreter's own
-    // `initializeClass` applies at every `new`, just written once into
-    // `base`'s bytes here instead of run fresh on every construction -
-    // `storeValue` already knows how to lay out the constant-foldable
-    // initializers this reaches (an integer, a float, `null`, a zero
-    // struct); one dmd cannot fold to a constant throws, the same
-    // "unsupported" rejection any other value this compiler cannot lay
-    // out gives.
+    // Every field `declaration` itself declares - an inherited one is
+    // already present in `base`, copied down from the base class's own
+    // `.init` bytes by `snakebite.backends.classinfo.classRuntimeInfo`
+    // before this runs. The same "skip a `void` initializer" rule the
+    // interpreter's own `initializeClass` applies at every `new`, just
+    // written once into `base`'s bytes here instead of run fresh on every
+    // construction - `storeValue` already knows how to lay out the
+    // constant-foldable initializers this reaches (an integer, a float,
+    // `null`, a zero struct); one dmd cannot fold to a constant throws,
+    // the same "unsupported" rejection any other value this compiler
+    // cannot lay out gives.
     private void fillFieldInits(
         imported!"dmd.dclass".ClassDeclaration declaration, ubyte* base,
     ) {
         import snakebite.nativelayout: storeValue;
         import std.conv: text;
-
-        if (declaration.baseClass !is null)
-            fillFieldInits(declaration.baseClass, base);
 
         foreach (field; declaration.fields) {
             if (field._init is null)
