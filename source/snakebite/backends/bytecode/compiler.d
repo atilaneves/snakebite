@@ -3982,7 +3982,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (structType is null || expression.arguments is null)
             return;
 
-        if (expression.arguments.length > structType.sym.fields.length)
+        if (expression.arguments.length > structType.sym.fields.length
+                || !isSupportedStructLiteral(expression.newtype))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
