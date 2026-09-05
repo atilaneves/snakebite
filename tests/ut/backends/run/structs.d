@@ -495,12 +495,12 @@ static foreach (backend; Matrix!()) {
 // A non-trivial constructor call passed straight as an argument is an
 // rvalue with no variable of its own. dmd's field-wise constructor for the
 // outer struct still takes this argument by address (the same lowering a
-// `ref` parameter gets), so the interpreter must give the temporary a
-// frame slot before the inner constructor runs, rather than reject it for
+// `ref` parameter gets), so a backend must give the temporary a frame
+// slot before the inner constructor runs, rather than reject it for
 // having no lvalue to take the address of. The scalar argument before it
 // checks that binding the temporary does not depend on it being the first
 // argument evaluated.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("structCtorCallArgumentAfterScalarArgument." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -535,7 +535,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // As above, with the temporary constructor call before the scalar
 // argument - the outer struct's field order should not matter to how the
 // temporary's storage is found.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("structCtorCallArgumentBeforeScalarArgument." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
