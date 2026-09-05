@@ -290,13 +290,28 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         void* returnPlace,
         void*[] args,
     ) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
         if (args.length != 0)
             throw new SnakebiteException(
                 "bytecode compiler does not support host-to-guest " ~
                     "arguments yet",
             );
 
-        _vm.call(*compileFunction(function_), returnPlace);
+        // `compileFunction` walks dmd's AST and calls dmd frontend semantic
+        // helpers (`Type.size`, `toInteger`, `defaultInit`, ...) that memoise
+        // onto process-global, dmd-owned objects (e.g. `Type` singletons
+        // shared across every module). Two `bin/ut` threads compiling
+        // unrelated guest functions at once can race on that shared state,
+        // corrupting it for both - the same reason the CTFE and interpreter
+        // backends serialise their own dmd-touching entry points on this
+        // lock. `_vm.call` itself only runs already-compiled bytecode, but it
+        // is kept inside the lock too so a lazily-compiled callee reached
+        // through a native callback (`invokeBoolFunction`) reenters the same,
+        // recursive mutex rather than a fresh one.
+        withCompilerLock({
+            _vm.call(*compileFunction(function_), returnPlace);
+        });
     }
 
     public override string eval(FuncDeclaration function_) {
@@ -328,10 +343,16 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         void* context,
         void* functionAddress,
     ) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
         auto bytecode = cast(Bytecode) context;
         auto function_ = cast(FuncDeclaration) functionAddress;
         bool result;
-        bytecode._vm.call(*bytecode.compileFunction(function_), &result);
+        // Same reasoning as `call`: this is a native callback into a guest
+        // callback, so it can compile a callee for the first time here.
+        withCompilerLock({
+            bytecode._vm.call(*bytecode.compileFunction(function_), &result);
+        });
         return result;
     }
 
