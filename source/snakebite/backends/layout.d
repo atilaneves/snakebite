@@ -509,14 +509,11 @@ extern(C++) private final class LocalsCollector:
         collectDeclarations(expression.lowering);
     }
 
-    // `==`/`!=` on arrays (`expressionsem.d`'s own `EqualExp` semantic)
-    // records the real comparison as `object.__equals(e1c, e2c)` in
-    // `lowering` - what `LoweringVisitor` (`snakebite.backends.loweringvisitor`)
-    // has both the interpreter and the bytecode compiler run in place of
-    // `e1`/`e2` themselves. `__equals`'s own second parameter is `scope`,
-    // so a bare array literal there (`xs == [1, 2, 3]`) gets dmd's usual
-    // scope-argument rewrite (`expressionsem.d`'s `functionParameters`): a
-    // fresh `__arrayliteral_on_stack*` temporary declared right there in
+    // `==`/`!=` on arrays lowers to `object.__equals(e1c, e2c)`, whose
+    // second parameter is `scope`, so a bare array literal there
+    // (`xs == [1, 2, 3]`) gets dmd's usual scope-argument rewrite
+    // (`expressionsem.d`'s `functionParameters`): a fresh
+    // `__arrayliteral_on_stack*` temporary declared right there in
     // `lowering`'s own call arguments, reachable only by walking into it.
     override void visit(EqualExp expression) {
         expression.e1.accept(this);

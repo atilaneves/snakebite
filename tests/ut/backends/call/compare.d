@@ -645,8 +645,7 @@ static foreach (backend; Matrix!()) {
 // `scope`, so a literal argument there gets hoisted into a compiler
 // temporary (`__arrayliteral_on_stack*`, `expressionsem.d`'s
 // `functionParameters`) before the call - a local this test's frame must
-// account for, unlike every array-equality test above where both sides
-// are already a call result and no such temporary exists.
+// account for.
 static foreach (backend; Matrix!()) {
     @("compare.scalarDynamicArrayEquality.literalOperand."
         ~ backend.stringof)

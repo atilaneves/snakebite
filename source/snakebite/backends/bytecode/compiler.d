@@ -4919,12 +4919,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto sourceType = expression.e1.type;
         auto destType = expression.type;
 
-        // `cast(T) null`: `visit(NullExp)` already fills any destination
-        // width with zero bytes regardless of what `T` is - a pointer, a
-        // class reference, a dynamic array's `{length, pointer}` pair, or
-        // an associative array (also one pointer-sized word natively).
-        // `_aaDup` (`core/internal/newaa.d`) reaches this casting `null` to
-        // an associative array type on its empty-argument early return.
+        // `null` is zero bytes at any width, which `visit(NullExp)` already
+        // writes; `_aaDup` casts `null` to an AA type.
         if (expression.e1.isNullExp !is null)
             return evalInto(expression.e1, destOffset, width);
 
