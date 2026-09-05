@@ -63,7 +63,7 @@ TimingStatistics timingStatistics(Duration[] times) {
 
 void printTable(in BackendReport[] reports) {
     import std.algorithm.comparison: max;
-    import std.algorithm.searching: find;
+    import std.algorithm.searching: canFind, find;
     import std.array: replicate;
     import std.format: format;
     import std.range: empty, front, walkLength;
@@ -109,11 +109,16 @@ void printTable(in BackendReport[] reports) {
         foreach (i, cell; row)
             widths[i] = max(widths[i], cell.walkLength);
 
+    // Columns for "run med" and "cmp med": the numbers most worth a
+    // glance when scanning the table.
+    enum boldColumns = [3, 6];
+
     foreach (row; rows) {
         string line;
         foreach (i, cell; row) {
             const padding = " ".replicate(widths[i] - cell.walkLength);
-            line ~= i == 0 ? cell ~ padding : "  " ~ padding ~ cell;
+            const displayCell = boldColumns.canFind(i) ? bold(cell) : cell;
+            line ~= i == 0 ? displayCell ~ padding : "  " ~ padding ~ displayCell;
         }
         writeln(line);
     }
@@ -159,6 +164,10 @@ string milliseconds(in Duration duration) {
     }
 
     return format!"%.1f ms"(milliseconds);
+}
+
+private string bold(in string text) {
+    return "\x1b[1m" ~ text ~ "\x1b[0m";
 }
 
 private string memory(in long bytes) {
