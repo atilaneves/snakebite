@@ -133,12 +133,6 @@ static foreach (backend; Matrix!(
 // not.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed,
-        "DMD's native constructor ABI needs stack-word support"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "catch matching is correct, but the guest exception's own `msg` " ~
-        "field reads as garbage - a native constructor call passing " ~
-        "more than six integer ABI words is unconfirmed"),
 )) {
     @("catchMatchesThrownClassByBaseType." ~ backend.stringof)
     @Tags(backend.stringof)
