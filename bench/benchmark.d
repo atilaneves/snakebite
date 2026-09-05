@@ -9,8 +9,9 @@
 // harness never collects or runs tests itself - and the table reports the
 // verdict, run-time statistics, the backend's own compile time (for
 // backends that have a compile step) and resident memory growth. A `dmd`
-// row (bench.oracle) benchmarks the real workflow as subprocesses and
-// doubles as the correctness oracle.
+// row (bench.oracle) benchmarks the real workflow as subprocesses, its
+// cells split the same way and its own per-cycle frontend and overhead
+// reported under the table, and doubles as the correctness oracle.
 module bench.benchmark;
 
 

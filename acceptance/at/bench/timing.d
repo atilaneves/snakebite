@@ -58,7 +58,10 @@ unittest {
 }
 
 
-@("dub.runTime.matchesTouchedTestCycle")
+// The dub row's pieces - dub's overhead, its frontend, and the row's run
+// (compile included) - add back up to what a real touch-and-`dub test`
+// costs.
+@("dub.cycle.matchesTouchedTestCycle")
 @Flaky(5)
 @Serial
 @Tags("timing")
@@ -81,7 +84,9 @@ unittest {
     report.passed.should == true;
 
     const direct = timingStatistics(directTimes).median;
-    const benchmark = report.runTime.median;
+    const benchmark = report.cycleOverhead.median
+        + report.cycleFrontend.median
+        + report.runTime.median;
     const ratio = benchmark.total!"hnsecs"
         / cast(double) direct.total!"hnsecs";
     writefln(

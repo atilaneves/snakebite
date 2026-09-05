@@ -26,6 +26,13 @@ struct BackendReport {
     // The dmd row: the real workflow, doubling as the correctness oracle
     // the other rows are checked against.
     bool isOracle;
+    // What the oracle's cycle pays before its compile and run, kept out of
+    // its cells the way the header keeps the in-process rows' frontend
+    // out of theirs: the tool's own overhead (labelled, e.g. "dub
+    // overhead"; none when the label is empty) and its frontend.
+    string cycleOverheadLabel;
+    TimingStatistics cycleOverhead;
+    TimingStatistics cycleFrontend;
 }
 
 void updateTestCounts(ref BackendReport report, in string output) {
@@ -125,6 +132,28 @@ void printTable(in BackendReport[] reports) {
 
     if (oracleFailed)
         writeln("\n* dmd oracle failed this run; pass columns unverified");
+
+    foreach (report; ordered)
+        if (report.isOracle)
+            writeln("\n", cycleLine(report));
+}
+
+// The oracle's per-cycle costs, in the header's shape so the two add up
+// the same way: overhead + frontend + the row's `run`.
+string cycleLine(in BackendReport report) {
+    import std.conv: text;
+
+    const overhead = report.cycleOverheadLabel.length
+        ? text(
+            "   ", report.cycleOverheadLabel, " ",
+            milliseconds(report.cycleOverhead.median),
+        )
+        : "";
+    return text(
+        report.name, overhead,
+        "   frontend ", milliseconds(report.cycleFrontend.median),
+        "   per cycle (medians), on top of its row",
+    );
 }
 
 BackendReport[] orderByMinimumRunTime(in BackendReport[] reports) {
