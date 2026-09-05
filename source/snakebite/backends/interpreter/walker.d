@@ -99,6 +99,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.backends.backend: Program;
     import snakebite.backends.delegates: DelegateTarget;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
+    import snakebite.backends.classinfo;
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
@@ -163,13 +164,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // declaration beside each object so a catch can match the actual
     // derived class after the reference has been widened.
     private ClassDeclaration[void*] _classes;
-    private struct GuestClassRuntime {
-        ClassDeclaration declaration;
-        TypeInfo_Class typeInfo;
-        void*[] vtable;
-    }
-
-    private GuestClassRuntime[] _classRuntime;
+    private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
     // A non-root struct can be requested by an interpreted compiler-generated
     // function even when its native TypeInfo was omitted by the compiler. The
     // runtime object is kept by declaration so repeated `typeid` expressions
@@ -4165,78 +4160,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     // Parsed guest classes have no emitted native ClassInfo. Build the
     // native TypeInfo_Class metadata druntime needs for allocation and
-    // classinfo; guest virtual calls still use dmd declarations below.
+    // classinfo; guest virtual calls still use dmd declarations below,
+    // never this vtable, so a guest override's own slot is left however
+    // `snakebite.backends.classinfo.classRuntimeInfo` already leaves it.
     private TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
-        if (declaration is ClassDeclaration.object)
-            return typeid(Object);
+        import snakebite.backends.classinfo:
+            classRuntimeInfo_ = classRuntimeInfo, Hooks;
 
-        foreach (runtime; _classRuntime)
-            if (runtime.declaration is declaration)
-                return runtime.typeInfo;
-
-        // Only the exact native declaration routes to druntime's own
-        // `typeid`: a guest class over a guest class that itself derives
-        // from `Exception` (`OutOfBytesError : MinicerealError :
-        // Exception`) must still recurse into `classRuntimeInfo` for its
-        // own guest base, or `MinicerealError`'s own runtime info - the
-        // one every `catch (MinicerealError)` clause names - never gets
-        // built, and its slot in the base chain silently becomes
-        // `Exception` instead.
-        TypeInfo_Class baseInfo;
-        if (declaration.isInterfaceDeclaration !is null)
-            baseInfo = null;
-        else if (declaration.baseClass is null
-                || declaration.baseClass is ClassDeclaration.object)
-            baseInfo = typeid(Object);
-        else if (declaration.baseClass is ClassDeclaration.throwable)
-            baseInfo = typeid(Throwable);
-        else if (declaration.baseClass is ClassDeclaration.exception)
-            baseInfo = typeid(Exception);
-        else if (declaration.baseClass is ClassDeclaration.errorException)
-            baseInfo = typeid(Error);
-        else
-            baseInfo = classRuntimeInfo(declaration.baseClass);
-
-        auto typeInfo = new TypeInfo_Class;
-        typeInfo.m_flags = cast(TypeInfo_Class.ClassFlags) 0;
-        typeInfo.name = cast(string) declaration.toPrettyChars.toDString;
-        typeInfo.base = baseInfo;
-        const baseVtableLength = baseInfo is null ? 0 : baseInfo.vtbl.length;
-        const vtableLength = declaration.vtbl.length > baseVtableLength
-            ? declaration.vtbl.length : baseVtableLength;
-        typeInfo.vtbl = new void*[vtableLength];
-        if (baseInfo !is null)
-            typeInfo.vtbl[0 .. baseVtableLength] = baseInfo.vtbl[];
-        typeInfo.vtbl[0] = cast(void*) typeInfo;
-        if (declaration.isInterfaceDeclaration is null) {
-            typeInfo.m_init = new byte[](declaration.structsize);
-            if (baseInfo !is null && baseInfo.m_init.length != 0)
-                typeInfo.m_init[0 .. baseInfo.m_init.length] =
-                    baseInfo.m_init[];
-            *cast(void**) typeInfo.m_init.ptr = typeInfo.vtbl.ptr;
-            fillFieldInits(declaration, cast(ubyte*) typeInfo.m_init.ptr);
-        }
-
-        if (declaration.interfaces.length != 0) {
-            import object: Interface;
-
-            typeInfo.interfaces.length = declaration.interfaces.length;
-            foreach (i, base; declaration.interfaces) {
-                auto interfaceInfo = classRuntimeInfo(base.sym);
-                typeInfo.interfaces[i] = Interface(
-                    interfaceInfo,
-                    interfaceInfo.vtbl,
-                    base.offset,
-                );
-            }
-        }
-
-        _classRuntime ~= GuestClassRuntime(
+        return classRuntimeInfo_(
             declaration,
-            typeInfo,
-            typeInfo.vtbl,
+            _classRuntime,
+            Hooks(
+                (FuncDeclaration) => null,
+                (concrete, interface_, interfaceInfo) => interfaceInfo.vtbl,
+                (decl, base) => fillFieldInits(decl, base),
+            ),
         );
-        return typeInfo;
     }
 
     private TypeInfo_Struct structRuntimeInfo(StructDeclaration declaration) {
