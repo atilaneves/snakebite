@@ -173,6 +173,37 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A non-static nested struct with its own declared field carries an
+// outer-function context word besides that field: dmd appends the
+// context field (`vthis`) after every declared field, so the context
+// must not land where the struct's own first field lives. Calling a
+// method that reads the captured local proves the context reached the
+// right place.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "the bytecode compiler rejects constructing a non-static nested "
+            ~ "struct outright"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter crashes building a non-static nested struct "
+            ~ "that has its own declared field"),
+)) {
+    @("nested.staticChain.nestedStructOwnFieldKeepsContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int base = 40;
+                struct Adder {
+                    int extra;
+                    int sum() { return base + extra; }
+                }
+                auto a = Adder(2);
+                return a.sum() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
 // `build!Local` is textually inside `main`'s enclosing module, not `main`
 // itself, but dmd still attaches it to `main`'s own scope: instantiating a
 // template with a locally-declared type argument makes the instantiation
@@ -183,8 +214,8 @@ static foreach (backend; Matrix!()) {
 // a context nothing captured.
 static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.unconfirmed,
-        "the bytecode compiler rejects any local struct declaration "
-            ~ "statement outright, unrelated to this test's own construct - "
+        "the bytecode compiler rejects a `static` local struct "
+            ~ "declaration, unrelated to this test's own construct - "
             ~ "`static struct Local { ... }` never reaches the code this "
             ~ "test means to exercise"),
 )) {
