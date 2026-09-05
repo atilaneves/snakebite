@@ -3903,27 +3903,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // (`core.lifetime._d_newclassT!T()`, no constructor arguments -
         // see that function's own doc in `core/lifetime.d`); the
         // constructor call dmd leaves outside it, on `expression.member`
-        // itself, is never virtual, so `compileNewClass` always binds
-        // `this` to the compiled callee directly rather than reading it
-        // back out of a vtable slot.
-        if (expression.type.ty == Tclass) {
-            compileNewClass(expression);
-            return;
-        }
-
-        // `new S(args)`, whether `S` has its own constructor
-        // (`expression.member`, the same split as a class's `new`) or is
-        // plain-old data initialised positionally from `args` (dmd sets no
-        // `member` then - the same shape `visit(StructLiteralExp)` fills a
-        // value destination from, just through a pointer here since `new`
-        // allocates first). Skipping either would leave a field at its
-        // `.init` value, which druntime's own associative-array
-        // implementation relies on not happening: its `Impl!(K, V)`
-        // allocates its bucket array in exactly such a constructor, and
-        // its `Entry!(K, V)` copies the key positionally the same way.
-        if (expression.type.ty == Tpointer
-                && expression.newtype.isTypeStruct !is null) {
-            compileNewStruct(expression);
+        // itself, is never virtual, so `compileNew` always binds `this`
+        // to the compiled callee directly rather than reading it back out
+        // of a vtable slot.
+        if (expression.type.ty == Tclass
+                || (expression.type.ty == Tpointer
+                    && expression.newtype.isTypeStruct !is null)) {
+            compileNew(expression);
             return;
         }
 
@@ -3933,25 +3919,44 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         expression.lowering.accept(this);
     }
 
-    // `new C(args)`: compiles `expression.lowering`
-    // (`_d_newclassT!C()`) as an ordinary guest call, the same way
+    // `new C(args)` and `new S(args)` share one shape: neither a class's
+    // nor a struct's `this` is ever virtual, so both allocate through
+    // `expression.lowering` (`_d_newclassT!C()` or `_d_newitemT!S()`,
+    // compiled as an ordinary guest call the same way
     // `visit(AssocArrayLiteralExp)` compiles its own lowering rather than
-    // building the object by hand - `_d_newclassT`'s own body reaches
-    // `GC.malloc` (an FFI call, resolved by `Bytecode.allocatorAddress`'s
-    // native-symbol lookup) and `__traits(initSymbol, T)` (served by
-    // `visit(VarExp)`'s `SymbolDeclaration` case from `classRuntimeInfo`'s
-    // own `.init` bytes). Then runs `expression.member` on the allocated
-    // object, the constructor dmd left outside the lowering, through
-    // `compileResolvedCall` - the same call-emission code `compileCall`
-    // uses for every other call, with the receiver pre-bound to the
-    // object just allocated rather than read off a `CallExp`'s own `e1`.
-    private void compileNewClass(NewExp expression) {
+    // building the object by hand - that reaches `GC.malloc`, an FFI call
+    // resolved by `Bytecode.allocatorAddress`'s native-symbol lookup, and
+    // `__traits(initSymbol, T)`, served by `visit(VarExp)`'s
+    // `SymbolDeclaration` case) and then, when `expression.member` is set,
+    // run the constructor dmd left outside the lowering directly on the
+    // allocation through `compileResolvedCall` - the same call-emission
+    // code `compileCall` uses for every other call, with the receiver
+    // pre-bound to the object just allocated rather than read off a
+    // `CallExp`'s own `e1`.
+    //
+    // A struct with no constructor still accepts `args` positionally, one
+    // per field in declaration order - dmd leaves `expression.member` null
+    // then, the same as `StructLiteralExp` does for `Point(3, 4)`, so this
+    // writes each argument through the allocation's own address at that
+    // field's offset, the pointer version of what `visit(StructLiteralExp)`
+    // already does directly into a value destination. Skipping this would
+    // leave a field at its `.init` value, which druntime's own
+    // associative-array implementation relies on not happening: its
+    // `Impl!(K, V)` allocates its bucket array in exactly such a
+    // constructor, and its `Entry!(K, V)` copies the key positionally the
+    // same way. A class has no positional-field form - dmd rejects
+    // `new C(args)` at semantic time unless `C` declares a constructor
+    // that accepts `args`, so `expression.member is null` for a class
+    // means `expression.arguments` is empty too, and there is nothing
+    // left to do.
+    private void compileNew(NewExp expression) {
         if (expression.placement !is null || expression.thisexp !is null
                 || expression.onstack || expression.lowering is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        if (expression.newtype.isTypeClass is null)
+        auto structType = expression.newtype.isTypeStruct;
+        if (expression.newtype.isTypeClass is null && structType is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -3966,41 +3971,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         evalInto(expression.lowering, objectOffset, pointerFacts.size);
 
-        if (expression.member !is null)
-            compileResolvedCall(
-                expression.member, expression.arguments, expression.loc,
-                expressionText(expression), true, () => objectOffset,
-                discardResult);
-    }
-
-    // `new S(args)`: the struct counterpart of `compileNewClass` - a
-    // struct's `this` is never virtual either, so the same "evaluate the
-    // allocation lowering, then run the constructor directly on it" shape
-    // applies when `S` declares one. `expression.lowering` here is
-    // `_d_newitemT!S()`.
-    //
-    // A struct with no constructor still accepts `args` positionally, one
-    // per field in declaration order - dmd leaves `expression.member` null
-    // then, the same as `StructLiteralExp` does for `Point(3, 4)`, so this
-    // writes each argument through the allocation's own address at that
-    // field's offset, the pointer version of what `visit(StructLiteralExp)`
-    // already does directly into a value destination.
-    private void compileNewStruct(NewExp expression) {
-        if (expression.placement !is null || expression.thisexp !is null
-                || expression.onstack || expression.lowering is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        auto structType = expression.newtype.isTypeStruct;
-        if (structType is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        const objectOffset = _destination == discardResult
-            ? reserveTemp(pointerFacts) : _destination;
-
-        evalInto(expression.lowering, objectOffset, pointerFacts.size);
-
         if (expression.member !is null) {
             compileResolvedCall(
                 expression.member, expression.arguments, expression.loc,
@@ -4009,7 +3979,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        if (expression.arguments is null)
+        if (structType is null || expression.arguments is null)
             return;
 
         if (expression.arguments.length > structType.sym.fields.length)
@@ -5306,7 +5276,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // Compiles a call to `callee` with `arguments` already resolved -
     // `compileCall`'s own dispatch for an ordinary `CallExp` and
-    // `compileNewClass`'s call to the constructor a `NewExp` leaves
+    // `compileNew`'s call to the constructor a `NewExp` leaves
     // outside its own allocation lowering both reach this. The "allocate,
     // then call the constructor" split a `NewExp` makes is only about
     // where the receiver comes from, never about how the call itself is
@@ -5955,7 +5925,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // directly rather than through an extra copy. Always `GC.BlkAttr.
     // NO_SCAN`: every element type this compiler accepts for a `new T[]`/
     // an array literal is a scalar with no pointers of its own. A class
-    // object's own allocation is no longer built here - `compileNewClass`
+    // object's own allocation is no longer built here - `compileNew`
     // compiles `_d_newclassT`'s own `GC.malloc` call as part of its
     // lowering instead, which computes its own `GC.BlkAttr` per class
     // (`BlkAttr.FINALIZE` for one with a destructor) the same way real
