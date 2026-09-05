@@ -443,3 +443,81 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+
+// `cast(T) null` where `T` is a delegate: two words, both zero.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read `dg.ptr`"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter refuses a cast_ expression whose operand is " ~
+        "`null`"),
+)) {
+    @("cast.null.delegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool isNull() {
+                    void delegate() dg = cast(void delegate()) null;
+                    return dg.ptr is null && dg.funcptr is null;
+                }
+            },
+            "isNull",
+        );
+    }
+}
+
+// `cast(bool) null` is `false`, `cast(size_t) null` is `0`.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter refuses a cast_ expression whose operand is " ~
+        "`null`"),
+)) {
+    @("cast.null.arithmetic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool zero() {
+                    bool b = cast(bool) null;
+                    size_t s = cast(size_t) null;
+                    ubyte u = cast(ubyte) null;
+                    return !b && s == 0 && u == 0;
+                }
+            },
+            "zero",
+        );
+    }
+}
+
+// A null cast in a narrow-width context: the destination is an `int`
+// field of a struct, so a 16-byte zero fill would clobber a neighbour.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter refuses a cast_ expression whose operand is " ~
+        "`null`"),
+)) {
+    @("cast.null.neighbourField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                struct S {
+                    int a;
+                    int b;
+                    int c;
+                }
+
+                bool keepsNeighbours() {
+                    S s = S(1, 2, 3);
+                    s.b = cast(int) null;
+                    return s.a == 1 && s.b == 0 && s.c == 3;
+                }
+            },
+            "keepsNeighbours",
+        );
+    }
+}
