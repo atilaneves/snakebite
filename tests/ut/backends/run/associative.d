@@ -38,9 +38,7 @@ static foreach (backend; Matrix!(
 
 // Duplicating an associative array preserves its type, including when a
 // struct is the key type. An empty table isolates the cast from AA lookup.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("assocArrayDupCopiesStructKeyContents." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
