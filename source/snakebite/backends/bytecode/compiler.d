@@ -5061,6 +5061,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             callee = calleeExp is null
                 ? null : calleeExp.var.isFuncDeclaration;
         }
+        // `super(args)`/`this(args)` constructor delegation: dmd's own
+        // semantic pass always resolves `expression.f` to the constructor
+        // it picked for this call, but a `FuncDeclaration` compiled through
+        // more than one semantic pass over the same source (druntime's
+        // `object.d` is one - see `resolveDelegatingConstructor`'s own doc)
+        // can still reach here with `expression.f` and `expression.e1`'s
+        // own `SuperExp`/`ThisExp.var` both unset. `resolveDelegatingConstructor`
+        // picks the same constructor dmd's semantic pass would have,
+        // straight from the enclosing class.
+        if (callee is null
+                && (expression.e1.isThisExp !is null
+                    || expression.e1.isSuperExp !is null))
+            callee = resolveDelegatingConstructor(expression);
         if (callee is null)
             return compileIndirectCall(expression, destOffset);
 
@@ -5192,18 +5205,26 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 // another one on the very object it is already
                 // constructing, not a fresh value going into `destOffset`
                 // - dmd represents the receiver as an explicit `this` on
-                // the call (`expression.e1`'s own `DotVarExp.e1`), the
-                // same address a plain method call already reads through
-                // `compileAddress`. Never reached with `destOffset ==
-                // discardResult` for any other constructor call: a struct
-                // literal's own `S(1, 2)` is always compiled into a
-                // destination, since it constructs a new value rather
-                // than delegating on an existing one.
+                // the call, the same address a plain method call already
+                // reads through `compileAddress`. Two shapes reach here:
+                // dmd's semantic pass normally wraps the receiver in a
+                // `DotVarExp` (`expression.e1.isDotVarExp.e1`), but a call
+                // resolved through `resolveDelegatingConstructor` instead
+                // (see that function's own doc) leaves `expression.e1` a
+                // bare `ThisExp`/`SuperExp` with no wrapper - `compileAddress`
+                // resolves either shape, and its own `hiddenThisOffset`
+                // falls back to `_function`'s hidden `this` when a bare
+                // `ThisExp`/`SuperExp` has no resolved `.var` either. Never
+                // reached with `destOffset == discardResult` for any other
+                // constructor call: a struct literal's own `S(1, 2)` is
+                // always compiled into a destination, since it constructs a
+                // new value rather than delegating on an existing one.
                 auto delegatingDot = expression.e1.isDotVarExp;
-                if (delegatingDot !is null
-                        && (delegatingDot.e1.isThisExp !is null
-                            || delegatingDot.e1.isSuperExp !is null)) {
-                    thisOffset = compileAddress(delegatingDot.e1);
+                auto receiver = delegatingDot is null
+                    ? expression.e1 : delegatingDot.e1;
+                if (receiver.isThisExp !is null
+                        || receiver.isSuperExp !is null) {
+                    thisOffset = compileAddress(receiver);
                 } else {
                     if (destOffset == discardResult)
                         throw rejection(_function, expression.loc,
@@ -5279,6 +5300,52 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _callSites ~=
             CallSite(calleeFunction, args, isVoidCallee ? 0 : returnFacts.size);
         emit(&opCall, destOffset, siteIndex, 0);
+    }
+
+    // `super(args)`/`this(args)`, when dmd's semantic pass has already run
+    // (setting `expression.f` to the constructor it picked) but the
+    // `FuncDeclaration` this compiler is walking is a second, independent
+    // semantic pass over the same declaration - druntime's `object.d` is
+    // analysed once for the guest program's own module graph and again for
+    // this compiler's own lookups of `Throwable`/`Exception`, and the
+    // second pass's `super(...)`/`this(...)` nodes keep the pre-semantic
+    // shape: a bare `SuperExp`/`ThisExp` `e1` with neither `.var` nor
+    // `expression.f` set. Picks the same constructor dmd's own semantic
+    // pass would (`expressionsem.d`'s `CallExp` handling for a `super_`/
+    // `this_` receiver): the enclosing class's own constructor for
+    // `this(...)`, or its base class's for `super(...)`, matched by
+    // parameter count - a delegating call always supplies every argument
+    // explicitly, so no default-argument application ever has to break a
+    // tie between overloads here. Returns `null`, the same as an
+    // unresolved ordinary call, when no constructor matches.
+    private imported!"dmd.func".FuncDeclaration resolveDelegatingConstructor(
+        CallExp expression,
+    ) {
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+        const isSuper = expression.e1.isSuperExp !is null;
+        auto aggregate = _function.isThis();
+        auto class_ = aggregate is null ? null : aggregate.isClassDeclaration();
+
+        auto ctorHead = isSuper
+            ? (class_ is null || class_.baseClass is null
+                ? null : class_.baseClass.ctor)
+            : (aggregate is null ? null : aggregate.ctor);
+
+        const argumentCount =
+            expression.arguments is null ? 0 : expression.arguments.length;
+
+        for (auto symbol = ctorHead; symbol !is null; ) {
+            auto candidate = symbol.isFuncDeclaration();
+            symbol = candidate is null ? null : candidate.overnext;
+            if (candidate is null || candidate.isCtorDeclaration is null)
+                continue;
+
+            if (typeFunctionOf(candidate).parameterList.length == argumentCount)
+                return candidate;
+        }
+
+        return null;
     }
 
     // `fn(args)` where dmd left `expression.f` unresolved: a call through a
