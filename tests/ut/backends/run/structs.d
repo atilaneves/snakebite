@@ -1830,3 +1830,45 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// `new S(a, b)` with no declared constructor writes each argument
+// straight into its own field's offset. `a` and `b` are both bitfields
+// packed into the same storage byte, so a field-wide write for `b`
+// would clobber the bits `a` already wrote there instead of only setting
+// `b`'s own bits. `compileNew`'s no-constructor branch now runs the same
+// `isSupportedStructLiteral` guard `visit(StructLiteralExp)` already
+// uses, so the bytecode compiler refuses this `new` outright rather than
+// compile it to that wrong answer. Read back through a raw `ubyte*` on
+// the backends that still run it - a bitfield's own read is refused
+// elsewhere in every backend, so this checks the packed byte directly
+// instead - the two nibbles must both still hold `a`'s 3 and `b`'s 5,
+// packed as `0x53` the same way native layout packs them.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "`compileNew` refuses a struct with a bitfield field: " ~
+            "`isSupportedStructLiteral` rejects it before the " ~
+            "positional-field-init loop can write field-wide over a " ~
+            "sibling bitfield's bits"),
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE cannot reinterpret cast `S*` to `ubyte*`"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter's own `initializeStructArguments` has the same " ~
+            "gap - out of scope here, tracked separately"),
+)) {
+    @("newStructWithBitfieldSiblingsSurvive." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                ubyte a : 4;
+                ubyte b : 4;
+            }
+
+            void main() {
+                auto s = new S(3, 5);
+                ubyte* raw = cast(ubyte*) s;
+                assert(*raw == 0x53);
+            }
+        });
+    }
+}
