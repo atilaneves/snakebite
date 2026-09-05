@@ -177,6 +177,37 @@ public struct CallPlan {
             }
         }
 
+        // Whether `i`'s own eightbytes all still fit in whichever register
+        // file(s) they classify to - never a partial answer, since the
+        // SysV ABI passes a value classified into more than one eightbyte
+        // either entirely in registers or entirely on the stack, never
+        // split across that boundary. A mixed INTEGER/SSE pair is exempt:
+        // `load`'s own `forceInteger`/`forceFloating` already reclassifies
+        // it atomically to whichever file still has room (or throws when
+        // neither does), so it never needs deferring here.
+        bool fitsRegisters(in size_t i) {
+            const plan = _arguments[i];
+            size_t integerLanes;
+            size_t floatingLanes;
+            foreach (register; plan.registers[0 .. plan.count]) {
+                if (register.kind == Register.Kind.sse)
+                    ++floatingLanes;
+                else
+                    ++integerLanes;
+            }
+
+            if (integerLanes == 1 && floatingLanes == 1)
+                return true;
+
+            if (integerLanes > 0
+                    && integerCount + integerLanes > maxIntegerArguments)
+                return false;
+            if (floatingLanes > 0
+                    && floatingCount + floatingLanes > maxFloatingArguments)
+                return false;
+            return true;
+        }
+
         size_t firstExplicit;
         if (_hiddenContext) {
             firstExplicit = 1;
@@ -189,12 +220,70 @@ public struct CallPlan {
         if (_hiddenContext && !_contextPrecedesHiddenReturnPointer)
             load(0);
 
+        // dmd's reversed register assignment (see `_reversedArguments`)
+        // only ever reorders which parameter reaches the register file
+        // first - the stack is a fixed extension of that same file, read
+        // by the callee in ordinary declaration order regardless. A
+        // parameter that does not fit is loaded in a second pass, in
+        // ascending order, once every parameter that does fit has claimed
+        // its register.
+        size_t[maxArguments] spilled;
+        size_t spilledCount;
+
+        void visit(in size_t i) {
+            if (fitsRegisters(i))
+                load(i);
+            else
+                spilled[spilledCount++] = i;
+        }
+
         if (_reversedArguments)
             foreach_reverse (i; firstExplicit .. arguments.length)
-                load(i);
+                visit(i);
         else
             foreach (i; firstExplicit .. arguments.length)
-                load(i);
+                visit(i);
+
+        import std.algorithm: sort;
+        sort(spilled[0 .. spilledCount]);
+
+        bool needsIntegerPad;
+        bool needsFloatingPad;
+        foreach (i; spilled[0 .. spilledCount]) {
+            const plan = _arguments[i];
+            foreach (register; plan.registers[0 .. plan.count]) {
+                if (register.kind == Register.Kind.sse)
+                    needsFloatingPad = true;
+                else
+                    needsIntegerPad = true;
+            }
+        }
+
+        // A register file a spilled argument cannot fit into is never
+        // reused by that same argument's own later eightbytes, or the
+        // callee (compiled by the same host compiler, and so subject to
+        // the same rule) would read them out of whichever register this
+        // caller left them in instead of off the stack where it expects
+        // an entirely-spilled argument's eightbytes to be. The leftover
+        // register(s) simply go unused - a dummy word here keeps this
+        // call's own word positions - not the callee's registers, which
+        // never see these - aligned with `dispatch`'s register/stack
+        // split, which only ever looks at position.
+        if (needsIntegerPad)
+            while (integerCount < maxIntegerArguments) {
+                words[slot] = 0;
+                kinds[slot++] = Register.Kind.integer;
+                ++integerCount;
+            }
+        if (needsFloatingPad)
+            while (floatingCount < maxFloatingArguments) {
+                words[slot] = 0;
+                kinds[slot++] = Register.Kind.sse;
+                ++floatingCount;
+            }
+
+        foreach (i; spilled[0 .. spilledCount])
+            load(i);
 
         const result = invoke(cast(void*) address,
             words[0 .. slot], kinds[0 .. slot], _return);

@@ -138,6 +138,22 @@ private extern(C) int snakebite_ut_seven(
     return a + b + c + d + e + f + g;
 }
 
+private struct TwoWords {
+    size_t first;
+    size_t second;
+}
+
+// Five plain `int` parameters leave one integer register free - not
+// enough for `value`'s own two eightbytes. The SysV ABI never splits a
+// multi-eightbyte argument across the register/stack boundary: `value`
+// must travel entirely on the stack, leaving that one leftover register
+// unused, rather than half in it and half on the stack.
+private extern(C) TwoWords snakebite_ut_split_after_five(
+    int a, int b, int c, int d, int e, TwoWords value,
+) {
+    return TwoWords(value.first + a + b + c + d + e, value.second);
+}
+
 
 @("called.refParameter")
 unittest {
@@ -406,4 +422,46 @@ unittest {
     ]);
 
     result.should == 28;
+}
+
+
+// Regression for the guest exception's `msg` reading garbage when a
+// native constructor's arguments needed more than six integer ABI words
+// (issue #272): five plain `int`s leave one integer register free, one
+// short of `value`'s own two - so `value` must travel entirely on the
+// stack. A caller that instead let `value`'s first eightbyte claim that
+// one leftover register, spilling only the second, hands the callee a
+// length/pointer pair built from two unrelated words.
+@("called.splitEightbyteSpillsWhole")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct TwoWords {
+            size_t first;
+            size_t second;
+        }
+
+        extern(C) TwoWords snakebite_ut_split_after_five(
+            int a, int b, int c, int d, int e, TwoWords value,
+        );
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_split_after_five");
+    assert(function_ !is null,
+        "No `snakebite_ut_split_after_five` in the guest program");
+
+    PlanCache cache;
+    int a = 1;
+    int b = 2;
+    int c = 3;
+    int d = 4;
+    int e = 5;
+    TwoWords value = TwoWords(100, 200);
+    TwoWords result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &a, cast(const void*) &b, cast(const void*) &c,
+        cast(const void*) &d, cast(const void*) &e,
+        cast(const void*) &value,
+    ]);
+
+    result.should == TwoWords(115, 200);
 }
