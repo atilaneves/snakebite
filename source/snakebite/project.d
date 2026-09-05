@@ -27,6 +27,17 @@ public Project loadProject(
     in string[] importPaths = null,
     in string[] stringImportPaths = null,
 ) {
+    return loadProject(
+        directory,
+        sourceSet(directory, importPaths, stringImportPaths),
+    );
+}
+
+
+// Finding the sources (`dub describe` for a dub project) and running the
+// frontend over them are separate steps so a caller can time the second
+// alone; see `snakebite.execution.prepareProject`.
+public Project loadProject(in string directory, SourceSet sources) {
     import snakebite.backends: Program;
     import snakebite.frontend.compiler: FrontendFlags, parseRootModules;
     import std.algorithm.iteration: map;
@@ -36,11 +47,7 @@ public Project loadProject(
     Project project;
     project.directory = directory.absolutePath.buildNormalizedPath;
     project.name = project.directory.baseName;
-    project.sources = sourceSet(
-        project.directory,
-        importPaths,
-        stringImportPaths,
-    );
+    project.sources = sources;
 
     const flags = FrontendFlags(
         project.sources.flags.compilerArguments
@@ -66,13 +73,18 @@ public SourceSet sourceSet(
 ) {
     import std.conv: text;
     import std.file: exists, isDir;
+    import std.path: absolutePath, buildNormalizedPath;
 
     if (!directory.exists || !directory.isDir)
         throw new Exception(text("not a directory: ", directory));
 
-    return isDubProject(directory)
-        ? dubSourceSet(directory)
-        : bareSourceSet(directory, importPaths, stringImportPaths);
+    // Absolute so the import paths derived from it work from any working
+    // directory, e.g. as `-I` flags to a subprocess run elsewhere.
+    const normalized = directory.absolutePath.buildNormalizedPath;
+
+    return isDubProject(normalized)
+        ? dubSourceSet(normalized)
+        : bareSourceSet(normalized, importPaths, stringImportPaths);
 }
 
 
