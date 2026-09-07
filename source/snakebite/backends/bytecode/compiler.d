@@ -2227,6 +2227,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto value = initializer is null
             ? defaultInit(variable.type, variable.loc)
             : initializerValueOf(initializer);
+
+        // dmd's CTFE assembles a string it built itself (`~=`/`Appender`,
+        // the way `std.conv`'s own `enumRep` does) as an `ArrayLiteralExp`
+        // of individual code units, not a `StringExp`: CTFE has no source
+        // text to point back into for a value it assembled itself. dmd's
+        // own `toStringExp` already knows how to fold such a literal back
+        // into a `StringExp`, so ask it before checking what this compiler
+        // supports - that keeps this compiler's static-data layout down to
+        // the one `StringExp` case `nativelayout.storeValue` already
+        // handles.
+        if (auto literal = value.isArrayLiteralExp) {
+            import dmd.expressionsem: toStringExp;
+
+            if (auto folded = toStringExp(literal))
+                value = folded;
+        }
+
         if (!isSupportedStaticInitializer(variable.type, facts, value))
             throw rejection(_function, variable.loc,
                 text("the variable `", variable.toString, "`"));

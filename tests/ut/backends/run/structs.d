@@ -2750,11 +2750,9 @@ static foreach (backend; Matrix!(
 
 // Pins `to!string` on an enum, the same way `toStringOnInt` above pins it
 // on a plain `int`: `toImpl`'s `enumRep` reads the enum's own member names,
-// a `static` array initializer neither backend below can compile yet.
+// a `static` initializer dmd's CTFE folds to an `ArrayLiteralExp` of code
+// units rather than a `StringExp`.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "bytecode compiler cannot compile the variable `enumRep` in " ~
-        "`toImpl`"),
     Omit!(Interpreter, Because.unconfirmed,
         "interpreter: assertion failed: " ~
         "`assert(to(Color.green) == \"green\")`"),

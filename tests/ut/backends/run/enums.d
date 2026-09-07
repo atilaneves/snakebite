@@ -70,3 +70,28 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// `to!string` on a two-member enum: `toImpl`'s `enumRep` static holds
+// only one member name at a time - `off`'s member index is `0`, the
+// smallest a `final switch` in `toStr` can pick, unlike the three-member
+// enum `toStringOnEnum` (`structs.d`) pins.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "interpreter: assertion failed: " ~
+        "`assert(to(Setting.on) == \"on\")`"),
+)) {
+    @("toStringOnTwoMemberEnum." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.conv: to;
+
+            enum Setting { off, on }
+
+            void main() {
+                assert(to!string(Setting.off) == "off");
+                assert(to!string(Setting.on) == "on");
+            }
+        });
+    }
+}
