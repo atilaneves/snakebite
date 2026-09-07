@@ -331,3 +331,273 @@ static foreach (backend; Matrix!(
         );
     }
 }
+
+// A nested struct with a user constructor, bound to a variable: dmd
+// rewrites `auto a = Adder(2)` into a default-init struct literal assigned
+// to `a` followed by `a.__ctor(2)`, so the struct literal is what supplies
+// the outer-context field, and the constructor runs on storage that
+// already has it.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter fails a user-constructor call on a non-static "
+            ~ "nested struct"),
+)) {
+    @("nested.staticChain.ctorCallOnVariableKeepsContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int base = 40;
+                struct Adder {
+                    int extra;
+                    this(int e) { extra = e; }
+                    int sum() { return base + extra; }
+                }
+                auto a = Adder(2);
+                return a.sum() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// The constructor body itself reads the enclosing local, so the context
+// has to be in place before the constructor runs, not only before a
+// later method call.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter crashes running a non-static nested struct's "
+            ~ "constructor that reads an enclosing local"),
+)) {
+    @("nested.staticChain.ctorBodyReadsEnclosingLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int base = 40;
+                struct Adder {
+                    int total;
+                    this(int e) { total = base + e; }
+                }
+                auto a = Adder(2);
+                return a.total == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A constructor-call temporary used directly as an rvalue, never bound to
+// a named variable: dmd keeps `S(args)` as `S.init.__ctor(args)` - a call
+// whose receiver is a struct literal - rather than splitting it into a
+// variable initialisation and a separate constructor call. The receiver
+// literal is where dmd expects the outer context to be filled in.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter fails a user-constructor call on a non-static "
+            ~ "nested struct"),
+)) {
+    @("nested.staticChain.ctorCallTemporaryKeepsContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int base = 40;
+                struct Adder {
+                    int extra;
+                    this(int e) { extra = e; }
+                    int sum() { return base + extra; }
+                }
+                return Adder(2).sum() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `new S(args)` with no constructor fills the declared fields positionally
+// from the arguments; the outer-context field has no argument of its own
+// and dmd expects whoever allocates the object to fill it in.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter crashes on `new` of a non-static nested struct"),
+)) {
+    @("nested.staticChain.newPositionalKeepsContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int base = 40;
+                struct Adder {
+                    int extra;
+                    int sum() { return base + extra; }
+                }
+                auto a = new Adder(2);
+                return a.sum() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `new S` with no arguments at all: the allocation copies `S.init`, whose
+// outer-context field is null, so the context still has to be written
+// after the allocation.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter fails `new` of a non-static nested struct"),
+)) {
+    @("nested.staticChain.newNoArgsKeepsContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int base = 40;
+                struct Reader {
+                    int read() { return base + 2; }
+                }
+                auto r = new Reader;
+                return r.read() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `new S(args)` with a user constructor: the constructor runs on the
+// allocation, so the context must already be there when it does.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter crashes on `new` of a non-static nested struct"),
+)) {
+    @("nested.staticChain.newCtorKeepsContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int base = 40;
+                struct Adder {
+                    int extra;
+                    this(int e) { extra = e; }
+                    int sum() { return base + extra; }
+                }
+                auto a = new Adder(2);
+                return a.sum() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// The literal is built inside a nested function of the struct's own
+// enclosing function, one frame away from the context it captures: the
+// context written into the literal must be the enclosing function's
+// frame, not the frame the literal happens to be built in.
+static foreach (backend; Matrix!()) {
+    @("nested.staticChain.literalBuiltInNestedFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int base = 40;
+                struct Reader {
+                    int read() { return base + 2; }
+                }
+                int build() { return Reader().read(); }
+                return build() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// The literal is built inside another nested struct's method: reaching the
+// shared enclosing frame from there goes through the builder's own
+// context field first.
+static foreach (backend; Matrix!()) {
+    @("nested.staticChain.literalBuiltInSiblingStructMethod." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int base = 40;
+                struct Reader {
+                    int read() { return base + 2; }
+                }
+                struct Builder {
+                    int go() { return Reader().read(); }
+                }
+                return Builder().go() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A struct declared inside a nested struct's method captures that method's
+// frame; reading `main`'s local from the inner struct then alternates
+// struct, function, struct, function all the way out.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter fails a struct nested inside a nested struct's "
+            ~ "method"),
+)) {
+    @("nested.staticChain.structInsideNestedStructMethod." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int base = 40;
+                struct Outer {
+                    int bump;
+                    int go() {
+                        int extra = bump;
+                        struct Inner {
+                            int r() { return base + extra; }
+                        }
+                        return Inner().r();
+                    }
+                }
+                return Outer(2).go() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A struct nested in a class method captures that method's frame the same
+// way as one nested in a free function; the class's own `this` is not
+// visible to it, only the method's locals are.
+static foreach (backend; Matrix!()) {
+    @("nested.staticChain.structInClassMethodReadsLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C {
+                int field = 2;
+                int go() {
+                    int base = 40 + field;
+                    struct Reader {
+                        int read() { return base; }
+                    }
+                    return Reader().read();
+                }
+            }
+            int main() {
+                return new C().go() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A struct declared by a template mixin mixed into a function is nested in
+// that function: the mixin is transparent to the struct's parent lookup.
+static foreach (backend; Matrix!()) {
+    @("nested.staticChain.structFromTemplateMixin." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            mixin template Decl() {
+                struct Reader {
+                    int read() { return base + 2; }
+                }
+            }
+            int main() {
+                int base = 40;
+                mixin Decl;
+                return Reader().read() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
