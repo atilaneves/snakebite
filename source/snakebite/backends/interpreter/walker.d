@@ -157,6 +157,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // answers so execution does not repeat the same AST walk for functions
     // that stay in this evaluator's program.
     private Cache!(FuncDeclaration, bool) _needsClosure;
+    // These properties of a callee do not change while an evaluator runs.
+    // Keep them apart from call-site decisions: delegate arguments and the
+    // active nesting context still need to be checked for every call.
+    private struct DispatchFacts {
+        bool _isGuest;
+        bool _isTemplate;
+        bool _hasNativeSymbol;
+    }
+
+    private Cache!(FuncDeclaration, DispatchFacts) _dispatchFacts;
     version(unittest) private size_t _staticLookups;
     // A guest pointer can live in an unscanned frame, so the evaluator keeps
     // each backing allocation reachable for as long as guest state can be.
@@ -399,6 +409,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return _plans.hasNativeSymbol(function_);
     }
 
+    private DispatchFacts dispatchFactsOf(FuncDeclaration function_) {
+        if (auto cached = function_ in _dispatchFacts)
+            return *cached;
+
+        const hasBody = function_.fbody !is null;
+        const isTemplate = function_.isInstantiated() !is null && hasBody;
+        const facts = DispatchFacts(
+            _program.isInterpreted(function_),
+            isTemplate,
+            isTemplate && hasNativeSymbol(function_),
+        );
+        _dispatchFacts[function_] = facts;
+        return facts;
+    }
+
     // `function_`'s frame layout, from the cache; computed on its first
     // call. The returned pointer aims into the cache and stays valid: AA
     // entries do not move.
@@ -579,19 +604,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // no function name, package, or template argument gets a vote.
         // Other non-root declarations still run as native code already
         // linked into the process.
-        const isGuest = _program.isInterpreted(function_);
-        const isTemplate = function_.isInstantiated() !is null
-            && function_.fbody !is null;
+        const dispatchFacts = dispatchFactsOf(function_);
         const interpretsDelegateArgument = function_.fbody !is null
             && hasInterpretedDelegateArgument(callSite);
         // A template instance can inherit the guest module of its call site,
         // even when dmd also emitted a native specialization for it. Check
         // the process symbol for every instantiated body so guest ownership
         // does not force a duplicate walk of code druntime already provides.
-        const interpretsTemplate = isTemplate
-            && (!hasNativeSymbol(function_)
+        const interpretsTemplate = dispatchFacts._isTemplate
+            && (!dispatchFacts._hasNativeSymbol
                 || interpretsDelegateArgument);
-        const interprets = isGuest && !isTemplate
+        const interprets = dispatchFacts._isGuest
+            && !dispatchFacts._isTemplate
             || interpretsTemplate
             || interpretsDelegateArgument
             || isNestedInCurrentlyWalkedFunction(function_);
@@ -1888,8 +1912,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return context + closure.slotOf(variable).offset;
         }
 
-        if (_layout.hasSlot(variable))
-            return _frameBase + _layout.offsetOf(variable);
+        if (auto slot = _layout.slotOf(variable))
+            return _frameBase + slot.offset;
 
         if (owner is null)
             throw new SnakebiteException(
@@ -1907,8 +1931,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return closure.slotOf(variable).isRef;
         }
 
-        if (_layout.hasSlot(variable))
-            return _layout.isRef(variable);
+        if (auto slot = _layout.slotOf(variable))
+            return slot.isRef;
 
         return owner !is null && layoutOf(owner).isRef(variable);
     }
@@ -1960,9 +1984,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto base = _frameBase;
         auto layout = _layout;
-        if (!layout.hasSlot(variable)) {
-                if (owner is null)
-                    throw new SnakebiteException(
+        auto slot = layout.slotOf(variable);
+        if (slot is null) {
+            if (owner is null)
+                throw new SnakebiteException(
                     text("interpreter cannot reach `", original.toString,
                         "` (", variable.ident.toString, ") in `",
                         _function.ident.toString,
@@ -1972,18 +1997,23 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
             base = contextOf(owner);
             layout = layoutOf(owner);
+            slot = layout.slotOf(variable);
         }
 
-        auto slot = base + layout.offsetOf(variable);
+        if (slot is null)
+            return base + layout.offsetOf(variable);
+
+        auto address = base + slot.offset;
 
         // A `ref` variable's own slot holds the address of the referenced
         // storage, not the storage itself. Reading through it once more here,
         // the one place every read, write and address-of a variable resolves
         // its slot, makes a reach of the variable reach its target instead.
-        if (layout.isRef(variable))
-            return cast(ubyte*) loadIntegral(slot, size_t.sizeof, false);
+        if (slot.isRef)
+            return cast(ubyte*) loadIntegral(
+                address, size_t.sizeof, false);
 
-        return slot;
+        return address;
     }
 
     extern(D) private ubyte* staticSlotOf(VarDeclaration variable) {
