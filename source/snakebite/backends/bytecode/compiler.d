@@ -2985,7 +2985,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
-    // `p[0 .. n] = q[];`/`a[] = b[];` for a dynamic-length target: a
+    // `p[0 .. n] = q[];`/`a[] = b[];` (array-to-array) or
+    // `p[a .. b] = v;` (scalar fill) for a dynamic-length target: a
     // pointer sliced to a run-time length (`_d_newclassT`'s own
     // `p[0 .. init.length] = init[];`, `core/lifetime.d`) or a dynamic
     // array's own whole slice. Neither side has a compile-time element
