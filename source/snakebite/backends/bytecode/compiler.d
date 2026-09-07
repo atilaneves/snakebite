@@ -4772,18 +4772,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `bool` - and the comparison opcode leaves its answer in the first
     // of those, copied out to `destOffset` only when it differs.
     private void compileComparison(BinExp expression, in size_t destOffset) {
-        import dmd.astenums: Tclass, Tpointer, Tstruct;
+        import dmd.astenums: Tarray, Tclass, Tpointer, Tstruct;
 
         const operandFacts = TypeFacts.of(expression.e1.type);
 
-        // `is`/`!is` on a struct is always a raw byte compare, over the
-        // struct's own native layout - dmd rewrites a field-less `==`
-        // (bitwise-comparable struct, no `opEquals`) into this same
-        // `IdentityExp`, so both arrive here needing exactly what
-        // `opStaticArrayEqual` already does for a static array or a
-        // delegate: `operandFacts.size` bytes at each operand's offset,
-        // memcmp'd whole.
-        if (expression.e1.type.ty == Tstruct) {
+        // `is`/`!is` on a struct or a dynamic array is always a raw byte
+        // compare, over the operand's own native layout - dmd rewrites a
+        // field-less `==` (bitwise-comparable struct, no `opEquals`) into
+        // this same `IdentityExp`, and for two dynamic arrays folds `is`
+        // itself into a compare of the whole two-word `{length, ptr}` pair
+        // (dmd's own `e2ir.d`, `visitIdentity`), not just the pointer -
+        // both arrive here needing exactly what `opStaticArrayEqual`
+        // already does for a static array or a delegate: `operandFacts.size`
+        // bytes at each operand's offset, memcmp'd whole. `==`/`!=` on two
+        // dynamic arrays never reach here: `visitUnloweredEqual` routes
+        // those to `compileMemcmpDynamicArrayEquality`'s per-element
+        // compare first.
+        if (expression.e1.type.ty == Tstruct
+                || expression.e1.type.ty == Tarray) {
             if (expression.op != EXP.identity && expression.op != EXP.notIdentity)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
