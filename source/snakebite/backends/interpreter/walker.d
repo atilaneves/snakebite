@@ -2316,20 +2316,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (field.type.ty == Tarray)
                 continue;
 
-            // A pointer field is a plain machine word with no copy hook
-            // of its own either - `Type.isIntegral` is `false` for
-            // `Tpointer` (a pointer is not an arithmetic type), so
-            // without this the check below would reject it the same way
-            // it would reject a field whose width this evaluator has no
-            // native layout for.
-            if (field.type.ty == Tpointer)
-                continue;
-
-            // An associative-array field is a plain machine word too - a
-            // pointer to druntime's own hash table, with no copy hook of
-            // its own - the same reason `Tpointer` above is a bytewise
-            // copy rather than a rejection.
-            if (field.type.ty == Taarray)
+            // A pointer, associative-array or class-reference field is a
+            // plain machine word too - respectively a raw address, a
+            // pointer to druntime's own hash table, and a pointer to the
+            // object's own instance - none with a copy hook of its own,
+            // the same reason `Tarray` above is a bytewise copy rather
+            // than a rejection.
+            if (field.type.ty == Tpointer || field.type.ty == Taarray
+                || field.type.ty == Tclass)
                 continue;
 
             const facts = factsOf(field.type);
