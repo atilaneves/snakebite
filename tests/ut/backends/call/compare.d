@@ -4,6 +4,53 @@ module ut.backends.call.compare;
 import ut.backends;
 
 
+static foreach (backend; Matrix!()) {
+    @("compare.integralConditions." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int signedBranches(long a, long b) {
+                    int bits;
+                    if (a < b) bits |= 1;
+                    if (a <= b) bits |= 2;
+                    if (a > b) bits |= 4;
+                    if (a >= b) bits |= 8;
+                    if (a == b) bits |= 16;
+                    if (a != b) bits |= 32;
+                    return bits;
+                }
+
+                int unsignedBranches(ulong a, ulong b) {
+                    int bits;
+                    if (a < b) bits |= 1;
+                    if (a <= b) bits |= 2;
+                    if (a > b) bits |= 4;
+                    if (a >= b) bits |= 8;
+                    if (a == b) bits |= 16;
+                    if (a != b) bits |= 32;
+                    return bits;
+                }
+
+                bool conditions() {
+                    int sum;
+                    for (int i = -3; i < 2; ++i) sum += i;
+                    return sum == -5
+                        && signedBranches(-1, 0) == 35
+                        && signedBranches(0, -1) == 44
+                        && signedBranches(-1, -1) == 26
+                        && unsignedBranches(0, ulong.max) == 35
+                        && unsignedBranches(ulong.max, 0) == 44
+                        && unsignedBranches(ulong.max, ulong.max) == 26;
+                }
+            },
+            "conditions",
+        );
+    }
+}
+
+
 // `1 < 2` is true and `2 < 1` is false. Both orderings are here so a
 // comparison that always answers the same way fails one of them, and both
 // operands are calls so the answer cannot be folded before a backend runs.
