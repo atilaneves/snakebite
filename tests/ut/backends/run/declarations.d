@@ -213,3 +213,53 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// The same CTFE-folded shape as `staticImmutableStringFromCtfeCall` with
+// two-byte code units: the static's pointer and length must describe
+// `wchar`s, not bytes.
+static foreach (backend; Matrix!()) {
+    @("staticImmutableWstringFromCtfeCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            wstring build() {
+                wstring result;
+                result ~= "ab"w;
+                result ~= "c"w;
+                return result;
+            }
+
+            static immutable wstring text = build();
+
+            void main() {
+                assert(text.length == 3);
+                assert(text == "abc"w);
+                assert(text[2] == 'c');
+            }
+        });
+    }
+}
+
+// The same CTFE-folded shape with four-byte code units.
+static foreach (backend; Matrix!()) {
+    @("staticImmutableDstringFromCtfeCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            dstring build() {
+                dstring result;
+                result ~= "ab"d;
+                result ~= "c"d;
+                return result;
+            }
+
+            static immutable dstring text = build();
+
+            void main() {
+                assert(text.length == 3);
+                assert(text == "abc"d);
+                assert(text[2] == 'c');
+            }
+        });
+    }
+}

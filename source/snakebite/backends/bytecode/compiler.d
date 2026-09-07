@@ -768,14 +768,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private StaticSlot[VarDeclaration] _staticSlots;
     private ubyte[] _staticInitialValue;
     private uint _staticAlignment = 1;
-    // Owns the byte content of a `static` string dmd's CTFE folded into an
-    // `ArrayLiteralExp` of individual code units - unlike a `StringExp`,
-    // which points at bytes a dmd module already keeps alive, this array
-    // literal has no storage of its own until this compiler builds one.
-    // Held here, and handed to the built `Function` below, so the pointer
-    // this compiler writes into `_staticInitialValue` stays valid for as
-    // long as the `Function` that reads it does.
-    private ubyte[][] _staticStringData;
     // Set once nothing after the statement just compiled can run: a
     // `return`, a `continue`, or an `if`/loop whose every path already
     // ends one of those. Every statement kind after one in the same block
@@ -1016,7 +1008,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _instructions, _constants, _callSites, _assertSites,
             exceptionHandlers,
             staticData,
-            _staticStringData,
             _tempSize, _tempAlignment,
             _closureOffset, contextOffset,
             _closureOffset == size_t.max ? 0 : _closureLayout.size,
@@ -2236,6 +2227,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto value = initializer is null
             ? defaultInit(variable.type, variable.loc)
             : initializerValueOf(initializer);
+
+        // dmd's CTFE assembles a string it built itself (`~=`/`Appender`,
+        // the way `std.conv`'s own `enumRep` does) as an `ArrayLiteralExp`
+        // of individual code units, not a `StringExp`: CTFE has no source
+        // text to point back into for a value it assembled itself. dmd's
+        // own `toStringExp` already knows how to fold such a literal back
+        // into a `StringExp`, so ask it before checking what this compiler
+        // supports - that keeps this compiler's static-data layout down to
+        // the one `StringExp` case `nativelayout.storeValue` already
+        // handles.
+        if (auto literal = value.isArrayLiteralExp) {
+            import dmd.expressionsem: toStringExp;
+
+            if (auto folded = toStringExp(literal))
+                value = folded;
+        }
+
         if (!isSupportedStaticInitializer(variable.type, facts, value))
             throw rejection(_function, variable.loc,
                 text("the variable `", variable.toString, "`"));
@@ -2247,47 +2255,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _staticAlignment = facts.alignment;
         _staticSlots[variable] = StaticSlot(offset);
 
-        if (auto literal = value.isArrayLiteralExp)
-            storeStaticFoldedString(literal, variable.type,
-                _staticInitialValue.ptr + offset);
-        else
-            storeValue(
-                variable.type,
-                facts,
-                value,
-                _staticInitialValue.ptr + offset,
-            );
+        storeValue(
+            variable.type,
+            facts,
+            value,
+            _staticInitialValue.ptr + offset,
+        );
         return offset;
-    }
-
-    // A `static` string dmd's CTFE folds down from a call - `toStr!T(x)`
-    // building its answer with `~=`/`Appender`, say - lands as this
-    // `ArrayLiteralExp` of individual code units instead of a `StringExp`:
-    // CTFE has no source text to point back into for a value it assembled
-    // itself. Unlike `nativelayout.storeValue`'s `StringExp` case, which
-    // points straight at bytes a dmd module already owns, this compiler
-    // must build the bytes itself and keep them alive on `_staticStringData`
-    // for as long as the `Function` holding this pointer does.
-    private void storeStaticFoldedString(
-        ArrayLiteralExp literal,
-        Type type,
-        ubyte* place,
-    ) {
-        import dmd.expressionsem: toInteger;
-        import dmd.typesem: nextOf, size;
-        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset,
-            storeIntegral;
-
-        const elementSize = type.nextOf.size;
-        auto bytes = new ubyte[](literal.elements.length * elementSize);
-        foreach (i, element; *literal.elements)
-            storeIntegral(
-                bytes.ptr + i * elementSize, element.toInteger, elementSize);
-        _staticStringData ~= bytes;
-
-        storeIntegral(
-            place + arrayLengthOffset, literal.elements.length, size_t.sizeof);
-        *cast(const(void)**) (place + arrayPointerOffset) = bytes.ptr;
     }
 
     private static bool isSupportedStaticInitializer(
@@ -2307,24 +2281,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto element = type.nextOf;
             return type.ty == Tarray && facts.size == arrayValueSize
                 && element !is null && literal.sz == element.size;
-        }
-
-        // dmd's CTFE assembles a string it built itself (rather than
-        // sliced from source text) as an array literal of individual code
-        // units - see `storeStaticFoldedString`. Every element must be a
-        // folded integer, or this is some other array literal this
-        // compiler does not lay out as static data.
-        if (auto literal = value.isArrayLiteralExp) {
-            auto element = type.nextOf;
-            if (type.ty != Tarray || facts.size != arrayValueSize
-                    || element is null || !TypeFacts.of(element).isIntegral)
-                return false;
-
-            foreach (item; *literal.elements)
-                if (item.isIntegerExp is null)
-                    return false;
-
-            return true;
         }
 
         if (isFloatingType(type))

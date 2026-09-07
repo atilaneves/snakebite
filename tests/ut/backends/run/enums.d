@@ -71,7 +71,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-
 // `to!string` on a two-member enum: `toImpl`'s `enumRep` static holds
 // only one member name at a time - `off`'s member index is `0`, the
 // smallest a `final switch` in `toStr` can pick, unlike the three-member
