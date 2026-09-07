@@ -41,32 +41,18 @@ static foreach (backend; Matrix!(
     @("exception.enforce.lazyMessage." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        static if (is(backend == Interpreter)) {
-            auto module_ = parseSnippet(q{
-                void result() {
-                    import std.exception: enforce;
+        true.shouldBeRetOf!(backend, q{
+            bool result() {
+                import std.exception: enforce;
 
+                try
                     enforce(false, "expected");
-                }
-            });
-            auto function_ = findFunction(module_, "result");
+                catch (Exception exception)
+                    return exception.msg == "expected";
 
-            interpreter(module_).call(function_, null, [])
-                .shouldThrowWithMessage("expected");
-        } else {
-            true.shouldBeRetOf!(backend, q{
-                bool result() {
-                    import std.exception: enforce;
-
-                    try
-                        enforce(false, "expected");
-                    catch (Exception exception)
-                        return exception.msg == "expected";
-
-                    return false;
-                }
-            }, "result");
-        }
+                return false;
+            }
+        }, "result");
     }
 }
 
@@ -400,5 +386,36 @@ static foreach (backend; Matrix!(
             },
             "result",
         );
+    }
+}
+
+
+// A native call that throws an `Error`, not an `Exception`, must still
+// pass a guest `catch (Exception)` untouched and reach a guest
+// `catch (Error)` - the same rule `assert.fails.is.not.caught.by.catching
+// .Exception` above pins for a guest-thrown `AssertError`, here for an
+// `Error` thrown by druntime itself from inside a native call.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE has no native calls"),
+)) {
+    @("nativeThrow.errorSkipsCatchException." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(backend, q{
+            int result() {
+                import core.exception: onRangeError;
+
+                try {
+                    try
+                        onRangeError();
+                    catch (Exception e)
+                        return 1;
+                } catch (Error e) {
+                    return 2;
+                }
+
+                return 0;
+            }
+        }, "result");
     }
 }
