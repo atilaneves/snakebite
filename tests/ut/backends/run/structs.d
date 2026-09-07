@@ -1956,12 +1956,7 @@ static foreach (backend; Matrix!()) {
 // A struct literal can initialize a `double` field, and a plain field-wide
 // copy of the whole struct carries that field's bytes along unchanged - a
 // floating-point field needs no postblit, destructor or captured context,
-// so it is native bytes exactly like an integral field. `x`'s own explicit
-// `= 0` default keeps `Point`'s `.init` all-zero bytes - a `double`'s own
-// default is `double.nan`, not zero, which would otherwise fail the
-// bytecode compiler's separate `zeroInit` requirement for a struct literal
-// that leaves any field out, unrelated to the field-kind question this
-// test is about.
+// so it is native bytes exactly like an integral field.
 static foreach (backend; Matrix!()) {
     @("structLiteralInitializesFloatingField." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -2089,9 +2084,7 @@ static foreach (backend; Matrix!()) {
 // A struct literal can initialize a `real` field, and copying the struct
 // carries it along unchanged - a `real` is 16 bytes wide and 16-byte
 // aligned on x86-64, so `R`'s layout has padding after `tag` that a plain
-// bytewise copy must carry too, unlike any 8-byte-or-narrower field. The
-// explicit `= 0` keeps `R`'s `.init` all-zero bytes, as in
-// `structLiteralInitializesFloatingField`.
+// bytewise copy must carry too, unlike any 8-byte-or-narrower field.
 static foreach (backend; Matrix!()) {
     @("structLiteralInitializesRealField." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -2495,6 +2488,69 @@ static foreach (backend; Matrix!(
                 return S(3).v;
             }
             void main() { assert(f() == 3); }
+        });
+    }
+}
+
+// A local of a templated struct type with no initializer of its own reads
+// `T.init` (dmd's `TypeStruct.defaultInit`, `typesem.d`), a `VarExp` on a
+// `SymbolDeclaration` naming the struct rather than any storage of its
+// own. `Widget`'s fields default to non-zero bytes (a non-empty string, a
+// non-first enum member, `true`, a non-`'\0'` `char`) - std.format.spec's
+// `FormatSpec` has the same shape, whose default read reaches this
+// through `to!string`'s own use of it. `isSupportedStructLiteral` (the
+// same predicate `visit(StructLiteralExp)` uses for `Widget(a, b)`)
+// governs this too, since `defaultInit`'s `VarExp` resolves to the exact
+// `StructLiteralExp` dmd would have built from `Widget`'s own field
+// defaults.
+static foreach (backend; Matrix!()) {
+    @("defaultInitializedTemplatedStructReadsAndMutatesNonZeroFields." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Mode { off, on }
+
+            struct Widget(T) {
+                string name = "default";
+                Mode mode = Mode.on;
+                bool active = true;
+                char tag = 'x';
+                T value;
+
+                void activate() { active = true; }
+            }
+
+            void main() {
+                Widget!int widget;
+                assert(widget.name == "default");
+                assert(widget.mode == Mode.on);
+                assert(widget.active == true);
+                assert(widget.tag == 'x');
+                assert(widget.value == 0);
+
+                widget.tag = 'y';
+                widget.mode = Mode.off;
+                assert(widget.tag == 'y');
+                assert(widget.mode == Mode.off);
+            }
+        });
+    }
+}
+
+// `to!string` on an `int` already worked before `FormatSpec!char`'s own
+// default read did (this module's `defaultInitializedTemplated...` test
+// above) - pinned here so a future change to either one has a direct
+// regression test for the common case `std.conv.to` exists for.
+static foreach (backend; Matrix!()) {
+    @("toStringOnInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.conv: to;
+
+            void main() {
+                assert(to!string(42) == "42");
+            }
         });
     }
 }
