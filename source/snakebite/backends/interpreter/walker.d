@@ -5,7 +5,6 @@ private:
 
 import std.conv: text;
 import snakebite.ffi.limits: maxArguments;
-import snakebite.backends.aggregates: AggregateFacts;
 
 
 // Walks dmd's AST directly. The one invariant: a result is never boxed
@@ -2119,42 +2118,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return assignSlice(expression);
         }
 
-        // `ConstructExp` and `BlitExp` arrive as this same node. Over a
-        // type with a destructor or an overloaded assignment, running
-        // either as a plain store would be a wrong answer, not a
-        // refusal, since D specifies construction and assignment
-        // differently there - so both stay refused in general. Integral
-        // and dynamic-array targets have neither: constructing, blitting
-        // and assigning one are the same bytes written the same way, which
-        // is exactly the shape `_d_arrayappendcTX_`'s own lowering
-        // writes, on the `~=` lowering's own chain, into the slot it
-        // just extended (`a[a.length - 1] = 2`, dmd's own `construct`
-        // for filling storage the guest has not touched yet).
+        // `ConstructExp` and `BlitExp` arrive as this same node. DMD emits
+        // explicit lifecycle calls around these byte operations when the
+        // struct needs them, so the operation here only moves the value's
+        // native bytes.
         auto structType = _type.isTypeStruct;
-        const isSupportedStruct = structType !is null
-            && AggregateFacts.of(_type).loweredCopy;
-        // DMD represents the raw copy that precedes its explicit
-        // `__aggrPostblit` call as `BlitExp`. It is not ordinary D
-        // assignment: the following AST node applies the lifecycle hook,
-        // so this node must copy the native bytes even when the struct has
-        // a postblit.
-        const isStructBlit = structType !is null
-            && expression.isBlitExp !is null;
+        const isStruct = structType !is null;
         // A scalar `ConstructExp` initializes storage that has no prior
         // value. This includes immutable fields in a constructor, which
         // cannot use ordinary assignment syntax but still have native bytes
         // that can be written once.
         const isConstruct = expression.isConstructExp !is null;
-        const isSupportedArray = _type.ty == Tarray;
-        if (structType !is null && !isSupportedStruct && !isStructBlit)
-            throw new SnakebiteException(
-                text("interpreter cannot assign unsupported struct `",
-                    structType.toString, "`"),
-            );
-
+        const isArray = _type.ty == Tarray;
         if (expression.op != EXP.assign && !_facts.isIntegral && !isConstruct
-                && !isSupportedStruct && !isStructBlit
-                && !isSupportedArray)
+                && !isStruct
+                && !isArray)
             throw new SnakebiteException(
                 text("interpreter cannot run a `", expression.op,
                     "` on `", expression.e1.toString, "`"),
@@ -2163,7 +2141,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // Naming `e1` rather than the whole expression: dmd lowers
         // `s.length = n` into a node whose `toString` is a bare `=`.
         auto target = addressOf(expression.e1);
-        if (isSupportedStruct || isStructBlit) {
+        if (isStruct) {
             auto scratch = _frames.push(_facts.size, _facts.alignment);
             evaluate(expression.e2, _type, _facts, scratch.base);
             memcpy(target, scratch.base, _facts.size);
@@ -4299,11 +4277,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         auto structType = _type.isTypeStruct;
-        if (structType is null || structType.sym != expression.sd
-                || !AggregateFacts.of(_type).loweredCopy)
+        if (structType is null || structType.sym != expression.sd)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
-                    "`: unsupported struct literal"),
+                    "`: struct literal layout mismatch"),
             );
 
         memset(_place, 0, _facts.size);

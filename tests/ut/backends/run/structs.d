@@ -123,7 +123,6 @@ static foreach (backend; Matrix!()) {
 // A slice assignment copies element by element and runs the postblit for
 // each one, rather than blitting the whole slice.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -1134,9 +1133,7 @@ static foreach (backend; Matrix!(
 // so this is an ordinary struct-typed variable declaration and an
 // ordinary method call once a struct with a postblit is no longer refused
 // outright.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("postblitRunsOnceOnCopyIntoVariable." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

@@ -4,7 +4,6 @@ module snakebite.backends.bytecode.compiler;
 private:
 
 import dmd.mtype: Type;
-import snakebite.backends.aggregates: AggregateFacts;
 import object: TypeInfo_Class;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.ffi:
@@ -30,8 +29,7 @@ private bool isSupportedFacts(
 
 // As above, for a caller that also has `type` in hand and so can ask the
 // one further question `TypeFacts` alone cannot answer: whether `type` is a
-// struct whose native bytes can occupy a frame slot. Operations that need
-// aggregate semantics still check `AggregateFacts.plainCopy`.
+// struct whose native bytes can occupy a frame slot.
 private bool isSupportedFacts(
     in imported!"snakebite.nativelayout".TypeFacts facts,
     imported!"dmd.mtype".Type type,
@@ -74,16 +72,14 @@ private imported!"snakebite.nativelayout".TypeFacts pointerFactsOf() {
     return TypeFacts(size_t.sizeof, size_t.sizeof, false, true);
 }
 
-// An array element type this compiler can lay out: any
-// `nativelayout.isNativeBytes` type, whether a plain scalar or a
-// plain-copy aggregate - a nested struct element still needs that
-// stricter aggregate-level rule, not just the field-type check, since an
-// element is copied and constructed the same way a struct's own field is.
+// An array element type this compiler can lay out: any native scalar or
+// aggregate. DMD lowers copies that need lifecycle hooks to explicit calls;
+// the byte operation only needs the element's native size.
 private bool isSupportedElementType(imported!"dmd.mtype".Type type) {
     import snakebite.nativelayout: isNativeBytes;
 
     if (type.isTypeStruct !is null)
-        return AggregateFacts.of(type).plainCopy;
+        return true;
 
     return isNativeBytes(type);
 }
@@ -3624,9 +3620,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (isStoredLiteral(expression))
             return compileConstant(expression);
 
-        if (!AggregateFacts.of(expression.type).nativeFields)
-            return visit(cast(Expression) expression);
-
         emit(&opZero, _destination, 0, _width);
 
         // `elements` never carries a value for `vthis` itself (dmd leaves
@@ -4045,8 +4038,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (structType is null || expression.arguments is null)
             return;
 
-        if (expression.arguments.length > structType.sym.fields.length
-                || !AggregateFacts.of(expression.newtype).nativeFields)
+        if (expression.arguments.length > structType.sym.fields.length)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
