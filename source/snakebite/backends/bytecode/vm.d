@@ -410,6 +410,24 @@ package const(Instruction)* opCopy(
 }
 
 
+// Constant lengths let the native compiler inline copies without requiring
+// aligned frame slots or typed pointer access.
+package const(Instruction)* opCopyFixed(size_t width)(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    import core.stdc.string: memcpy;
+
+    memcpy(frame + pc.destination, frame + pc.source, width);
+    return pc + 1;
+}
+
+
 // Copies a function-local static from its persistent native-layout storage
 // into the current frame. The compiler resolves `pc.source` from a temporary
 // static offset to the storage address after the function is built.

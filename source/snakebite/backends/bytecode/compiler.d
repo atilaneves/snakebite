@@ -700,7 +700,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
-        opArrayEqual, opConstant, opCopy, opDivideSigned, opDivideUnsigned,
+        opArrayEqual, opConstant, opCopy, opCopyFixed,
+        opDivideSigned, opDivideUnsigned,
         opEqual,
         opFloatAdd, opFloatDivide, opFloatEqual, opFloatGreaterOrEqual,
         opFloatGreaterThan, opFloatLessOrEqual, opFloatLessThan,
@@ -1015,6 +1016,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t width,
         in size_t sourceWidth = 0,
     ) {
+        if (handler is &opCopy) {
+            static foreach (size; [1, 2, 4, 8, 16]) {
+                if (width == size)
+                    handler = &opCopyFixed!size;
+            }
+        }
         _instructions ~= Instruction(
             handler, destination, source, width, sourceWidth);
     }
