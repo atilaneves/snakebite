@@ -1896,8 +1896,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return context + closure.slotOf(variable).offset;
         }
 
-        if (_layout.hasSlot(variable))
-            return _frameBase + _layout.offsetOf(variable);
+        if (auto slot = _layout.slotOf(variable))
+            return _frameBase + slot.offset;
 
         if (owner is null)
             throw new SnakebiteException(
@@ -1915,8 +1915,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return closure.slotOf(variable).isRef;
         }
 
-        if (_layout.hasSlot(variable))
-            return _layout.isRef(variable);
+        if (auto slot = _layout.slotOf(variable))
+            return slot.isRef;
 
         return owner !is null && layoutOf(owner).isRef(variable);
     }
@@ -1968,9 +1968,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto base = _frameBase;
         auto layout = _layout;
-        if (!layout.hasSlot(variable)) {
-                if (owner is null)
-                    throw new SnakebiteException(
+        auto slot = layout.slotOf(variable);
+        if (slot is null) {
+            if (owner is null)
+                throw new SnakebiteException(
                     text("interpreter cannot reach `", original.toString,
                         "` (", variable.ident.toString, ") in `",
                         _function.ident.toString,
@@ -1980,18 +1981,23 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
             base = contextOf(owner);
             layout = layoutOf(owner);
+            slot = layout.slotOf(variable);
         }
 
-        auto slot = base + layout.offsetOf(variable);
+        if (slot is null)
+            return base + layout.offsetOf(variable);
+
+        auto address = base + slot.offset;
 
         // A `ref` variable's own slot holds the address of the referenced
         // storage, not the storage itself. Reading through it once more here,
         // the one place every read, write and address-of a variable resolves
         // its slot, makes a reach of the variable reach its target instead.
-        if (layout.isRef(variable))
-            return cast(ubyte*) loadIntegral(slot, size_t.sizeof, false);
+        if (slot.isRef)
+            return cast(ubyte*) loadIntegral(
+                address, size_t.sizeof, false);
 
-        return slot;
+        return address;
     }
 
     // Where `variable` lives outside any frame, created and initialised
