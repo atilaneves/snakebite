@@ -612,6 +612,89 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `p[0 .. n] = v` broadcasts a scalar into every element of a pointer
+// slice, the same fill `staticArray.sliceScalarFill` already covers for a
+// static array's own whole slice - but here the target has no
+// compile-time element count, since a bare pointer carries no length of
+// its own. This is the exact shape `core/internal/newaa.d`'s own
+// `allocEntry` uses to zero a freshly allocated associative array entry's
+// value: `(cast(ubyte*)&entry.value)[0 .. V.sizeof] = 0` when `V`'s own
+// `.init` is not already all zero bits, so the entry's storage - carved
+// out of a heap-allocated bucket - must be zeroed by hand instead.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "the ctfe backend cannot reinterpret-cast a `double*` to a " ~
+            "`ubyte*`"),
+)) {
+    @("pointers.slice.scalarFill." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                double value = 1.0;
+            }
+
+            void main() {
+                auto holder = new Holder;
+                auto bytes = (cast(ubyte*) &holder.value);
+                bytes[0 .. double.sizeof] = 0;
+                assert(holder.value == 0);
+            }
+        });
+    }
+}
+
+// The fill's own start need not be the pointer's own first element: `p +
+// 2` names the third element onward, so only elements at or past that
+// offset are overwritten.
+static foreach (backend; Matrix!(
+)) {
+    @("pointers.slice.scalarFill.nonZeroStart." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[5] storage = [1, 2, 3, 4, 5];
+                int* p = storage.ptr;
+                p[2 .. 5] = 9;
+                assert(storage[0] == 1);
+                assert(storage[1] == 2);
+                assert(storage[2] == 9);
+                assert(storage[3] == 9);
+                assert(storage[4] == 9);
+            }
+        });
+    }
+}
+
+// The same fill, run from inside a nested `@trusted` lambda called
+// straight away - `core/internal/newaa.d`'s own `allocEntry` wraps its
+// zero-fill in exactly this shape (`() @trusted { ... }();`) since the
+// cast from a typed pointer to `ubyte*` is `@system` on its own.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "the ctfe backend cannot reinterpret-cast a `double*` to a " ~
+            "`ubyte*`"),
+)) {
+    @("pointers.slice.scalarFill.trustedLambda." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                double value = 1.0;
+            }
+
+            void main() {
+                auto holder = new Holder;
+                () @trusted {
+                    (cast(ubyte*) &holder.value)[0 .. double.sizeof] = 0;
+                }();
+                assert(holder.value == 0);
+            }
+        });
+    }
+}
+
 // A static array's whole-array assign and slice assign both copy a
 // pointer element the same way they copy any other fixed-size element.
 static foreach (backend; Matrix!(

@@ -1672,3 +1672,36 @@ package const(Instruction)* opSliceCopy(
     return advance(pc, frame, returnPlace, constants, callSites,
         assertSites, frames);
 }
+
+
+// `p[a .. b] = v;`/`a[] = v;` for a dynamic-length target and a scalar
+// right side (`v` is a single element, not an array): the run-time
+// counterpart to `compileSliceAssign`'s own compile-time-unrolled fill
+// loop for a static array, whose element count is not known until the
+// program runs here. `v`'s bytes (`pc.width` wide, at `frame +
+// pc.source`) are copied into every element of the `{length, pointer}`
+// pair at `frame + pc.destination`.
+package const(Instruction)* opSliceFill(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    import core.stdc.string: memcpy;
+    import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
+
+    auto dest = frame + pc.destination;
+    auto value = frame + pc.source;
+    const length = *cast(const(size_t)*) (dest + arrayLengthOffset);
+    auto destPtr = *cast(ubyte**) (dest + arrayPointerOffset);
+    foreach (_; 0 .. length) {
+        memcpy(destPtr, value, pc.width);
+        destPtr += pc.width;
+    }
+
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}

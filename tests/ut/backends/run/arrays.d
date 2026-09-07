@@ -347,6 +347,53 @@ static foreach (backend; Matrix!(
     }
 }
 
+// `a[] = v` for a dynamic array evaluates the scalar `v` once, then
+// broadcasts it into every element, at a length known only at run time -
+// the same shape `core/internal/newaa.d`'s own `allocEntry` needs for
+// `(cast(ubyte*)&entry.value)[0 .. V.sizeof] = 0` when zeroing a freshly
+// allocated associative array entry whose value type is not already
+// zero-initialised. Unlike `dynamicSliceCopyFromDynamicSlice` above, no
+// element-by-element source read is needed, only one broadcast write per
+// element.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] a = [1, 2, 3];
+                a[] = 7;
+                assert(a[0] == 7);
+                assert(a[1] == 7);
+                assert(a[2] == 7);
+            }
+        });
+    }
+}
+
+// `a[m .. n] = v` fills only the bounded slice, at whatever run-time
+// start `m` names - not necessarily zero - leaving the elements outside
+// the slice untouched.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.nonZeroStart." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] a = [1, 2, 3, 4, 5];
+                a[1 .. 4] = 9;
+                assert(a[0] == 1);
+                assert(a[1] == 9);
+                assert(a[2] == 9);
+                assert(a[3] == 9);
+                assert(a[4] == 5);
+            }
+        });
+    }
+}
+
 // `a[] += b[]` for two dynamic arrays of the same length adds `b`'s
 // elements into `a`'s, in place, at a length known only at run time.
 // druntime lowers this to `core.internal.array.operations`'s `arrayOp`
@@ -365,6 +412,368 @@ static foreach (backend; Matrix!(
                 a[] += b[];
                 assert(a[0] == 11);
                 assert(a[1] == 22);
+            }
+        });
+    }
+}
+
+// `a[] = S(1, 2)` for a plain struct element broadcasts the whole struct
+// value, every field, into each element.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.struct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; short y; }
+            void main() {
+                S[] a = [S(1, 1), S(2, 2), S(3, 3)];
+                a[] = S(7, 8);
+                assert(a[0].x == 7 && a[0].y == 8);
+                assert(a[1].x == 7 && a[1].y == 8);
+                assert(a[2].x == 7 && a[2].y == 8);
+            }
+        });
+    }
+}
+
+// A `double` element fill.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.double." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                double[] a = [1.0, 2.0, 3.0];
+                a[] = 2.5;
+                assert(a[0] == 2.5 && a[1] == 2.5 && a[2] == 2.5);
+            }
+        });
+    }
+}
+
+// A `float` element fill, where the right side is a `double` literal
+// that dmd converts to `float` first.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.float." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                float[] a = [1.0f, 2.0f, 3.0f];
+                a[] = 2.5;
+                assert(a[0] == 2.5f && a[1] == 2.5f && a[2] == 2.5f);
+            }
+        });
+    }
+}
+
+// A pointer element fill.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.pointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int x = 42;
+                int*[] a = [null, null, null];
+                a[] = &x;
+                assert(*a[0] == 42 && *a[1] == 42 && *a[2] == 42);
+                assert(a[0] is &x);
+            }
+        });
+    }
+}
+
+// A `bool` element fill.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.bool." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                bool[] a = [false, false, false];
+                a[] = true;
+                assert(a[0] && a[1] && a[2]);
+            }
+        });
+    }
+}
+
+// A `short` element fill.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.short." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                short[] a = [1, 2, 3];
+                a[] = -5;
+                assert(a[0] == -5 && a[1] == -5 && a[2] == -5);
+            }
+        });
+    }
+}
+
+// A `ubyte` element fill from an `int` literal: dmd converts the right
+// side to the element type, so only one byte per element is written.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.ubyte." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ubyte[] a = [1, 2, 3, 4];
+                a[1 .. 3] = 200;
+                assert(a[0] == 1 && a[1] == 200 && a[2] == 200 && a[3] == 4);
+            }
+        });
+    }
+}
+
+// A `ubyte` element fill from an `int` variable cast to `ubyte`.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.ubyteFromVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int v = 0x1234;
+                ubyte[] a = [1, 2, 3, 4];
+                a[] = cast(ubyte) v;
+                assert(a[0] == 0x34 && a[3] == 0x34);
+            }
+        });
+    }
+}
+
+// A struct with a postblit: dmd lowers `a[] = v` to `_d_arraysetassign`,
+// which runs the postblit once per element and the destructor on each
+// overwritten element.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.postblit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int x;
+                int* copies;
+                this(this) { if (copies) ++*copies; }
+            }
+            void main() {
+                int copies;
+                S[] a = new S[3];
+                S v = S(7, &copies);
+                a[] = v;
+                assert(a[0].x == 7 && a[1].x == 7 && a[2].x == 7);
+                assert(copies == 3);
+            }
+        });
+    }
+}
+
+// The right side is evaluated exactly once, before any element is
+// written, even when it has a side effect.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.rhsOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int next(int* calls) { return ++*calls; }
+            void main() {
+                int calls;
+                int[] a = [0, 0, 0];
+                a[] = next(&calls);
+                assert(calls == 1);
+                assert(a[0] == 1 && a[1] == 1 && a[2] == 1);
+            }
+        });
+    }
+}
+
+// The slice bounds are evaluated once each, and the whole left side is
+// evaluated before the right side.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.boundsOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            size_t low(int* lows) { ++*lows; return 1; }
+            size_t high(int* highs) { ++*highs; return 3; }
+            void main() {
+                int lows;
+                int highs;
+                int[] a = [0, 0, 0, 0];
+                a[low(&lows) .. high(&highs)] = 5;
+                assert(lows == 1 && highs == 1);
+                assert(a[0] == 0 && a[1] == 5 && a[2] == 5 && a[3] == 0);
+            }
+        });
+    }
+}
+
+// An upper bound past the array's length is a `RangeError`, not a write
+// past the end.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter reports an out-of-bounds slice as its own " ~
+            "error, not as a guest-catchable `RangeError`"),
+)) {
+    @("dynamicSliceScalarFill.upperOutOfBounds." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+            void main() {
+                int[] a = [1, 2, 3];
+                size_t high = 10;
+                bool caught;
+                try {
+                    a[1 .. high] = 7;
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+                assert(a[0] == 1 && a[1] == 2 && a[2] == 3);
+            }
+        });
+    }
+}
+
+// Reversed bounds are a `RangeError` too.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter reports an out-of-bounds slice as its own " ~
+            "error, not as a guest-catchable `RangeError`"),
+)) {
+    @("dynamicSliceScalarFill.reversedBounds." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+            void main() {
+                int[] a = [1, 2, 3];
+                size_t low = 2;
+                size_t high = 1;
+                bool caught;
+                try {
+                    a[low .. high] = 7;
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+                assert(a[0] == 1 && a[1] == 2 && a[2] == 3);
+            }
+        });
+    }
+}
+
+// A zero-length slice writes nothing.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.zeroLength." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] a = [1, 2, 3];
+                a[2 .. 2] = 7;
+                assert(a[0] == 1 && a[1] == 2 && a[2] == 3);
+                int[] empty;
+                empty[] = 7;
+                assert(empty.length == 0);
+            }
+        });
+    }
+}
+
+// A static-array element (`int[2]`) fill: the right side is a static
+// array with the element's own size, broadcast whole into each element.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.staticArrayElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[2][] a = new int[2][3];
+                int[2] pair = [7, 8];
+                a[] = pair;
+                assert(a[0][0] == 7 && a[0][1] == 8);
+                assert(a[2][0] == 7 && a[2][1] == 8);
+            }
+        });
+    }
+}
+
+// The assignment's own value is the filled slice.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.resultValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] a = [1, 2, 3, 4];
+                int[] r = (a[1 .. 3] = 9);
+                assert(r.length == 2);
+                assert(r[0] == 9 && r[1] == 9);
+                assert(r.ptr is a.ptr + 1);
+            }
+        });
+    }
+}
+
+// A class reference element fill.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.classRef." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C { int x; this(int x) { this.x = x; } }
+            void main() {
+                C[] a = new C[3];
+                auto c = new C(5);
+                a[] = c;
+                assert(a[0] is c && a[1] is c && a[2] is c);
+                assert(a[2].x == 5);
+            }
+        });
+    }
+}
+
+
+// A 3-byte struct element fill: an element size that is not a native
+// integral width, so the value must be copied as bytes, not as a word.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.threeByteStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S3 { ubyte a; ubyte b; ubyte c; }
+            void main() {
+                S3[] a = new S3[2];
+                a[] = S3(1, 2, 3);
+                assert(a[0].a == 1 && a[0].b == 2 && a[0].c == 3);
+                assert(a[1].a == 1 && a[1].b == 2 && a[1].c == 3);
+                S3 v = S3(4, 5, 6);
+                a[1 .. 2] = v;
+                assert(a[0].c == 3);
+                assert(a[1].a == 4 && a[1].b == 5 && a[1].c == 6);
             }
         });
     }

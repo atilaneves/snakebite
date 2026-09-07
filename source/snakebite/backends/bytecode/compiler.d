@@ -727,7 +727,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opModuloUnsigned, opMultiply, opNegate, opNotEqual, opRangeError,
         opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
-        opSliceCopy,
+        opSliceCopy, opSliceFill,
         opStaticAddress, opStaticArrayEqual, opStaticLoad, opStaticStore,
         opStoreIndirect, opSubtract, opThrow, opZero;
     import dmd.expressionsem: toInteger;
@@ -2985,7 +2985,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
-    // `p[0 .. n] = q[];`/`a[] = b[];` for a dynamic-length target: a
+    // `p[0 .. n] = q[];`/`a[] = b[];` (array-to-array) or
+    // `p[a .. b] = v;` (scalar fill) for a dynamic-length target: a
     // pointer sliced to a run-time length (`_d_newclassT`'s own
     // `p[0 .. init.length] = init[];`, `core/lifetime.d`) or a dynamic
     // array's own whole slice. Neither side has a compile-time element
@@ -3007,6 +3008,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // sees it (`expressionsem.d`'s `lowerArrayAssign`), so a plain
     // `AssignExp` reaching here is already safe to treat as a raw byte
     // copy.
+    //
+    // When the right side is not itself an array, this is instead
+    // `p[a .. b] = v;`'s scalar-fill shape (dmd's own `blockAssign`,
+    // e.g. `core/internal/newaa.d`'s `(cast(ubyte*)&entry.value)[0 ..
+    // V.sizeof] = 0` zeroing a newly allocated AA entry's value): `v` is
+    // evaluated once, then broadcast into every element through
+    // `opSliceFill`, the run-time counterpart to `compileSliceAssign`'s
+    // own compile-time-unrolled scalar fill for a static array.
     private void compileDynamicSliceAssign(
         AssignExp expression, SliceExp target, in size_t destOffset,
     ) {
@@ -3014,60 +3023,78 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
         import std.string: fromStringz;
 
-        if ((target.e1.type.ty != Tarray && target.e1.type.ty != Tpointer)
-                || expression.e2.type.ty != Tarray)
+        if (target.e1.type.ty != Tarray && target.e1.type.ty != Tpointer)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
         auto elementType = target.type.nextOf;
-        auto sourceElementType = expression.e2.type.nextOf;
-        if (elementType is null || sourceElementType is null)
+        if (elementType is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
-
-        if (elementType.ty != Tvoid
-                && !isSupportedElementType(elementType))
+        if (elementType.ty != Tvoid && !isSupportedElementType(elementType))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
-        if (sourceElementType.ty != Tvoid
-                && !isSupportedElementType(sourceElementType))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
         const elementSize =
             elementType.ty == Tvoid ? 1 : TypeFacts.of(elementType).size;
-        const sourceElementSize = sourceElementType.ty == Tvoid
-            ? 1 : TypeFacts.of(sourceElementType).size;
-        if (elementSize != sourceElementSize)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
 
         const arrayFacts = TypeFacts.of(target.type);
         const destSliceOffset = reserveTemp(arrayFacts);
         evalInto(target, destSliceOffset, arrayFacts.size);
 
-        const sourceFacts = TypeFacts.of(expression.e2.type);
-        const sourceSliceOffset = reserveTemp(sourceFacts);
-        evalInto(expression.e2, sourceSliceOffset, sourceFacts.size);
+        if (expression.e2.type.ty != Tarray) {
+            if (elementType.ty == Tvoid)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
 
-        // D requires both sides of a dynamic slice assignment to share
-        // one length; a compiled program never proves that at compile
-        // time, so this is the run-time counterpart to
-        // `_d_arraycopy`'s own `RangeError` on a mismatch.
-        const orderOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, orderOffset, destSliceOffset + arrayLengthOffset,
-            size_t.sizeof);
-        emit(&opEqual, orderOffset, sourceSliceOffset + arrayLengthOffset,
-            size_t.sizeof);
-        const site = AssertSite(
-            null,
-            expression.loc.filename.fromStringz.idup,
-            expression.loc.linnum,
-        );
-        _assertSites ~= site;
-        emit(&opRangeError, orderOffset, _assertSites.length - 1, 1);
+            const elementFacts = TypeFacts.of(elementType);
+            const sourceFacts = TypeFacts.of(expression.e2.type);
+            if (sourceFacts.size != elementFacts.size)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
 
-        emit(&opSliceCopy, destSliceOffset, sourceSliceOffset, elementSize);
+            const valueOffset = reserveTemp(elementFacts);
+            evalInto(expression.e2, valueOffset, elementFacts.size);
+            emit(&opSliceFill, destSliceOffset, valueOffset, elementSize);
+        } else {
+            auto sourceElementType = expression.e2.type.nextOf;
+            if (sourceElementType is null)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+            if (sourceElementType.ty != Tvoid
+                    && !isSupportedElementType(sourceElementType))
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const sourceElementSize = sourceElementType.ty == Tvoid
+                ? 1 : TypeFacts.of(sourceElementType).size;
+            if (elementSize != sourceElementSize)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            const sourceFacts = TypeFacts.of(expression.e2.type);
+            const sourceSliceOffset = reserveTemp(sourceFacts);
+            evalInto(expression.e2, sourceSliceOffset, sourceFacts.size);
+
+            // D requires both sides of a dynamic slice assignment to
+            // share one length; a compiled program never proves that at
+            // compile time, so this is the run-time counterpart to
+            // `_d_arraycopy`'s own `RangeError` on a mismatch.
+            const orderOffset = reserveTemp(pointerFacts);
+            emit(&opCopy, orderOffset, destSliceOffset + arrayLengthOffset,
+                size_t.sizeof);
+            emit(&opEqual, orderOffset,
+                sourceSliceOffset + arrayLengthOffset, size_t.sizeof);
+            const site = AssertSite(
+                null,
+                expression.loc.filename.fromStringz.idup,
+                expression.loc.linnum,
+            );
+            _assertSites ~= site;
+            emit(&opRangeError, orderOffset, _assertSites.length - 1, 1);
+
+            emit(&opSliceCopy, destSliceOffset, sourceSliceOffset,
+                elementSize);
+        }
 
         if (destOffset != discardResult) {
             emit(&opCopy, destOffset + arrayLengthOffset,
