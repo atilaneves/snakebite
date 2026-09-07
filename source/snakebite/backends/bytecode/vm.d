@@ -18,11 +18,8 @@ import object: Throwable, TypeInfo_Class;
 private alias storeWidth = storeIntegral;
 
 
-// The widest value `opCall` can hand back to its caller: wide enough for
-// a dynamic array's own two words, and the compiler's own ceiling on a
-// guest callee's return type (see `Bytecode.compileFunction`) - a plain
-// struct too wide to fit is refused there rather than compiled to a call
-// that would overflow `opCall`'s own scratch return buffer below.
+// Keep the compiler's supported return sizes unchanged when optimizing
+// result storage. This limit includes a dynamic array's two words.
 package enum maxReturnWidth = 16;
 
 
@@ -39,8 +36,7 @@ package struct Arg {
 
 
 // One call site: which compiled function it calls, the arguments to hand
-// it, and the width of the value it hands back (`0` for a `void` callee,
-// which `opCall` then never copies out of the scratch return buffer).
+// it, and the width of the value it hands back (`0` for a `void` callee).
 package struct CallSite {
     package const(Function)* callee;
     package Arg[] args;
@@ -543,10 +539,9 @@ package const(Instruction)* opThrow(
 
 // Calls `callSites[pc.source]`'s callee: pushes its frame, copies each
 // argument in, runs it to its own return instruction through the nested
-// dispatch loop, then copies the result to `frame + pc.destination`
-// (unless `pc.destination` is `discardResult`) and returns this call's own
-// next instruction. `pc.width` is unused: the width to copy out comes
-// from the call site's own `returnWidth` instead.
+// dispatch loop with `frame + pc.destination` as its result slot (unless
+// `pc.destination` is `discardResult`), and returns this call's own next
+// instruction. `pc.width` is unused.
 package const(Instruction)* opCall(
     const(Instruction)* pc,
     ubyte* frame,
@@ -622,23 +617,17 @@ package const(Instruction)* opCall(
 
     initializeClosure(callee, calleeFrame.base, frames);
 
-    // A scratch return buffer that outlives the callee's own frame, unlike
-    // one carved from it, since `opCall` reads back out of it after
-    // `calleeFrame` has already popped. Sized to `maxReturnWidth` - the
-    // compiler refuses to compile a guest callee whose return is wider
-    // than that (see its own doc), so `site.returnWidth` never exceeds it
-    // here.
-    ubyte[maxReturnWidth] returnScratch = void;
-    void* returnDestination = site.returnWidth == 0 ? null : returnScratch.ptr;
+    // The caller frame stays at a fixed address during nested calls.
+    // This pointer must stay mutable so the callee can write the result.
+    auto returnDestination = pc.destination == discardResult || site.returnWidth == 0
+        ? null
+        : frame + pc.destination;
 
     auto calleePc = callee.instructions.ptr;
     dispatch(
         calleePc, calleeFrame.base, returnDestination, callee.constants,
         callee.callSites, callee.assertSites, callee.exceptionHandlers, frames,
     );
-
-    if (pc.destination != discardResult && site.returnWidth != 0)
-        memcpy(frame + pc.destination, returnScratch.ptr, site.returnWidth);
 
     const next = pc + 1;
     return next;
