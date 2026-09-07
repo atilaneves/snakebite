@@ -106,7 +106,7 @@ unittest {
 
     // Fixed from independent runs of a known-good revision: mean + 3 sample
     // standard deviations, rounded up. Do not let a candidate's own noise
-    // raise its limit. See ai/ffi-timing-calibration.md for the measurements.
+    // raise its limit.
     enum maxRatio = 2.40;
     assert(ratios[2] < maxRatio,
         "the barrier costs more than 2.40 times a direct call");
