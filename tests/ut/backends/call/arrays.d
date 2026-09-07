@@ -163,6 +163,159 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `arr is null` on a dynamic array compares its whole two-word
+// `{length, ptr}` pair, not just `.ptr` - a default-initialised array has
+// both words zero, so this is true.
+static foreach (backend; Matrix!()) {
+    @("arrays.identity.null." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool isNull() {
+                    int[] arr;
+                    return arr is null;
+                }
+            },
+            "isNull",
+        );
+    }
+}
+
+// A non-empty array has a non-null `.ptr`, so `!is null` is true.
+static foreach (backend; Matrix!()) {
+    @("arrays.identity.notNull." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool notNull() {
+                    int[] arr = [1, 2, 3];
+                    return arr !is null;
+                }
+            },
+            "notNull",
+        );
+    }
+}
+
+// Slicing an appended-to array down to `arr[0 .. 0]` keeps its `.ptr` (the
+// allocation `~=` gave it) while its `.length` drops to zero - the same
+// zero `.length` as a default-initialised array, but a different `.ptr`.
+// `is null` reads both words, so this empty-but-not-null array must still
+// answer `!is null` true.
+static foreach (backend; Matrix!()) {
+    @("arrays.identity.emptyNonNull." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool emptyNonNull() {
+                    int[] arr;
+                    arr ~= 1;
+                    arr = arr[0 .. 0];
+                    return arr !is null;
+                }
+            },
+            "emptyNonNull",
+        );
+    }
+}
+
+// Two slices of one array share `.ptr` but differ in `.length`. Only a
+// compare of both words answers `is` false here - a compare of `.ptr`
+// alone would call them identical.
+static foreach (backend; Matrix!()) {
+    @("arrays.identity.sliceLength." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        false.shouldBeRetOf!(
+            backend,
+            q{
+                bool sliceLength() {
+                    int[] arr = [1, 2, 3];
+                    return arr[0 .. 2] is arr[0 .. 3];
+                }
+            },
+            "sliceLength",
+        );
+    }
+}
+
+// `arr2 = arr1` copies the same `{length, ptr}` pair, so the two variables
+// name the same array and `is` between them is true.
+static foreach (backend; Matrix!()) {
+    @("arrays.identity.sameArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool same() {
+                    int[] arr1 = [1, 2, 3];
+                    int[] arr2 = arr1;
+                    return arr1 is arr2;
+                }
+            },
+            "same",
+        );
+    }
+}
+
+// Two array literals with the same contents are two separate allocations,
+// so `is` between them is false even though `==` between them is true.
+//
+// dmd's own CTFE engine does not honour this: `ctfeIdentity` routes two
+// non-null array operands to `ctfeRawCmp(..., identity: true)`, a compare
+// of contents, not of allocation. So CTFE answers `true` for any two
+// arrays with the same contents, however they were built (confirmed with
+// `pragma(msg, ...)` against dmd for literals, `.dup`, `new`, and `~=`).
+// `Ctfe` calls that same engine, so it disagrees here on purpose.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE engine compares array contents for `is` " ~
+        "(ctfeIdentity -> ctfeRawCmp), not allocation identity"),
+)) {
+    @("arrays.identity.differentArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        false.shouldBeRetOf!(
+            backend,
+            q{
+                bool different() {
+                    int[] arr1 = [1, 2, 3];
+                    int[] arr2 = [1, 2, 3];
+                    return arr1 is arr2;
+                }
+            },
+            "different",
+        );
+    }
+}
+
+// `is`/`!is` on an array as an `if` condition, not just a returned `bool`.
+static foreach (backend; Matrix!()) {
+    @("arrays.identity.ifCondition." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                int usedAsCondition() {
+                    int[] arr;
+                    if (arr is null)
+                        return 1;
+                    return 0;
+                }
+            },
+            "usedAsCondition",
+        );
+    }
+}
+
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
