@@ -71,10 +71,10 @@ package struct FrameLayout {
     // a parameter or local read from a `VarDeclaration` it found by name
     // lookup, not by position, so it still needs a hash lookup. A `ref`
     // parameter or local occupies a pointer slot, which `Evaluator.slotOf`
-    // reads through. Reached only through `offsetOf` and `isRef` below.
-    private struct VariableSlot {
-        size_t offset;
-        bool isRef;
+    // reads through. Reached through the lookup helpers below.
+    package struct VariableSlot {
+        package size_t offset;
+        package bool isRef;
     }
     private VariableSlot[VarDeclaration] _slotOf;
 
@@ -250,13 +250,19 @@ package struct FrameLayout {
     // `offsetOf`'s own throw cannot do without exceptions doing double
     // duty as control flow.
     package bool hasSlot(VarDeclaration variable) const {
-        return (variable in _slotOf) !is null;
+        return slotOf(variable) !is null;
+    }
+
+    package const(VariableSlot)* slotOf(
+        VarDeclaration variable,
+    ) const {
+        return variable in _slotOf;
     }
 
     package size_t offsetOf(VarDeclaration variable) const {
         import std.conv: text;
 
-        auto slot = variable in _slotOf;
+        auto slot = slotOf(variable);
         if (slot is null)
             throw new SnakebiteException(
                 text("interpreter cannot reach `", variable.toString,
