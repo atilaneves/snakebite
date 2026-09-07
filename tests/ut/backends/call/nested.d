@@ -180,9 +180,6 @@ static foreach (backend; Matrix!()) {
 // method that reads the captured local proves the context reached the
 // right place.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "the bytecode compiler rejects constructing a non-static nested "
-            ~ "struct outright"),
     Omit!(Interpreter, Because.unconfirmed,
         "the interpreter crashes building a non-static nested struct "
             ~ "that has its own declared field"),
@@ -212,13 +209,7 @@ static foreach (backend; Matrix!(
 // (`AggregateDeclaration.isNested` is `false`) - only its lexical position
 // makes it look nested. Constructing a `Local` value must not try to reach
 // a context nothing captured.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "the bytecode compiler rejects a `static` local struct "
-            ~ "declaration, unrelated to this test's own construct - "
-            ~ "`static struct Local { ... }` never reaches the code this "
-            ~ "test means to exercise"),
-)) {
+static foreach (backend; Matrix!()) {
     @("nested.staticChain.localStaticStructNeedsNoOuterContext." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -234,6 +225,75 @@ static foreach (backend; Matrix!(
                 }
 
                 return build!Local() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A nested struct's method can read a parameter of the enclosing function,
+// not only a local: dmd stores a parameter and a local the same way in the
+// enclosing frame, so the static chain must reach either one.
+static foreach (backend; Matrix!()) {
+    @("nested.staticChain.nestedStructReadsEnclosingParameter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int addToParam(int p) {
+                struct Reader {
+                    int read() { return p + 2; }
+                }
+                return Reader().read();
+            }
+
+            int main() {
+                return addToParam(40) == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// `opEquals` reading an enclosing local directly, with no field of its own
+// to go through first, is the shape a `lazy` assertion wrapper actually
+// builds (`should(expression) == expected` in a hand-rolled `unit_threaded`
+// stand-in): the struct's `vthis` is its only field, so this also proves
+// the context lands correctly when there is no other field ahead of it.
+static foreach (backend; Matrix!()) {
+    @("nested.staticChain.opEqualsComparesAgainstEnclosingLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int base = 40;
+                struct Wrapper {
+                    bool opEquals(int other) {
+                        return base + 2 == other;
+                    }
+                }
+                auto w = Wrapper();
+                return w == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A nested struct declared inside a nested function, reading a local two
+// frames further out, exercises `contextAddressOf`'s walk across more than
+// one hop: struct to its own immediate function, then that function on to
+// its own enclosing one.
+static foreach (backend; Matrix!()) {
+    @("nested.staticChain.nestedStructInsideNestedFunctionTwoLevelChain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int base = 40;
+                int outer() {
+                    struct Reader {
+                        int read() { return base + 2; }
+                    }
+                    return Reader().read();
+                }
+                return outer() == 42 ? 0 : 1;
             }
         });
     }
