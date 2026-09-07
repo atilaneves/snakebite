@@ -34,10 +34,7 @@ static foreach (backend; Matrix!()) {
 // `enforce` is an available native template, but its message is a `lazy`
 // parameter. The caller's expression must stay executable when `enforce`
 // reads it.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "bytecode cannot compile `enforce`'s lazy message delegate"),
-)) {
+static foreach (backend; Matrix!()) {
     @("exception.enforce.lazyMessage." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
