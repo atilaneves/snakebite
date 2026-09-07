@@ -2101,6 +2101,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     private void* assign(AssignExp expression) {
         import core.stdc.string: memcpy;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
         import std.conv: text;
 
         // DMD records the two meanings of a slice assignment on the node:
@@ -2137,6 +2138,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 text("interpreter cannot run a `", expression.op,
                     "` on `", expression.e1.toString, "`"),
             );
+
+        if (auto dot = expression.e1.isDotVarExp) {
+            auto field = dot.var.isVarDeclaration;
+            if (field !is null && field.isBitFieldDeclaration !is null) {
+                const valueFacts = factsOf(expression.e2.type);
+                auto scratch = _frames.push(valueFacts.size,
+                    valueFacts.alignment);
+                evaluate(expression.e2, expression.e2.type,
+                    valueFacts, scratch.base);
+                const result = loadIntegral(
+                    scratch.base, valueFacts.size, !valueFacts.isUnsigned);
+                storeBitfield(dot, field, result);
+                storeIntegral(_place, result, _facts.size);
+                return _place;
+            }
+        }
 
         // Naming `e1` rather than the whole expression: dmd lowers
         // `s.length = n` into a node whose `toString` is a bare `=`.
@@ -2560,6 +2577,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`"),
             );
 
+        if (auto dot = expression.e1.isDotVarExp) {
+            auto field = dot.var.isVarDeclaration;
+            if (field !is null && field.isBitFieldDeclaration !is null) {
+                const stepFacts = factsOf(expression.e2.type);
+                const step = asIntegral(expression.e2, stepFacts);
+                auto base = fieldBaseAddress(dot.e1);
+                const current = bitfieldValueAt(base, field, targetFacts);
+                const result = combine!op(
+                    current, step, targetFacts, stepFacts, expression);
+                storeBitfieldAt(field,
+                    cast(ubyte*) base + field.offset, result);
+                storeIntegral(_place, result, _facts.size);
+                return;
+            }
+        }
+
         void* target;
         try {
             target = addressOf(expression.e1);
@@ -2596,6 +2629,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: `", expression.e1.toString,
                     "` is not an integral lvalue"),
             );
+
+        if (auto dot = expression.e1.isDotVarExp) {
+            auto field = dot.var.isVarDeclaration;
+            if (field !is null && field.isBitFieldDeclaration !is null) {
+                auto base = fieldBaseAddress(dot.e1);
+                const current = bitfieldValueAt(base, field, facts);
+                const step = asIntegral(expression.e2);
+                const changed = expression.op == EXP.plusPlus
+                    ? current + step : current - step;
+                storeIntegral(_place, current, _facts.size);
+                storeBitfieldAt(field,
+                    cast(ubyte*) base + field.offset, changed);
+                return;
+            }
+        }
 
         auto target = addressOf(expression.e1);
         const step = asIntegral(expression.e2);
@@ -3502,6 +3550,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // recomputed here.
     override void visit(DotVarExp expression) {
         import core.stdc.string: memcpy;
+        import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
         auto field = expression.var.isVarDeclaration;
@@ -3511,16 +3560,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: only a field read is supported"),
             );
 
-        // `field.offset` below is a whole-byte offset. A bitfield is also
-        // a `VarDeclaration`, but its storage is a sub-byte slice of that
-        // offset's byte, which a plain `memcpy` from it would read as
-        // whole bytes instead - refused rather than run to a wrong
-        // answer, the same way an unhandled node already is.
-        if (field.isBitFieldDeclaration !is null)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: reading a bitfield is not supported"),
-            );
+        if (field.isBitFieldDeclaration !is null) {
+            storeIntegral(_place,
+                bitfieldValue(expression, field, factsOf(field.type)),
+                _facts.size);
+            return;
+        }
 
         auto base = cast(ubyte*) fieldBaseAddress(expression.e1);
         memcpy(_place, base + field.offset, _facts.size);
@@ -3536,6 +3581,48 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void* object;
         evaluate(aggregate, aggregate.type, facts, &object);
         return object;
+    }
+
+    private long bitfieldValue(
+        DotVarExp expression, VarDeclaration field, in TypeFacts facts,
+    ) {
+        return bitfieldValueAt(fieldBaseAddress(expression.e1), field, facts);
+    }
+
+    private long bitfieldValueAt(
+        void* base, VarDeclaration field, in TypeFacts facts,
+    ) {
+        import snakebite.nativelayout: loadIntegral;
+        const bits = field.isBitFieldDeclaration;
+        const raw = loadIntegral(
+            cast(ubyte*) base + field.offset,
+            facts.size, false);
+        const mask = ulong.max >> (64 - bits.fieldWidth);
+        auto value = (raw >> bits.bitOffset) & mask;
+        if (!facts.isUnsigned && bits.fieldWidth < 64
+                && (value & (1UL << (bits.fieldWidth - 1))))
+            value |= ulong.max << bits.fieldWidth;
+        return cast(long) value;
+    }
+
+    private void storeBitfield(
+        DotVarExp expression, VarDeclaration field, long value,
+    ) {
+        const bits = field.isBitFieldDeclaration;
+        auto place = cast(ubyte*) fieldBaseAddress(expression.e1) + field.offset;
+        storeBitfieldAt(field, place, value);
+    }
+
+    private void storeBitfieldAt(
+        VarDeclaration field, void* place, long value,
+    ) {
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+        const bits = field.isBitFieldDeclaration;
+        const mask = (ulong.max >> (64 - bits.fieldWidth)) << bits.bitOffset;
+        auto storage = loadIntegral(place, factsOf(field.type).size, false);
+        storage = (storage & ~mask)
+            | ((cast(ulong) value << bits.bitOffset) & mask);
+        storeIntegral(place, storage, factsOf(field.type).size);
     }
 
     override void visit(TypeidExp expression) {
@@ -4174,6 +4261,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private void initializeStructArguments(NewExp expression, ubyte* object) {
+        import core.stdc.string: memcpy;
         import std.conv: text;
 
         auto declaration = expression.newtype.isTypeStruct.sym;
@@ -4185,12 +4273,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         foreach (i; 0 .. expression.arguments.length) {
             auto field = declaration.fields[i];
-            evaluate(
-                (*expression.arguments)[i],
-                field.type,
-                factsOf(field.type),
-                object + field.offset,
-            );
+            auto valueFacts = factsOf(field.type);
+            auto value = _frames.push(valueFacts.size, valueFacts.alignment);
+            evaluate((*expression.arguments)[i], field.type, valueFacts,
+                value.base);
+            if (field.isBitFieldDeclaration !is null) {
+                import snakebite.nativelayout: loadIntegral;
+                storeBitfieldAt(field, object + field.offset,
+                    loadIntegral(value.base, valueFacts.size,
+                        !valueFacts.isUnsigned));
+                continue;
+            }
+            memcpy(object + field.offset, value.base, valueFacts.size);
         }
     }
 
@@ -4268,7 +4362,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     override void visit(StructLiteralExp expression) {
         import core.stdc.string: memset;
-        import snakebite.nativelayout: isStoredLiteral, storeIntegral;
+        import snakebite.nativelayout:
+            isStoredLiteral, loadIntegral, storeIntegral;
         import std.conv: text;
 
         if (isStoredLiteral(expression)) {
@@ -4314,6 +4409,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 continue;
 
             auto field = expression.sd.fields[i];
+            if (field.isBitFieldDeclaration !is null) {
+                auto valueFacts = factsOf(field.type);
+                auto value = _frames.push(valueFacts.size,
+                    valueFacts.alignment);
+                evaluate(element, field.type, valueFacts, value.base);
+                storeBitfieldAt(field, cast(ubyte*) _place + field.offset,
+                    loadIntegral(value.base, valueFacts.size,
+                        !valueFacts.isUnsigned));
+                continue;
+            }
             evaluate(
                 element,
                 field.type,

@@ -1541,6 +1541,27 @@ package const(Instruction)* opLoadIndirect(
         assertSites, frames);
 }
 
+package const(Instruction)* opLoadBitfield(
+    const(Instruction)* pc, ubyte* frame, void* returnPlace,
+    scope const long[] constants, scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites, FrameStack* frames,
+) {
+    auto address = *cast(void**) (frame + pc.source);
+    const metadata = pc.sourceWidth;
+    const bitOffset = metadata & 0xffff;
+    const fieldWidth = (metadata >> 16) & 0xffff;
+    const resultWidth = (metadata >> 40) & 0xff;
+    const isSigned = (metadata & (1UL << 32)) != 0;
+    const storage = loadUnsigned(address, pc.width);
+    const mask = ulong.max >> (64 - fieldWidth);
+    ulong value = (storage >> bitOffset) & mask;
+    if (isSigned && fieldWidth < 64 && (value & (1UL << (fieldWidth - 1))))
+        value |= ulong.max << fieldWidth;
+    storeWidth(frame + pc.destination, cast(long) value, resultWidth);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
 
 // Writes `frame + pc.source` itself - not the bytes stored there, the
 // address of that slot - to `frame + pc.destination`, always `size_t.sizeof`
@@ -1597,6 +1618,24 @@ package const(Instruction)* opStoreIndirect(
 
     auto address = *cast(void**) (frame + pc.destination);
     memcpy(address, frame + pc.source, pc.width);
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package const(Instruction)* opStoreBitfield(
+    const(Instruction)* pc, ubyte* frame, void* returnPlace,
+    scope const long[] constants, scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites, FrameStack* frames,
+) {
+    auto address = *cast(void**) (frame + pc.destination);
+    const metadata = pc.sourceWidth;
+    const bitOffset = metadata & 0xffff;
+    const fieldWidth = (metadata >> 16) & 0xffff;
+    auto value = loadUnsigned(frame + pc.source, pc.width);
+    const mask = (ulong.max >> (64 - fieldWidth)) << bitOffset;
+    auto storage = loadUnsigned(address, (metadata >> 40) & 0xff);
+    storage = (storage & ~mask) | ((value << bitOffset) & mask);
+    storeWidth(address, cast(long) storage, (metadata >> 40) & 0xff);
     return advance(pc, frame, returnPlace, constants, callSites,
         assertSites, frames);
 }

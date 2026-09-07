@@ -155,6 +155,56 @@ static foreach (backend; Matrix!(
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("bitfieldRuntimeOperations." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Signed { int bits : 3; }
+            struct Pair { uint first : 4; uint second : 4; }
+
+            int value(int input) { return input; }
+            Pair* receiver(ref Pair pair, ref int calls) {
+                ++calls;
+                return &pair;
+            }
+
+            void main() {
+                auto signedValue = Signed(value(-1));
+                assert(signedValue.bits == -1);
+                auto pair = Pair(value(2), value(3));
+                int calls;
+
+                receiver(pair, calls).first += 1;
+                assert(pair.first == 3 && pair.second == 3);
+                assert(calls == 1);
+                auto previous = receiver(pair, calls).first++;
+                assert(previous == 3);
+                assert(pair.first == 4 && pair.second == 3);
+                assert(calls == 2);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE cannot execute full-width ulong bitfield assignment"),
+)) {
+    @("fullWidthUlongBitfield." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Full { ulong bits : 64; }
+            void main() {
+                Full full;
+                full.bits = ulong.max;
+                assert(full.bits == ulong.max);
+            }
+        });
+    }
+}
+
 // A struct allocated with `new` runs its constructor in the allocated
 // storage. An immutable field is initialized with a construct expression,
 // so this also checks that constructor initialization reaches the object
@@ -206,9 +256,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // The members of an anonymous union occupy the same storage, so writing
 // through one member changes what is read back through another.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("anonymousUnionMembersShareStorage." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1943,16 +1991,8 @@ static foreach (backend; Matrix!()) {
 // instead - the two nibbles must both still hold `a`'s 3 and `b`'s 5,
 // packed as `0x53` the same way native layout packs them.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "`compileNew` refuses a struct with a bitfield field: " ~
-            "`isSupportedStructLiteral` rejects it before the " ~
-            "positional-field-init loop can write field-wide over a " ~
-            "sibling bitfield's bits"),
     Omit!(Ctfe, Because.unconfirmed,
         "CTFE cannot reinterpret cast `S*` to `ubyte*`"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter's own `initializeStructArguments` has the same " ~
-            "gap - out of scope here, tracked separately"),
 )) {
     @("newStructWithBitfieldSiblingsSurvive." ~ backend.stringof)
     @Tags(backend.stringof)

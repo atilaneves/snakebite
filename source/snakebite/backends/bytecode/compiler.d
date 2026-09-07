@@ -482,13 +482,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opGreaterOrEqualUnsigned, opGreaterThanSigned, opGreaterThanUnsigned,
         opIntegralToFloatSigned, opIntegralToFloatUnsigned,
         opJump, opLessOrEqualSigned, opLessOrEqualUnsigned, opLessThanSigned,
-        opLessThanUnsigned, opLoadIndirect, opLogicalNot, opModuloSigned,
-        opModuloUnsigned, opMultiply, opNegate, opNotEqual,
+        opLessThanUnsigned, opLoadBitfield, opLoadIndirect, opLogicalNot,
+        opModuloSigned,
+        opModuloUnsigned, opMultiply, opNegate, opNotEqual, opRangeError,
         opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
         opSliceCopy, opSliceFill,
         opStaticAddress, opStaticArrayEqual, opStaticLoad, opStaticStore,
-        opStoreIndirect, opSubtract, opThrow, opZero;
+        opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf;
     import snakebite.backends.delegates: DelegateTarget, delegateTargetOf;
@@ -2381,9 +2382,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         AssignExp expression, DotVarExp target, in size_t destOffset,
     ) {
         auto field = target.var.isVarDeclaration;
-        if (field is null || field.isBitFieldDeclaration !is null)
+        if (field is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
+
+        if (auto bitfield = field.isBitFieldDeclaration) {
+            const facts = TypeFacts.of(field.type);
+            const valueOffset = reserveTemp(facts);
+            evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
+            emitBitfieldStore(field, target, valueOffset, facts.size);
+            if (destOffset != discardResult)
+                emit(&opCopy, destOffset, valueOffset, facts.size);
+            return;
+        }
 
         const facts = TypeFacts.of(target.type);
         if (!isSupportedFacts(facts, target.type))
@@ -2403,7 +2414,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tclass;
 
         auto field = expression.var.isVarDeclaration;
-        if (field is null || field.isBitFieldDeclaration !is null)
+        if (field is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -2426,6 +2437,33 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             addConstant(cast(long) field.offset), size_t.sizeof);
         emit(&opAdd, fieldOffset, addressOffset, size_t.sizeof);
         return fieldOffset;
+    }
+
+    private size_t bitfieldMetadata(VarDeclaration field, in size_t resultWidth) {
+        auto bitfield = field.isBitFieldDeclaration;
+        const signedBit = TypeFacts.of(field.type).isUnsigned
+            ? 0UL : (1UL << 32);
+        return cast(size_t) bitfield.bitOffset
+            | (cast(size_t) bitfield.fieldWidth << 16)
+            | signedBit
+            | (resultWidth << 40);
+    }
+
+    private void emitBitfieldStore(
+        VarDeclaration field, DotVarExp target, in size_t valueOffset,
+        in size_t valueWidth,
+    ) {
+        const addressOffset = compileFieldAddress(target);
+        emitBitfieldStore(field, addressOffset, valueOffset, valueWidth);
+    }
+
+    private void emitBitfieldStore(
+        VarDeclaration field, in size_t addressOffset, in size_t valueOffset,
+        in size_t valueWidth,
+    ) {
+        const metadata = bitfieldMetadata(field, valueWidth);
+        emit(&opStoreBitfield, addressOffset, valueOffset, valueWidth,
+            metadata);
     }
 
     // `arr[i] = value`. `opStoreIndirect` writes `facts.size` bytes
@@ -2803,9 +2841,34 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // shapes below.
         if (auto fieldTarget = target.isDotVarExp) {
             auto field = fieldTarget.var.isVarDeclaration;
-            if (field is null || field.isBitFieldDeclaration !is null)
+            if (field is null)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
+
+            if (field.isBitFieldDeclaration !is null) {
+                const storageFacts = TypeFacts.of(field.type);
+                const operationFacts = promotion is null
+                    ? storageFacts : TypeFacts.of(promotion.type);
+                auto handler = compoundHandler(
+                    expression, operationFacts.isUnsigned);
+                if (handler is null)
+                    throw rejection(_function, expression.loc,
+                        expressionText(expression));
+                const rightOffset = reserveTemp(operationFacts);
+                evalInto(expression.e2, rightOffset, operationFacts.size);
+                const valueOffset = reserveTemp(operationFacts);
+                const addressOffset = compileFieldAddress(fieldTarget);
+                emit(&opLoadBitfield, valueOffset, addressOffset,
+                    TypeFacts.of(field.type).size,
+                    bitfieldMetadata(field, operationFacts.size));
+                emit(handler, valueOffset, rightOffset, operationFacts.size);
+                emitBitfieldStore(field, addressOffset,
+                    valueOffset, operationFacts.size);
+                if (destOffset != discardResult)
+                    emit(&opCopy, destOffset, valueOffset,
+                        operationFacts.size);
+                return;
+            }
 
             const storageFacts = TypeFacts.of(field.type);
             if (!storageFacts.isIntegral || !isIntegralSize(storageFacts.size))
@@ -3045,7 +3108,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // slot.
         if (auto fieldTarget = expression.e1.isDotVarExp) {
             auto field = fieldTarget.var.isVarDeclaration;
-            if (field is null || field.isBitFieldDeclaration !is null)
+            if (field is null)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
@@ -3056,7 +3119,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             const addressOffset = compileFieldAddress(fieldTarget);
             const valueOffset = reserveTemp(facts);
-            emit(&opLoadIndirect, valueOffset, addressOffset, facts.size);
+            if (field.isBitFieldDeclaration !is null)
+                emit(&opLoadBitfield, valueOffset, addressOffset,
+                    facts.size, bitfieldMetadata(field, facts.size));
+            else
+                emit(&opLoadIndirect, valueOffset, addressOffset, facts.size);
 
             if (destOffset != discardResult)
                 emit(&opCopy, destOffset, valueOffset, facts.size);
@@ -3067,7 +3134,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto handler = expression.op == EXP.plusPlus
                 ? &opAdd : &opSubtract;
             emit(handler, valueOffset, stepOffset, facts.size);
-            emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
+            if (field.isBitFieldDeclaration !is null)
+                emitBitfieldStore(field, addressOffset, valueOffset,
+                    facts.size);
+            else
+                emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
             return;
         }
 
@@ -3533,8 +3604,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         requireDestination(expression);
 
         auto field = expression.var.isVarDeclaration;
-        if (field is null || field.isBitFieldDeclaration !is null)
+        if (field is null)
             return visit(cast(Expression) expression);
+
+        if (auto bitfield = field.isBitFieldDeclaration) {
+            const facts = TypeFacts.of(field.type);
+            const addressOffset = compileFieldAddress(expression);
+            emit(&opLoadBitfield, _destination, addressOffset, facts.size,
+                bitfieldMetadata(field, facts.size));
+            return;
+        }
 
         import dmd.astenums: Tclass;
         if (expression.e1.type.ty == Tclass) {
@@ -3654,6 +3733,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
 
             const facts = TypeFacts.of(field.type);
+            if (field.isBitFieldDeclaration !is null) {
+                const valueOffset = reserveTemp(facts);
+                evalInto(element, valueOffset, facts.size, field.type);
+                const addressOffset = reserveTemp(pointerFacts);
+                emit(&opFrameAddress, addressOffset,
+                    _destination + field.offset, size_t.sizeof);
+                emitBitfieldStore(field, addressOffset, valueOffset,
+                    facts.size);
+                continue;
+            }
             evalInto(element, _destination + field.offset, facts.size, field.type);
         }
     }
@@ -4051,6 +4140,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             const valueOffset = reserveTemp(facts);
             evalInto(argument, valueOffset, facts.size);
+
+            if (field.isBitFieldDeclaration !is null) {
+                auto addressOffset = reserveTemp(pointerFacts);
+                emit(&opCopy, addressOffset, objectOffset, size_t.sizeof);
+                if (field.offset != 0) {
+                    const fieldOffset = reserveTemp(pointerFacts);
+                    emit(&opConstant, fieldOffset,
+                        addConstant(cast(long) field.offset), size_t.sizeof);
+                    emit(&opAdd, addressOffset, fieldOffset, size_t.sizeof);
+                }
+                emitBitfieldStore(field, addressOffset, valueOffset,
+                    facts.size);
+                continue;
+            }
 
             const fieldAddressOffset = reserveTemp(pointerFacts);
             emit(&opConstant, fieldAddressOffset,
