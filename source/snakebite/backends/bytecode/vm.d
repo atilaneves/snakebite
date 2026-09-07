@@ -12,8 +12,9 @@ extern(C) void executeCallPlan(
 );
 
 import snakebite.ffi.limits: maxArguments;
-import snakebite.nativevalue: loadSigned, loadUnsigned, storeIntegral;
-import object: Throwable, TypeInfo_Class;
+import snakebite.nativevalue:
+    isIntegralSize, loadSigned, loadUnsigned, storeIntegral;
+import object: Error, Throwable, TypeInfo_Class;
 
 private alias storeWidth = storeIntegral;
 
@@ -377,6 +378,19 @@ package const(Instruction)* opConstant(
     scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
+    // `storeWidth` only lays out the widths `isIntegralSize` recognises
+    // (1/2/4/8 bytes). The compiler never emits `opConstant` at any other
+    // width (see `Bytecode.visit(IntegerExp)`), so reaching this branch
+    // is a compiler bug, not a guest error - `storeWidth`'s own
+    // `assert(0, ...)` would otherwise compile to a bare `halt` under
+    // `-release`, losing the message that says which width was wrong.
+    if (!isIntegralSize(pc.width)) {
+        import std.conv: text;
+
+        throw new Error(
+            text("opConstant: unsupported integral width ", pc.width));
+    }
+
     storeWidth(frame + pc.destination, constants[pc.source], pc.width);
     const next = pc + 1;
     return next;
