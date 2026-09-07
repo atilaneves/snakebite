@@ -153,6 +153,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // kept in `_allocations`, so a delegate can retain this context after
     // the frame stack has popped the call.
     private Cache!(FuncDeclaration, ClosureLayout) _closures;
+    // DMD's closure analysis is stable after semantic analysis. Keep both
+    // answers so execution does not repeat the same AST walk for functions
+    // that stay in this evaluator's program.
+    private Cache!(FuncDeclaration, bool) _needsClosure;
     version(unittest) private size_t _staticLookups;
     // A guest pointer can live in an unscanned frame, so the evaluator keeps
     // each backing allocation reachable for as long as guest state can be.
@@ -619,8 +623,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: its class `this` is not bound"),
             );
 
-        import dmd.funcsem: needsClosure;
-
         // A root-owned declaration with no body has no code anywhere: the
         // program owns it, so no library can be expected to implement it.
         auto body_ = function_.fbody;
@@ -633,7 +635,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const guard = CallStateGuard(this);
 
         _closureBase = null;
-        if (function_.needsClosure())
+        if (functionNeedsClosure(function_))
             _closureBase = allocateClosure(function_, frameBase, layout);
 
         _type = function_.type.nextOf;
@@ -1801,7 +1803,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // useful for a non-capturing delegate, whose context is never read.
     private ubyte* tryContextOf(FuncDeclaration owner) {
         import snakebite.nativelayout: loadIntegral;
-        import dmd.funcsem: needsClosure;
 
         auto fn = _function;
         auto base = functionNeedsClosure(fn)
@@ -1853,10 +1854,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // ask dmd's own escape analysis the same question before deciding
     // whether a captured variable lives in a frame slot or a heap block.
     private bool functionNeedsClosure(FuncDeclaration function_) {
+        if (auto cached = function_ in _needsClosure)
+            return *cached;
+
+        import dmd.funcsem: functionSemantic3;
         import snakebite.backends.delegates:
             sharedFunctionNeedsClosure = functionNeedsClosure;
 
-        return sharedFunctionNeedsClosure(function_);
+        functionSemantic3(function_);
+        const result = sharedFunctionNeedsClosure(function_);
+        _needsClosure[function_] = result;
+        return result;
     }
 
     // Where the variable read or written by `expression` lives: the
