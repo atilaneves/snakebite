@@ -5,6 +5,7 @@ private:
 
 import std.conv: text;
 import snakebite.ffi.limits: maxArguments;
+import snakebite.backends.aggregates: AggregateFacts;
 
 
 // Walks dmd's AST directly. The one invariant: a result is never boxed
@@ -109,7 +110,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.nativelayout:
         initializerValueOf, isIntegralSize, TypeFacts;
     import object:
-        Error, Exception, Throwable, TypeInfo_Class, TypeInfo_Struct;
+        Error, Exception, Throwable, TypeInfo_Class;
     import dmd.root.string: toDString;
     import dmd.astenums:
         Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32, Tfloat64,
@@ -136,6 +137,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import dmd.typesem: isIntegral, nextOf;
     import core.thread: ThreadID;
     import snakebite.nativelayout: NativeData, nativeSymbolName;
+    import snakebite.backends.runtimetypes: RuntimeTypes;
 
     alias visit = LoweringVisitor.visit;
 
@@ -176,11 +178,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // derived class after the reference has been widened.
     private ClassDeclaration[void*] _classes;
     private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
-    // A non-root struct can be requested by an interpreted compiler-generated
-    // function even when its native TypeInfo was omitted by the compiler. The
-    // runtime object is kept by declaration so repeated `typeid` expressions
-    // see one stable identity.
-    private Cache!(StructDeclaration, TypeInfo_Struct) _structRuntime;
+    private RuntimeTypes _runtimeTypes;
     // dmd gives every `arr[... $ ...]` a `lengthVar` declaration for its
     // `$`, which no statement declares and which therefore has no frame
     // slot - and needs none, since the length is a value `visit(IndexExp)`
@@ -297,6 +295,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         _program = program;
         _nativeData = NativeData(&constantSymbolAddress);
+        _runtimeTypes = RuntimeTypes(program, &resolveTypeInfo,
+            (declaration) => classRuntimeInfo(declaration));
         _frames = FrameStack(defaultFrameCapacity);
         _temporaries = new TemporaryLifetime(&destroyTemporary);
         _ownerThread = Thread.getThis.id;
@@ -629,20 +629,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // regardless of which module owns it.
         auto body_ = function_.fbody;
         const dispatchFacts = dispatchFactsOf(function_);
-        const interpretsDelegateArgument = body_ !is null
-            && hasInterpretedDelegateArgument(callSite);
-        // A template instance can inherit the guest module of its call site,
-        // even when dmd also emitted a native specialization for it. Check
-        // the process symbol for every instantiated body so guest ownership
-        // does not force a duplicate walk of code druntime already provides.
-        const interpretsTemplate = dispatchFacts._isTemplate
-            && (!dispatchFacts._hasNativeSymbol
-                || interpretsDelegateArgument);
-        const interprets = body_ !is null
-            && (dispatchFacts._isGuest && !dispatchFacts._isTemplate
-                || interpretsTemplate
-                || interpretsDelegateArgument
-                || isNestedInCurrentlyWalkedFunction(function_));
+        import snakebite.backends.calls: usesGuestBody;
+
+        const interprets = usesGuestBody(
+            function_, callSite is null ? null : callSite.arguments,
+            (callee) => _program.isInterpreted(callee),
+            dispatchFacts._isGuest && !dispatchFacts._isTemplate
+                || dispatchFacts._isTemplate && !dispatchFacts._hasNativeSymbol,
+            _function,
+        );
         if (!interprets) {
             const plan = callSite is null
                 ? &_plans.of(function_)
@@ -775,51 +770,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     private void destroyTemporary(Expression expression) {
         runForEffect(expression);
-    }
-
-    // A guest delegate's function word holds its declaration, not an
-    // executable address. Walking the available callee keeps every call to
-    // that delegate in this evaluator. Native delegates still use FFI.
-    private bool hasInterpretedDelegateArgument(CallExp callSite) {
-        if (callSite is null || callSite.arguments is null)
-            return false;
-
-        foreach (argument; *callSite.arguments) {
-            auto expression = argument;
-            while (auto cast_ = expression.isCastExp)
-                expression = cast_.e1;
-
-            FuncDeclaration delegateFunction;
-            if (auto funcExp = expression.isFuncExp)
-                delegateFunction = funcExp.fd;
-            else if (auto delegateExp = expression.isDelegateExp)
-                delegateFunction = delegateExp.func;
-
-            if (delegateFunction !is null
-                    && _program.isInterpreted(delegateFunction))
-                return true;
-        }
-
-        return false;
-    }
-
-    // A closure literal lexically nested inside the function this
-    // evaluator is currently walking (e.g. druntime's `_toAA` cast
-    // wrapper inside a common `_d_aaApply2` instantiation) closes over
-    // this walk's own closure allocation, read back through
-    // `tryContextOf`. Both this evaluator and native D builds use the
-    // DMD frontend's native layout, but a non-escaping native closure
-    // may have no heap layout at all and read captured variables from
-    // its compiled stack frame, a frame this walk never builds. Walking
-    // the literal's body here instead keeps every reader of this walk's
-    // context the walker that wrote it, regardless of whether druntime
-    // also links a native specialization of the literal's declaration.
-    private bool isNestedInCurrentlyWalkedFunction(FuncDeclaration function_) {
-        if (_function is null)
-            return false;
-
-        auto parent = function_.toParent2();
-        return parent !is null && parent.isFuncDeclaration is _function;
     }
 
     private const(CallPlan)* callPlanOf(
@@ -2182,7 +2132,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // for filling storage the guest has not touched yet).
         auto structType = _type.isTypeStruct;
         const isSupportedStruct = structType !is null
-            && supportsStruct(_type);
+            && AggregateFacts.of(_type).loweredCopy;
         // DMD represents the raw copy that precedes its explicit
         // `__aggrPostblit` call as `BlitExp`. It is not ordinary D
         // assignment: the following AST node applies the lifecycle hook,
@@ -2323,56 +2273,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         memcpy(_place, destination.base, _facts.size);
         return destination.base;
-    }
-
-    private bool supportsStruct(Type type) {
-        import dmd.astenums: STC;
-        import snakebite.nativelayout: isNativeBytes;
-
-        auto structType = type.isTypeStruct;
-        if (structType is null)
-            return false;
-
-        auto declaration = structType.sym;
-        // A postblit or a destructor is fine: dmd's own semantic pass already
-        // emits the raw byte copy (`BlitExp`/`ConstructExp`, still handled
-        // bytewise below) and the call to `sd.postblit`/`sd.dtor` as separate,
-        // explicit AST nodes - an ordinary method call this interpreter
-        // already runs like any other - so nothing here has to run either
-        // lifecycle hook itself. A copy constructor is a different guest
-        // feature this interpreter does not support yet, so it still refuses.
-        // `hasIdentityAssign`/`hasBlitAssign` are set whenever dmd builds
-        // the `opAssign` a postblit or a destructor needs on its own
-        // (clone.d's `buildOpAssign`), not only for a guest-written one -
-        // so a struct with either lifecycle hook has both flags set purely
-        // as that hook's byproduct. Gating on them only when neither hook
-        // is present still refuses a struct whose only reason for having
-        // one is a genuinely guest-written `opAssign`, which this
-        // interpreter does not run.
-        const hasElaborateAssign = declaration.postblit is null
-            && declaration.dtor is null
-            && (declaration.hasIdentityAssign || declaration.hasBlitAssign);
-        if (declaration.isUnionDeclaration !is null
-                || declaration.hasCopyCtor
-                || hasElaborateAssign)
-            return false;
-
-        foreach (field; declaration.fields) {
-            if (field.isBitFieldDeclaration !is null
-                    || field.storage_class & STC.ref_)
-                return false;
-
-            if (field.type.isTypeStruct !is null) {
-                if (!supportsStruct(field.type))
-                    return false;
-                continue;
-            }
-
-            if (!isNativeBytes(field.type))
-                return false;
-        }
-
-        return true;
     }
 
     // The address of the storage `target` names: a variable's own slot
@@ -3539,8 +3439,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (auto typeInfo = expression.var.isTypeInfoDeclaration) {
             auto type = typeInfo.tinfo;
             auto classType = type.isTypeClass;
-            if (classType !is null && isRootOwnedClass(classType.sym)) {
-                auto info = classRuntimeInfo(classType.sym);
+            if (classType !is null && _runtimeTypes.isRootOwned(classType.sym)) {
+                auto info = _runtimeTypes.get(type);
                 storeIntegral(
                     _place,
                     cast(size_t) cast(void*) info,
@@ -3660,24 +3560,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return object;
     }
 
-    // `typeid(int)`: a class reference to a singleton dmd's glue layer -
-    // codegen, which this interpreter has none of - would normally
-    // conjure the storage for. dmd's frontend has already worked out
-    // that singleton's identity by the time it hands this node over
-    // (`Type.vtinfo`, set by `semanticTypeInfo` during this very node's
-    // own semantic pass), and that identity's own `ident` already spells
-    // its linker name: `TypeInfoDeclaration` is declared `extern(C)` with
-    // that identifier standing in directly for a mangled name
-    // (`declaration.d`'s `getTypeInfoIdent`), not a plain D identifier
-    // this evaluator would have to mangle itself. Class TypeInfo is the
-    // exception: codegen aliases its synthetic declaration to the class
-    // declaration's `__Class` metadata symbol. Resolving it is then
-    // the same question `execute`'s FFI branch already asks of any other
-    // symbol compiled elsewhere: is it in this process.
     override void visit(TypeidExp expression) {
-        import dmd.common.outbuffer: OutBuffer;
         import dmd.dtemplate: isType;
-        import dmd.mangle: mangleToBuffer;
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
@@ -3688,56 +3572,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: only `typeid` of a resolved type is supported"),
             );
 
-        auto classType = type.isTypeClass;
-        if (classType !is null && isRootOwnedClass(classType.sym)) {
-            storeIntegral(
-                _place,
-                cast(size_t) cast(void*) classRuntimeInfo(classType.sym),
-                _facts.size,
-            );
-            return;
-        }
-
-        auto structType = type.isTypeStruct;
-        if (structType !is null && isRootOwnedStruct(structType.sym)) {
-            storeIntegral(
-                _place,
-                cast(size_t) cast(void*)
-                    structRuntimeInfo(structType.sym),
-                _facts.size,
-            );
-            return;
-        }
-
-        auto name = type.vtinfo.ident.toString;
-        if (classType !is null
-                && classType.sym.isInterfaceDeclaration is null) {
-            OutBuffer mangled;
-            mangleToBuffer(classType.sym, mangled);
-            name = text("_D", mangled[], "7__ClassZ");
-        }
-        countForeignNameLookup;
-        auto address = _plans.resolve(name);
-        if (address is null) {
-            if (structType !is null
-                    && !isRootOwnedStruct(structType.sym)) {
-                storeIntegral(
-                    _place,
-                    cast(size_t) cast(void*)
-                        structRuntimeInfo(structType.sym),
-                    _facts.size,
-                );
-                return;
-            }
-
+        auto info = _runtimeTypes.get(type);
+        if (info is null)
             throw new SnakebiteException(
-                text("interpreter cannot resolve the symbol `", name,
-                    "` for `", expression.toString,
-                    "`: it is not in this process"),
+                text("interpreter cannot resolve `", expression.toString,
+                    "`: its type information is not in this process"),
             );
-        }
+        storeIntegral(_place, cast(size_t) cast(void*) info, _facts.size);
+    }
 
-        storeIntegral(_place, cast(size_t) address, _facts.size);
+    extern(D) private void* resolveTypeInfo(const(char)[] name) {
+        countForeignNameLookup;
+        return _plans.resolve(name);
     }
 
     // Only the branch the condition selects is evaluated, the same way
@@ -4269,38 +4115,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         );
     }
 
-    private TypeInfo_Struct structRuntimeInfo(StructDeclaration declaration) {
-        if (auto cached = declaration in _structRuntime)
-            return *cached;
-
-        auto typeInfo = new TypeInfo_Struct;
-        typeInfo.m_init = new byte[](declaration.structsize);
-        typeInfo.m_align = declaration.alignsize;
-        if (declaration.hasPointerField)
-            typeInfo.m_flags = TypeInfo_Struct.StructFlags.hasPointers;
-
-        _structRuntime[declaration] = typeInfo;
-        return typeInfo;
-    }
-
-    private bool isRootOwnedClass(ClassDeclaration declaration) const {
-        const module_ = declaration.getModule;
-        foreach (rootModule; _program.rootModules)
-            if (module_ is rootModule)
-                return true;
-
-        return false;
-    }
-
-    private bool isRootOwnedStruct(StructDeclaration declaration) const {
-        const module_ = declaration.getModule;
-        foreach (rootModule; _program.rootModules)
-            if (module_ is rootModule)
-                return true;
-
-        return false;
-    }
-
     // Every field's own default value, written once into `classRuntimeInfo`'s
     // own `.init` image rather than run fresh on every `new` - real
     // compiled D bakes the same values into the class's linked `.init`
@@ -4486,7 +4300,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto structType = _type.isTypeStruct;
         if (structType is null || structType.sym != expression.sd
-                || !supportsStruct(_type))
+                || !AggregateFacts.of(_type).loweredCopy)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: unsupported struct literal"),
@@ -4721,15 +4535,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return staticFunction;
 
         if (staticClass.isInterfaceDeclaration !is null) {
-            import dmd.funcsem: overrides;
+            import snakebite.backends.classinfo: interfaceOverride;
 
-            foreach (symbol; declaration.vtbl) {
-                auto candidate = symbol.isFuncDeclaration;
-                if (candidate !is null
-                        && candidate.overrides(staticFunction))
-                    return candidate;
-            }
-            return staticFunction;
+            auto candidate = interfaceOverride(declaration, staticFunction);
+            return candidate is null ? staticFunction : candidate;
         }
 
         const index = staticFunction.vtblIndex;

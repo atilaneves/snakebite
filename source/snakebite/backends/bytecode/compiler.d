@@ -4,7 +4,8 @@ module snakebite.backends.bytecode.compiler;
 private:
 
 import dmd.mtype: Type;
-import object: TypeInfo, TypeInfo_Array, TypeInfo_Class, TypeInfo_Struct;
+import snakebite.backends.aggregates: AggregateFacts;
+import object: TypeInfo_Class;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.ffi:
     CallbackBridge, maxArguments, PlanCache, supportsBoolFunction;
@@ -29,7 +30,7 @@ private bool isSupportedFacts(
 // As above, for a caller that also has `type` in hand and so can ask the
 // one further question `TypeFacts` alone cannot answer: whether `type` is a
 // struct whose native bytes can occupy a frame slot. Operations that need
-// aggregate semantics still check `isPlainOldStruct` below.
+// aggregate semantics still check `AggregateFacts.plainCopy`.
 private bool isSupportedFacts(
     in imported!"snakebite.nativelayout".TypeFacts facts,
     imported!"dmd.mtype".Type type,
@@ -53,101 +54,6 @@ private bool isSupportedFacts(
         || type.isTypeSArray !is null;
 }
 
-// Whether this compiler can treat `type` as plain bytes it never has to
-// call guest code to copy, construct or destroy: a struct with no
-// postblit, copy constructor, destructor or user-defined assignment, not a
-// `union` (whose fields this compiler cannot lay out from a plain field
-// list) and not nested in an enclosing scope (a local struct with its own
-// `this` captured context, unsupported the same way a method is), whose
-// every field is itself either a nested struct meeting this same
-// predicate or a type `nativelayout.isNativeBytes` accepts.
-private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: STC;
-    import snakebite.nativelayout: isNativeBytes;
-
-    auto structType = type.isTypeStruct;
-    if (structType is null)
-        return false;
-
-    auto declaration = structType.sym;
-    if (declaration.isUnionDeclaration !is null
-            || declaration.enclosing !is null
-            || declaration.postblit !is null || declaration.hasCopyCtor
-            || declaration.dtor !is null
-            || declaration.hasIdentityAssign || declaration.hasBlitAssign)
-        return false;
-
-    foreach (field; declaration.fields) {
-        if (field.isBitFieldDeclaration !is null
-                || (field.storage_class & STC.ref_))
-            return false;
-
-        if (field.type.isTypeStruct !is null) {
-            if (!isPlainOldStruct(field.type))
-                return false;
-            continue;
-        }
-
-        if (!isNativeBytes(field.type))
-            return false;
-    }
-
-    return true;
-}
-
-// Whether this compiler can construct `type` as a struct literal (`T(a,
-// b)`, dmd's node for direct construction with no user-defined
-// constructor) by writing straight into each field's own slot: as
-// `isPlainOldStruct`, but without ruling out a postblit, copy
-// constructor, destructor or user-defined assignment, a non-zero
-// `.init`, or nesting inside a function or another nested struct
-// (`sd.isNested()`) - a nested struct's hidden `vthis` field is filled
-// in separately, by every construction route's own call to `fillVthis`,
-// so it needs no ruling out here. Direct construction invokes neither a
-// postblit nor a copy of
-// `.init` - dmd only ever calls a postblit to run an elaborate *copy*,
-// never to build a fresh value from its own field expressions, and
-// `visit(StructLiteralExp)` below zeroes `_destination` and then writes
-// every field `dmd` gave an element for, whatever that field's own
-// default value is - including broadcasting a single element across a
-// static-array field, when `dmd`'s `fill` supplies one instead of an
-// array literal - so this asks only whether every field's own type can
-// be laid out and evaluated directly, recursing into a nested struct
-// field through this same relaxed rule rather than `isPlainOldStruct`'s
-// stricter one, so `LifetimeTracker(&postblits, &dtors)` and its holder
-// `TrackerHolder(1, tracker)` both qualify even though neither is a
-// plain-old struct on its own, and so does `std.format.spec.FormatSpec`,
-// whose fields default to non-zero values (`char spec = 's'`).
-private bool isSupportedStructLiteral(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: STC;
-    import snakebite.nativelayout: isNativeBytes;
-
-    auto structType = type.isTypeStruct;
-    if (structType is null)
-        return false;
-
-    auto declaration = structType.sym;
-    if (declaration.isUnionDeclaration !is null)
-        return false;
-
-    foreach (field; declaration.fields) {
-        if (field.isBitFieldDeclaration !is null
-                || (field.storage_class & STC.ref_))
-            return false;
-
-        if (field.type.isTypeStruct !is null) {
-            if (!isSupportedStructLiteral(field.type))
-                return false;
-            continue;
-        }
-
-        if (!isNativeBytes(field.type))
-            return false;
-    }
-
-    return true;
-}
-
 // Whether `type` is `float`/`double`/`real` - `TypeFacts` has no notion of
 // its own for this, unlike `isIntegral`/`isDynamicArray`, which drive
 // checks all over this compiler.
@@ -169,14 +75,14 @@ private imported!"snakebite.nativelayout".TypeFacts pointerFactsOf() {
 
 // An array element type this compiler can lay out: any
 // `nativelayout.isNativeBytes` type, whether a plain scalar or a
-// `isPlainOldStruct` aggregate - a nested struct element still needs that
+// plain-copy aggregate - a nested struct element still needs that
 // stricter aggregate-level rule, not just the field-type check, since an
 // element is copied and constructed the same way a struct's own field is.
 private bool isSupportedElementType(imported!"dmd.mtype".Type type) {
     import snakebite.nativelayout: isNativeBytes;
 
     if (type.isTypeStruct !is null)
-        return isPlainOldStruct(type);
+        return AggregateFacts.of(type).plainCopy;
 
     return isNativeBytes(type);
 }
@@ -191,6 +97,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.exception: SnakebiteException;
     import snakebite.framestack: defaultFrameCapacity;
     import snakebite.nativelayout: NativeData, nativeSymbolName;
+    import snakebite.backends.runtimetypes: RuntimeTypes;
 
     private Vm _vm;
     private NativeData _nativeData;
@@ -209,18 +116,13 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // the same `Resolver` `_plans` already owns, so this costs nothing new
     // besides the one symbol lookup.
     private void* _allocatorAddress;
-    private TypeInfo[] _typeInfoRoots;
+    private RuntimeTypes _runtimeTypes;
     // Guest classes never reach dmd's own code generator, so nothing ever
     // emits their `TypeInfo_Class`, instance vtable or `.init` bytes as
     // real linked data - this builds the same shapes by hand instead, once
     // per `ClassDeclaration`, and every later `new`/virtual call/`typeid`
     // reuses the one already built.
     private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
-    // `dmd` merges every `shared(Scalars)` (or other qualified variant of
-    // the same class) parsed anywhere in a program back into the one
-    // `Type` object, so keying by that object's own identity, the same as
-    // `_classRuntime`, is enough to reuse one wrapper per qualified type.
-    private TypeInfo[Type] _qualifiedClassRuntime;
     private size_t _compilationDepth;
     private size_t _cacheMisses;
     private imported!"core.time".Duration _compilationTime;
@@ -229,6 +131,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     public this(const Program program) {
         super(program);
         _nativeData = NativeData(&constantSymbolAddress);
+        _runtimeTypes = RuntimeTypes(program,
+            (name) => _plans.resolve(name), &classRuntimeInfo);
         _vm = Vm(defaultFrameCapacity);
         _callbacks = new CallbackBridge(
             &invokeBoolFunction,
@@ -350,83 +254,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _allocatorAddress;
     }
 
-    private TypeInfo runtimeTypeInfo(Type type) {
-        import dmd.astenums:
-            Tarray, Tbool, Tchar, Tdchar, Tfloat32, Tfloat64, Tfloat80,
-            Tint8, Tint16, Tint32, Tint64, Tuns8, Tuns16, Tuns32, Tuns64,
-            Twchar;
-        import dmd.typesem: nextOf;
-
-        if (type.vtinfo !is null) {
-            auto address = _plans.resolve(type.vtinfo.ident.toString);
-            if (address !is null)
-                return cast(TypeInfo) address;
-        }
-
-        import dmd.astenums: Tclass;
-        if (type.ty == Tclass) {
-            // A host-linked class (`Object`, `Exception`, ...) already has
-            // a real `TypeInfo_Class` in the running process; a
-            // guest-declared one does not, since nothing ever asks dmd's
-            // code generator to emit one - `classRuntimeInfo` builds the
-            // same shape by hand instead.
-            if (auto found = TypeInfo_Class.find(type.toString))
-                return cast(TypeInfo) cast() found;
-
-            auto classType = type.isTypeClass;
-            if (classType is null)
-                return null;
-
-            auto unqualified = classRuntimeInfo(classType.sym);
-            // `shared` (or `const`/`immutable`) is a qualifier on the same
-            // class, not a distinct one - druntime gives the qualified
-            // type its own `TypeInfo_Const`/`TypeInfo_Shared` wrapper
-            // whose `base` names the unqualified class's own
-            // `TypeInfo_Class`, rather than a second `TypeInfo_Class` of
-            // its own.
-            return type.mod == 0
-                ? unqualified : qualifiedClassTypeInfo(type, unqualified);
-        }
-
-        if (auto structType = type.isTypeStruct) {
-            auto info = new TypeInfo_Struct;
-            info.m_init = new byte[](structType.sym.structsize);
-            info.m_align = structType.sym.alignsize;
-            if (structType.sym.hasPointerField)
-                info.m_flags = TypeInfo_Struct.StructFlags.hasPointers;
-            _typeInfoRoots ~= info;
-            return info;
-        }
-
-        if (type.ty == Tarray) {
-            auto info = new TypeInfo_Array;
-            info.value = runtimeTypeInfo(type.nextOf);
-            if (info.value is null)
-                return null;
-            _typeInfoRoots ~= info;
-            return info;
-        }
-
-        switch (type.ty) {
-            case Tbool: return typeid(bool);
-            case Tchar: return typeid(char);
-            case Twchar: return typeid(wchar);
-            case Tdchar: return typeid(dchar);
-            case Tint8: return typeid(byte);
-            case Tint16: return typeid(short);
-            case Tint32: return typeid(int);
-            case Tint64: return typeid(long);
-            case Tuns8: return typeid(ubyte);
-            case Tuns16: return typeid(ushort);
-            case Tuns32: return typeid(uint);
-            case Tuns64: return typeid(ulong);
-            case Tfloat32: return typeid(float);
-            case Tfloat64: return typeid(double);
-            case Tfloat80: return typeid(real);
-            default: return null;
-        }
-    }
-
     // The native metadata a guest class needs at run time: an instance
     // vtable, a per-interface vtable and the `.init` bytes `_d_newclassT`'s
     // real body would otherwise copy from a linked symbol this project's
@@ -468,7 +295,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         imported!"dmd.dclass".ClassDeclaration interface_,
         TypeInfo_Class interfaceInfo,
     ) {
-        import dmd.funcsem: overrides;
+        import snakebite.backends.classinfo: interfaceOverride;
 
         auto vtbl = new void*[interface_.vtbl.length];
         foreach (i; 1 .. interface_.vtbl.length) {
@@ -476,14 +303,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             if (interfaceMethod is null)
                 continue;
 
-            foreach (candidateSymbol; declaration.vtbl) {
-                auto candidate = candidateSymbol.isFuncDeclaration;
-                if (candidate !is null && isGuestFunction(candidate)
-                        && candidate.overrides(interfaceMethod)) {
-                    vtbl[i] = cast(void*) compileFunction(candidate);
-                    break;
-                }
-            }
+            auto candidate = interfaceOverride(
+                declaration, interfaceMethod, &isGuestFunction);
+            if (candidate !is null)
+                vtbl[i] = cast(void*) compileFunction(candidate);
         }
 
         return vtbl;
@@ -494,31 +317,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     ) {
         _nativeData.fillFields(declaration, base);
     }
-    // `type`'s own `TypeInfo_Shared`/`TypeInfo_Const` wrapper, `base` set
-    // to `unqualified` - see `runtimeTypeInfo`'s own doc for why a
-    // qualified class type needs one rather than reusing the unqualified
-    // class's `TypeInfo_Class` itself. `TypeInfo_Shared` is a
-    // `TypeInfo_Const` (druntime's own `object.d`), so `shared` and
-    // plain `const`/`immutable`/`inout` share this one wrapper build,
-    // distinguished only by which concrete subtype names `type`'s own
-    // qualifier - `toString` is the only thing that differs between them,
-    // and nothing here ever calls it.
-    private TypeInfo qualifiedClassTypeInfo(
-        Type type, TypeInfo_Class unqualified,
-    ) {
-        if (auto cached = type in _qualifiedClassRuntime)
-            return *cached;
-
-        import dmd.astenums: MODFlags;
-        import object: TypeInfo_Const, TypeInfo_Shared;
-
-        auto wrapper = (type.mod & MODFlags.shared_) != 0
-            ? new TypeInfo_Shared : new TypeInfo_Const;
-        wrapper.base = unqualified;
-        _qualifiedClassRuntime[type] = wrapper;
-        return wrapper;
-    }
-
     // `function_`'s compiled form, compiling it - and, transitively,
     // whatever it calls - on first use. Reused on every later call to the
     // same function, the way compiled code only ever compiles a function
@@ -1496,7 +1294,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 type.toString, "`",
             ));
 
-        auto info = cast(TypeInfo_Class) cast() _bytecode.runtimeTypeInfo(type);
+        auto info = cast(TypeInfo_Class) cast() _bytecode._runtimeTypes.get(type);
         if (info is null)
             throw new SnakebiteException(text(
                 "bytecode compiler cannot resolve catch type `",
@@ -3738,7 +3536,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // (`compileNew`) - `isPointer` picks which. Every construction route
     // that can build a nested struct must call this: leaving `vthis` at
     // its `.init` zero, rather than rejecting the struct outright
-    // (`isSupportedStructLiteral` no longer does), reads back a null
+    // (field construction does not), reads back a null
     // context the first time a method on that instance uses it.
     //
     // `isNested()` is true only when dmd gave the struct a hidden `vthis`
@@ -3789,7 +3587,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (isStoredLiteral(expression))
             return compileConstant(expression);
 
-        if (!isSupportedStructLiteral(expression.type))
+        if (!AggregateFacts.of(expression.type).nativeFields)
             return visit(cast(Expression) expression);
 
         emit(&opZero, _destination, 0, _width);
@@ -4187,7 +3985,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
 
         if (expression.arguments.length > structType.sym.fields.length
-                || !isSupportedStructLiteral(expression.newtype))
+                || !AggregateFacts.of(expression.newtype).nativeFields)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -4239,10 +4037,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 text("`", expression.toString,
                     "` without resolved type information"));
 
-        auto address = _bytecode._plans.resolve(
-            type.vtinfo.ident.toString);
-        if (address is null)
-            address = cast(void*) _bytecode.runtimeTypeInfo(type);
+        auto address = cast(void*) _bytecode._runtimeTypes.get(type);
         if (address is null)
             throw rejection(_function, expression.loc,
                 text("unresolved `", expression.toString, "`"));
@@ -5550,30 +5345,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: STC, Tvoid;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        // A callee druntime already supplies as native code (`Exception.
-        // this`, reached constructing a guest exception class's base, or
-        // an ordinary FFI-backed function) is called through FFI rather
-        // than compiled as a guest body - compiling a native constructor's
-        // body would walk druntime's own `object.d` a second time (the
-        // first is this compiler's own lookups of `Throwable`/`Exception`)
-        // and reach constructs this compiler does not support there.
-        //
-        // A template instance (`enforce`, `shouldThrow`, ...) druntime
-        // already supplies native code for is the one exception: when an
-        // argument is itself a delegate this compiler's own `visit(FuncExp)`
-        // builds (a `lazy` argument's implicit delegate included - see
-        // `delegatize.d`'s `toDelegate`), the native code has no way to
-        // call back into a value only this compiler's own bytecode knows
-        // how to run. `callee.fbody` is still there for a template
-        // instance - it is only a body-less `extern` declaration that
-        // never has one - so walking it here reaches the guest branch
-        // below instead, the same call graph the interpreter's own
-        // `executeRaw`/`hasInterpretedDelegateArgument` already walks for
-        // exactly this reason.
-        const callsIntoGuestDelegate = callee.fbody !is null
-            && hasInterpretedDelegateArgument(arguments);
-        if (!callsIntoGuestDelegate
-                && (callee.fbody is null || _bytecode.hasNativeSymbol(callee))) {
+        import snakebite.backends.calls: usesGuestBody;
+
+        const guest = usesGuestBody(
+            callee, arguments, &_bytecode.isGuestFunction,
+            !_bytecode.hasNativeSymbol(callee),
+        );
+        if (!guest) {
             auto type = typeFunctionOf(callee);
 
             Arg[] initialArgs;
@@ -5934,41 +5712,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.nativelayout: delegateValueSize;
 
         return TypeFacts(delegateValueSize, size_t.sizeof, false, false);
-    }
-
-    // Whether any of `arguments` is a delegate literal (a `lazy` argument's
-    // own implicit one included - `delegatize.d`'s `toDelegate` builds it
-    // the same shape as a guest source `delegate` literal) naming a
-    // function this program interprets. `compileResolvedCall`'s own
-    // native/guest choice asks this before trusting `hasNativeSymbol`:
-    // druntime's compiled code for a template instance like `enforce` has
-    // no way to call back into a value only this compiler's bytecode can
-    // run, so such an argument forces the callee itself to compile as a
-    // guest body too, mirroring the interpreter's own
-    // `hasInterpretedDelegateArgument`.
-    private bool hasInterpretedDelegateArgument(
-        imported!"dmd.arraytypes".Expressions* arguments,
-    ) {
-        if (arguments is null)
-            return false;
-
-        foreach (argument; *arguments) {
-            auto expression = argument;
-            while (auto cast_ = expression.isCastExp)
-                expression = cast_.e1;
-
-            FuncDeclaration delegateFunction;
-            if (auto funcExp = expression.isFuncExp)
-                delegateFunction = funcExp.fd;
-            else if (auto delegateExp = expression.isDelegateExp)
-                delegateFunction = delegateExp.func;
-
-            if (delegateFunction !is null
-                    && _bytecode.isGuestFunction(delegateFunction))
-                return true;
-        }
-
-        return false;
     }
 
     // Where `expression`'s element actually lives: `expression.e1`'s own
