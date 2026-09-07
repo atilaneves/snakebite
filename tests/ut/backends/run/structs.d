@@ -1872,3 +1872,43 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A struct literal can initialize a class-reference field directly from
+// a `new` expression - the field is a plain pointer-sized handle to the
+// object's own instance, no different from any other field this literal
+// writes.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "`isSupportedStructLiteral` rejects every field but an integral, " ~
+            "a dynamic array, a pointer or a nested plain-old struct - a " ~
+            "class-reference field falls through that list"),
+)) {
+    @("structLiteralInitializesClassReferenceField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Inner {
+                ushort s;
+                ubyte b;
+                this(ushort s, ubyte b) {
+                    this.s = s;
+                    this.b = b;
+                }
+            }
+
+            struct Outer {
+                ushort s;
+                Inner inner;
+                ubyte b;
+            }
+
+            void main() {
+                auto outer = Outer(2, new Inner(3, 5), 8);
+                assert(outer.s == 2);
+                assert(outer.inner.s == 3);
+                assert(outer.inner.b == 5);
+                assert(outer.b == 8);
+            }
+        });
+    }
+}

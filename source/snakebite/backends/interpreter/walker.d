@@ -2332,6 +2332,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (field.type.ty == Taarray)
                 continue;
 
+            // A class-reference field is a plain machine word too - a
+            // pointer to the object's own instance, with no copy hook of
+            // its own - the same reason `Tpointer` above is a bytewise
+            // copy rather than a rejection.
+            if (field.type.ty == Tclass)
+                continue;
+
             const facts = factsOf(field.type);
             if (!facts.isIntegral || !isIntegralSize(facts.size))
                 return false;
