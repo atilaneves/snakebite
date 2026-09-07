@@ -3453,9 +3453,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // not all zero bytes. `defaultInitLiteral` turns the same
             // `SymbolDeclaration` back into the `StructLiteralExp` dmd
             // built it from in the first place - one element per field,
-            // each already its own default value - so this compiler's own
-            // `visit(StructLiteralExp)` can lay it out the usual way
-            // instead of this needing a second copy of that logic.
+            // except a static-array field, whose element is a sparse
+            // `ArrayLiteralExp` with its one fill value in `basis` - so
+            // this compiler's own `visit(StructLiteralExp)` can lay it
+            // out the usual way instead of this needing a second copy of
+            // that logic.
             if (symbol.type.isTypeStruct !is null) {
                 import dmd.typesem: defaultInitLiteral;
 
@@ -6237,7 +6239,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emitAllocate(sizeOffset, pointerOffset);
 
         foreach (i; 0 .. count) {
-            auto element = (*expression.elements)[i];
+            auto element = elementAt(expression, i);
             const elementOffset = reserveTemp(elementFacts);
             evalInto(element, elementOffset, elementFacts.size);
 
@@ -6297,13 +6299,32 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const facts = TypeFacts.of(expression.type);
         const tempOffset = reserveTemp(facts);
         foreach (i; 0 .. count) {
-            auto element = (*expression.elements)[i];
+            auto element = elementAt(expression, i);
             evalInto(
                 element, tempOffset + i * elementFacts.size,
                 elementFacts.size,
             );
         }
         emit(&opCopy, destOffset, tempOffset, count * elementFacts.size);
+    }
+
+    // `expression.elements[i]` directly, the way both callers above used
+    // to, reads a sparse entry's `null` straight through. `defaultInitLiteral`
+    // (`typesem.d`'s `TypeSArray.defaultInitLiteral`) builds exactly this
+    // shape for a static-array field: every entry `null`, the one shared
+    // fill value held in `basis`. `expression[i]` is dmd's own `opIndex`,
+    // which falls back to `basis` for a sparse entry, the same as the
+    // interpreter's own `elementAt` (`walker.d`). The result can still be
+    // `null` - sparse without a `basis` is not a shape either backend has
+    // a guest program that reaches - so this rejects rather than handing
+    // `evalInto` a null `Expression` to dereference.
+    private Expression elementAt(ArrayLiteralExp expression, size_t i) {
+        auto element = expression[i];
+        if (element is null)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        return element;
     }
 
 }
