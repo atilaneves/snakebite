@@ -4,6 +4,7 @@ module snakebite.backends.bytecode.compiler;
 private:
 
 import dmd.mtype: Type;
+import snakebite.backends.aggregates: AggregateFacts;
 import object: TypeInfo, TypeInfo_Array, TypeInfo_Class, TypeInfo_Struct;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.ffi:
@@ -29,7 +30,7 @@ private bool isSupportedFacts(
 // As above, for a caller that also has `type` in hand and so can ask the
 // one further question `TypeFacts` alone cannot answer: whether `type` is a
 // struct whose native bytes can occupy a frame slot. Operations that need
-// aggregate semantics still check `isPlainOldStruct` below.
+// aggregate semantics still check `AggregateFacts.plainCopy`.
 private bool isSupportedFacts(
     in imported!"snakebite.nativelayout".TypeFacts facts,
     imported!"dmd.mtype".Type type,
@@ -53,101 +54,6 @@ private bool isSupportedFacts(
         || type.isTypeSArray !is null;
 }
 
-// Whether this compiler can treat `type` as plain bytes it never has to
-// call guest code to copy, construct or destroy: a struct with no
-// postblit, copy constructor, destructor or user-defined assignment, not a
-// `union` (whose fields this compiler cannot lay out from a plain field
-// list) and not nested in an enclosing scope (a local struct with its own
-// `this` captured context, unsupported the same way a method is), whose
-// every field is itself either a nested struct meeting this same
-// predicate or a type `nativelayout.isNativeBytes` accepts.
-private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: STC;
-    import snakebite.nativelayout: isNativeBytes;
-
-    auto structType = type.isTypeStruct;
-    if (structType is null)
-        return false;
-
-    auto declaration = structType.sym;
-    if (declaration.isUnionDeclaration !is null
-            || declaration.enclosing !is null
-            || declaration.postblit !is null || declaration.hasCopyCtor
-            || declaration.dtor !is null
-            || declaration.hasIdentityAssign || declaration.hasBlitAssign)
-        return false;
-
-    foreach (field; declaration.fields) {
-        if (field.isBitFieldDeclaration !is null
-                || (field.storage_class & STC.ref_))
-            return false;
-
-        if (field.type.isTypeStruct !is null) {
-            if (!isPlainOldStruct(field.type))
-                return false;
-            continue;
-        }
-
-        if (!isNativeBytes(field.type))
-            return false;
-    }
-
-    return true;
-}
-
-// Whether this compiler can construct `type` as a struct literal (`T(a,
-// b)`, dmd's node for direct construction with no user-defined
-// constructor) by writing straight into each field's own slot: as
-// `isPlainOldStruct`, but without ruling out a postblit, copy
-// constructor, destructor or user-defined assignment, a non-zero
-// `.init`, or nesting inside a function or another nested struct
-// (`sd.isNested()`) - a nested struct's hidden `vthis` field is filled
-// in separately, by every construction route's own call to `fillVthis`,
-// so it needs no ruling out here. Direct construction invokes neither a
-// postblit nor a copy of
-// `.init` - dmd only ever calls a postblit to run an elaborate *copy*,
-// never to build a fresh value from its own field expressions, and
-// `visit(StructLiteralExp)` below zeroes `_destination` and then writes
-// every field `dmd` gave an element for, whatever that field's own
-// default value is - including broadcasting a single element across a
-// static-array field, when `dmd`'s `fill` supplies one instead of an
-// array literal - so this asks only whether every field's own type can
-// be laid out and evaluated directly, recursing into a nested struct
-// field through this same relaxed rule rather than `isPlainOldStruct`'s
-// stricter one, so `LifetimeTracker(&postblits, &dtors)` and its holder
-// `TrackerHolder(1, tracker)` both qualify even though neither is a
-// plain-old struct on its own, and so does `std.format.spec.FormatSpec`,
-// whose fields default to non-zero values (`char spec = 's'`).
-private bool isSupportedStructLiteral(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: STC;
-    import snakebite.nativelayout: isNativeBytes;
-
-    auto structType = type.isTypeStruct;
-    if (structType is null)
-        return false;
-
-    auto declaration = structType.sym;
-    if (declaration.isUnionDeclaration !is null)
-        return false;
-
-    foreach (field; declaration.fields) {
-        if (field.isBitFieldDeclaration !is null
-                || (field.storage_class & STC.ref_))
-            return false;
-
-        if (field.type.isTypeStruct !is null) {
-            if (!isSupportedStructLiteral(field.type))
-                return false;
-            continue;
-        }
-
-        if (!isNativeBytes(field.type))
-            return false;
-    }
-
-    return true;
-}
-
 // Whether `type` is `float`/`double`/`real` - `TypeFacts` has no notion of
 // its own for this, unlike `isIntegral`/`isDynamicArray`, which drive
 // checks all over this compiler.
@@ -169,14 +75,14 @@ private imported!"snakebite.nativelayout".TypeFacts pointerFactsOf() {
 
 // An array element type this compiler can lay out: any
 // `nativelayout.isNativeBytes` type, whether a plain scalar or a
-// `isPlainOldStruct` aggregate - a nested struct element still needs that
+// plain-copy aggregate - a nested struct element still needs that
 // stricter aggregate-level rule, not just the field-type check, since an
 // element is copied and constructed the same way a struct's own field is.
 private bool isSupportedElementType(imported!"dmd.mtype".Type type) {
     import snakebite.nativelayout: isNativeBytes;
 
     if (type.isTypeStruct !is null)
-        return isPlainOldStruct(type);
+        return AggregateFacts.of(type).plainCopy;
 
     return isNativeBytes(type);
 }
@@ -3734,7 +3640,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // (`compileNew`) - `isPointer` picks which. Every construction route
     // that can build a nested struct must call this: leaving `vthis` at
     // its `.init` zero, rather than rejecting the struct outright
-    // (`isSupportedStructLiteral` no longer does), reads back a null
+    // (field construction does not), reads back a null
     // context the first time a method on that instance uses it.
     //
     // `isNested()` is true only when dmd gave the struct a hidden `vthis`
@@ -3785,7 +3691,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (isStoredLiteral(expression))
             return compileConstant(expression);
 
-        if (!isSupportedStructLiteral(expression.type))
+        if (!AggregateFacts.of(expression.type).nativeFields)
             return visit(cast(Expression) expression);
 
         emit(&opZero, _destination, 0, _width);
@@ -4183,7 +4089,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
 
         if (expression.arguments.length > structType.sym.fields.length
-                || !isSupportedStructLiteral(expression.newtype))
+                || !AggregateFacts.of(expression.newtype).nativeFields)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 

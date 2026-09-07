@@ -5,6 +5,7 @@ private:
 
 import std.conv: text;
 import snakebite.ffi.limits: maxArguments;
+import snakebite.backends.aggregates: AggregateFacts;
 
 
 // Walks dmd's AST directly. The one invariant: a result is never boxed
@@ -2182,7 +2183,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // for filling storage the guest has not touched yet).
         auto structType = _type.isTypeStruct;
         const isSupportedStruct = structType !is null
-            && supportsStruct(_type);
+            && AggregateFacts.of(_type).loweredCopy;
         // DMD represents the raw copy that precedes its explicit
         // `__aggrPostblit` call as `BlitExp`. It is not ordinary D
         // assignment: the following AST node applies the lifecycle hook,
@@ -2323,56 +2324,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         memcpy(_place, destination.base, _facts.size);
         return destination.base;
-    }
-
-    private bool supportsStruct(Type type) {
-        import dmd.astenums: STC;
-        import snakebite.nativelayout: isNativeBytes;
-
-        auto structType = type.isTypeStruct;
-        if (structType is null)
-            return false;
-
-        auto declaration = structType.sym;
-        // A postblit or a destructor is fine: dmd's own semantic pass already
-        // emits the raw byte copy (`BlitExp`/`ConstructExp`, still handled
-        // bytewise below) and the call to `sd.postblit`/`sd.dtor` as separate,
-        // explicit AST nodes - an ordinary method call this interpreter
-        // already runs like any other - so nothing here has to run either
-        // lifecycle hook itself. A copy constructor is a different guest
-        // feature this interpreter does not support yet, so it still refuses.
-        // `hasIdentityAssign`/`hasBlitAssign` are set whenever dmd builds
-        // the `opAssign` a postblit or a destructor needs on its own
-        // (clone.d's `buildOpAssign`), not only for a guest-written one -
-        // so a struct with either lifecycle hook has both flags set purely
-        // as that hook's byproduct. Gating on them only when neither hook
-        // is present still refuses a struct whose only reason for having
-        // one is a genuinely guest-written `opAssign`, which this
-        // interpreter does not run.
-        const hasElaborateAssign = declaration.postblit is null
-            && declaration.dtor is null
-            && (declaration.hasIdentityAssign || declaration.hasBlitAssign);
-        if (declaration.isUnionDeclaration !is null
-                || declaration.hasCopyCtor
-                || hasElaborateAssign)
-            return false;
-
-        foreach (field; declaration.fields) {
-            if (field.isBitFieldDeclaration !is null
-                    || field.storage_class & STC.ref_)
-                return false;
-
-            if (field.type.isTypeStruct !is null) {
-                if (!supportsStruct(field.type))
-                    return false;
-                continue;
-            }
-
-            if (!isNativeBytes(field.type))
-                return false;
-        }
-
-        return true;
     }
 
     // The address of the storage `target` names: a variable's own slot
@@ -4486,7 +4437,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto structType = _type.isTypeStruct;
         if (structType is null || structType.sym != expression.sd
-                || !supportsStruct(_type))
+                || !AggregateFacts.of(_type).loweredCopy)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: unsupported struct literal"),
