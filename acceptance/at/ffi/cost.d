@@ -98,15 +98,16 @@ unittest {
     sort(baselines[]);
     sort(barriers[]);
     sort(ratios[]);
-    writefln("  baseline %5.2f ns, barrier %5.2f ns, ratio %4.1fx",
+    writefln("  baseline %5.2f ns, barrier %5.2f ns, ratio %.6fx",
         baselines[2], barriers[2], ratios[2]);
 
     result.should == 42;
     assert(sink != 0, "the baseline loop was optimised away");
 
-    // Crossing the barrier should cost about what the call costs, not a
-    // large multiple of it. The margin covers timer noise and the small
-    // instruction-count difference between DMD's direct and planned calls.
-    assert(ratios[2] < 2.25,
-        "the barrier costs more than 2.25 times a direct call");
+    // Fixed from independent runs of a known-good revision: mean + 3 sample
+    // standard deviations, rounded up. Do not let a candidate's own noise
+    // raise its limit. See ai/ffi-timing-calibration.md for the measurements.
+    enum maxRatio = 2.40;
+    assert(ratios[2] < maxRatio,
+        "the barrier costs more than 2.40 times a direct call");
 }
