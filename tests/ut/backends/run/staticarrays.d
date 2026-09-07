@@ -238,10 +238,7 @@ static foreach (backend; Matrix!(
 
 // `a[] = v` is an expression whose value is the slice `a[]` after the
 // fill, so it can initialise a dynamic array that aliases `a`.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter cannot take the address of `a[]`"),
-)) {
+static foreach (backend; Matrix!()) {
     @("staticArray.fillValueIsTheSlice." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

@@ -4145,7 +4145,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (expression.type.ty == Tpointer) {
             const structType = expression.newtype.isTypeStruct;
             if ((structType is null
-                    && !expression.newtype.isScalar())
+                    && !expression.newtype.isScalar)
                     || expression.placement !is null || expression.thisexp !is null)
                 throw new SnakebiteException(
                     text("interpreter cannot evaluate `", expression.op,
