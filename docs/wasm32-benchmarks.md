@@ -1,8 +1,8 @@
 # Wasm32 benchmarks
 
 The `wasm32` row runs Dennis Korpel's DMD Wasm backend and Wasmtime as
-external processes. It is selected by every example's `bench.backends`
-file and by `bin/bench -b wasm32`.
+external processes. It is selected by the supported examples' `bench.backends`
+files and by `bin/bench -b wasm32`.
 
 ## Setup
 
@@ -69,13 +69,12 @@ commands. The DMD and Phobos branches are experimental.
 
 ## Results with these revisions
 
-On Linux x86_64, `rt-simple`, `rt-cerealed-0`, `rt-cerealed-1`, and `rt-ffi`
-pass. The reported test counts are 22, 26, and 156 for the first three.
-`rt-ffi` uses the process exit status.
+On Linux x86_64, the default wasm32 selections are `rt-simple`,
+`rt-cerealed-0`, `rt-cerealed-1`, and `rt-ffi`. The reported test counts are
+22, 26, and 156 for the first three. `rt-ffi` uses the process exit status.
 
-`ct-easy`, `ct-full`, and `rt-perf` fail compilation because their binary
-search uses a `long` array index. DMD rejects that 64-bit index on wasm32.
-`rt` fails while building unit-threaded's integration package, which
-imports `std.process.execute` and `Config`; these APIs are absent on WASI.
-These failures also make `build/benches.sh` and `build/ci.sh` fail. The
-example sources remain unchanged.
+The unsupported examples are omitted from their default selections because
+`ct-easy`, `ct-full`, and `rt-perf` use a `long` array index that DMD rejects
+on wasm32, while `rt` needs unit-threaded APIs absent on WASI. You can still
+request `bin/bench <example> -b wasm32`; compilation or preparation failures
+are reported as `FAIL`. The example sources remain unchanged.

@@ -2,4 +2,3 @@ ctfe
 interpreter
 dmd
 bytecode
-wasm32
