@@ -320,6 +320,17 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         });
     }
 
+    // Investigation only, for `bench --diagnose`: compiles `function_`
+    // without ever running it. `call` above always runs what it compiles,
+    // which risks whatever a function that compiled fine but still has a
+    // runtime bug in the VM might do (crash, loop forever); this only ever
+    // exercises the compiler.
+    public void compileOnly(FuncDeclaration function_) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        withCompilerLock({ compileFunction(function_); });
+    }
+
     public override string eval(FuncDeclaration function_) {
         string result;
         call(function_, &result, []);
@@ -6198,17 +6209,29 @@ private string expressionText(imported!"dmd.expression".Expression expression) {
 
 // A rejection naming where in the guest source it happened (`loc`), what
 // the compiler refused (`operation`), and which function it was compiling.
+// `line` identifies this call's own place in this file - a `size_t
+// = __LINE__` default argument is evaluated at each of this function's many
+// call sites, not here, so every one of them reports its own line for free.
+// See `snakebite.backends.bytecode.diagnosis` for what that is used for.
 private imported!"snakebite.exception".SnakebiteException rejection(
     imported!"dmd.func".FuncDeclaration function_,
     imported!"dmd.location".Loc loc,
     string operation,
+    size_t line = __LINE__,
 ) {
+    import snakebite.backends.bytecode.diagnosis:
+        diagnosisEnabled, recordRejection;
     import snakebite.exception: SnakebiteException;
     import std.conv: text;
     import std.string: fromStringz;
 
+    const location = loc.toChars.fromStringz.idup;
+
+    if (diagnosisEnabled)
+        recordRejection(line, location, function_.toString.idup, operation);
+
     return new SnakebiteException(text(
-        loc.toChars.fromStringz, ": bytecode compiler cannot compile ",
+        location, ": bytecode compiler cannot compile ",
         operation, " in `", function_.toString, "`",
     ));
 }

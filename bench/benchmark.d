@@ -29,6 +29,11 @@ struct Options {
     string[] stringImportPaths; // ditto
     string projectDirectory;
     bool helpWanted;
+    // Investigation-only: compile every unittest through the bytecode
+    // backend independently instead of running the project once, so one
+    // rejection does not hide every other one behind it. See
+    // `diagnoseBytecode` and `snakebite.backends.bytecode.diagnosis`.
+    bool diagnose;
 }
 
 public int run(string[] args) {
@@ -45,6 +50,19 @@ public int run(string[] args) {
 
     if (options.helpWanted)
         return 0;
+
+    if (options.diagnose) {
+        imported!"snakebite.execution".PreparationReport preparation;
+        try
+            preparation = loadProject(options);
+        catch (Exception exception) {
+            stderr.writeln(exception.msg);
+            return 1;
+        }
+
+        diagnoseBytecode(preparation.project.program);
+        return 0;
+    }
 
     if (const error = validate(options)) {
         stderr.writeln(error);
@@ -89,6 +107,10 @@ private Options parseOptions(string[] args) {
         ~ "repeatable.", &options.importPaths,
         "string-import-path|J", "String import path for a bare directory of "
         ~ ".d files; repeatable.", &options.stringImportPaths,
+        "diagnose", "Investigation only: compile every unittest through the "
+        ~ "bytecode backend independently and report every distinct "
+        ~ "rejection instead of running the project once.",
+        &options.diagnose,
     );
 
     if (result.helpWanted) {
@@ -226,6 +248,40 @@ private BackendReport[] benchmarkAll(
         );
 
     return reports;
+}
+
+// Investigation only, behind `--diagnose`: a normal run compiles the whole
+// project as one entry point (its `main`), so the bytecode compiler's first
+// refusal aborts everything after it - the rest of the project's own gaps
+// stay hidden until that one is fixed and the bench is run again. Compiling
+// every unittest on its own instead means one bad unittest no longer hides
+// the next one's own, possibly different, gap. Module constructors and
+// unittest bodies still run once compiled, same as a normal bytecode run -
+// this only changes how many independent entry points get a chance to
+// compile before the process ends.
+private void diagnoseBytecode(imported!"snakebite.backends".Program program) {
+    import snakebite.backends.bytecode: Bytecode, printBytecodeDiagnosis;
+    import snakebite.frontend.dmd.functions: findUnittests;
+
+    scope backend = new Bytecode(program);
+
+    foreach (constructor; program.moduleConstructors)
+        ignoringFailure(() => backend.compileOnly(constructor));
+
+    foreach (module_; program.rootModules)
+        foreach (test; findUnittests(module_))
+            ignoringFailure(() => backend.compileOnly(test));
+
+    printBytecodeDiagnosis();
+}
+
+// One guest entry point's compile-or-run failure must not stop the rest
+// from getting their own turn - see `diagnoseBytecode`.
+private void ignoringFailure(scope void delegate() action) {
+    try
+        action();
+    catch (Throwable throwable) {
+    }
 }
 
 private bool selected(in Options options, in string name) {
