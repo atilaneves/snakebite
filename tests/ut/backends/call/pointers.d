@@ -181,10 +181,7 @@ static foreach (backend; Matrix!()) {
 
 
 // Subtracting pointers gives the distance in elements, not bytes.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "bytecode cannot evaluate pointer subtraction"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.dynamicArray.pointerDifference." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -199,6 +196,174 @@ static foreach (backend; Matrix!(
                 }
             },
             "distance",
+        );
+    }
+}
+
+
+// `arr.ptr` and an explicit `cast(ubyte*) arr` both read a dynamic
+// array's pointer word - the element size (one byte here) does not
+// change which word that is.
+static foreach (backend; Matrix!()) {
+    @("pointers.dynamicArray.ubyteArrayToPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        102.shouldBeRetOf!(
+            backend,
+            q{
+                int sum() {
+                    ubyte[] arr = [1, 2, 3];
+                    ubyte* viaDotPtr = arr.ptr;
+                    ubyte* viaCast = cast(ubyte*) arr;
+                    return *viaDotPtr + *viaCast
+                        + (viaDotPtr is viaCast ? 100 : 0);
+                }
+            },
+            "sum",
+        );
+    }
+}
+
+
+// The same round trip as above, for an element wider than one byte -
+// `cast(int*) arr` still reads the array's pointer word, not `arr[0]`'s
+// address plus some byte offset.
+static foreach (backend; Matrix!()) {
+    @("pointers.dynamicArray.intArrayToPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        120.shouldBeRetOf!(
+            backend,
+            q{
+                int sum() {
+                    int[] arr = [10, 20, 30];
+                    int* viaDotPtr = arr.ptr;
+                    int* viaCast = cast(int*) arr;
+                    return *viaDotPtr + *viaCast
+                        + (viaDotPtr is viaCast ? 100 : 0);
+                }
+            },
+            "sum",
+        );
+    }
+}
+
+
+// Pointer subtraction divides by the pointee's own size, not always one
+// byte: an `int*` difference of two elements is `2`, not `8` (the byte
+// distance), whichever direction is later, so the sign follows too. The
+// two pointers come from slicing a dynamic array into named variables
+// first - the same shape `sliceOfSameArrayDifference` below uses - not
+// `&arr[i]` on a static one, which is dmd's own `SymOffExp` with a
+// non-zero offset, a separate, unconfirmed gap this compiler has for
+// address-of a non-first static-array element, out of scope here.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter divides a pointer difference by the wrong "
+            ~ "stride once the pointee is wider than one byte"),
+)) {
+    @("pointers.intPointer.differenceBothSigns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] arr = [10, 20, 30, 40];
+                int[] lowSlice = arr[1 .. $];
+                int[] highSlice = arr[3 .. $];
+                int* low = lowSlice.ptr;
+                int* high = highSlice.ptr;
+                assert(high - low == 2);
+                assert(low - high == -2);
+            }
+        });
+    }
+}
+
+
+// The same signed difference for a struct pointer, whose element size
+// (two `int` fields, eight bytes) is neither one nor `size_t.sizeof`.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter divides a pointer difference by the wrong "
+            ~ "stride once the pointee is wider than one byte"),
+)) {
+    @("pointers.structPointer.differenceBothSigns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Pair {
+                int a;
+                int b;
+            }
+
+            void main() {
+                Pair[] arr = [Pair(1, 2), Pair(3, 4), Pair(5, 6), Pair(7, 8)];
+                Pair[] lowSlice = arr[1 .. $];
+                Pair[] highSlice = arr[3 .. $];
+                Pair* low = lowSlice.ptr;
+                Pair* high = highSlice.ptr;
+                assert(high - low == 2);
+                assert(low - high == -2);
+            }
+        });
+    }
+}
+
+
+// Two slices of the same array share its allocation, so their `.ptr`
+// words differ only by the element offset between where each slice
+// starts - exactly what `_d_arrayshrinkfit` computes for a shrunk slice
+// against the block `gc_getArrayUsed` still remembers as full length.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter divides a pointer difference by the wrong "
+            ~ "stride once the pointee is wider than one byte"),
+)) {
+    @("pointers.dynamicArray.sliceOfSameArrayDifference." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] arr = [1, 2, 3, 4, 5];
+                int[] low = arr[1 .. 3];
+                int[] high = arr[3 .. 5];
+                assert(high.ptr - low.ptr == 2);
+            }
+        });
+    }
+}
+
+
+// The shape `cerealed` actually runs into: shrink a dynamic array down to
+// an empty slice of its own allocation (`arr = arr[0 .. 0]`), then tell
+// the runtime the rest of that allocation is free to reuse
+// (`assumeSafeAppend`). `_d_arrayshrinkfit` reads that reuse back through
+// `arr.ptr - curArr.ptr`, the pointer subtraction fixed above. Appending
+// afterwards reuses the emptied slice's own start - the same address
+// `arr[0 .. 0]` already pointed at - so the first byte becomes the newly
+// appended one, not the one the empty slice let go of.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "`gc_getArrayUsed` has no CTFE-interpretable source"),
+)) {
+    @("pointers.dynamicArray.assumeSafeAppendAfterEmptySlice."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        9.shouldBeRetOf!(
+            backend,
+            q{
+                int first() {
+                    ubyte[] arr;
+                    arr ~= 7;
+                    arr ~= 8;
+                    arr = arr[0 .. 0];
+                    arr.assumeSafeAppend();
+                    arr ~= 9;
+                    return arr[0];
+                }
+            },
+            "first",
         );
     }
 }

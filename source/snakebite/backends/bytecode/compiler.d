@@ -4772,6 +4772,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
+        // `p2 - p1`: dmd's own semantic pass for this (`MinExp::semantic`,
+        // `expressionsem.d`) already wraps the whole subtraction in a
+        // `DivExp` by the pointee's size, so this node's own `type` is
+        // `ptrdiff_t`, not a pointer, even though both operands still
+        // are. Nothing here needs to know the pointee's size at all: the
+        // outer `DivExp` this compiler visits next does that division on
+        // the raw byte count this leaves behind, the same way it divides
+        // any other pair of integers.
+        if (handler is &opSubtract
+                && expression.e1.type.ty == Tpointer
+                && expression.e2.type.ty == Tpointer) {
+            const leftOffset = reserveTemp(pointerFacts);
+            evalInto(expression.e1, leftOffset, pointerFacts.size);
+            const rightOffset = reserveTemp(pointerFacts);
+            evalInto(expression.e2, rightOffset, pointerFacts.size);
+            emit(&opSubtract, leftOffset, rightOffset, pointerFacts.size);
+
+            if (destOffset != leftOffset)
+                emit(&opCopy, destOffset, leftOffset, width);
+            return;
+        }
+
         const facts = TypeFacts.of(expression.type);
         if (isFloatingType(expression.type)) {
             const leftOffset = reserveTemp(facts);
