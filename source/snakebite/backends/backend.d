@@ -186,7 +186,7 @@ private int runMain(
     int status;
     string[] arguments;
     void*[] mainArguments;
-    if (main_.parameters.length != 0) {
+    if (main_.parameters !is null && main_.parameters.length != 0) {
         arguments = [program.name];
         mainArguments = [cast(void*) &arguments];
     }
