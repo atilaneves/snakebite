@@ -254,3 +254,64 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// A static-array local initialized from an `ArrayLiteralExp` whose elements
+// are runtime values (not folded at compile time, since they come from a
+// function's parameters): the literal is typed `int[3]`, not `int[]`, so
+// it copies element by element into the local's own storage.
+static foreach (backend; Matrix!()) {
+    @("staticArray.literalFromRuntimeValues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int[3] make(int x, int y, int z) {
+                int[3] a = [x, y, z];
+                return a;
+            }
+
+            void main() {
+                auto a = make(1, 2, 3);
+                assert(a[0] == 1);
+                assert(a[1] == 2);
+                assert(a[2] == 3);
+            }
+        });
+    }
+}
+
+// A nested `ArrayLiteralExp`, one `int[3]` row literal per element of the
+// outer `int[3][2]`: each row must land in its own row's storage, not be
+// aliased or share one temporary.
+static foreach (backend; Matrix!()) {
+    @("staticArray.nestedLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3][2] a = [[3, 5, 6], [-3, 6, 1]];
+                assert(a[0][0] == 3);
+                assert(a[0][2] == 6);
+                assert(a[1][0] == -3);
+                assert(a[1][2] == 1);
+            }
+        });
+    }
+}
+
+// A nested `ArrayLiteralExp` of `string`, a reference type, into a
+// static-array context: each element is a `{length, ptr}` pair copied by
+// value, not a struct needing element-wise construction.
+static foreach (backend; Matrix!()) {
+    @("staticArray.stringLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                string[2] a = ["foo", "sunny"];
+                assert(a[0] == "foo");
+                assert(a[1] == "sunny");
+            }
+        });
+    }
+}

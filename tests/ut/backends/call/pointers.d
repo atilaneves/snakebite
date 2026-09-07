@@ -828,3 +828,91 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// `&sarr[1]` is dmd's `SymOffExp` with a non-zero offset: the address is
+// the array's own storage plus one element's width, not the array's start.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "bytecode compiler cannot compile `(& sarr + 4)` in `deref`"),
+)) {
+    @("pointers.addressOf.staticArrayElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(
+            backend,
+            q{
+                int deref() {
+                    int[3] sarr = [1, 2, 3];
+                    int* p = &sarr[1];
+                    return *p;
+                }
+            },
+            "deref",
+        );
+    }
+}
+
+
+// `&s.get` on a struct method is dmd's `DelegateExp`: the delegate's context
+// is the struct's own storage, so calling it through the pointer must see
+// the same fields the struct held when the address was taken.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "bytecode compiler cannot compile `&s.get` in `deref`"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "interpreter cannot evaluate `&s.get`: its delegate declaration " ~
+        "is unsupported"),
+)) {
+    @("pointers.addressOf.structMethod." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                struct S {
+                    int value;
+                    int get() { return value + 1; }
+                }
+                int deref() {
+                    S s = S(41);
+                    int delegate() dg = &s.get;
+                    return dg();
+                }
+            },
+            "deref",
+        );
+    }
+}
+
+
+// `&c.get` on a class method is dmd's `DelegateExp` too, with the object
+// reference as context instead of a struct's inline storage.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "bytecode compiler cannot compile `&c.get` in `deref`"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "interpreter cannot evaluate `&c.get`: its delegate declaration " ~
+        "is unsupported"),
+)) {
+    @("pointers.addressOf.classMethod." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                class C {
+                    int value;
+                    this(int v) { value = v; }
+                    int get() { return value + 1; }
+                }
+                int deref() {
+                    auto c = new C(41);
+                    int delegate() dg = &c.get;
+                    return dg();
+                }
+            },
+            "deref",
+        );
+    }
+}
