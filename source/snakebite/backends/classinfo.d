@@ -184,7 +184,7 @@ public TypeInfo_Class classRuntimeInfo(
 public imported!"dmd.func".FuncDeclaration interfaceOverride(
     imported!"dmd.dclass".ClassDeclaration concrete,
     imported!"dmd.func".FuncDeclaration method,
-    scope bool delegate(FuncDeclaration) accepts = null,
+    scope bool delegate(imported!"dmd.func".FuncDeclaration) accepts = null,
 ) {
     import dmd.funcsem: overrides;
 
