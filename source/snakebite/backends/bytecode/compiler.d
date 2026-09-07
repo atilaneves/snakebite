@@ -5,7 +5,7 @@ private:
 
 import dmd.mtype: Type;
 import snakebite.backends.aggregates: AggregateFacts;
-import object: TypeInfo, TypeInfo_Array, TypeInfo_Class, TypeInfo_Struct;
+import object: TypeInfo_Class;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.ffi:
     CallbackBridge, maxArguments, PlanCache, supportsBoolFunction;
@@ -97,6 +97,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.exception: SnakebiteException;
     import snakebite.framestack: defaultFrameCapacity;
     import snakebite.nativelayout: NativeData, nativeSymbolName;
+    import snakebite.backends.runtimetypes: RuntimeTypes;
 
     private Vm _vm;
     private NativeData _nativeData;
@@ -115,18 +116,13 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // the same `Resolver` `_plans` already owns, so this costs nothing new
     // besides the one symbol lookup.
     private void* _allocatorAddress;
-    private TypeInfo[] _typeInfoRoots;
+    private RuntimeTypes _runtimeTypes;
     // Guest classes never reach dmd's own code generator, so nothing ever
     // emits their `TypeInfo_Class`, instance vtable or `.init` bytes as
     // real linked data - this builds the same shapes by hand instead, once
     // per `ClassDeclaration`, and every later `new`/virtual call/`typeid`
     // reuses the one already built.
     private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
-    // `dmd` merges every `shared(Scalars)` (or other qualified variant of
-    // the same class) parsed anywhere in a program back into the one
-    // `Type` object, so keying by that object's own identity, the same as
-    // `_classRuntime`, is enough to reuse one wrapper per qualified type.
-    private TypeInfo[Type] _qualifiedClassRuntime;
     private size_t _compilationDepth;
     private size_t _cacheMisses;
     private imported!"core.time".Duration _compilationTime;
@@ -135,6 +131,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     public this(const Program program) {
         super(program);
         _nativeData = NativeData(&constantSymbolAddress);
+        _runtimeTypes = RuntimeTypes(program,
+            (name) => _plans.resolve(name), &classRuntimeInfo);
         _vm = Vm(defaultFrameCapacity);
         _callbacks = new CallbackBridge(
             &invokeBoolFunction,
@@ -256,83 +254,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _allocatorAddress;
     }
 
-    private TypeInfo runtimeTypeInfo(Type type) {
-        import dmd.astenums:
-            Tarray, Tbool, Tchar, Tdchar, Tfloat32, Tfloat64, Tfloat80,
-            Tint8, Tint16, Tint32, Tint64, Tuns8, Tuns16, Tuns32, Tuns64,
-            Twchar;
-        import dmd.typesem: nextOf;
-
-        if (type.vtinfo !is null) {
-            auto address = _plans.resolve(type.vtinfo.ident.toString);
-            if (address !is null)
-                return cast(TypeInfo) address;
-        }
-
-        import dmd.astenums: Tclass;
-        if (type.ty == Tclass) {
-            // A host-linked class (`Object`, `Exception`, ...) already has
-            // a real `TypeInfo_Class` in the running process; a
-            // guest-declared one does not, since nothing ever asks dmd's
-            // code generator to emit one - `classRuntimeInfo` builds the
-            // same shape by hand instead.
-            if (auto found = TypeInfo_Class.find(type.toString))
-                return cast(TypeInfo) cast() found;
-
-            auto classType = type.isTypeClass;
-            if (classType is null)
-                return null;
-
-            auto unqualified = classRuntimeInfo(classType.sym);
-            // `shared` (or `const`/`immutable`) is a qualifier on the same
-            // class, not a distinct one - druntime gives the qualified
-            // type its own `TypeInfo_Const`/`TypeInfo_Shared` wrapper
-            // whose `base` names the unqualified class's own
-            // `TypeInfo_Class`, rather than a second `TypeInfo_Class` of
-            // its own.
-            return type.mod == 0
-                ? unqualified : qualifiedClassTypeInfo(type, unqualified);
-        }
-
-        if (auto structType = type.isTypeStruct) {
-            auto info = new TypeInfo_Struct;
-            info.m_init = new byte[](structType.sym.structsize);
-            info.m_align = structType.sym.alignsize;
-            if (structType.sym.hasPointerField)
-                info.m_flags = TypeInfo_Struct.StructFlags.hasPointers;
-            _typeInfoRoots ~= info;
-            return info;
-        }
-
-        if (type.ty == Tarray) {
-            auto info = new TypeInfo_Array;
-            info.value = runtimeTypeInfo(type.nextOf);
-            if (info.value is null)
-                return null;
-            _typeInfoRoots ~= info;
-            return info;
-        }
-
-        switch (type.ty) {
-            case Tbool: return typeid(bool);
-            case Tchar: return typeid(char);
-            case Twchar: return typeid(wchar);
-            case Tdchar: return typeid(dchar);
-            case Tint8: return typeid(byte);
-            case Tint16: return typeid(short);
-            case Tint32: return typeid(int);
-            case Tint64: return typeid(long);
-            case Tuns8: return typeid(ubyte);
-            case Tuns16: return typeid(ushort);
-            case Tuns32: return typeid(uint);
-            case Tuns64: return typeid(ulong);
-            case Tfloat32: return typeid(float);
-            case Tfloat64: return typeid(double);
-            case Tfloat80: return typeid(real);
-            default: return null;
-        }
-    }
-
     // The native metadata a guest class needs at run time: an instance
     // vtable, a per-interface vtable and the `.init` bytes `_d_newclassT`'s
     // real body would otherwise copy from a linked symbol this project's
@@ -396,31 +317,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     ) {
         _nativeData.fillFields(declaration, base);
     }
-    // `type`'s own `TypeInfo_Shared`/`TypeInfo_Const` wrapper, `base` set
-    // to `unqualified` - see `runtimeTypeInfo`'s own doc for why a
-    // qualified class type needs one rather than reusing the unqualified
-    // class's `TypeInfo_Class` itself. `TypeInfo_Shared` is a
-    // `TypeInfo_Const` (druntime's own `object.d`), so `shared` and
-    // plain `const`/`immutable`/`inout` share this one wrapper build,
-    // distinguished only by which concrete subtype names `type`'s own
-    // qualifier - `toString` is the only thing that differs between them,
-    // and nothing here ever calls it.
-    private TypeInfo qualifiedClassTypeInfo(
-        Type type, TypeInfo_Class unqualified,
-    ) {
-        if (auto cached = type in _qualifiedClassRuntime)
-            return *cached;
-
-        import dmd.astenums: MODFlags;
-        import object: TypeInfo_Const, TypeInfo_Shared;
-
-        auto wrapper = (type.mod & MODFlags.shared_) != 0
-            ? new TypeInfo_Shared : new TypeInfo_Const;
-        wrapper.base = unqualified;
-        _qualifiedClassRuntime[type] = wrapper;
-        return wrapper;
-    }
-
     // `function_`'s compiled form, compiling it - and, transitively,
     // whatever it calls - on first use. Reused on every later call to the
     // same function, the way compiled code only ever compiles a function
@@ -1398,7 +1294,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 type.toString, "`",
             ));
 
-        auto info = cast(TypeInfo_Class) cast() _bytecode.runtimeTypeInfo(type);
+        auto info = cast(TypeInfo_Class) cast() _bytecode._runtimeTypes.get(type);
         if (info is null)
             throw new SnakebiteException(text(
                 "bytecode compiler cannot resolve catch type `",
@@ -4141,10 +4037,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 text("`", expression.toString,
                     "` without resolved type information"));
 
-        auto address = _bytecode._plans.resolve(
-            type.vtinfo.ident.toString);
-        if (address is null)
-            address = cast(void*) _bytecode.runtimeTypeInfo(type);
+        auto address = cast(void*) _bytecode._runtimeTypes.get(type);
         if (address is null)
             throw rejection(_function, expression.loc,
                 text("unresolved `", expression.toString, "`"));

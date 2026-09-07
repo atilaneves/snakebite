@@ -56,7 +56,6 @@ unittest {
 // `TypeInfo` names the unshared one as its base.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("sharedClassSharesItsUnsharedTypeInfo." ~ backend.stringof)
     @Tags(backend.stringof)
