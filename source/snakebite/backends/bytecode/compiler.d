@@ -75,7 +75,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         super(program);
         _nativeData = NativeData(&constantSymbolAddress);
         _runtimeTypes = RuntimeTypes(program,
-            (name) => _plans.resolve(name), &classRuntimeInfo);
+            (name) => _plans.resolve(name), &classRuntimeInfo,
+            (type, loc) => _nativeData.initialValue(type, loc));
         _vm = Vm(defaultFrameCapacity);
         _callbacks = new CallbackBridge(
             &invokeBoolFunction,

@@ -8,6 +8,60 @@ module ut.backends.run.structs;
 
 import ut.backends;
 
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot inspect guest TypeInfo metadata"),
+)) {
+    @("runtimeTypeInfoBuildsDataMetadata." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Code : int { ready = 7 }
+            struct Value {
+                int field = 42;
+            }
+            void main() {
+                auto structInfo = cast(TypeInfo_Struct) typeid(Value);
+                assert(*cast(int*) structInfo.m_init.ptr == 42);
+                auto enumInfo = cast(TypeInfo_Enum) typeid(Code);
+                assert(*cast(int*) enumInfo.m_init.ptr == 7);
+                assert((cast(TypeInfo_Pointer) typeid(int*)).m_next
+                    is typeid(int));
+                auto sharedInfo = cast(TypeInfo_Shared)
+                    typeid(shared const Value);
+                assert(sharedInfo.base is typeid(const Value));
+                auto qualified = cast(TypeInfo_Const) sharedInfo.base;
+                assert(qualified.base is typeid(Value));
+                structInfo = cast(TypeInfo_Struct) qualified.base;
+                assert(*cast(int*) structInfo.m_init.ptr == 42);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "Bytecode compiler cannot compile typeid(Value)"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read guest typeid metadata"),
+)) {
+    @("runtimeTypeInfoNamesGuestAggregates." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Code : int { ready = 7 }
+            struct Value { int field; }
+            class Product {}
+            void main() {
+                assert((cast(TypeInfo_Enum) typeid(Code)).name.length != 0);
+                assert((cast(TypeInfo_Struct) typeid(Value)).name.length != 0);
+                assert((cast(TypeInfo_Class) typeid(Product)).name.length != 0);
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("structInitialValueContainsFunctionPointer." ~ backend.stringof)
     @Tags(backend.stringof)

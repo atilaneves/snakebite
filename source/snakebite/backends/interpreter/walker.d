@@ -295,7 +295,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _program = program;
         _nativeData = NativeData(&constantSymbolAddress);
         _runtimeTypes = RuntimeTypes(program, &resolveTypeInfo,
-            (declaration) => classRuntimeInfo(declaration));
+            (declaration) => classRuntimeInfo(declaration),
+            (type, loc) => _nativeData.initialValue(type, loc));
         _frames = FrameStack(defaultFrameCapacity);
         _temporaries = new TemporaryLifetime(&destroyTemporary);
         _ownerThread = Thread.getThis.id;
