@@ -2537,10 +2537,10 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// `to!string` on an `int` already worked before `FormatSpec!char`'s own
-// default read did (this module's `defaultInitializedTemplated...` test
-// above) - pinned here so a future change to either one has a direct
-// regression test for the common case `std.conv.to` exists for.
+// Pins `to!string` on a plain `int`, so a future change to either it or
+// `FormatSpec!char`'s own default read (this module's
+// `defaultInitializedTemplated...` test above) has a direct regression
+// test for the common case `std.conv.to` exists for.
 static foreach (backend; Matrix!()) {
     @("toStringOnInt." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -2550,6 +2550,56 @@ static foreach (backend; Matrix!()) {
 
             void main() {
                 assert(to!string(42) == "42");
+            }
+        });
+    }
+}
+
+// A local with no initializer of a struct whose `.init` is not all zero
+// bytes and which has a static-array field: dmd's `defaultInitLiteral`
+// (`typesem.d`) builds the struct's `StructLiteralExp` with, for the
+// `int[3]` field, a *sparse* `ArrayLiteralExp` - every entry `null`, the
+// one shared fill value held in `basis` (`TypeSArray.defaultInitLiteral`).
+// The language semantics are just `Outer.init`: `xs` all zero, `b == 7`.
+static foreach (backend; Matrix!()) {
+    @("defaultInitializedNonZeroInitStructWithStaticArrayField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Outer { int[3] xs; int b = 7; }
+
+            void main() {
+                Outer d;
+                assert(d.xs[0] == 0);
+                assert(d.xs[2] == 0);
+                assert(d.b == 7);
+            }
+        });
+    }
+}
+
+// A struct literal that leaves out a static-array field whose element
+// struct has a non-zero `.init`: every element of `inners` is
+// `Inner.init`, so `x == 5` in all three. dmd's `fill` (`expressionsem.d`,
+// issue 12509) supplies the *element* type's literal `Inner(5)` for the
+// whole `Inner[3]` field, one value that every element takes, rather than
+// an array literal of three.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed),
+)) {
+    @("structLiteralOmitsStaticArrayOfNonZeroInitStructField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner { int x = 5; }
+            struct Outer { int a; Inner[3] inners; }
+
+            void main() {
+                auto o = Outer(1);
+                assert(o.a == 1);
+                assert(o.inners[0].x == 5);
+                assert(o.inners[1].x == 5);
+                assert(o.inners[2].x == 5);
             }
         });
     }
