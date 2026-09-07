@@ -131,7 +131,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         ForStatement, GotoCaseStatement, GotoDefaultStatement, IfStatement,
         ImportStatement, LabelStatement, ReturnStatement, ScopeStatement,
         Statement, SwitchStatement, ThrowStatement, TryCatchStatement,
-        TryFinallyStatement, UnrolledLoopStatement;
+        TryFinallyStatement, UnrolledLoopStatement, WithStatement;
     import dmd.tokens: EXP;
     import dmd.typesem: isIntegral, nextOf;
     import core.thread: ThreadID;
@@ -1064,6 +1064,30 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
 
         statement.statement.accept(this);
+    }
+
+    // Semantic analysis resolves every member in a `with` body through its
+    // compiler-generated `wthis` temporary. Initialise that temporary once
+    // before the body, so an aggregate expression has the same evaluation
+    // and aliasing behaviour as compiled D. A type `with` has no temporary:
+    // it only changes name lookup, which semantic analysis already did.
+    override void visit(WithStatement statement) {
+        if (statement.wthis !is null) {
+            auto initializer = statement.wthis._init.isExpInitializer;
+            if (initializer is null)
+                throw new SnakebiteException(
+                    "interpreter cannot initialize `with` expression",
+                );
+
+            evaluate(
+                initializerValueOf(initializer),
+                statement.wthis.type,
+                storageOf(statement.wthis),
+            );
+        }
+
+        if (statement._body !is null)
+            statement._body.accept(this);
     }
 
     override void visit(ReturnStatement statement) {
@@ -2132,11 +2156,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // a node this interpreter refuses rather than one it reaches this code
     // with.
     override void visit(AssignExp expression) {
-        if (expression.e1.isSliceExp !is null) {
-            assignSlice(expression);
-            return;
-        }
-
         assign(expression);
     }
 
@@ -2144,23 +2163,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import core.stdc.string: memcpy;
         import std.conv: text;
 
-        // `a[] = b[]`: dmd gives this the same `AssignExp` shape as
-        // `a = b`, but its meaning is different - `a`'s own storage keeps
-        // its identity and every element of `b` is copied into it, rather
-        // than `a` being rebound to `b`'s storage. `_type.ty == Tarray`
-        // alone does not tell the two apart (`a = b` has the same target
-        // type), so the left side's own shape does: only a slice
-        // expression on the left names storage this way. Guarding on the
-        // right side's type as well as the left rules out `a[] = v`, an
-        // element fill dmd gives the same `AssignExp` shape again, whose
-        // right side is the element type, not an array - a different
-        // operation this evaluator does not support yet. This is the
-        // shape `_d_newclassT`'s own lowering needs, copying a guest
-        // class's `.init` bytes into its freshly allocated storage
-        // (`p[0 .. init.length] = cast(void[]) init[];`, `core/lifetime.d`).
-        if (_type.ty == Tarray && expression.e1.isSliceExp !is null
-                && expression.e2.type.ty == Tarray)
-            return assignSlice(expression);
+        // DMD records the two meanings of a slice assignment on the node:
+        // `blockAssign` is `a[] = v`, which evaluates `v` as one element
+        // before copying its bytes to every slot; all other supported slice
+        // assignments here are `a[] = b[]`, which copy one element from the
+        // source per destination slot. The distinction cannot come from the
+        // right-side type alone: `int[][3] a; int[] b; a[] = b;` fills each
+        // outer element with the one dynamic-array value `b`.
+        if (_type.ty == Tarray && expression.e1.isSliceExp !is null) {
+            if (expression.memset == MemorySet.blockAssign)
+                return assignSliceScalar(expression);
+
+            if (expression.e2.type.ty == Tarray)
+                return assignSlice(expression);
+        }
 
         // `ConstructExp` and `BlitExp` arrive as this same node. Over a
         // type with a destructor or an overloaded assignment, running
@@ -2215,6 +2231,61 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
         memcpy(_place, target, _facts.size);
         return target;
+    }
+
+    // A scalar slice assignment evaluates the right side once before any
+    // destination element is overwritten: `a[] = a[0]` fills every element
+    // with the old first value. DMD marks this shape with `blockAssign`,
+    // including the static-array initialization lowering that reaches it as
+    // a `T[]` slice despite the underlying storage being a `T[N]`.
+    private void* assignSliceScalar(AssignExp expression) {
+        import core.stdc.string: memcpy;
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset, isNativeBytes,
+            loadIntegral;
+        import std.conv: text;
+
+        auto elementType = _type.nextOf;
+        if (elementType is null)
+            throw new SnakebiteException(
+                text("interpreter cannot fill `", expression.e1.toString,
+                    "`: it has no element type"),
+            );
+        if (!isNativeBytes(elementType))
+            throw new SnakebiteException(
+                text("interpreter cannot fill `", expression.e1.toString,
+                    "`: its element type is `", elementType.toString,
+                    "`"),
+            );
+
+        const elementFacts = factsOf(elementType);
+        const sourceFacts = factsOf(expression.e2.type);
+        if (sourceFacts.size != elementFacts.size)
+            throw new SnakebiteException(
+                text("interpreter cannot fill `", expression.e1.toString,
+                    "`: source `", expression.e2.type.toString,
+                    "` and element `", elementType.toString,
+                    "` have different sizes"),
+            );
+
+        auto destination = _frames.push(_facts.size, _facts.alignment);
+        evaluate(expression.e1, _type, _facts, destination.base);
+        auto value = _frames.push(sourceFacts.size, sourceFacts.alignment);
+        evaluate(
+            expression.e2, expression.e2.type, sourceFacts, value.base,
+        );
+
+        const length = loadIntegral(
+            destination.base + arrayLengthOffset, size_t.sizeof, false);
+        auto element = *cast(ubyte**) (
+            destination.base + arrayPointerOffset);
+        foreach (_; 0 .. length) {
+            memcpy(element, value.base, elementFacts.size);
+            element += elementFacts.size;
+        }
+
+        memcpy(_place, destination.base, _facts.size);
+        return destination.base;
     }
 
     // `a[] = b[]`: both sides are evaluated as ordinary dynamic-array
@@ -3985,6 +4056,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // call.
     override void visit(NewExp expression) {
         import dmd.astenums: Taarray;
+        import dmd.typesem: isScalar;
 
         if (expression.type.ty == Tarray || expression.type.ty == Taarray) {
             if (expression.lowering is null)
@@ -4072,40 +4144,54 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         if (expression.type.ty == Tpointer) {
             const structType = expression.newtype.isTypeStruct;
-            if (structType is null || expression.placement !is null
-                    || expression.thisexp !is null)
+            if ((structType is null
+                    && !expression.newtype.isScalar)
+                    || expression.placement !is null || expression.thisexp !is null)
                 throw new SnakebiteException(
                     text("interpreter cannot evaluate `", expression.op,
                         "` expression: `", expression.toString, "`"),
                 );
 
-            const declaration = structType.sym;
-            const alignment = declaration.alignsize == 0
-                ? 1 : declaration.alignsize;
+            const objectFacts = factsOf(expression.newtype);
+            const alignment = objectFacts.alignment;
             const padding = alignment - 1;
-            if (declaration.structsize > size_t.max - padding)
+            if (objectFacts.size > size_t.max - padding)
                 throw new SnakebiteException(
                     text("interpreter cannot allocate `",
                         expression.toString, "`: its alignment padding " ~
                         "overflows `size_t`"),
                 );
 
-            auto allocation = new ubyte[](declaration.structsize + padding);
+            auto allocation = new ubyte[](objectFacts.size + padding);
             _allocations ~= allocation;
             const start = -cast(size_t) allocation.ptr
                 & (alignment - 1);
             auto object = cast(ubyte*) allocation.ptr + start;
-            initializeDefault(
-                expression.newtype,
-                factsOf(expression.newtype),
-                object,
-                expression.loc,
-            );
 
-            if (expression.member !is null)
-                constructStruct(expression, object);
-            else if (arguments !is null)
-                initializeStructArguments(expression, object);
+            if (structType !is null) {
+                initializeDefault(
+                    expression.newtype,
+                    objectFacts,
+                    object,
+                    expression.loc,
+                );
+
+                if (expression.member !is null)
+                    constructStruct(expression, object);
+                else if (arguments !is null)
+                    initializeStructArguments(expression, object);
+            } else if (arguments is null || arguments.length == 0) {
+                initializeDefault(
+                    expression.newtype,
+                    objectFacts,
+                    object,
+                    expression.loc,
+                );
+            } else {
+                evaluate(
+                    (*arguments)[0], expression.newtype, objectFacts, object,
+                );
+            }
 
             storeIntegral(_place, cast(size_t) object, _facts.size);
             return;

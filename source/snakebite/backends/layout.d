@@ -340,6 +340,8 @@ import dmd.visitor: SemanticTimeTransitiveVisitor;
 // because they only introduce scope, `ForStatement` and `IfStatement`
 // because their branches run like any other statement, and `ExpStatement`
 // is where a `long sum = 0;` local declaration itself is found.
+// `WithStatement` has the semantic-analysis `wthis` temporary that makes
+// aggregate members available to its body, so it needs a slot as well.
 // `ReturnStatement` is walked the same way `ExpStatement` is: dmd's own
 // rvalue-AA-index lowering (`return aa[key];`) can leave a compiler
 // temporary (`__aaget`, a `DeclarationExp` inside the returned
@@ -370,7 +372,7 @@ extern(C++) private final class LocalsCollector:
         Catch, CompoundStatement, DoStatement, ExpStatement, ForStatement,
         IfStatement, ImportStatement, LabelStatement, ReturnStatement,
         ScopeStatement, Statement, TryCatchStatement, TryFinallyStatement,
-        UnrolledLoopStatement;
+        UnrolledLoopStatement, WithStatement;
 
     alias visit = SemanticTimeTransitiveVisitor.visit;
 
@@ -412,6 +414,14 @@ extern(C++) private final class LocalsCollector:
     override void visit(ScopeStatement statement) {
         if (statement.statement !is null)
             statement.statement.accept(this);
+    }
+
+    override void visit(WithStatement statement) {
+        if (statement.wthis !is null)
+            collectVariable(statement.wthis);
+
+        if (statement._body !is null)
+            statement._body.accept(this);
     }
 
     // dmd hoists a `for`'s own initialiser out into the enclosing
