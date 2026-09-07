@@ -1956,12 +1956,7 @@ static foreach (backend; Matrix!()) {
 // A struct literal can initialize a `double` field, and a plain field-wide
 // copy of the whole struct carries that field's bytes along unchanged - a
 // floating-point field needs no postblit, destructor or captured context,
-// so it is native bytes exactly like an integral field. `x`'s own explicit
-// `= 0` default keeps `Point`'s `.init` all-zero bytes - a `double`'s own
-// default is `double.nan`, not zero, which would otherwise fail the
-// bytecode compiler's separate `zeroInit` requirement for a struct literal
-// that leaves any field out, unrelated to the field-kind question this
-// test is about.
+// so it is native bytes exactly like an integral field.
 static foreach (backend; Matrix!()) {
     @("structLiteralInitializesFloatingField." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -2089,9 +2084,7 @@ static foreach (backend; Matrix!()) {
 // A struct literal can initialize a `real` field, and copying the struct
 // carries it along unchanged - a `real` is 16 bytes wide and 16-byte
 // aligned on x86-64, so `R`'s layout has padding after `tag` that a plain
-// bytewise copy must carry too, unlike any 8-byte-or-narrower field. The
-// explicit `= 0` keeps `R`'s `.init` all-zero bytes, as in
-// `structLiteralInitializesFloatingField`.
+// bytewise copy must carry too, unlike any 8-byte-or-narrower field.
 static foreach (backend; Matrix!()) {
     @("structLiteralInitializesRealField." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -2146,6 +2139,467 @@ static foreach (backend; Matrix!()) {
                 auto copy = original;
                 assert(copy.getter.get() == 41);
                 assert(copy.tag == 1);
+            }
+        });
+    }
+}
+
+// A struct wider than one machine word but no wider than two - the same
+// `{ pointer, size_t, uint }` shape druntime's own `BlkInfo_` has, padded
+// to 24 bytes - can be returned by value from a named function. The call
+// destination slot is sized from the return type's own `TypeFacts`, not
+// a fixed-width scratch buffer, so the width of the struct does not
+// matter.
+static foreach (backend; Matrix!()) {
+    @("structWithPointerFieldReturnedByValueFromNamedFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide {
+                void* base;
+                size_t size;
+                uint tag;
+            }
+
+            Wide makeWide(ref int payload) {
+                return Wide(&payload, 3, 4);
+            }
+
+            void main() {
+                int payload = 7;
+                auto w = makeWide(payload);
+                assert(*cast(int*) w.base == 7);
+                assert(w.size == 3);
+                assert(w.tag == 4);
+            }
+        });
+    }
+}
+
+// As above, returned from a lambda's own call rather than a named
+// function - the same return-width limit applies to every guest callee,
+// not just one declared with `function`/`ref`/... syntax.
+static foreach (backend; Matrix!()) {
+    @("structWithPointerFieldReturnedByValueFromLambda." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide {
+                void* base;
+                size_t size;
+                uint tag;
+            }
+
+            void main() {
+                int payload = 7;
+                auto makeWide = () => Wide(&payload, 3, 4);
+                auto w = makeWide();
+                assert(*cast(int*) w.base == 7);
+                assert(w.size == 3);
+                assert(w.tag == 4);
+            }
+        });
+    }
+}
+
+// A struct with a class-reference field - one pointer-sized handle, no
+// different from any other field a bytewise copy carries - can be
+// returned by value the same way a struct with a plain pointer field can.
+static foreach (backend; Matrix!()) {
+    @("structWithClassFieldReturnedByValueFromNamedFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Inner {
+                int value;
+                this(int value) { this.value = value; }
+            }
+
+            struct Outer {
+                ushort tag;
+                Inner inner;
+                ubyte flag;
+            }
+
+            Outer makeOuter() {
+                return Outer(2, new Inner(3), 8);
+            }
+
+            void main() {
+                auto o = makeOuter();
+                assert(o.tag == 2);
+                assert(o.inner.value == 3);
+                assert(o.flag == 8);
+            }
+        });
+    }
+}
+
+// A struct literal with a pointer field, written directly as a call
+// argument - the callee's own parameter slot holds the same native bytes
+// the literal wrote, no different from any other struct-typed argument.
+static foreach (backend; Matrix!()) {
+    @("structLiteralWithPointerFieldAsCallArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Outer {
+                ushort tag;
+                int* inner;
+                ubyte flag;
+            }
+
+            void takesOuter(Outer o) {
+                assert(o.tag == 9);
+                assert(*o.inner == 1);
+                assert(o.flag == 2);
+            }
+
+            void main() {
+                int value = 1;
+                takesOuter(Outer(9, &value, 2));
+            }
+        });
+    }
+}
+
+// As above, with a class-reference field instead of a plain pointer.
+static foreach (backend; Matrix!()) {
+    @("structLiteralWithClassFieldAsCallArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Inner {
+                int value;
+                this(int value) { this.value = value; }
+            }
+
+            struct Outer {
+                ushort tag;
+                Inner inner;
+                ubyte flag;
+            }
+
+            void takesOuter(Outer o) {
+                assert(o.tag == 9);
+                assert(o.inner.value == 1);
+                assert(o.flag == 2);
+            }
+
+            void main() {
+                takesOuter(Outer(9, new Inner(1), 2));
+            }
+        });
+    }
+}
+
+// A struct literal with a pointer field, assigned into an already-declared
+// local - the assignment's own source is the literal's native bytes, the
+// same as any other struct-typed assignment.
+static foreach (backend; Matrix!()) {
+    @("structLiteralWithPointerFieldAsAssignmentSource." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Outer {
+                ushort tag;
+                int* inner;
+                ubyte flag;
+            }
+
+            void main() {
+                int value = 5;
+                Outer o;
+                o = Outer(3, &value, 7);
+                assert(o.tag == 3);
+                assert(*o.inner == 5);
+                assert(o.flag == 7);
+            }
+        });
+    }
+}
+
+// As above, with a class-reference field instead of a plain pointer.
+static foreach (backend; Matrix!()) {
+    @("structLiteralWithClassFieldAsAssignmentSource." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Inner {
+                int value;
+                this(int value) { this.value = value; }
+            }
+
+            struct Outer {
+                ushort tag;
+                Inner inner;
+                ubyte flag;
+            }
+
+            void main() {
+                Outer o;
+                o = Outer(3, new Inner(5), 7);
+                assert(o.tag == 3);
+                assert(o.inner.value == 5);
+                assert(o.flag == 7);
+            }
+        });
+    }
+}
+
+// A storage-class attribute wrapping a non-variable local declaration
+// (`static struct S { ... }`) parses as an `AttribDeclaration` holding the
+// `StructDeclaration`, not as a flag on the declaration itself the way
+// `static int x;` sets `STC.static_` directly on its own `VarDeclaration`.
+// This local struct has no runtime action of its own - the same as one
+// declared without `static` - so declaring it must not stop the
+// surrounding function from compiling.
+static foreach (backend; Matrix!()) {
+    @("staticLocalStructDeclarationHasNoRuntimeAction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int useLocalStruct() {
+                static struct Holder {
+                    int value;
+                }
+
+                Holder h = Holder(42);
+                return h.value;
+            }
+
+            void main() {
+                assert(useLocalStruct() == 42);
+            }
+        });
+    }
+}
+
+// A struct return is copied straight into the caller's own frame slot,
+// which the compiler sizes from the return type, so a struct wider than
+// two machine words returns by value the same way a narrower one does.
+static foreach (backend; Matrix!()) {
+    @("fourWordStructReturnedByValueFromNamedFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide {
+                long a;
+                long b;
+                long c;
+                long d;
+            }
+
+            Wide makeWide() {
+                return Wide(1, 2, 3, 4);
+            }
+
+            void main() {
+                auto w = makeWide();
+                assert(w.a == 1);
+                assert(w.b == 2);
+                assert(w.c == 3);
+                assert(w.d == 4);
+            }
+        });
+    }
+}
+
+// As above, from a lambda: the same width rule applies to every guest
+// callee whatever syntax declared it.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed), // segfaults
+)) {
+    @("fourWordStructReturnedByValueFromLambda." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide {
+                long a;
+                long b;
+                long c;
+                long d;
+            }
+
+            void main() {
+                auto make = () => Wide(1, 2, 3, 4);
+                auto w = make();
+                assert(w.a + w.b + w.c + w.d == 10);
+            }
+        });
+    }
+}
+
+// A five-word struct with pointer and class-reference fields returned
+// from a method and handed straight to another call as its argument: the
+// returned bytes land in the temporary the call site reserved for that
+// argument, however wide the struct is.
+static foreach (backend; Matrix!()) {
+    @("fiveWordStructReturnedFromMethodPassedAsArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Inner {
+                int value;
+                this(int value) { this.value = value; }
+            }
+
+            struct Wide {
+                int* p;
+                Inner inner;
+                long a;
+                long b;
+                long c;
+            }
+
+            struct Factory {
+                int payload;
+                Wide make() {
+                    return Wide(&payload, new Inner(9), 1, 2, 3);
+                }
+            }
+
+            long sum(Wide w) {
+                return *w.p + w.inner.value + w.a + w.b + w.c;
+            }
+
+            void main() {
+                Factory f = Factory(100);
+                assert(sum(f.make()) == 115);
+            }
+        });
+    }
+}
+
+// A user attribute and a storage class on one local struct (`@("tag")
+// static struct S`) nest one attribute declaration inside another (a
+// storage class alone merges into a single one, `@safe static` included);
+// the struct underneath still has no runtime action.
+static foreach (backend; Matrix!(
+    // the interpreter recurses through one attribute wrapper, not two
+    Omit!(Interpreter, Because.unconfirmed),
+)) {
+    @("userAttributeOnStaticLocalStructDeclarationHasNoRuntimeAction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f() {
+                @("tag") static struct S { int v; }
+                return S(3).v;
+            }
+            void main() { assert(f() == 3); }
+        });
+    }
+}
+
+// A local of a templated struct type with no initializer of its own reads
+// `T.init` (dmd's `TypeStruct.defaultInit`, `typesem.d`), a `VarExp` on a
+// `SymbolDeclaration` naming the struct rather than any storage of its
+// own. `Widget`'s fields default to non-zero bytes (a non-empty string, a
+// non-first enum member, `true`, a non-`'\0'` `char`) - std.format.spec's
+// `FormatSpec` has the same shape, whose default read reaches this
+// through `to!string`'s own use of it. `isSupportedStructLiteral` (the
+// same predicate `visit(StructLiteralExp)` uses for `Widget(a, b)`)
+// governs this too, since `defaultInit`'s `VarExp` resolves to the exact
+// `StructLiteralExp` dmd would have built from `Widget`'s own field
+// defaults.
+static foreach (backend; Matrix!()) {
+    @("defaultInitializedTemplatedStructReadsAndMutatesNonZeroFields." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Mode { off, on }
+
+            struct Widget(T) {
+                string name = "default";
+                Mode mode = Mode.on;
+                bool active = true;
+                char tag = 'x';
+                T value;
+
+                void activate() { active = true; }
+            }
+
+            void main() {
+                Widget!int widget;
+                assert(widget.name == "default");
+                assert(widget.mode == Mode.on);
+                assert(widget.active == true);
+                assert(widget.tag == 'x');
+                assert(widget.value == 0);
+
+                widget.tag = 'y';
+                widget.mode = Mode.off;
+                assert(widget.tag == 'y');
+                assert(widget.mode == Mode.off);
+            }
+        });
+    }
+}
+
+// Pins `to!string` on a plain `int`, so a future change to either it or
+// `FormatSpec!char`'s own default read (this module's
+// `defaultInitializedTemplated...` test above) has a direct regression
+// test for the common case `std.conv.to` exists for.
+static foreach (backend; Matrix!()) {
+    @("toStringOnInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.conv: to;
+
+            void main() {
+                assert(to!string(42) == "42");
+            }
+        });
+    }
+}
+
+// A local with no initializer of a struct whose `.init` is not all zero
+// bytes and which has a static-array field: dmd's `defaultInitLiteral`
+// (`typesem.d`) builds the struct's `StructLiteralExp` with, for the
+// `int[3]` field, a *sparse* `ArrayLiteralExp` - every entry `null`, the
+// one shared fill value held in `basis` (`TypeSArray.defaultInitLiteral`).
+// The language semantics are just `Outer.init`: `xs` all zero, `b == 7`.
+static foreach (backend; Matrix!()) {
+    @("defaultInitializedNonZeroInitStructWithStaticArrayField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Outer { int[3] xs; int b = 7; }
+
+            void main() {
+                Outer d;
+                assert(d.xs[0] == 0);
+                assert(d.xs[2] == 0);
+                assert(d.b == 7);
+            }
+        });
+    }
+}
+
+// A struct literal that leaves out a static-array field whose element
+// struct has a non-zero `.init`: every element of `inners` is
+// `Inner.init`, so `x == 5` in all three. dmd's `fill` (`expressionsem.d`,
+// issue 12509) supplies the *element* type's literal `Inner(5)` for the
+// whole `Inner[3]` field, one value that every element takes, rather than
+// an array literal of three.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed),
+)) {
+    @("structLiteralOmitsStaticArrayOfNonZeroInitStructField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner { int x = 5; }
+            struct Outer { int a; Inner[3] inners; }
+
+            void main() {
+                auto o = Outer(1);
+                assert(o.a == 1);
+                assert(o.inners[0].x == 5);
+                assert(o.inners[1].x == 5);
+                assert(o.inners[2].x == 5);
             }
         });
     }

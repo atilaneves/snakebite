@@ -18,11 +18,6 @@ import object: Throwable, TypeInfo_Class;
 private alias storeWidth = storeIntegral;
 
 
-// Keep the compiler's supported return sizes unchanged when optimizing
-// result storage. This limit includes a dynamic array's two words.
-package enum maxReturnWidth = 16;
-
-
 // One argument a call instruction copies from the caller's frame into the
 // callee's, at compile time already resolved to both sides' byte offsets
 // and the width to copy - the same three numbers `opCopy` needs for a
