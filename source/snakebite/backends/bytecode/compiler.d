@@ -5391,7 +5391,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         size_t delegate() thisOffsetOf,
         in size_t destOffset,
     ) {
-        import dmd.astenums: Tvoid;
+        import dmd.astenums: STC, Tvoid;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         // A callee druntime already supplies as native code (`Exception.
@@ -5476,8 +5476,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // would compare that shape against the declared type and
             // wrongly refuse it, so this check is skipped for `lazy`
             // the same way `Bytecode.compileFunction` skips it above.
-            import dmd.astenums: STC;
-
             const isLazyParameter =
                 (calleeType.parameterList[i].storageClass & STC.lazy_) != 0;
             if (!isLazyParameter && !isSupportedFacts(parameter.facts,
