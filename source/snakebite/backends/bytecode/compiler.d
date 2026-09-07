@@ -104,15 +104,21 @@ private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
 // b)`, dmd's node for direct construction with no user-defined
 // constructor) by writing straight into each field's own slot: as
 // `isPlainOldStruct`, but without ruling out a postblit, copy
-// constructor, destructor or user-defined assignment. Direct construction
-// invokes none of those - dmd only ever calls a postblit to run an
-// elaborate *copy*, never to build a fresh value from its own field
-// expressions - so this asks only whether every field's own type can be
-// laid out and evaluated directly, recursing into a nested struct field
-// through this same relaxed rule rather than `isPlainOldStruct`'s
+// constructor, destructor or user-defined assignment, or a non-zero
+// `.init`. Direct construction invokes neither a postblit nor a copy of
+// `.init` - dmd only ever calls a postblit to run an elaborate *copy*,
+// never to build a fresh value from its own field expressions, and
+// `visit(StructLiteralExp)` below zeroes `_destination` and then writes
+// every field `dmd` gave an element for, whatever that field's own
+// default value is - including broadcasting a single element across a
+// static-array field, when `dmd`'s `fill` supplies one instead of an
+// array literal - so this asks only whether every field's own type can
+// be laid out and evaluated directly, recursing into a nested struct
+// field through this same relaxed rule rather than `isPlainOldStruct`'s
 // stricter one, so `LifetimeTracker(&postblits, &dtors)` and its holder
 // `TrackerHolder(1, tracker)` both qualify even though neither is a
-// plain-old struct on its own.
+// plain-old struct on its own, and so does `std.format.spec.FormatSpec`,
+// whose fields default to non-zero values (`char spec = 's'`).
 private bool isSupportedStructLiteral(imported!"dmd.mtype".Type type) {
     import dmd.astenums: STC;
     import snakebite.nativelayout: isNativeBytes;
@@ -122,8 +128,7 @@ private bool isSupportedStructLiteral(imported!"dmd.mtype".Type type) {
         return false;
 
     auto declaration = structType.sym;
-    if (!declaration.zeroInit
-            || declaration.isUnionDeclaration !is null
+    if (declaration.isUnionDeclaration !is null
             || declaration.enclosing !is null)
         return false;
 
@@ -3443,6 +3448,26 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // `typeid` - this reads it back rather than emitting a second copy
         // of it.
         if (auto symbol = expression.var.isSymbolDeclaration) {
+            // `T.init` for a struct `T`: dmd's own `TypeStruct.defaultInit`
+            // (`typesem.d`) hands back this exact `VarExp` shape, whether
+            // written by hand or reached through a plain declaration with
+            // no initialiser (`FormatSpec!char f;`) whose own `.init` is
+            // not all zero bytes. `defaultInitLiteral` turns the same
+            // `SymbolDeclaration` back into the `StructLiteralExp` dmd
+            // built it from in the first place - one element per field,
+            // except a static-array field, whose element is a sparse
+            // `ArrayLiteralExp` with its one fill value in `basis` - so
+            // this compiler's own `visit(StructLiteralExp)` can lay it
+            // out the usual way instead of this needing a second copy of
+            // that logic.
+            if (symbol.type.isTypeStruct !is null) {
+                import dmd.typesem: defaultInitLiteral;
+
+                defaultInitLiteral(symbol.type, expression.loc)
+                    .accept(this);
+                return;
+            }
+
             auto classDeclaration = symbol.dsym.isClassDeclaration;
             if (classDeclaration is null)
                 return visit(cast(Expression) expression);
@@ -3777,9 +3802,45 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 continue;
 
             auto field = expression.sd.fields[i];
+            auto sarrayType = field.type.isTypeSArray;
+
+            // dmd's `fill` (`expressionsem.d`, issue 12509) can supply,
+            // for a static-array field whose element type has a non-zero
+            // `.init`, a single literal of that *element* type rather
+            // than an array literal with one entry per slot: one value
+            // that every slot takes. Broadcast it, the same as dmd's own
+            // glue (`e2ir.d`'s `StructLiteralExp` case) does.
+            if (sarrayType !is null && !element.type.equals(field.type)) {
+                compileBroadcastArrayField(
+                    element, sarrayType, _destination + field.offset);
+                continue;
+            }
+
             const facts = TypeFacts.of(field.type);
             evalInto(element, _destination + field.offset, facts.size);
         }
+    }
+
+    // Fills every slot of a static-array field with the one element `dmd`
+    // gave for the whole array (see the call site above). `elementFacts`
+    // is the actual literal's own type, so this broadcasts correctly
+    // however many array dimensions still lie between it and
+    // `sarrayType` - a nested `T[2][3]` field works the same way, one
+    // flat run of `elementFacts.size`-sized copies.
+    private void compileBroadcastArrayField(
+        Expression element, imported!"dmd.mtype".TypeSArray sarrayType,
+        in size_t destOffset,
+    ) {
+        const elementFacts = TypeFacts.of(element.type);
+        const fieldFacts = TypeFacts.of(sarrayType);
+        const count = fieldFacts.size / elementFacts.size;
+
+        const tempOffset = reserveTemp(elementFacts);
+        evalInto(element, tempOffset, elementFacts.size);
+
+        foreach (i; 0 .. count)
+            emit(&opCopy, destOffset + i * elementFacts.size, tempOffset,
+                elementFacts.size);
     }
 
     // `arr.length`: the array's own length word, read straight out of its
@@ -6216,7 +6277,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emitAllocate(sizeOffset, pointerOffset);
 
         foreach (i; 0 .. count) {
-            auto element = (*expression.elements)[i];
+            auto element = elementAt(expression, i);
             const elementOffset = reserveTemp(elementFacts);
             evalInto(element, elementOffset, elementFacts.size);
 
@@ -6276,13 +6337,32 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const facts = TypeFacts.of(expression.type);
         const tempOffset = reserveTemp(facts);
         foreach (i; 0 .. count) {
-            auto element = (*expression.elements)[i];
+            auto element = elementAt(expression, i);
             evalInto(
                 element, tempOffset + i * elementFacts.size,
                 elementFacts.size,
             );
         }
         emit(&opCopy, destOffset, tempOffset, count * elementFacts.size);
+    }
+
+    // `expression.elements[i]` directly, the way both callers above used
+    // to, reads a sparse entry's `null` straight through. `defaultInitLiteral`
+    // (`typesem.d`'s `TypeSArray.defaultInitLiteral`) builds exactly this
+    // shape for a static-array field: every entry `null`, the one shared
+    // fill value held in `basis`. `expression[i]` is dmd's own `opIndex`,
+    // which falls back to `basis` for a sparse entry, the same as the
+    // interpreter's own `elementAt` (`walker.d`). The result can still be
+    // `null` - sparse without a `basis` is not a shape either backend has
+    // a guest program that reaches - so this rejects rather than handing
+    // `evalInto` a null `Expression` to dereference.
+    private Expression elementAt(ArrayLiteralExp expression, size_t i) {
+        auto element = expression[i];
+        if (element is null)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        return element;
     }
 
 }

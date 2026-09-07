@@ -1956,12 +1956,7 @@ static foreach (backend; Matrix!()) {
 // A struct literal can initialize a `double` field, and a plain field-wide
 // copy of the whole struct carries that field's bytes along unchanged - a
 // floating-point field needs no postblit, destructor or captured context,
-// so it is native bytes exactly like an integral field. `x`'s own explicit
-// `= 0` default keeps `Point`'s `.init` all-zero bytes - a `double`'s own
-// default is `double.nan`, not zero, which would otherwise fail the
-// bytecode compiler's separate `zeroInit` requirement for a struct literal
-// that leaves any field out, unrelated to the field-kind question this
-// test is about.
+// so it is native bytes exactly like an integral field.
 static foreach (backend; Matrix!()) {
     @("structLiteralInitializesFloatingField." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -2089,9 +2084,7 @@ static foreach (backend; Matrix!()) {
 // A struct literal can initialize a `real` field, and copying the struct
 // carries it along unchanged - a `real` is 16 bytes wide and 16-byte
 // aligned on x86-64, so `R`'s layout has padding after `tag` that a plain
-// bytewise copy must carry too, unlike any 8-byte-or-narrower field. The
-// explicit `= 0` keeps `R`'s `.init` all-zero bytes, as in
-// `structLiteralInitializesFloatingField`.
+// bytewise copy must carry too, unlike any 8-byte-or-narrower field.
 static foreach (backend; Matrix!()) {
     @("structLiteralInitializesRealField." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -2495,6 +2488,119 @@ static foreach (backend; Matrix!(
                 return S(3).v;
             }
             void main() { assert(f() == 3); }
+        });
+    }
+}
+
+// A local of a templated struct type with no initializer of its own reads
+// `T.init` (dmd's `TypeStruct.defaultInit`, `typesem.d`), a `VarExp` on a
+// `SymbolDeclaration` naming the struct rather than any storage of its
+// own. `Widget`'s fields default to non-zero bytes (a non-empty string, a
+// non-first enum member, `true`, a non-`'\0'` `char`) - std.format.spec's
+// `FormatSpec` has the same shape, whose default read reaches this
+// through `to!string`'s own use of it. `isSupportedStructLiteral` (the
+// same predicate `visit(StructLiteralExp)` uses for `Widget(a, b)`)
+// governs this too, since `defaultInit`'s `VarExp` resolves to the exact
+// `StructLiteralExp` dmd would have built from `Widget`'s own field
+// defaults.
+static foreach (backend; Matrix!()) {
+    @("defaultInitializedTemplatedStructReadsAndMutatesNonZeroFields." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Mode { off, on }
+
+            struct Widget(T) {
+                string name = "default";
+                Mode mode = Mode.on;
+                bool active = true;
+                char tag = 'x';
+                T value;
+
+                void activate() { active = true; }
+            }
+
+            void main() {
+                Widget!int widget;
+                assert(widget.name == "default");
+                assert(widget.mode == Mode.on);
+                assert(widget.active == true);
+                assert(widget.tag == 'x');
+                assert(widget.value == 0);
+
+                widget.tag = 'y';
+                widget.mode = Mode.off;
+                assert(widget.tag == 'y');
+                assert(widget.mode == Mode.off);
+            }
+        });
+    }
+}
+
+// Pins `to!string` on a plain `int`, so a future change to either it or
+// `FormatSpec!char`'s own default read (this module's
+// `defaultInitializedTemplated...` test above) has a direct regression
+// test for the common case `std.conv.to` exists for.
+static foreach (backend; Matrix!()) {
+    @("toStringOnInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.conv: to;
+
+            void main() {
+                assert(to!string(42) == "42");
+            }
+        });
+    }
+}
+
+// A local with no initializer of a struct whose `.init` is not all zero
+// bytes and which has a static-array field: dmd's `defaultInitLiteral`
+// (`typesem.d`) builds the struct's `StructLiteralExp` with, for the
+// `int[3]` field, a *sparse* `ArrayLiteralExp` - every entry `null`, the
+// one shared fill value held in `basis` (`TypeSArray.defaultInitLiteral`).
+// The language semantics are just `Outer.init`: `xs` all zero, `b == 7`.
+static foreach (backend; Matrix!()) {
+    @("defaultInitializedNonZeroInitStructWithStaticArrayField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Outer { int[3] xs; int b = 7; }
+
+            void main() {
+                Outer d;
+                assert(d.xs[0] == 0);
+                assert(d.xs[2] == 0);
+                assert(d.b == 7);
+            }
+        });
+    }
+}
+
+// A struct literal that leaves out a static-array field whose element
+// struct has a non-zero `.init`: every element of `inners` is
+// `Inner.init`, so `x == 5` in all three. dmd's `fill` (`expressionsem.d`,
+// issue 12509) supplies the *element* type's literal `Inner(5)` for the
+// whole `Inner[3]` field, one value that every element takes, rather than
+// an array literal of three.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed),
+)) {
+    @("structLiteralOmitsStaticArrayOfNonZeroInitStructField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner { int x = 5; }
+            struct Outer { int a; Inner[3] inners; }
+
+            void main() {
+                auto o = Outer(1);
+                assert(o.a == 1);
+                assert(o.inners[0].x == 5);
+                assert(o.inners[1].x == 5);
+                assert(o.inners[2].x == 5);
+            }
         });
     }
 }
