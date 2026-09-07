@@ -11,48 +11,6 @@ import snakebite.ffi:
 import snakebite.ffi.abi: Register;
 
 
-// Whether this compiler can lay `facts` out in a frame slot at all: an
-// integral of a width `nativelayout.storeIntegral` knows, or a dynamic
-// array, always `nativelayout.arrayValueSize` bytes as its own two-word
-// `{length, pointer}` pair regardless of its element type. Shared between
-// `Bytecode.compileFunction`'s parameter/return checks and
-// `FunctionCompiler.compileCall`'s, which ask the same question of a
-// callee's own signature.
-private bool isSupportedFacts(
-    in imported!"snakebite.nativelayout".TypeFacts facts,
-) {
-    import snakebite.nativelayout: isIntegralSize;
-
-    return facts.isDynamicArray
-        || (facts.isIntegral && isIntegralSize(facts.size));
-}
-
-// As above, for a caller that also has `type` in hand and so can ask the
-// one further question `TypeFacts` alone cannot answer: whether `type` is a
-// struct whose native bytes can occupy a frame slot.
-private bool isSupportedFacts(
-    in imported!"snakebite.nativelayout".TypeFacts facts,
-    imported!"dmd.mtype".Type type,
-) {
-    import dmd.astenums: Taarray, Tclass, Tdelegate, Tpointer, Tsarray;
-
-    // An associative array's native layout is one pointer to the runtime's
-    // own hash table (`AA` in druntime), the same as a class reference or
-    // any other pointer - this compiler never lays out the table itself. A
-    // class reference (`Tclass`) is that same one pointer word, holding the
-    // object's own address - not the object's bytes inline. A delegate is
-    // the native `{context, function}` pair (`nativelayout.
-    // delegateValueSize` bytes) that `visit(DelegateExp)`/`visit(FuncExp)`
-    // fill in and every call through a delegate value reads back out of.
-    return isSupportedFacts(facts) || isFloatingType(type)
-        || type.ty == Tpointer
-        || type.ty == Tclass
-        || type.ty == Taarray
-        || type.ty == Tdelegate
-        || type.isTypeStruct !is null
-        || type.isTypeSArray !is null;
-}
-
 // Whether `type` is `float`/`double`/`real` - `TypeFacts` has no notion of
 // its own for this, unlike `isIntegral`/`isDynamicArray`, which drive
 // checks all over this compiler.
@@ -70,18 +28,6 @@ private imported!"snakebite.nativelayout".TypeFacts pointerFactsOf() {
     import snakebite.nativelayout: TypeFacts;
 
     return TypeFacts(size_t.sizeof, size_t.sizeof, false, true);
-}
-
-// An array element type this compiler can lay out: any native scalar or
-// aggregate. DMD lowers copies that need lifecycle hooks to explicit calls;
-// the byte operation only needs the element's native size.
-private bool isSupportedElementType(imported!"dmd.mtype".Type type) {
-    import snakebite.nativelayout: isNativeBytes;
-
-    if (type.isTypeStruct !is null)
-        return true;
-
-    return isNativeBytes(type);
 }
 
 public final class Bytecode: imported!"snakebite.backends.backend".Backend {
@@ -385,30 +331,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         // already uses for a native `ref`-returning callee.
         const isRefReturn = functionType.isRef;
         const pointeeFacts = isVoidReturn ? TypeFacts.init : TypeFacts.of(returnType);
-        if (!isVoidReturn && !isSupportedFacts(pointeeFacts, returnType))
-            throw rejection(function_, function_.loc, text(
-                "a `", returnType is null ? "auto" : returnType.toString,
-                "` return",
-            ));
         const returnFacts = isRefReturn ? pointerFactsOf : pointeeFacts;
-
-        foreach (i; 0 .. functionType.parameterList.length) {
-            auto parameter = functionType.parameterList[i];
-            // A `lazy` parameter's frame slot holds dmd's own implicit
-            // delegate (see `FrameLayout.packParameter` and the
-            // `hasDeadContext` comment above it), never a value of the
-            // declared type itself - a read inside the body already comes
-            // through as a `CallExp` on that delegate (dmd's own semantic
-            // rewrite), so nothing here needs to check the declared
-            // type's own facts.
-            if (parameter.storageClass & STC.lazy_)
-                continue;
-
-            const facts = TypeFacts.of(parameter.type);
-            if (!isSupportedFacts(facts, parameter.type))
-                throw rejection(function_, function_.loc, text(
-                    "a `", parameter.type.toString, "` parameter"));
-        }
 
         auto body_ = function_.fbody;
         if (body_ is null)
@@ -1920,18 +1843,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto construct = expInitializer.exp.isConstructExp;
         const storedLiteral = isStoredLiteral(initializer)
             && (construct is null || construct.lowering is null);
-        auto nativeCall = initializer.isCallExp;
-        // A native aggregate return already writes directly to caller-owned
-        // storage. It does not need the bytewise copy path, which is only
-        // valid for plain-old structs.
-        const nativeAggregateReturn = variable.type.isTypeStruct !is null
-            && nativeCall !is null && nativeCall.f !is null
-            && (nativeCall.f.fbody is null
-                || _bytecode.hasNativeSymbol(nativeCall.f));
-        if (!isSupportedFacts(facts, variable.type)
-                && !nativeAggregateReturn)
-            throw rejection(_function, loc, operation);
-
         if (isClosureVariable(variable)) {
             const slot = _closureLayout.slotOf(variable);
             const target = closureSlotAddress(slot.offset);
@@ -1943,8 +1854,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             } else {
                 const valueOffset = reserveTemp(facts);
                 evalInto(
-                    nativeAggregateReturn || storedLiteral
-                        ? initializer : expInitializer.exp,
+                    storedLiteral ? initializer : expInitializer.exp,
                     valueOffset, facts.size, variable.type,
                 );
                 emit(&opStoreIndirect, target, valueOffset, facts.size);
@@ -1970,8 +1880,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         evalInto(
-            nativeAggregateReturn || storedLiteral
-                ? initializer : expInitializer.exp,
+            storedLiteral ? initializer : expInitializer.exp,
             offset,
             facts.size,
             variable.type,
@@ -2022,9 +1931,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return compileIndirectAssign(expression, varExp, destOffset);
 
         const facts = TypeFacts.of(variable.type);
-        if (!isSupportedFacts(facts, variable.type))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
 
         if (variable.isDataseg) {
             const valueOffset = reserveTemp(facts);
@@ -2362,9 +2268,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         AssignExp expression, Expression target, in size_t destOffset,
     ) {
         const facts = TypeFacts.of(expression.e1.type);
-        if (!isSupportedFacts(facts, expression.e1.type))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
 
         const addressOffset = compileAddress(target);
         const valueOffset = reserveTemp(facts);
@@ -2397,9 +2300,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const facts = TypeFacts.of(target.type);
-        if (!isSupportedFacts(facts, target.type))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
 
         const addressOffset = compileFieldAddress(target);
         const valueOffset = reserveTemp(facts);
@@ -2486,9 +2386,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (target.e1.type.ty == Tpointer) {
             const addressOffset = compilePointerElementAddress(target);
             const facts = TypeFacts.of(expression.e1.type);
-            if (!isSupportedFacts(facts, expression.e1.type))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
 
             const valueOffset = reserveTemp(facts);
             evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
@@ -2505,9 +2402,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 expressionText(expression));
 
         const facts = TypeFacts.of(expression.e1.type);
-        if (!isSupportedFacts(facts, expression.e1.type))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
 
         const addressOffset = compileElementAddress(target, arrayFacts);
         const valueOffset = reserveTemp(facts);
@@ -2526,9 +2420,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         AssignExp expression, IndexExp target, in size_t destOffset,
     ) {
         const facts = TypeFacts.of(expression.e1.type);
-        if (!isSupportedFacts(facts, expression.e1.type))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
 
         const addressOffset = compileStaticElementAddress(target);
         const valueOffset = reserveTemp(facts);
@@ -2571,9 +2462,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto sarrayType = target.e1.type.isTypeSArray;
         const elementFacts = TypeFacts.of(sarrayType.next);
-        if (!isSupportedElementType(sarrayType.next))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
 
         const dim = cast(size_t) sarrayType.dim.toInteger;
 
@@ -2707,9 +2595,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (elementType is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
-        if (elementType.ty != Tvoid && !isSupportedElementType(elementType))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
         const elementSize =
             elementType.ty == Tvoid ? 1 : TypeFacts.of(elementType).size;
 
@@ -2734,10 +2619,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         } else {
             auto sourceElementType = expression.e2.type.nextOf;
             if (sourceElementType is null)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-            if (sourceElementType.ty != Tvoid
-                    && !isSupportedElementType(sourceElementType))
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
@@ -3618,9 +3499,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tclass;
         if (expression.e1.type.ty == Tclass) {
             const facts = TypeFacts.of(field.type);
-            if (!isSupportedFacts(facts, field.type))
-                return visit(cast(Expression) expression);
-
             const objectOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, objectOffset, size_t.sizeof);
             const fieldOffset = reserveTemp(pointerFacts);
@@ -4134,9 +4012,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         foreach (i, argument; *expression.arguments) {
             auto field = structType.sym.fields[i];
             const facts = TypeFacts.of(field.type);
-            if (!isSupportedFacts(facts, field.type))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
 
             const valueOffset = reserveTemp(facts);
             evalInto(argument, valueOffset, facts.size);
@@ -4399,17 +4274,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     protected override void visitUnloweredEqual(EqualExp expression) {
         import dmd.astenums: Tarray, Tdelegate, Tsarray;
+        import dmd.typesem: toBasetype;
 
         requireDestination(expression);
 
-        if (expression.e1.type.ty == Tarray
-                && expression.e2.type.ty == Tarray) {
+        auto operandType = expression.e1.type.toBasetype;
+        auto rightType = expression.e2.type.toBasetype;
+        if (operandType.ty == Tarray && rightType.ty == Tarray) {
             compileMemcmpDynamicArrayEquality(expression, _destination);
             return;
         }
 
-        if (expression.e1.type.ty == Tsarray
-                && expression.e2.type.ty == Tsarray) {
+        if (operandType.ty == Tsarray && rightType.ty == Tsarray) {
             compileStaticArrayEquality(expression, _destination);
             return;
         }
@@ -4420,8 +4296,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // delegate is not an aggregate with one). `compileStaticArrayEquality`
         // already does nothing but that byte compare, keyed off `facts.size`
         // rather than anything array-specific, so it serves here unchanged.
-        if (expression.e1.type.ty == Tdelegate
-                && expression.e2.type.ty == Tdelegate) {
+        if (operandType.ty == Tdelegate && rightType.ty == Tdelegate) {
             compileStaticArrayEquality(expression, _destination);
             return;
         }
@@ -4676,8 +4551,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // of those, copied out to `destOffset` only when it differs.
     private void compileComparison(BinExp expression, in size_t destOffset) {
         import dmd.astenums: Tarray, Tclass, Tpointer, Tstruct;
+        import dmd.typesem: toBasetype;
 
-        const operandFacts = TypeFacts.of(expression.e1.type);
+        auto operandType = expression.e1.type.toBasetype;
+        const operandFacts = TypeFacts.of(operandType);
 
         // `is`/`!is` on a struct or a dynamic array is always a raw byte
         // compare, over the operand's own native layout - dmd rewrites a
@@ -4691,8 +4568,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // dynamic arrays never reach here: `visitUnloweredEqual` routes
         // those to `compileMemcmpDynamicArrayEquality`'s per-element
         // compare first.
-        if (expression.e1.type.ty == Tstruct
-                || expression.e1.type.ty == Tarray) {
+        if (operandType.ty == Tstruct || operandType.ty == Tarray) {
             if (expression.op != EXP.identity && expression.op != EXP.notIdentity)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
@@ -4716,8 +4592,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // `opEqual` already reads either way; only `is`/`!is` (`identity`/
         // `notIdentity`) are legal D syntax for a class reference, but the
         // handler map below already answers those the same as `==`/`!=`.
-        if (expression.e1.type.ty == Tpointer
-                || expression.e1.type.ty == Tclass) {
+        if (operandType.ty == Tpointer || operandType.ty == Tclass) {
             Instruction.Handler pointerHandler;
             with (EXP) switch (expression.op) {
                 case lessThan:
@@ -4755,7 +4630,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // semantics for equality and ordering. Integral equality instead
         // compares the stored bits, which would make a NaN equal itself and
         // positive and negative zero unequal.
-        if (isFloatingType(expression.e1.type)) {
+        if (isFloatingType(operandType)) {
             Instruction.Handler floatHandler;
             with (EXP) switch (expression.op) {
                 case lessThan: floatHandler = &opFloatLessThan; break;
@@ -5244,9 +5119,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const isVoidCallee = returnType is null || returnType.ty == Tvoid;
         const returnFacts =
             isVoidCallee ? TypeFacts.init : TypeFacts.of(returnType);
-        if (!isVoidCallee && !isSupportedFacts(returnFacts, returnType))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
         if (isVoidCallee && destOffset != discardResult)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
@@ -5278,10 +5150,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 continue;
             }
 
-            if (!isSupportedFacts(
-                    parameter.facts, calleeType.parameterList[i].type))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
 
             const argumentOffset = reserveTemp(parameter.facts);
             evalInto(
@@ -5561,28 +5429,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         foreach (i; 0 .. parameterCount) {
             auto parameter = calleeLayout.parameters[i];
 
-            // A `ref` parameter's own `facts` are the pointer slot's,
-            // never `isSupportedFacts` on their own terms (`isIntegral`
-            // is `false` for them) - the pointee's own facts are what
-            // that check is for, and `Bytecode.compileFunction` already
-            // made it of the callee's declared parameter type.
             if (parameter.isRef) {
                 const argumentOffset = compileAddress((*arguments)[i]);
                 args ~= Arg(argumentOffset, parameter.offset, size_t.sizeof);
                 continue;
             }
-
-            // A `lazy` parameter's `facts` are already the fixed
-            // delegate shape `FrameLayout.packParameter` gives every
-            // `lazy` slot, not the declared type's own - `isSupportedFacts`
-            // would compare that shape against the declared type and
-            // wrongly refuse it, so this check is skipped for `lazy`
-            // the same way `Bytecode.compileFunction` skips it above.
-            const isLazyParameter =
-                (calleeType.parameterList[i].storageClass & STC.lazy_) != 0;
-            if (!isLazyParameter && !isSupportedFacts(parameter.facts,
-                    calleeType.parameterList[i].type))
-                throw rejection(_function, loc, exprText);
 
             const argumentOffset = reserveTemp(parameter.facts);
             evalInto(
@@ -5603,9 +5454,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const returnFacts = isRefCallee
             ? pointerFacts
             : isVoidCallee ? TypeFacts.init : TypeFacts.of(calleeReturnType);
-        if (!isRefCallee && !isVoidCallee
-                && !isSupportedFacts(returnFacts, calleeReturnType))
-            throw rejection(_function, loc, exprText);
         if (isVoidCallee && !isConstructor && destOffset != discardResult)
             throw rejection(_function, loc, exprText);
 
@@ -5786,10 +5634,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const returnFacts = isRefCallee
             ? pointerFacts
             : isVoidCallee ? TypeFacts.init : TypeFacts.of(returnType);
-        if (!isRefCallee && !isVoidCallee
-                && !isSupportedFacts(returnFacts, returnType))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
         if (isVoidCallee && destOffset != discardResult)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
@@ -5824,9 +5668,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 continue;
             }
 
-            if (!isSupportedFacts(slot.facts, parameter.type))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
 
             const argumentOffset = reserveTemp(slot.facts);
             evalInto(
@@ -6296,9 +6137,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 expressionText(expression));
 
         const elementFacts = TypeFacts.of(expression.type.nextOf);
-        if (!isSupportedElementType(expression.type.nextOf))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
 
         const count =
             expression.elements is null ? 0 : expression.elements.length;
@@ -6372,9 +6210,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         auto sarrayType = expression.type.isTypeSArray;
         const elementFacts = TypeFacts.of(sarrayType.next);
-        if (!isSupportedElementType(sarrayType.next))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
 
         const count =
             expression.elements is null ? 0 : expression.elements.length;

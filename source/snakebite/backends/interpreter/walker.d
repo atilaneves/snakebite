@@ -133,7 +133,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         Statement, SwitchStatement, ThrowStatement, TryCatchStatement,
         TryFinallyStatement, UnrolledLoopStatement, WithStatement;
     import dmd.tokens: EXP;
-    import dmd.typesem: isIntegral, nextOf;
+    import dmd.typesem: isIntegral, nextOf, toBasetype;
     import core.thread: ThreadID;
     import snakebite.nativelayout: NativeData, nativeSymbolName;
     import snakebite.backends.runtimetypes: RuntimeTypes;
@@ -1445,7 +1445,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             loadIntegral;
         import std.conv: text;
 
-        auto type = expression.type;
+        auto type = expression.type.toBasetype;
         if (type.ty != Tarray)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
@@ -2177,8 +2177,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private void* assignSliceScalar(AssignExp expression) {
         import core.stdc.string: memcpy;
         import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset, isNativeBytes,
-            loadIntegral;
+            arrayLengthOffset, arrayPointerOffset, loadIntegral;
         import std.conv: text;
 
         auto elementType = _type.nextOf;
@@ -2187,13 +2186,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 text("interpreter cannot fill `", expression.e1.toString,
                     "`: it has no element type"),
             );
-        if (!isNativeBytes(elementType))
-            throw new SnakebiteException(
-                text("interpreter cannot fill `", expression.e1.toString,
-                    "`: its element type is `", elementType.toString,
-                    "`"),
-            );
-
         const elementFacts = factsOf(elementType);
         const sourceFacts = factsOf(expression.e2.type);
         if (sourceFacts.size != elementFacts.size)
@@ -2741,6 +2733,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     protected override void visitUnloweredEqual(EqualExp expression) {
         import core.stdc.string: memcmp;
         import snakebite.nativelayout: storeIntegral;
+        import dmd.typesem: toBasetype;
         import std.conv: text;
 
         if (expression.op != EXP.equal && expression.op != EXP.notEqual)
@@ -2750,7 +2743,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
 
         // DMD's `Type.nextOf` is not const-correct, so this cannot be const.
-        auto type = expression.e1.type;
+        auto type = expression.e1.type.toBasetype;
         auto structType = type.isTypeStruct;
         if (structType !is null) {
             const facts = factsOf(type);
@@ -3142,7 +3135,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private real asFloating(Expression expression) {
         import std.conv: text;
 
-        auto type = expression.type;
+        auto type = expression.type.toBasetype;
         if (type.ty != Tfloat32 && type.ty != Tfloat64
                 && type.ty != Tfloat80)
             throw new SnakebiteException(

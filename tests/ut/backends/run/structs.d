@@ -209,7 +209,7 @@ static foreach (backend; Matrix!(
 // storage. An immutable field is initialized with a construct expression,
 // so this also checks that constructor initialization reaches the object
 // field rather than being rejected as an assignment.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("struct.new.constructorInitializesImmutableField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -222,15 +222,15 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
                 }
             }
 
-            int main() {
+            int answer() {
                 auto value = new Value(42);
                 return value.value;
             }
-        }, "main");
+        }, "answer");
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("struct.new.constructorBindsRefParameter." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -244,12 +244,12 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
                 }
             }
 
-            int main() {
+            int answer() {
                 int source = 42;
                 auto value = new Value(source);
                 return value.value;
             }
-        }, "main");
+        }, "answer");
     }
 }
 
@@ -388,9 +388,7 @@ static foreach (backend; Matrix!()) {
 // `static` changes how the local type is represented during semantic
 // analysis, but it does not give an instance static storage. Constructing an
 // instance still creates an ordinary local value with native struct layout.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("staticLocalStructConstruction." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -588,7 +586,6 @@ static foreach (backend; Matrix!(
 // positionally, in declaration order, from the constructor arguments -
 // the same as a struct literal `S(args)` would.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("newStructWithStringField." ~ backend.stringof)
@@ -599,11 +596,11 @@ static foreach (backend; Matrix!(
                 string text;
             }
 
-            int main() {
+            int answer() {
                 auto value = new Value("hello");
                 return cast(int) value.text.length;
             }
-        }, "main");
+        }, "answer");
     }
 }
 
@@ -720,7 +717,7 @@ static foreach (backend; Matrix!()) {
 // `Middle` argument by address the same way, and `Middle`'s in turn takes
 // `Part` by address, so both levels of temporary need a frame slot before
 // their constructor runs.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("nestedStructCtorCallArguments." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -759,7 +756,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // constructor argument: the call has no lvalue either, and the interpreter
 // must materialize its return value into a frame slot to hand its address
 // to the outer constructor.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("functionReturningStructAsCtorCallArgument." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -797,7 +794,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // A ternary between two constructor calls, used as a constructor argument:
 // only the branch actually taken ever runs, so only its temporary needs a
 // frame slot - the other branch's temporary is never constructed.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("ternaryBetweenStructCtorCallsAsCtorCallArgument." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -837,7 +834,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // constructor's hidden `this` is bound before that return place is filled,
 // so this exercises the same rvalue-materialization path with no
 // surrounding struct constructor at all.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("structCtorCallReturnedFromAutoRefLambda." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -870,7 +867,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // frame slot before that ordinary call runs, and the slot must still be
 // there - not reused for the ordinary call's own frame - when the
 // constructor resumes writing to it afterward.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("structCtorCallBodyCallsAnotherFunctionBeforeFinishing." ~
         backend.stringof)
     @Tags(backend.stringof)
@@ -2699,12 +2696,7 @@ static foreach (backend; Matrix!()) {
 // the field holds, and the interpreter's native-layout path (used to lay
 // out the literal) must recognise a floating-point base the same way it
 // already recognises an integral one.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "no native layout for a value of type `E`"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "bytecode compiler cannot compile `2.5` in `main`"),
-)) {
+static foreach (backend; Matrix!()) {
     @("structLiteralInitializesDoubleBaseEnumField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -2723,12 +2715,7 @@ static foreach (backend; Matrix!(
 // The same gap as the `double`-base enum test above, for a `string`-base
 // enum: the field's native layout is the string's own `{length, ptr}`
 // pair, which the same native-layout path must also recognise.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "no native layout for the string literal `\"y\"` as a `E`"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "bytecode compiler cannot compile `\"y\"` in `main`"),
-)) {
+static foreach (backend; Matrix!()) {
     @("structLiteralInitializesStringBaseEnumField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
