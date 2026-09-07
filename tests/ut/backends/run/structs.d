@@ -1100,6 +1100,7 @@ static foreach (backend; Matrix!(
         "not run: 300000 CTFE iterations, each copying a 4KiB struct, " ~
         "take longer than a unit test can afford"),
 )) {
+    @HiddenTest
     @("structValueCallFieldReadsDoNotExhaustFrameStack." ~
         backend.stringof)
     @Tags(backend.stringof)

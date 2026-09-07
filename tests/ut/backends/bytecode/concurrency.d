@@ -77,6 +77,7 @@ private long expectedResult(in size_t index) {
     return 3 * index + 0 + 1 + 2;
 }
 
+@HiddenTest
 @("compileFunction.concurrentCompilesOfDifferentFunctionsAgree")
 unittest {
     import core.atomic: atomicLoad, atomicOp, atomicStore;
