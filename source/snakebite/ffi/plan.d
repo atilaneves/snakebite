@@ -514,7 +514,7 @@ private CallPlan prepare(
             // A `ref` parameter occupies a pointer slot in the caller's
             // frame - the address of the argument's own storage, not a
             // copy of its value (see `FrameLayout.of` in
-            // `interpreter/framelayout.d`, which lays such a slot out the
+            // `backends/layout.d`, which lays such a slot out the
             // same way). That address is the value that travels, so the
             // argument is one pointer register whatever
             // `parameterList[i].type` - the *pointee* type - would

@@ -44,8 +44,7 @@ static foreach (backend; Matrix!(
 // This calls `bin/sb` rather than sharing a matrix with `Native`: compiling
 // the native oracle into `bin/ut` would emit the dmd atomic specialization
 // and hide the missing symbol in `bin/sb`.
-@("sharedTemplateConstructor.Interpreter")
-@Tags("Interpreter")
+@("sharedTemplateConstructor")
 unittest {
     import std.file: thisExePath;
     import std.path: buildPath, dirName;
@@ -67,13 +66,15 @@ unittest {
     ]);
     native.status.should == 0;
 
-    const interpreter = execute([
-        root.buildPath("bin", "sb"),
-        "-b",
-        "interpreter",
-        fixture,
-    ]);
-    interpreter.status.should == 0;
+    foreach (backend; ["bytecode", "ctfe", "interpreter"]) {
+        const result = execute([
+            root.buildPath("bin", "sb"),
+            "-b",
+            backend,
+            fixture,
+        ]);
+        result.status.should == 0;
+    }
 }
 
 

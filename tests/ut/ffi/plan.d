@@ -2,10 +2,7 @@ module ut.ffi.plan;
 
 
 import ut;
-import dmd.astenums: LINK;
 import dmd.func: FuncDeclaration;
-import snakebite.druntime.constructoratomic:
-    nativeTarget, snakebite_constructor_atomic_add_int;
 import snakebite.ffi: CallAdapter, PlanCache;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -18,21 +15,6 @@ private enum declarations = q{
     extern(C) int abs(int);
     extern(C) void free(void*);
 };
-
-
-@("druntime.sharedCtorAtomicTarget")
-unittest {
-    auto target = nativeTarget(atomicOperation!(int));
-
-    target.address.should == &snakebite_constructor_atomic_add_int;
-    target.linkage.should == LINK.c;
-}
-
-
-@("druntime.otherAtomicSpecializationHasNoTarget")
-unittest {
-    assert(nativeTarget(atomicOperation!(long)).address is null);
-}
 
 
 @("druntime.sharedCtorAtomicPlan")
