@@ -1,0 +1,16 @@
+name "rt-cerealed-2"
+description "all cerealed tests with vendored unit-threaded"
+targetType "library"
+targetPath "bin"
+dflags "-checkaction=context"
+dflags "-preview=dip1000"
+
+
+configuration "unittest" {
+    targetType "executable"
+    targetName "ut"
+    targetPath "bin"
+    mainSourceFile "tests/main.d"
+    sourcePaths "tests"
+    importPaths "tests"
+}
