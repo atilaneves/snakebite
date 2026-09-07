@@ -3395,6 +3395,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
+        // An explicit pointer-to-integral cast preserves the native address
+        // bits. `bool` has truth-conversion semantics, so it stays outside
+        // this byte-preserving conversion.
+        if (sourceType.ty == Tpointer && _facts.isIntegral
+                && _type.ty != Tbool) {
+            storeIntegral(
+                _place, cast(size_t) asPointer(expression.e1), _facts.size);
+            return;
+        }
+
         // `cast(T) p`: `_d_newclassT`'s own final step (`core/lifetime.d`),
         // reinterpreting the `void*` its allocation returned as the guest
         // class reference it hands back. A class reference's native layout
