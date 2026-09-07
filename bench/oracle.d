@@ -250,7 +250,7 @@ private ProcessResult bareBuild(in SourceSet sources, in string outputPath) {
     );
 }
 
-private string[] dmdArguments(in SourceSet sources) {
+package(bench) string[] dmdArguments(in SourceSet sources) {
     import std.algorithm.iteration: map;
     import std.array: array;
 
@@ -260,7 +260,7 @@ private string[] dmdArguments(in SourceSet sources) {
         ~ sources.linkerFlags.map!(flag => "-L" ~ flag).array;
 }
 
-private struct ProcessResult {
+package(bench) struct ProcessResult {
     int status;
     string stdout_;
     string stderr_;
@@ -282,16 +282,17 @@ private struct ProcessResult {
 // small `dmd` invocation read back as using a gigabyte. `time` is a
 // lightweight process with nothing of its own to inherit, so what it
 // reports for its child is the child's actual usage.
-private ProcessResult run(in string[] command, in string workDir = null) {
+package(bench) ProcessResult run(in string[] command, in string workDir = null) {
     import std.conv: text, to;
     import std.file: readText, remove, tempDir;
     import std.path: buildPath;
     import std.process: spawnProcess, thisProcessID, wait;
     import std.regex: matchFirst, regex;
     import std.stdio: File, stdin;
+    import std.uuid: randomUUID;
 
     const prefix = buildPath(
-        tempDir, "snakebite-bench-capture-" ~ thisProcessID.text,
+        tempDir, "snakebite-bench-capture-" ~ randomUUID.toString,
     );
     const stdoutPath = prefix ~ ".out";
     const stderrPath = prefix ~ ".err";
