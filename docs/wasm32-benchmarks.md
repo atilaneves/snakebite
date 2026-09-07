@@ -1,8 +1,10 @@
 # Wasm32 benchmarks
 
-The `wasm32` row runs Dennis Korpel's DMD Wasm backend and Wasmtime as
+The `wasm32-jit` row runs Dennis Korpel's DMD Wasm backend and Wasmtime as
 external processes. No example selects it by default. Select it explicitly
-with `bin/bench <example> -b wasm32`.
+with `bin/bench <example> -b wasm32-jit`. The `wasm32` name remains an alias
+for this row. On Linux x86_64, `wasm32-interpreter` runs the same modules with
+Wizard's interpreter.
 
 ## Setup
 
@@ -13,7 +15,7 @@ sha256sum. Then run:
 build/setup-wasm32.sh
 build/reggae.sh
 ninja bin/bench
-bin/bench rt-simple -b wasm32 -w 1 -r 10
+bin/bench rt-simple -b wasm32-jit -w 1 -r 10
 ```
 
 `build/benches.sh` also runs setup before starting the benchmarks. Setup
@@ -28,6 +30,10 @@ The fixed versions are:
 - [Phobos Wasm build target][phobos], revision
   `0f0bf79d32c2b876e755c01ad1e34a5284caa39d`.
 - Wasmtime 46.0.1.
+- [Virgil][virgil], revision
+  `dc8fca33bbacf5c20aa434d35749902d23a5f814`.
+- [Wizard][wizard], revision
+  `672e9cea2ac3f971263d78a7840a5d9a8facf45f`.
 - WASI SDK 33's sysroot, checked against the checksum in DMD's Makefile.
 
 Clang and LLD come from the host system. Setup prints the compiler,
@@ -37,13 +43,16 @@ sources or Snakebite's `dmd:frontend` dependency.
 
 [dmd]: https://github.com/dlang/dmd/pull/23584
 [phobos]: https://github.com/dkorpel/phobos/commit/0f0bf79d32c2
+[virgil]: https://github.com/titzer/virgil/commit/dc8fca33bbacf5c20aa434d35749902d23a5f814
+[wizard]: https://github.com/titzer/wizard-engine/commit/672e9cea2ac3f971263d78a7840a5d9a8facf45f
 
 ## What the row measures
 
 Dub supplies the project sources, flags, import paths, and dependency
 descriptions. Dependency archives are built for Wasm once before timing.
 Each round then invokes DMD with `-mwasm32 -os=wasm -unittest` and runs the
-result with Wasmtime. The original source files and test runner are used.
+result with Wasmtime or Wizard. The original source files and test runner are
+used.
 
 `cmp` includes the compiler frontend, code generation, and linking.
 `run` includes all of `cmp`, Wasmtime startup and JIT compilation, and test
@@ -53,7 +62,7 @@ resident memory value from the compiler and runtime processes.
 
 The native `dmd`/`dub` row subtracts frontend time from its cells and
 reports it below the table. Add that frontend time when comparing its full
-cycle with `wasm32`. Dub command overhead and dependency preparation are
+cycle with `wasm32-jit`. Dub command overhead and dependency preparation are
 outside the Wasm row's timing.
 
 Compilation errors, missing tools, and runtime failures produce `FAIL`
@@ -76,5 +85,5 @@ On Linux x86_64, wasm32 passes for `rt-simple`,
 The remaining examples fail with these revisions:
 `ct-easy`, `ct-full`, and `rt-perf` use a `long` array index that DMD rejects
 on wasm32, while `rt` needs unit-threaded APIs absent on WASI. You can still
-request `bin/bench <example> -b wasm32`; compilation or preparation failures
+request `bin/bench <example> -b wasm32-jit`; compilation or preparation failures
 are reported as `FAIL`. The example sources remain unchanged.

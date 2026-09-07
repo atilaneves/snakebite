@@ -5,6 +5,8 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 dmd_revision=0864cee4e9d091355e86ef8457789142c97bcb10
 phobos_revision=0f0bf79d32c2b876e755c01ad1e34a5284caa39d
 wasmtime_version=46.0.1
+virgil_revision=dc8fca33bbacf5c20aa434d35749902d23a5f814
+wizard_revision=672e9cea2ac3f971263d78a7840a5d9a8facf45f
 tool_dir="${SNAKEBITE_WASM32_ROOT:-$PWD/.tools/wasm32}"
 mkdir -p "$tool_dir"
 tool_dir=$(cd "$tool_dir" && pwd)
@@ -55,7 +57,14 @@ if [[ ! -x "$tool_dir/$wasmtime_name/wasmtime" ]]; then
     tar -xJf "$tool_dir/$wasmtime_name.tar.xz" -C "$tool_dir"
 fi
 
-make -C "$tool_dir/dmd" -j"${JOBS:-$(nproc)}" HOST_DMD="$(command -v dmd)" dmd
+dmd_stamp="$tool_dir/dmd/.snakebite-release-build"
+dmd_build_settings="$dmd_revision ENABLE_RELEASE=1 HOST_DMD=$(command -v dmd)"
+if [[ ! -f "$dmd_stamp" || $(cat "$dmd_stamp") != "$dmd_build_settings" ]]; then
+    make -C "$tool_dir/dmd" clean
+fi
+make -C "$tool_dir/dmd" -j"${JOBS:-$(nproc)}" \
+    HOST_DMD="$(command -v dmd)" ENABLE_RELEASE=1 dmd
+printf '%s\n' "$dmd_build_settings" > "$dmd_stamp"
 
 # The two runtime archive rules can fetch the same tarball in parallel.
 # Supply the complete, checked archive before starting those rules.
@@ -78,9 +87,24 @@ fi
 make -C "$tool_dir/phobos" -j"${JOBS:-$(nproc)}" wasm \
     WASM_DMD="$tool_dir/dmd/generated/linux/release/64/dmd -cpp=clang -P-E -P--target=wasm32-wasi -P-Wno-deprecated -P--sysroot=$tool_dir/wasi-sysroot-33.0+m"
 
+if [[ "$(uname -m)" == x86_64 ]]; then
+    fetch_source titzer/virgil "$virgil_revision" "$tool_dir/virgil"
+    make -C "$tool_dir/virgil" -j"${JOBS:-$(nproc)}" bootstrap
+    fetch_source titzer/wizard-engine "$wizard_revision" "$tool_dir/wizard"
+    (
+        cd "$tool_dir/wizard"
+        PATH="$tool_dir/virgil/bin:$PATH" ./build.sh --nojit wizeng x86-64-linux
+        cp bin/wizeng.x86-64-linux bin/wizeng.pregen.x86-64-linux
+        bin/wizeng.x86-64-linux --pregen=bin/wizeng.pregen.x86-64-linux
+    )
+fi
+
 mkdir -p "$tool_dir/bin"
 ln -sfn "../dmd/generated/linux/release/64/dmd" "$tool_dir/bin/dmd"
 ln -sfn "../$wasmtime_name/wasmtime" "$tool_dir/bin/wasmtime"
+if [[ -x "$tool_dir/wizard/bin/wizeng.pregen.x86-64-linux" ]]; then
+    ln -sfn ../wizard/bin/wizeng.pregen.x86-64-linux "$tool_dir/bin/wizeng"
+fi
 printf 'Wasm32 tools ready in %s\n' "$tool_dir"
 "$tool_dir/bin/dmd" --version
 "$tool_dir/bin/wasmtime" --version

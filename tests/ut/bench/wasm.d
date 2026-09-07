@@ -1,8 +1,9 @@
 module ut.bench.wasm;
 
 
-import bench.wasm: WasmTools, wasmReport;
+import bench.wasm: WasmRuntime, WasmTools, wasmReport;
 import core.time: Duration, msecs;
+import std.algorithm.searching: canFind;
 import snakebite.project: SourceSet, sourceSet;
 import std.algorithm.searching: count;
 import std.conv: octal;
@@ -18,7 +19,7 @@ unittest {
     scope(exit) fixture.directory.rmdirRecurse;
     const report = wasmReport(fixture.sources, fixture.directory, 1, 2, fixture.tools);
 
-    report.name.should == "wasm32";
+    report.name.should == "wasm32-jit";
     report.passed.should == true;
     report.isOracle.should == false;
     report.totalCount.should == 3;
@@ -41,6 +42,26 @@ unittest {
     report.passed.should == false;
     report.runTime.minimum.should == Duration.zero;
     buildPath(fixture.directory, "runs").exists.should == false;
+}
+
+
+@("wasm32.wizardUsesInterpreterOptions")
+unittest {
+    auto fixture = WasmFixture.create;
+    scope(exit) fixture.directory.rmdirRecurse;
+    fixture.tools.runtimeKind = WasmRuntime.wizard;
+
+    const report = wasmReport(
+        fixture.sources, fixture.directory, 0, 1, fixture.tools,
+    );
+
+    report.name.should == "wasm32-interpreter";
+    report.passed.should == true;
+    const arguments = buildPath(
+        fixture.directory, "runtime-arguments",
+    ).readText;
+    arguments.canFind("--mode=int").should == true;
+    arguments.canFind("--env=PWD=").should == true;
 }
 
 
@@ -176,6 +197,7 @@ echo wasm-fixture > "$output"
 `);
         fixture.tools.runtime.write(`#!/bin/sh
 set -eu
+printf '%s\\n' "$@" > runtime-arguments
 for arg do binary=$arg; done
 test "$(cat "$binary")" = wasm-fixture
 echo run >> runs
