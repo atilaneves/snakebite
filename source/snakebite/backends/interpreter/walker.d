@@ -2263,35 +2263,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return destination.base;
     }
 
-    // Whether this interpreter can treat a value of `type` as native bytes
-    // with no hook of its own to run: not a `Tvector` (this interpreter
-    // never lays out a SIMD register or evaluates a vector expression) and,
-    // per `facts`, not an integral of a width `nativelayout.storeIntegral`
-    // cannot store or load (only `bool`/`byte`.../`long`/`ulong`-sized
-    // integrals exist in ordinary D, so this only ever refuses `cent`/
-    // `ucent`), and per `nativelayout.needsElaborateHandling`, not a type
-    // needing a postblit, copy constructor, destructor or captured
-    // enclosing context to copy or construct correctly. Every other kind -
-    // `float`/`double`/`real`, an enum, a static array, a delegate, a
-    // function pointer, a class or interface reference, an associative
-    // array, a pointer, or a dynamic array - is native bytes this
-    // interpreter can copy or evaluate field by field elsewhere, so this
-    // asks nothing more about `type`'s own kind.
-    private bool supportsFieldType(Type type, in TypeFacts facts) {
-        import dmd.astenums: Tvector;
-        import snakebite.nativelayout: needsElaborateHandling;
-
-        if (type.ty == Tvector)
-            return false;
-
-        if (facts.isIntegral && !isIntegralSize(facts.size))
-            return false;
-
-        return !needsElaborateHandling(type);
-    }
-
     private bool supportsStruct(Type type) {
         import dmd.astenums: STC;
+        import snakebite.nativelayout: isNativeBytes;
 
         auto structType = type.isTypeStruct;
         if (structType is null)
@@ -2332,7 +2306,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 continue;
             }
 
-            if (!supportsFieldType(field.type, factsOf(field.type)))
+            if (!isNativeBytes(field.type))
                 return false;
         }
 

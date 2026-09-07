@@ -26,26 +26,38 @@ public bool isIntegralSize(in size_t size) {
     return nativeIsIntegralSize(size);
 }
 
-// Whether copying, constructing or destroying a value of `type` needs a
-// hook this project's backends do not run themselves: a postblit, a copy
-// constructor, a destructor, or a captured enclosing context (a nested
-// struct's own hidden `this`). dmd answers this per type, recursing
-// through a static array to its element and through an enum to its base
-// type on its own, in `needsCopyOrPostblit`/`needsDestruction`/
-// `needsNested`. A struct field whose type needs none of these three is
-// native bytes a bytewise copy already carries correctly, whatever its
-// own kind - `float`/`double`/`real`, an enum, a static array, a
-// delegate, a function pointer, a class or interface reference, an
-// associative array, a pointer or a dynamic array. This says nothing
-// about a `union` or a guest-written `opAssign`, neither of which either
-// dmd function is about; callers still refuse those at the aggregate's
-// own declaration.
-public bool needsElaborateHandling(imported!"dmd.mtype".Type type) {
-    import dmd.typesem: needsCopyOrPostblit, needsDestruction, needsNested;
+// Whether a backend can treat a value of `type` as native bytes with no
+// hook of its own to run. A `Tvector` is refused: no backend lays out a
+// SIMD register or evaluates a vector expression. An integral of a width
+// `storeIntegral` cannot store or load is refused: only `bool`/`byte`...
+// `long`/`ulong`-sized integrals exist in ordinary D, so this only ever
+// refuses `cent`/`ucent`. Otherwise the answer is dmd's own: a postblit,
+// a copy constructor, a destructor, or a captured enclosing context (a
+// nested struct's own hidden `this`) is a hook the backends do not run
+// themselves, and dmd answers per type, recursing through a static array
+// to its element and through an enum to its base type on its own, in
+// `needsCopyOrPostblit`/`needsDestruction`/`needsNested`. A struct field
+// whose type needs none of these is native bytes a bytewise copy already
+// carries correctly, whatever its own kind - `float`/`double`/`real`, an
+// enum, a static array, a delegate, a function pointer, a class or
+// interface reference, an associative array, a pointer or a dynamic
+// array. This says nothing about a `union` or a guest-written `opAssign`,
+// neither of which any dmd function here is about; callers still refuse
+// those at the aggregate's own declaration.
+public bool isNativeBytes(imported!"dmd.mtype".Type type) {
+    import dmd.astenums: Tvector;
+    import dmd.typesem:
+        isIntegral, needsCopyOrPostblit, needsDestruction, needsNested, size;
 
-    return type.needsCopyOrPostblit
-        || type.needsDestruction
-        || type.needsNested;
+    if (type.ty == Tvector)
+        return false;
+
+    if (type.isIntegral && !isIntegralSize(type.size))
+        return false;
+
+    return !type.needsCopyOrPostblit
+        && !type.needsDestruction
+        && !type.needsNested;
 }
 
 // Keep the DMD-facing module's historical error behavior while the actual

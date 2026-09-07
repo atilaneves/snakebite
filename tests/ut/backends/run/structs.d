@@ -2040,3 +2040,68 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A struct literal can initialize a `real` field, and copying the struct
+// carries it along unchanged - a `real` is 16 bytes wide and 16-byte
+// aligned on x86-64, so `R`'s layout has padding after `tag` that a plain
+// bytewise copy must carry too, unlike any 8-byte-or-narrower field. The
+// explicit `= 0` keeps `R`'s `.init` all-zero bytes, as in
+// `structLiteralInitializesFloatingField`.
+static foreach (backend; Matrix!()) {
+    @("structLiteralInitializesRealField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct R {
+                real r = 0;
+                int tag;
+            }
+
+            void main() {
+                auto original = R(3.5L, 7);
+                auto copy = original;
+                assert(copy.r == 3.5L);
+                assert(copy.tag == 7);
+                copy.r = 2.25L;
+                assert(copy.r == 2.25L);
+                assert(original.r == 3.5L);
+                R[2] pair = [R(1.0L, 1), R(2.0L, 2)];
+                assert(pair[1].r == 2.0L);
+                assert(pair[1].tag == 2);
+            }
+        });
+    }
+}
+
+// A struct literal can initialize an interface-reference field from a class
+// reference - the implicit conversion is a `CastExp` to the interface's own
+// vtable slot inside the object, and the field itself is a plain
+// pointer-sized handle a bytewise copy shares, exactly like a class
+// reference.
+static foreach (backend; Matrix!()) {
+    @("structLiteralInitializesInterfaceReferenceField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface Getter { int get(); }
+
+            class Box: Getter {
+                int value;
+                this(int value) { this.value = value; }
+                int get() { return value; }
+            }
+
+            struct Holder {
+                Getter getter;
+                int tag;
+            }
+
+            void main() {
+                auto original = Holder(new Box(41), 1);
+                auto copy = original;
+                assert(copy.getter.get() == 41);
+                assert(copy.tag == 1);
+            }
+        });
+    }
+}
