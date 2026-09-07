@@ -110,8 +110,10 @@ private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
 // never to build a fresh value from its own field expressions, and
 // `visit(StructLiteralExp)` below zeroes `_destination` and then writes
 // every field `dmd` gave an element for, whatever that field's own
-// default value is - so this asks only whether every field's own type
-// can be laid out and evaluated directly, recursing into a nested struct
+// default value is - including broadcasting a single element across a
+// static-array field, when `dmd`'s `fill` supplies one instead of an
+// array literal - so this asks only whether every field's own type can
+// be laid out and evaluated directly, recursing into a nested struct
 // field through this same relaxed rule rather than `isPlainOldStruct`'s
 // stricter one, so `LifetimeTracker(&postblits, &dtors)` and its holder
 // `TrackerHolder(1, tracker)` both qualify even though neither is a
@@ -3800,9 +3802,45 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 continue;
 
             auto field = expression.sd.fields[i];
+            auto sarrayType = field.type.isTypeSArray;
+
+            // dmd's `fill` (`expressionsem.d`, issue 12509) can supply,
+            // for a static-array field whose element type has a non-zero
+            // `.init`, a single literal of that *element* type rather
+            // than an array literal with one entry per slot: one value
+            // that every slot takes. Broadcast it, the same as dmd's own
+            // glue (`e2ir.d`'s `StructLiteralExp` case) does.
+            if (sarrayType !is null && !element.type.equals(field.type)) {
+                compileBroadcastArrayField(
+                    element, sarrayType, _destination + field.offset);
+                continue;
+            }
+
             const facts = TypeFacts.of(field.type);
             evalInto(element, _destination + field.offset, facts.size);
         }
+    }
+
+    // Fills every slot of a static-array field with the one element `dmd`
+    // gave for the whole array (see the call site above). `elementFacts`
+    // is the actual literal's own type, so this broadcasts correctly
+    // however many array dimensions still lie between it and
+    // `sarrayType` - a nested `T[2][3]` field works the same way, one
+    // flat run of `elementFacts.size`-sized copies.
+    private void compileBroadcastArrayField(
+        Expression element, imported!"dmd.mtype".TypeSArray sarrayType,
+        in size_t destOffset,
+    ) {
+        const elementFacts = TypeFacts.of(element.type);
+        const fieldFacts = TypeFacts.of(sarrayType);
+        const count = fieldFacts.size / elementFacts.size;
+
+        const tempOffset = reserveTemp(elementFacts);
+        evalInto(element, tempOffset, elementFacts.size);
+
+        foreach (i; 0 .. count)
+            emit(&opCopy, destOffset + i * elementFacts.size, tempOffset,
+                elementFacts.size);
     }
 
     // `arr.length`: the array's own length word, read straight out of its
