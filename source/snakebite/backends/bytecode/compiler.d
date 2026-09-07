@@ -2163,12 +2163,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // Runs `variable`'s own initialiser into whichever storage its layout
     // gave it: a closure slot, a frame slot holding an address (a `ref`
-    // local, or `with`'s own `wthis`), or a frame slot holding a value.
-    // Shared between a local declaration (`compileDeclaration`, where
-    // `loc`/`operation` name the whole `int sum = 0;`) and a `with`
-    // statement's own compiler-generated temporary (where they name the
-    // `with (...)` itself, since it has no declaration of its own to
-    // render).
+    // local), or a frame slot holding a value. `with (aggregate) ...`'s
+    // own `wthis` takes the last path: its slot holds the pointer or
+    // class reference value its initialiser evaluates to, not a `ref`
+    // local's address. Shared between a local declaration
+    // (`compileDeclaration`, where `loc`/`operation` name the whole
+    // `int sum = 0;`) and a `with` statement's own compiler-generated
+    // temporary (where they name the `with (...)` itself, since it has no
+    // declaration of its own to render).
     private void compileVariableInitializer(
         VarDeclaration variable,
         imported!"dmd.location".Loc loc,
@@ -2218,10 +2220,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // local shape a `ref int x = y;` written by hand has. Its own
         // slot holds `y`'s address, not `y`'s value, so this stores the
         // address `compileAddress` computes rather than evaluating the
-        // initialiser as a value the way a by-value local's is. `with
-        // (aggregate) ...`'s own `wthis` is laid out the same way: it is
-        // always a reference to the aggregate, never a copy of it, so
-        // field writes through it reach the aggregate's own storage.
+        // initialiser as a value the way a by-value local's is. `with`'s
+        // `wthis` is not laid out this way: `FrameLayout.collectVariable`
+        // sets `isRef` only for `STC.ref_`, and `wthis` is `STC.temp`, so
+        // it falls through to the plain `evalInto` path below instead.
         if (_layout.isRef(variable)) {
             const addressOffset = compileAddress(initializerValueOf(expInitializer));
             emit(&opCopy, offset, addressOffset, size_t.sizeof);
