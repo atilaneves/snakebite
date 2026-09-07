@@ -209,7 +209,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import dmd.root.string: toDString;
     import snakebite.backends.backend: Program;
     import snakebite.backends.classinfo;
-    import snakebite.backends.bytecode.vm: Function, maxReturnWidth, Vm;
+    import snakebite.backends.bytecode.vm: Function, Vm;
     import snakebite.exception: SnakebiteException;
     import snakebite.framestack: defaultFrameCapacity;
 
@@ -618,8 +618,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         // already uses for a native `ref`-returning callee.
         const isRefReturn = functionType.isRef;
         const pointeeFacts = isVoidReturn ? TypeFacts.init : TypeFacts.of(returnType);
-        if (!isVoidReturn && (!isSupportedFacts(pointeeFacts, returnType)
-                || (!isRefReturn && pointeeFacts.size > maxReturnWidth)))
+        if (!isVoidReturn && !isSupportedFacts(pointeeFacts, returnType))
             throw rejection(function_, function_.loc, text(
                 "a `", returnType is null ? "auto" : returnType.toString,
                 "` return",
@@ -1971,18 +1970,54 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         expression.accept(this);
     }
 
+    // Whether `declaration` binds a name for the semantic pass with no
+    // runtime action of its own: a struct/alias/template/function/enum
+    // declared inside a function body, none of which this compiler ever
+    // has to run code for. An `AttribDeclaration` (`static struct S {
+    // ... }`'s own node - the `static` attaches to the declaration this
+    // way rather than as a storage-class flag the way it does on a
+    // `VarDeclaration`) is the same kind of no-op exactly when every
+    // symbol it wraps is, recursed the same way a nested attribute
+    // (`@("tag") static struct S { ... }`, one `AttribDeclaration`
+    // wrapping another) already needs.
+    private bool isRuntimeNoopDeclaration(
+        imported!"dmd.dsymbol".Dsymbol declaration,
+    ) {
+        if (declaration.isStructDeclaration !is null
+                || declaration.isAliasDeclaration !is null
+                || declaration.isTemplateDeclaration !is null
+                || declaration.isFuncDeclaration !is null
+                || declaration.isEnumDeclaration !is null)
+            return true;
+
+        if (auto attribute = declaration.isAttribDeclaration) {
+            if (attribute.decl is null)
+                return true;
+
+            foreach (member; *attribute.decl)
+                if (!isRuntimeNoopDeclaration(member))
+                    return false;
+
+            return true;
+        }
+
+        return false;
+    }
+
     // Runs a local's initialiser into the frame slot `_layout` already
     // gave it - `int sum = 0;` is a `DeclarationExp` here, the same as in
     // the interpreter.
     private void compileDeclaration(DeclarationExp expression) {
         // These declarations bind names for the semantic pass but have no
         // runtime action, the same way an `import` inside a function body
-        // does.
-        if (expression.declaration.isStructDeclaration !is null
-                || expression.declaration.isAliasDeclaration !is null
-                || expression.declaration.isTemplateDeclaration !is null
-                || expression.declaration.isFuncDeclaration !is null
-                || expression.declaration.isEnumDeclaration !is null)
+        // does. `static struct S { ... }` reaches here as an
+        // `AttribDeclaration` wrapping the actual `StructDeclaration` - a
+        // storage class attached to a non-variable declaration parses as
+        // the attribute holding it, not as a flag on the declaration
+        // itself the way `static int x;` sets `STC.static_` directly on
+        // its own `VarDeclaration` - so this recurses through one to
+        // reach the same no-op declarations underneath.
+        if (isRuntimeNoopDeclaration(expression.declaration))
             return;
 
         auto variable = expression.declaration.isVarDeclaration;

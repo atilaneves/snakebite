@@ -2150,3 +2150,234 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A struct wider than one machine word but no wider than two - the same
+// `{ pointer, size_t, uint }` shape druntime's own `BlkInfo_` has, padded
+// to 24 bytes - can be returned by value from a named function. The call
+// destination slot is sized from the return type's own `TypeFacts`, not
+// a fixed-width scratch buffer, so the width of the struct does not
+// matter.
+static foreach (backend; Matrix!()) {
+    @("structWithPointerFieldReturnedByValueFromNamedFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide {
+                void* base;
+                size_t size;
+                uint tag;
+            }
+
+            Wide makeWide(ref int payload) {
+                return Wide(&payload, 3, 4);
+            }
+
+            void main() {
+                int payload = 7;
+                auto w = makeWide(payload);
+                assert(*cast(int*) w.base == 7);
+                assert(w.size == 3);
+                assert(w.tag == 4);
+            }
+        });
+    }
+}
+
+// As above, returned from a lambda's own call rather than a named
+// function - the same return-width limit applies to every guest callee,
+// not just one declared with `function`/`ref`/... syntax.
+static foreach (backend; Matrix!()) {
+    @("structWithPointerFieldReturnedByValueFromLambda." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide {
+                void* base;
+                size_t size;
+                uint tag;
+            }
+
+            void main() {
+                int payload = 7;
+                auto makeWide = () => Wide(&payload, 3, 4);
+                auto w = makeWide();
+                assert(*cast(int*) w.base == 7);
+                assert(w.size == 3);
+                assert(w.tag == 4);
+            }
+        });
+    }
+}
+
+// A struct with a class-reference field - one pointer-sized handle, no
+// different from any other field a bytewise copy carries - can be
+// returned by value the same way a struct with a plain pointer field can.
+static foreach (backend; Matrix!()) {
+    @("structWithClassFieldReturnedByValueFromNamedFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Inner {
+                int value;
+                this(int value) { this.value = value; }
+            }
+
+            struct Outer {
+                ushort tag;
+                Inner inner;
+                ubyte flag;
+            }
+
+            Outer makeOuter() {
+                return Outer(2, new Inner(3), 8);
+            }
+
+            void main() {
+                auto o = makeOuter();
+                assert(o.tag == 2);
+                assert(o.inner.value == 3);
+                assert(o.flag == 8);
+            }
+        });
+    }
+}
+
+// A struct literal with a pointer field, written directly as a call
+// argument - the callee's own parameter slot holds the same native bytes
+// the literal wrote, no different from any other struct-typed argument.
+static foreach (backend; Matrix!()) {
+    @("structLiteralWithPointerFieldAsCallArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Outer {
+                ushort tag;
+                int* inner;
+                ubyte flag;
+            }
+
+            void takesOuter(Outer o) {
+                assert(o.tag == 9);
+                assert(*o.inner == 1);
+                assert(o.flag == 2);
+            }
+
+            void main() {
+                int value = 1;
+                takesOuter(Outer(9, &value, 2));
+            }
+        });
+    }
+}
+
+// As above, with a class-reference field instead of a plain pointer.
+static foreach (backend; Matrix!()) {
+    @("structLiteralWithClassFieldAsCallArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Inner {
+                int value;
+                this(int value) { this.value = value; }
+            }
+
+            struct Outer {
+                ushort tag;
+                Inner inner;
+                ubyte flag;
+            }
+
+            void takesOuter(Outer o) {
+                assert(o.tag == 9);
+                assert(o.inner.value == 1);
+                assert(o.flag == 2);
+            }
+
+            void main() {
+                takesOuter(Outer(9, new Inner(1), 2));
+            }
+        });
+    }
+}
+
+// A struct literal with a pointer field, assigned into an already-declared
+// local - the assignment's own source is the literal's native bytes, the
+// same as any other struct-typed assignment.
+static foreach (backend; Matrix!()) {
+    @("structLiteralWithPointerFieldAsAssignmentSource." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Outer {
+                ushort tag;
+                int* inner;
+                ubyte flag;
+            }
+
+            void main() {
+                int value = 5;
+                Outer o;
+                o = Outer(3, &value, 7);
+                assert(o.tag == 3);
+                assert(*o.inner == 5);
+                assert(o.flag == 7);
+            }
+        });
+    }
+}
+
+// As above, with a class-reference field instead of a plain pointer.
+static foreach (backend; Matrix!()) {
+    @("structLiteralWithClassFieldAsAssignmentSource." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Inner {
+                int value;
+                this(int value) { this.value = value; }
+            }
+
+            struct Outer {
+                ushort tag;
+                Inner inner;
+                ubyte flag;
+            }
+
+            void main() {
+                Outer o;
+                o = Outer(3, new Inner(5), 7);
+                assert(o.tag == 3);
+                assert(o.inner.value == 5);
+                assert(o.flag == 7);
+            }
+        });
+    }
+}
+
+// A storage-class attribute wrapping a non-variable local declaration
+// (`static struct S { ... }`) parses as an `AttribDeclaration` holding the
+// `StructDeclaration`, not as a flag on the declaration itself the way
+// `static int x;` sets `STC.static_` directly on its own `VarDeclaration`.
+// This local struct has no runtime action of its own - the same as one
+// declared without `static` - so declaring it must not stop the
+// surrounding function from compiling.
+static foreach (backend; Matrix!()) {
+    @("staticLocalStructDeclarationHasNoRuntimeAction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int useLocalStruct() {
+                static struct Holder {
+                    int value;
+                }
+
+                Holder h = Holder(42);
+                return h.value;
+            }
+
+            void main() {
+                assert(useLocalStruct() == 42);
+            }
+        });
+    }
+}
