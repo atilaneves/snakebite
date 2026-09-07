@@ -4721,15 +4721,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return staticFunction;
 
         if (staticClass.isInterfaceDeclaration !is null) {
-            import dmd.funcsem: overrides;
+            import snakebite.backends.classinfo: interfaceOverride;
 
-            foreach (symbol; declaration.vtbl) {
-                auto candidate = symbol.isFuncDeclaration;
-                if (candidate !is null
-                        && candidate.overrides(staticFunction))
-                    return candidate;
-            }
-            return staticFunction;
+            auto candidate = interfaceOverride(declaration, staticFunction);
+            return candidate is null ? staticFunction : candidate;
         }
 
         const index = staticFunction.vtblIndex;

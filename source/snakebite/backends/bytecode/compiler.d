@@ -468,7 +468,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         imported!"dmd.dclass".ClassDeclaration interface_,
         TypeInfo_Class interfaceInfo,
     ) {
-        import dmd.funcsem: overrides;
+        import snakebite.backends.classinfo: interfaceOverride;
 
         auto vtbl = new void*[interface_.vtbl.length];
         foreach (i; 1 .. interface_.vtbl.length) {
@@ -476,14 +476,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             if (interfaceMethod is null)
                 continue;
 
-            foreach (candidateSymbol; declaration.vtbl) {
-                auto candidate = candidateSymbol.isFuncDeclaration;
-                if (candidate !is null && isGuestFunction(candidate)
-                        && candidate.overrides(interfaceMethod)) {
-                    vtbl[i] = cast(void*) compileFunction(candidate);
-                    break;
-                }
-            }
+            auto candidate = interfaceOverride(
+                declaration, interfaceMethod, &isGuestFunction);
+            if (candidate !is null)
+                vtbl[i] = cast(void*) compileFunction(candidate);
         }
 
         return vtbl;

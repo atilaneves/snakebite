@@ -177,3 +177,23 @@ public TypeInfo_Class classRuntimeInfo(
 
     return typeInfo;
 }
+
+
+// DMD's override relation also covers covariant interface methods. The
+// caller can limit candidates to methods it can make callable.
+public imported!"dmd.func".FuncDeclaration interfaceOverride(
+    imported!"dmd.dclass".ClassDeclaration concrete,
+    imported!"dmd.func".FuncDeclaration method,
+    scope bool delegate(FuncDeclaration) accepts = null,
+) {
+    import dmd.funcsem: overrides;
+
+    foreach (symbol; concrete.vtbl) {
+        auto candidate = symbol.isFuncDeclaration;
+        if (candidate !is null
+                && (accepts is null || accepts(candidate))
+                && candidate.overrides(method))
+            return candidate;
+    }
+    return null;
+}
