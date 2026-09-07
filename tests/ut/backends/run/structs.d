@@ -12,9 +12,7 @@ import ut.backends;
 // `with` on a struct evaluates the value once, then resolves each unqualified
 // member through that same storage. The assignments must update the source
 // value, not a copied temporary.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed, "no WithStatement support"),
-)) {
+static foreach (backend; Matrix!()) {
     @("struct.withStatementUsesAggregateStorage." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -2728,9 +2726,7 @@ static foreach (backend; Matrix!()) {
 // reads a field of the with-object: the same `WithStatement` gap as
 // `struct.withStatementUsesAggregateStorage` in this module, exercised
 // with a statement body instead of a block.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed, "no WithStatement support"),
-)) {
+static foreach (backend; Matrix!()) {
     @("withStatementSingleStatementBodyReadsAggregateField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -2743,6 +2739,36 @@ static foreach (backend; Matrix!(
                 with (s)
                     len = cast(int) things.length - 2;
                 assert(len == 1);
+            }
+        });
+    }
+}
+
+// `with (val) ... things.length ...` where `val` is a `ref` parameter and
+// `things` is a dynamic array field: unlike
+// `withStatementSingleStatementBodyReadsAggregateField`'s static array,
+// whose `.length` is a manifest constant dmd folds away, a dynamic array's
+// `.length` is a runtime read of the `{ size_t length; T* ptr; }` field at
+// offset 0 - so this reaches through `wthis` into the aggregate's own
+// storage instead of skipping it entirely. This is the shape
+// `cerealed.cereal.lengthOfArray`'s `with(val) _tmpLen =
+// cast(int)(things.length);` mixin builds.
+static foreach (backend; Matrix!()) {
+    @("withStatementReadsRefParameterDynamicArrayLength." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[] things; }
+
+            int lengthOfArray(ref S val) {
+                int _tmpLen;
+                with (val) _tmpLen = cast(int) things.length;
+                return _tmpLen;
+            }
+
+            void main() {
+                S s = S([1, 2, 3, 4]);
+                assert(lengthOfArray(s) == 4);
             }
         });
     }
