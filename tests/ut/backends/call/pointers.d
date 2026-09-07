@@ -1051,6 +1051,39 @@ static foreach (backend; Matrix!(
 }
 
 
+// A pointee whose size is not a power of two: the byte distance between
+// the two pointers (24 here) is still an exact multiple of the element
+// size (12), so the element distance is exact in both directions.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter divides a pointer difference by the wrong "
+            ~ "stride once the pointee is wider than one byte"),
+)) {
+    @("pointers.structPointer.twelveByteStrideBothSigns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Triple {
+                int a;
+                int b;
+                int c;
+            }
+
+            void main() {
+                Triple[] arr = [Triple(1, 2, 3), Triple(4, 5, 6),
+                    Triple(7, 8, 9), Triple(10, 11, 12)];
+                Triple[] lowSlice = arr[1 .. $];
+                Triple[] highSlice = arr[3 .. $];
+                Triple* low = lowSlice.ptr;
+                Triple* high = highSlice.ptr;
+                assert(high - low == 2);
+                assert(low - high == -2);
+            }
+        });
+    }
+}
+
+
 // `&c.get` on a class method is dmd's `DelegateExp` too, with the object
 // reference as context instead of a struct's inline storage.
 static foreach (backend; Matrix!(
@@ -1079,5 +1112,121 @@ static foreach (backend; Matrix!(
             },
             "deref",
         );
+    }
+}
+
+
+// `void*` has a pointee size of one, so its difference is the plain byte
+// distance, signed either way round.
+static foreach (backend; Matrix!()) {
+    @("pointers.voidPointer.differenceBothSigns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] arr = [1, 2, 3, 4];
+                int[] lowSlice = arr[1 .. $];
+                int[] highSlice = arr[3 .. $];
+                void* low = lowSlice.ptr;
+                void* high = highSlice.ptr;
+                assert(high - low == 8);
+                assert(low - high == -8);
+            }
+        });
+    }
+}
+
+
+// The pointer operands' qualifiers do not change the difference: two
+// `const(int)*` values (converted from mutable pointers) subtract like
+// `int*` ones.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter divides a pointer difference by the wrong "
+            ~ "stride once the pointee is wider than one byte"),
+)) {
+    @("pointers.constPointer.differenceBothSigns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] arr = [1, 2, 3, 4];
+                int[] lowSlice = arr[1 .. $];
+                int[] highSlice = arr[3 .. $];
+                int* lowMutable = lowSlice.ptr;
+                int* highMutable = highSlice.ptr;
+                const(int)* low = lowMutable;
+                const(int)* high = highMutable;
+                assert(high - low == 2);
+                assert(low - high == -2);
+            }
+        });
+    }
+}
+
+
+// A pointer difference is a signed integer, so a negative one compares
+// below zero, and `p - p` is zero and therefore false as a condition.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter divides a pointer difference by the wrong "
+            ~ "stride once the pointee is wider than one byte"),
+)) {
+    @("pointers.pointerDifference.asCondition." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(
+            backend,
+            q{
+                int f() {
+                    int[] arr = [1, 2, 3, 4];
+                    int[] lowSlice = arr[1 .. $];
+                    int[] highSlice = arr[3 .. $];
+                    int* low = lowSlice.ptr;
+                    int* high = highSlice.ptr;
+                    int r;
+                    if (low - low) r += 100;
+                    if (low - low == 0) r += 1;
+                    if (low - high < 0) r += 2;
+                    if (high - low > 0) r += 4;
+                    if (low - high >= 0) r += 200;
+                    return r;
+                }
+            },
+            "f",
+        );
+    }
+}
+
+
+// The difference is a `ptrdiff_t` value like any other: it stores into a
+// `long`, takes part in further arithmetic, converts to `size_t`, and
+// narrows to `int` with its sign intact. An odd distance (three `long`
+// elements) checks that the byte count divides exactly by the stride.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter divides a pointer difference by the wrong "
+            ~ "stride once the pointee is wider than one byte"),
+)) {
+    @("pointers.pointerDifference.asInteger." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                long[] arr = [1, 2, 3, 4, 5];
+                long[] lowSlice = arr[0 .. $];
+                long[] highSlice = arr[3 .. $];
+                long* low = lowSlice.ptr;
+                long* high = highSlice.ptr;
+                long d = low - high;
+                assert(d == -3);
+                ptrdiff_t e = (high - low) * 2 + 1;
+                assert(e == 7);
+                size_t u = high - low;
+                assert(u == 3);
+                int narrow = cast(int) (low - high);
+                assert(narrow == -3);
+            }
+        });
     }
 }
