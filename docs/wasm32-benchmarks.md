@@ -1,8 +1,8 @@
 # Wasm32 benchmarks
 
 The `wasm32` row runs Dennis Korpel's DMD Wasm backend and Wasmtime as
-external processes. It is selected by the supported examples' `bench.backends`
-files and by `bin/bench -b wasm32`.
+external processes. No example selects it by default. Select it explicitly
+with `bin/bench <example> -b wasm32`.
 
 ## Setup
 
@@ -69,11 +69,11 @@ commands. The DMD and Phobos branches are experimental.
 
 ## Results with these revisions
 
-On Linux x86_64, the default wasm32 selections are `rt-simple`,
+On Linux x86_64, wasm32 passes for `rt-simple`,
 `rt-cerealed-0`, `rt-cerealed-1`, and `rt-ffi`. The reported test counts are
 22, 26, and 156 for the first three. `rt-ffi` uses the process exit status.
 
-The unsupported examples are omitted from their default selections because
+The remaining examples fail with these revisions:
 `ct-easy`, `ct-full`, and `rt-perf` use a `long` array index that DMD rejects
 on wasm32, while `rt` needs unit-threaded APIs absent on WASI. You can still
 request `bin/bench <example> -b wasm32`; compilation or preparation failures
