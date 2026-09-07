@@ -241,7 +241,7 @@ private SourceSet dubSourceSet(
 }
 
 
-private string dmdFlagsForOption(in string option) {
+public string dmdFlagsForOption(in string option) @safe pure nothrow {
     switch (option) {
         case "debugMode": return "-debug";
         case "releaseMode": return "-release";

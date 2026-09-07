@@ -1,3 +1,4 @@
 bytecode
 interpreter
 dmd
+wasm32

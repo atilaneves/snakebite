@@ -218,6 +218,7 @@ private BackendReport[] benchmarkAll(
     in Options options,
 ) {
     import bench.oracle: oracleName, oracleReport;
+    import bench.wasm: wasmName, wasmReport;
 
     BackendReport[] reports;
     static foreach (BackendType; imported!"snakebite.backends".Backends)
@@ -233,6 +234,11 @@ private BackendReport[] benchmarkAll(
 
     if (selected(options, oracleName))
         reports ~= oracleReport(
+            project.sources, project.directory, options.warmup, options.runs,
+        );
+
+    if (selected(options, wasmName))
+        reports ~= wasmReport(
             project.sources, project.directory, options.warmup, options.runs,
         );
 
@@ -322,6 +328,7 @@ private enum knownBackendNames = () {
     static foreach (BackendType; imported!"snakebite.backends".Backends)
         names ~= backendName!BackendType;
     names ~= imported!"bench.oracle".oracleName;
+    names ~= imported!"bench.wasm".wasmName;
     return names;
 }();
 
