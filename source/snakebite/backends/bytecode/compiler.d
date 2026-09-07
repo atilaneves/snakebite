@@ -104,8 +104,12 @@ private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
 // b)`, dmd's node for direct construction with no user-defined
 // constructor) by writing straight into each field's own slot: as
 // `isPlainOldStruct`, but without ruling out a postblit, copy
-// constructor, destructor or user-defined assignment, or a non-zero
-// `.init`. Direct construction invokes neither a postblit nor a copy of
+// constructor, destructor or user-defined assignment, a non-zero
+// `.init`, or nesting inside a function or another nested struct
+// (`sd.isNested()`) - a nested struct's hidden `vthis` field is filled
+// in separately, by every construction route's own call to `fillVthis`,
+// so it needs no ruling out here. Direct construction invokes neither a
+// postblit nor a copy of
 // `.init` - dmd only ever calls a postblit to run an elaborate *copy*,
 // never to build a fresh value from its own field expressions, and
 // `visit(StructLiteralExp)` below zeroes `_destination` and then writes
@@ -3807,6 +3811,52 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, _destination, baseOffset + field.offset, _width);
     }
 
+    // Writes the enclosing context a nested struct captured (`sd.vthis`)
+    // into its own field, wherever the struct being built lives:
+    // `destination` is a frame offset holding the struct's own bytes
+    // directly for a value (`visit(StructLiteralExp)`), or a frame offset
+    // holding a pointer to the struct's allocation for `new`
+    // (`compileNew`) - `isPointer` picks which. Every construction route
+    // that can build a nested struct must call this: leaving `vthis` at
+    // its `.init` zero, rather than rejecting the struct outright
+    // (`isSupportedStructLiteral` no longer does), reads back a null
+    // context the first time a method on that instance uses it.
+    //
+    // `isNested()` is true only when dmd gave the struct a hidden `vthis`
+    // field; a `static struct` declared inside a function is lexically
+    // nested but has no such field. For a `StructDeclaration`, dmd's
+    // `makeNested` only ever sets a function as `enclosing` - unlike a
+    // class nested in a class, where a class parent is used instead - so
+    // `sd.toParent2()` landing on anything but a function here is a
+    // rejection, not a silent no-op.
+    private void fillVthis(
+        imported!"dmd.dstruct".StructDeclaration sd,
+        imported!"dmd.location".Loc loc,
+        size_t destination,
+        bool isPointer,
+    ) {
+        if (!sd.isNested() || sd.vthis is null)
+            return;
+
+        auto parent = sd.toParent2();
+        auto parentFunction = parent is null ? null : parent.isFuncDeclaration;
+        if (parentFunction is null)
+            throw rejection(_function, loc, "a nested struct's static chain");
+
+        const context = contextAddressOf(parentFunction);
+
+        if (!isPointer) {
+            emit(&opCopy, destination + sd.vthis.offset, context,
+                size_t.sizeof);
+            return;
+        }
+
+        const fieldAddress = reserveTemp(pointerFacts);
+        emit(&opCopy, fieldAddress, destination, size_t.sizeof);
+        addPointerOffset(fieldAddress, sd.vthis.offset);
+        emit(&opStoreIndirect, fieldAddress, context, size_t.sizeof);
+    }
+
     // `Point(3, 4)`, dmd's own literal form for a plain-old struct with no
     // user-defined constructor: every field evaluated directly into its
     // own slot at `field.offset` within `_destination`, zeroed first for
@@ -3821,26 +3871,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         emit(&opZero, _destination, 0, _width);
 
-        // `isNested()` is true only when dmd gave the struct a hidden
-        // `vthis` field; a `static struct` declared inside a function is
-        // lexically nested but has no such field, and `elements` never
-        // carries a value for `vthis` itself (dmd leaves it out, expecting
-        // whoever builds the literal to fill it in - the same gap the
-        // interpreter's own `visit(StructLiteralExp)` fills). The context
-        // this struct captures is whatever encloses it lexically; a struct
-        // nested inside another nested struct's method rather than a
-        // function directly is not a shape any guest program here reaches,
-        // so only the function case is filled in.
-        if (expression.sd.isNested() && expression.sd.vthis !is null) {
-            auto parent = expression.sd.toParent2();
-            auto parentFunction = parent is null
-                ? null : parent.isFuncDeclaration;
-            if (parentFunction !is null) {
-                const context = contextAddressOf(parentFunction);
-                emit(&opCopy, _destination + expression.sd.vthis.offset,
-                    context, size_t.sizeof);
-            }
-        }
+        // `elements` never carries a value for `vthis` itself (dmd leaves
+        // it out, expecting whoever builds the literal to fill it in -
+        // the same gap the interpreter's own `visit(StructLiteralExp)`
+        // fills). The context this struct captures is whatever encloses
+        // it lexically, whether that is a function directly or a struct
+        // nested inside another nested struct's method
+        // (`fillVthis`/`contextAddressOf` hop through either).
+        fillVthis(expression.sd, expression.loc, _destination, false);
 
         if (expression.elements is null)
             return;
@@ -4199,6 +4237,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? reserveTemp(pointerFacts) : _destination;
 
         evalInto(expression.lowering, objectOffset, pointerFacts.size);
+
+        // A nested struct's `vthis` sits inside the allocation the
+        // lowering just returned, at the same native offset a value of
+        // that struct type would use - filled here, once, ahead of
+        // either the constructor call below or the positional field
+        // stores further down, so both a `new Adder(2)` with a
+        // constructor and a bare `new Reader` (no arguments at all) get
+        // a real context rather than `.init`'s zero.
+        if (structType !is null)
+            fillVthis(structType.sym, expression.loc, objectOffset, true);
 
         if (expression.member !is null) {
             compileResolvedCall(
@@ -5507,6 +5555,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
+            // `Adder(2).sum()`: dmd keeps the constructor-call temporary
+            // as a bare `StructLiteralExp` receiver with no wrapping
+            // `VarExp`, so nothing else ever visits it. Evaluating it
+            // here, into the same `destOffset` the constructor is about
+            // to run on, is what runs `visit(StructLiteralExp)` at all -
+            // including its `fillVthis` call, for a nested struct.
+            if (receiver.isStructLiteralExp !is null) {
+                const facts = TypeFacts.of(receiver.type);
+                evalInto(receiver, destOffset, facts.size);
+            }
+
             const thisOffset = reserveTemp(pointerFacts);
             emit(&opFrameAddress, thisOffset, destOffset, size_t.sizeof);
             return thisOffset;
@@ -6197,7 +6256,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 callee = calleeExp is null
                     ? null : calleeExp.var.isFuncDeclaration;
             }
-            if (isRefCall(callExp)) {
+
+            // A constructor call as an rvalue receiver - `Adder(2).sum()`
+            // - needs the same treatment `visit(CallExp)` already gives a
+            // constructor at statement level: `destOffset` is the
+            // constructed struct's own storage, not an address the
+            // callee hands back. dmd's own `TypeFunction` for a
+            // constructor is `isRef` (a struct constructor conceptually
+            // returns its own instance by reference, for chaining), so
+            // without this check `isRefCall` below would reserve only a
+            // pointer-sized temporary and hand it to `compileCall` as if
+            // the constructor were about to fill it with a returned
+            // address - `receiverOffsetOf`'s own struct-literal shortcut
+            // then writes the whole struct through it instead, overrunning
+            // that pointer-sized slot into whatever else the frame put
+            // right after it.
+            const isCtorCall = callee !is null && callee.isCtorDeclaration !is null;
+
+            if (!isCtorCall && isRefCall(callExp)) {
                 const offset = reserveTemp(pointerFacts);
                 compileCall(callExp, offset);
                 return offset;
