@@ -163,6 +163,138 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `arr is null` on a dynamic array compares its whole two-word
+// `{length, ptr}` pair, not just `.ptr` - a default-initialised array has
+// both words zero, so this is true.
+static foreach (backend; Matrix!()) {
+    @("arrays.identity.null." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool isNull() {
+                    int[] arr;
+                    return arr is null;
+                }
+            },
+            "isNull",
+        );
+    }
+}
+
+// A non-empty array has a non-null `.ptr`, so `!is null` is true.
+static foreach (backend; Matrix!()) {
+    @("arrays.identity.notNull." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool notNull() {
+                    int[] arr = [1, 2, 3];
+                    return arr !is null;
+                }
+            },
+            "notNull",
+        );
+    }
+}
+
+// Slicing an appended-to array down to `arr[0 .. 0]` keeps its `.ptr` (the
+// allocation `~=` gave it) while its `.length` drops to zero - the same
+// zero `.length` as a default-initialised array, but a different `.ptr`.
+// `is null` reads both words, so this empty-but-not-null array must still
+// answer `!is null` true.
+static foreach (backend; Matrix!()) {
+    @("arrays.identity.emptyNonNull." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool emptyNonNull() {
+                    int[] arr;
+                    arr ~= 1;
+                    arr = arr[0 .. 0];
+                    return arr !is null;
+                }
+            },
+            "emptyNonNull",
+        );
+    }
+}
+
+// `arr2 = arr1` copies the same `{length, ptr}` pair, so the two variables
+// name the same array and `is` between them is true.
+static foreach (backend; Matrix!()) {
+    @("arrays.identity.sameArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool same() {
+                    int[] arr1 = [1, 2, 3];
+                    int[] arr2 = arr1;
+                    return arr1 is arr2;
+                }
+            },
+            "same",
+        );
+    }
+}
+
+// Two array literals with the same contents are two separate allocations,
+// so `is` between them is false even though `==` between them is true.
+//
+// dmd's own CTFE engine does not honour this: `enum` over an equivalent
+// snippet (confirmed directly with `pragma(msg, ...)` against dmd) prints
+// `true`, so it interns or otherwise unifies the two identical literals
+// instead of giving them separate identities. `Ctfe` calls that same
+// engine, so it disagrees here on purpose.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE engine unifies two identical array literals into " ~
+        "one identity instead of giving them separate allocations"),
+)) {
+    @("arrays.identity.differentArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        false.shouldBeRetOf!(
+            backend,
+            q{
+                bool different() {
+                    int[] arr1 = [1, 2, 3];
+                    int[] arr2 = [1, 2, 3];
+                    return arr1 is arr2;
+                }
+            },
+            "different",
+        );
+    }
+}
+
+// `is`/`!is` on an array as an `if` condition, not just a returned `bool`.
+static foreach (backend; Matrix!()) {
+    @("arrays.identity.ifCondition." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.shouldBeRetOf!(
+            backend,
+            q{
+                int usedAsCondition() {
+                    int[] arr;
+                    if (arr is null)
+                        return 1;
+                    return 0;
+                }
+            },
+            "usedAsCondition",
+        );
+    }
+}
+
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
