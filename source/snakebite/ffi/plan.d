@@ -102,6 +102,30 @@ public struct CallPlan {
         callGeneric(address, returnPlace, arguments);
     }
 
+    // Prepares a plan for a raw address that has no `FuncDeclaration`
+    // behind it - a druntime glue-layer hook such as
+    // `_d_arraybounds_indexp`, called by linker symbol the same way
+    // `snakebite.backends.bytecode.compiler`'s `CatDcharAssignExp` visitor
+    // already resolves `_d_arrayappendcd` - rather than a guest
+    // declaration `prepare` walks a dmd type for. Every parameter here is
+    // one plain integer-class register, already the exact width its own
+    // hook expects, so the caller hands over the register shapes directly
+    // instead of this classifying a dmd `Type`. The hook itself never
+    // returns, so the return stays void: no hidden pointer, nothing to
+    // read back.
+    package static CallPlan ofRawAddress(
+        const(void)* address,
+        scope const(Register)[] parameterRegisters,
+    ) {
+        CallPlan plan;
+        plan._address = cast(void*) address;
+        plan._parameterCount = parameterRegisters.length;
+        foreach (i, register; parameterRegisters)
+            plan._arguments[i] =
+                ArgumentPlan([register, Register.init], 1, false);
+        return plan;
+    }
+
     private void callGeneric(
         const(void)* address,
         void* returnPlace,
@@ -336,6 +360,7 @@ public extern(C) void executeCallPlan(
 // it, which is the caller's business and not this package's.
 public struct PlanCache {
     private CallPlan*[imported!"dmd.func".FuncDeclaration] _plans;
+    private CallPlan*[string] _rawPlans;
     private bool[imported!"dmd.func".FuncDeclaration] _nativeSymbols;
     private Resolver _resolver;
     private size_t _preparations;
@@ -407,6 +432,31 @@ public struct PlanCache {
         *plan = prepare(function_, _resolver);
         _plans[function_] = plan;
         return *plan;
+    }
+
+    // As `.of`, but for a raw address with no `FuncDeclaration` to key
+    // on - see `CallPlan.ofRawAddress`. Keyed and cached by linker symbol
+    // name instead, so a second bounds check anywhere in the guest
+    // program reuses the first one's resolved address and plan. Returns
+    // `null` when the symbol is not in this process, the same convention
+    // `resolve` itself uses.
+    public const(CallPlan)* rawPlanOf(
+        string name,
+        scope const(imported!"snakebite.ffi.abi".Register)[]
+            parameterRegisters,
+    ) {
+        if (auto cached = name in _rawPlans)
+            return *cached;
+
+        auto address = resolve(name);
+        if (address is null)
+            return null;
+
+        ++_preparations;
+        auto plan = new CallPlan;
+        *plan = CallPlan.ofRawAddress(address, parameterRegisters);
+        _rawPlans[name] = plan;
+        return plan;
     }
 
 }

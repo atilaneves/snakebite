@@ -503,29 +503,6 @@ package const(Instruction)* opAssert(
 }
 
 
-// A slice bounds failure must use druntime's range-error path. A backend
-// assertion would have a different D type and could not be caught as the
-// `RangeError` that compiled D specifies.
-package const(Instruction)* opRangeError(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
-) {
-    if (loadUnsigned(frame + pc.destination, pc.width) != 0)
-        return advance(pc, frame, returnPlace, constants, callSites,
-            assertSites, frames);
-
-    import core.exception: onRangeError;
-
-    const site = assertSites[pc.source];
-    onRangeError(site.file, site.line);
-}
-
-
 // Throws the Throwable reference at `pc.destination`. The expression has
 // already been evaluated into the frame, so this preserves the original
 // object while dispatch unwinds through guest catch handlers and frames.
@@ -1629,9 +1606,10 @@ package const(Instruction)* opStoreIndirect(
 // and `frame + pc.source`, with `pc.width` the element size baked in at
 // compile time (both sides share one element size - the compiler checked
 // that before emitting this). The two lengths are trusted equal - the
-// compiler emits an `opRangeError` check immediately before this, the
-// same way it already guards a run-time slice's own bounds - so only
-// `dest`'s own pointer, not its length, is read here.
+// compiler emits a conditional call to druntime's own bounds hook
+// immediately before this, the same way it already guards a run-time
+// slice's own bounds - so only `dest`'s own pointer, not its length, is
+// read here.
 //
 // The one opcode a plain-element slice assignment ever reaches for its
 // own copy: dmd's own semantic pass rewrites an assignment whose element
