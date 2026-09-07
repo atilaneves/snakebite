@@ -128,8 +128,7 @@ private bool isSupportedStructLiteral(imported!"dmd.mtype".Type type) {
         return false;
 
     auto declaration = structType.sym;
-    if (declaration.isUnionDeclaration !is null
-            || declaration.enclosing !is null)
+    if (declaration.isUnionDeclaration !is null)
         return false;
 
     foreach (field; declaration.fields) {
@@ -2370,6 +2369,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // The context of `owner`, as a pointer value in a temporary frame slot.
     // A closure's first word links to its parent context. A non-closure
     // nested frame stores that link in its hidden `vthis` slot.
+    //
+    // `_function.toParent2()` does not skip over an enclosing aggregate the
+    // way it skips a block or `Catch` scope: a nested struct's method has
+    // that struct as its immediate `toParent2()`, not the function the
+    // struct itself is nested in. Crossing that hop reads the struct's own
+    // `vthis` field (`sd.isNested()`) out of the receiver - `_function`'s
+    // own hidden `this` is that receiver's address, the same as for an
+    // ordinary member method - at the field's own native offset
+    // (`sd.vthis.offset`), the same way any other field is reached by its
+    // `field.offset`. What that field holds is the context this struct's
+    // instance captured when it was built (`visit(StructLiteralExp)`'s own
+    // `isNested()` branch), which may itself be another nested struct's
+    // receiver, so the walk below alternates between a struct hop and a
+    // function hop for as many levels as the guest source actually nests.
     private size_t contextAddressOf(FuncDeclaration owner) {
         if (owner is _function) {
             if (_closureOffset != size_t.max)
@@ -2380,36 +2393,50 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return result;
         }
 
-        auto parent = _function.toParent2();
-        auto current = parent is null ? null : parent.isFuncDeclaration;
-        if (current is null)
+        if (_layout.hiddenThis.variable is null)
             throw rejection(_function, _function.loc, "a static chain");
 
         const result = reserveTemp(pointerFacts);
         emit(&opCopy, result,
             _layout.hiddenThis.parameter.offset, size_t.sizeof);
 
-        while (current !is owner) {
-            if (functionNeedsClosure(current)) {
+        auto parent = _function.toParent2();
+        auto currentFunction = parent is null ? null : parent.isFuncDeclaration;
+        auto currentStruct = parent is null ? null : parent.isStructDeclaration;
+
+        while (currentFunction !is owner) {
+            if (currentStruct !is null) {
+                if (!currentStruct.isNested() || currentStruct.vthis is null)
+                    throw rejection(_function, _function.loc,
+                        "a static chain");
+
+                addPointerOffset(result, currentStruct.vthis.offset);
+                emit(&opLoadIndirect, result, result, size_t.sizeof);
+
+                auto next = currentStruct.toParent2();
+                currentFunction = next is null ? null : next.isFuncDeclaration;
+                currentStruct = next is null ? null : next.isStructDeclaration;
+                continue;
+            }
+
+            if (currentFunction is null)
+                throw rejection(_function, _function.loc, "a static chain");
+
+            if (functionNeedsClosure(currentFunction)) {
                 emit(&opLoadIndirect, result, result, size_t.sizeof);
             } else {
-                const layout = FrameLayout.of(current);
+                const layout = FrameLayout.of(currentFunction);
                 if (layout.hiddenThis.variable is null)
                     throw rejection(_function, _function.loc,
                         "a static chain");
 
-                const offset = reserveTemp(pointerFacts);
-                emit(&opConstant, offset,
-                    addConstant(cast(long)
-                        layout.hiddenThis.parameter.offset), size_t.sizeof);
-                emit(&opAdd, result, offset, size_t.sizeof);
+                addPointerOffset(result, layout.hiddenThis.parameter.offset);
                 emit(&opLoadIndirect, result, result, size_t.sizeof);
             }
 
-            auto next = current.toParent2();
-            current = next is null ? null : next.isFuncDeclaration;
-            if (current is null)
-                throw rejection(_function, _function.loc, "a static chain");
+            auto next = currentFunction.toParent2();
+            currentFunction = next is null ? null : next.isFuncDeclaration;
+            currentStruct = next is null ? null : next.isStructDeclaration;
         }
 
         return result;
@@ -3793,6 +3820,27 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return visit(cast(Expression) expression);
 
         emit(&opZero, _destination, 0, _width);
+
+        // `isNested()` is true only when dmd gave the struct a hidden
+        // `vthis` field; a `static struct` declared inside a function is
+        // lexically nested but has no such field, and `elements` never
+        // carries a value for `vthis` itself (dmd leaves it out, expecting
+        // whoever builds the literal to fill it in - the same gap the
+        // interpreter's own `visit(StructLiteralExp)` fills). The context
+        // this struct captures is whatever encloses it lexically; a struct
+        // nested inside another nested struct's method rather than a
+        // function directly is not a shape any guest program here reaches,
+        // so only the function case is filled in.
+        if (expression.sd.isNested() && expression.sd.vthis !is null) {
+            auto parent = expression.sd.toParent2();
+            auto parentFunction = parent is null
+                ? null : parent.isFuncDeclaration;
+            if (parentFunction !is null) {
+                const context = contextAddressOf(parentFunction);
+                emit(&opCopy, _destination + expression.sd.vthis.offset,
+                    context, size_t.sizeof);
+            }
+        }
 
         if (expression.elements is null)
             return;
