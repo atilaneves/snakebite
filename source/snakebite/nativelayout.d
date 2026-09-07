@@ -26,6 +26,28 @@ public bool isIntegralSize(in size_t size) {
     return nativeIsIntegralSize(size);
 }
 
+// Whether copying, constructing or destroying a value of `type` needs a
+// hook this project's backends do not run themselves: a postblit, a copy
+// constructor, a destructor, or a captured enclosing context (a nested
+// struct's own hidden `this`). dmd answers this per type, recursing
+// through a static array to its element and through an enum to its base
+// type on its own, in `needsCopyOrPostblit`/`needsDestruction`/
+// `needsNested`. A struct field whose type needs none of these three is
+// native bytes a bytewise copy already carries correctly, whatever its
+// own kind - `float`/`double`/`real`, an enum, a static array, a
+// delegate, a function pointer, a class or interface reference, an
+// associative array, a pointer or a dynamic array. This says nothing
+// about a `union` or a guest-written `opAssign`, neither of which either
+// dmd function is about; callers still refuse those at the aggregate's
+// own declaration.
+public bool needsElaborateHandling(imported!"dmd.mtype".Type type) {
+    import dmd.typesem: needsCopyOrPostblit, needsDestruction, needsNested;
+
+    return type.needsCopyOrPostblit
+        || type.needsDestruction
+        || type.needsNested;
+}
+
 // Keep the DMD-facing module's historical error behavior while the actual
 // byte operations live in the DMD-free native-value module. Backend code
 // that already validated its widths can call that module directly.

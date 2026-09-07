@@ -59,16 +59,15 @@ private bool isSupportedFacts(
 // `union` (whose fields this compiler cannot lay out from a plain field
 // list) and not nested in an enclosing scope (a local struct with its own
 // `this` captured context, unsupported the same way a method is), whose
-// every field is itself one of an integral this compiler already lays
-// out, a dynamic array (a plain two-word slice, copied the same way an
-// integral field is - by value, sharing whatever it points at), or a
-// nested struct meeting this same predicate. `declaration.zeroInit` is
-// required too: this compiler's only default-value story for a struct is
-// zeroing its bytes (see `opZero`), the same way `nativelayout.storeValue`
-// already special-cases a zero-init struct's own `.init` elsewhere.
+// every field is itself either a nested struct meeting this same
+// predicate or a type `isSupportedFieldType` accepts.
+// `declaration.zeroInit` is required too: this compiler's only
+// default-value story for a struct is zeroing its bytes (see `opZero`),
+// the same way `nativelayout.storeValue` already special-cases a
+// zero-init struct's own `.init` elsewhere.
 private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: STC, Tarray, Tpointer;
-    import snakebite.nativelayout: isIntegralSize, TypeFacts;
+    import dmd.astenums: STC;
+    import snakebite.nativelayout: TypeFacts;
 
     auto structType = type.isTypeStruct;
     if (structType is null)
@@ -94,11 +93,7 @@ private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
             continue;
         }
 
-        if (field.type.ty == Tarray || field.type.ty == Tpointer)
-            continue;
-
-        const facts = TypeFacts.of(field.type);
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
+        if (!isSupportedFieldType(TypeFacts.of(field.type), field.type))
             return false;
     }
 
@@ -119,8 +114,8 @@ private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
 // `TrackerHolder(1, tracker)` both qualify even though neither is a
 // plain-old struct on its own.
 private bool isSupportedStructLiteral(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: STC, Tarray, Tpointer;
-    import snakebite.nativelayout: isIntegralSize, TypeFacts;
+    import dmd.astenums: STC;
+    import snakebite.nativelayout: TypeFacts;
 
     auto structType = type.isTypeStruct;
     if (structType is null)
@@ -143,11 +138,7 @@ private bool isSupportedStructLiteral(imported!"dmd.mtype".Type type) {
             continue;
         }
 
-        if (field.type.ty == Tarray || field.type.ty == Tpointer)
-            continue;
-
-        const facts = TypeFacts.of(field.type);
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
+        if (!isSupportedFieldType(TypeFacts.of(field.type), field.type))
             return false;
     }
 
@@ -173,25 +164,50 @@ private imported!"snakebite.nativelayout".TypeFacts pointerFactsOf() {
     return TypeFacts(size_t.sizeof, size_t.sizeof, false, true);
 }
 
-// An array element type this compiler can lay out: every integral width it
-// already accepts elsewhere, plus `float`/`double`/`real`, which have no
-// `.init` this compiler can write any other way but zero, and a pointer -
-// a plain `size_t.sizeof`-wide value copied by value, sharing whatever it
-// points at, the same way `isPlainOldStruct` already treats a pointer
-// *field* as ordinary bytes rather than something needing an element-wise
-// visit.
+// Whether this compiler can treat a value of `type` as native bytes with
+// no hook of its own to run: not a `Tvector` (this compiler never lays
+// out a SIMD register or evaluates a vector expression) and, per
+// `facts`, not an integral of a width `nativelayout.storeIntegral`
+// cannot store or load (only `bool`/`byte`.../`long`/`ulong`-sized
+// integrals exist in ordinary D, so this only ever refuses `cent`/
+// `ucent`), and per `nativelayout.needsElaborateHandling`, not a type
+// needing a postblit, copy constructor, destructor or captured enclosing
+// context to copy or construct correctly. Every other kind - `float`/
+// `double`/`real`, an enum, a static array, a delegate, a function
+// pointer, a class or interface reference, an associative array, a
+// pointer, a dynamic array, or a struct meeting `isPlainOldStruct`'s
+// stricter aggregate-level rule - is native bytes this compiler can copy
+// or evaluate field by field elsewhere, so this asks nothing more about
+// `type`'s own kind.
+private bool isSupportedFieldType(
+    in imported!"snakebite.nativelayout".TypeFacts facts,
+    imported!"dmd.mtype".Type type,
+) {
+    import dmd.astenums: Tvector;
+    import snakebite.nativelayout: isIntegralSize, needsElaborateHandling;
+
+    if (type.ty == Tvector)
+        return false;
+
+    if (facts.isIntegral && !isIntegralSize(facts.size))
+        return false;
+
+    return !needsElaborateHandling(type);
+}
+
+// An array element type this compiler can lay out: any `isSupportedFieldType`
+// type, whether a plain scalar or a `isPlainOldStruct` aggregate - a nested
+// struct element still needs that stricter aggregate-level rule, not just
+// the field-type check above, since an element is copied and constructed
+// the same way a struct's own field is.
 private bool isSupportedElementFacts(
     in imported!"snakebite.nativelayout".TypeFacts facts,
     imported!"dmd.mtype".Type type,
 ) {
-    import dmd.astenums: Tpointer;
-    import snakebite.nativelayout: isIntegralSize;
+    if (type.isTypeStruct !is null)
+        return isPlainOldStruct(type);
 
-    return (facts.isIntegral && isIntegralSize(facts.size))
-        || isFloatingType(type)
-        || type.ty == Tpointer
-        || isPlainOldStruct(type)
-        || isSupportedStaticArray(type);
+    return isSupportedFieldType(facts, type);
 }
 
 // Whether this compiler can lay `type` out as a static array's own

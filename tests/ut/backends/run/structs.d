@@ -1877,12 +1877,7 @@ static foreach (backend; Matrix!(
 // a `new` expression - the field is a plain pointer-sized handle to the
 // object's own instance, no different from any other field this literal
 // writes.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "`isSupportedStructLiteral` rejects every field but an integral, " ~
-            "a dynamic array, a pointer or a nested plain-old struct - a " ~
-            "class-reference field falls through that list"),
-)) {
+static foreach (backend; Matrix!()) {
     @("structLiteralInitializesClassReferenceField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1908,6 +1903,139 @@ static foreach (backend; Matrix!(
                 assert(outer.inner.s == 3);
                 assert(outer.inner.b == 5);
                 assert(outer.b == 8);
+            }
+        });
+    }
+}
+
+// A struct literal can initialize a `double` field, and a plain field-wide
+// copy of the whole struct carries that field's bytes along unchanged - a
+// floating-point field needs no postblit, destructor or captured context,
+// so it is native bytes exactly like an integral field. `x`'s own explicit
+// `= 0` default keeps `Point`'s `.init` all-zero bytes - a `double`'s own
+// default is `double.nan`, not zero, which would otherwise fail the
+// bytecode compiler's separate `zeroInit` requirement for a struct literal
+// that leaves any field out, unrelated to the field-kind question this
+// test is about.
+static foreach (backend; Matrix!()) {
+    @("structLiteralInitializesFloatingField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                double x = 0;
+                int tag;
+            }
+
+            void main() {
+                auto original = Point(3.5, 7);
+                auto copy = original;
+                assert(copy.x == 3.5);
+                assert(copy.tag == 7);
+            }
+        });
+    }
+}
+
+// A struct literal can initialize an enum-typed field, and copying the
+// struct carries the member's own underlying value along unchanged - an
+// enum needs no postblit, destructor or captured context any more than
+// its base type does.
+static foreach (backend; Matrix!()) {
+    @("structLiteralInitializesEnumField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Color { red, green, blue }
+
+            struct Paint {
+                Color color;
+                int tag;
+            }
+
+            void main() {
+                auto original = Paint(Color.green, 9);
+                auto copy = original;
+                assert(copy.color == Color.green);
+                assert(copy.tag == 9);
+            }
+        });
+    }
+}
+
+// A struct literal can initialize a static-array field element by element,
+// and copying the struct carries every element's own bytes along
+// unchanged - a static array of a plain element type needs no postblit,
+// destructor or captured context any more than the element type itself
+// does.
+static foreach (backend; Matrix!()) {
+    @("structLiteralInitializesStaticArrayField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Triple {
+                int[3] values;
+                int tag;
+            }
+
+            void main() {
+                auto original = Triple([1, 2, 3], 4);
+                auto copy = original;
+                assert(copy.values == [1, 2, 3]);
+                assert(copy.tag == 4);
+            }
+        });
+    }
+}
+
+// A struct literal can initialize a delegate-typed field directly from a
+// closure, and copying the struct carries the delegate's own `{context,
+// function}` pair along unchanged - a delegate needs no postblit,
+// destructor or captured context of its own to copy, only to call.
+static foreach (backend; Matrix!()) {
+    @("structLiteralInitializesDelegateField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int delegate() dg;
+                int tag;
+            }
+
+            void main() {
+                int base = 40;
+                auto original = Holder(() => base + 2, 5);
+                auto copy = original;
+                assert(copy.dg() == 42);
+                assert(copy.tag == 5);
+            }
+        });
+    }
+}
+
+// A struct literal can initialize a function-pointer-typed field directly
+// from a module-level function's address, and copying the struct carries
+// that address along unchanged - a function pointer is a plain machine
+// word with no hook of its own to run.
+static foreach (backend; Matrix!()) {
+    @("structLiteralInitializesFunctionPointerField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int addOne(int value) {
+                return value + 1;
+            }
+
+            struct Holder {
+                int function(int) fn;
+                int tag;
+            }
+
+            void main() {
+                auto original = Holder(&addOne, 6);
+                auto copy = original;
+                assert(copy.fn(41) == 42);
+                assert(copy.tag == 6);
             }
         });
     }

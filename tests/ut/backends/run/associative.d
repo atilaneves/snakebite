@@ -284,12 +284,7 @@ static foreach (backend; Matrix!(
 // even when the AA's value type is the struct itself - the AA field is
 // a plain pointer-sized handle to druntime's own hash table, no
 // different from any other field this literal writes.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "`isSupportedStructLiteral` rejects every field but an integral, " ~
-            "a dynamic array, a pointer or a nested plain-old struct - an " ~
-            "AA-typed field falls through that list"),
-)) {
+static foreach (backend; Matrix!()) {
     @("structLiteralInitializesAssociativeArrayField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
