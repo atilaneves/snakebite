@@ -104,15 +104,19 @@ private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
 // b)`, dmd's node for direct construction with no user-defined
 // constructor) by writing straight into each field's own slot: as
 // `isPlainOldStruct`, but without ruling out a postblit, copy
-// constructor, destructor or user-defined assignment. Direct construction
-// invokes none of those - dmd only ever calls a postblit to run an
-// elaborate *copy*, never to build a fresh value from its own field
-// expressions - so this asks only whether every field's own type can be
-// laid out and evaluated directly, recursing into a nested struct field
-// through this same relaxed rule rather than `isPlainOldStruct`'s
+// constructor, destructor or user-defined assignment, or a non-zero
+// `.init`. Direct construction invokes neither a postblit nor a copy of
+// `.init` - dmd only ever calls a postblit to run an elaborate *copy*,
+// never to build a fresh value from its own field expressions, and
+// `visit(StructLiteralExp)` below zeroes `_destination` and then writes
+// every field `dmd` gave an element for, whatever that field's own
+// default value is - so this asks only whether every field's own type
+// can be laid out and evaluated directly, recursing into a nested struct
+// field through this same relaxed rule rather than `isPlainOldStruct`'s
 // stricter one, so `LifetimeTracker(&postblits, &dtors)` and its holder
 // `TrackerHolder(1, tracker)` both qualify even though neither is a
-// plain-old struct on its own.
+// plain-old struct on its own, and so does `std.format.spec.FormatSpec`,
+// whose fields default to non-zero values (`char spec = 's'`).
 private bool isSupportedStructLiteral(imported!"dmd.mtype".Type type) {
     import dmd.astenums: STC;
     import snakebite.nativelayout: isNativeBytes;
@@ -122,8 +126,7 @@ private bool isSupportedStructLiteral(imported!"dmd.mtype".Type type) {
         return false;
 
     auto declaration = structType.sym;
-    if (!declaration.zeroInit
-            || declaration.isUnionDeclaration !is null
+    if (declaration.isUnionDeclaration !is null
             || declaration.enclosing !is null)
         return false;
 
@@ -3443,6 +3446,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // `typeid` - this reads it back rather than emitting a second copy
         // of it.
         if (auto symbol = expression.var.isSymbolDeclaration) {
+            // `T.init` for a struct `T`: dmd's own `TypeStruct.defaultInit`
+            // (`typesem.d`) hands back this exact `VarExp` shape, whether
+            // written by hand or reached through a plain declaration with
+            // no initialiser (`FormatSpec!char f;`) whose own `.init` is
+            // not all zero bytes. `defaultInitLiteral` turns the same
+            // `SymbolDeclaration` back into the `StructLiteralExp` dmd
+            // built it from in the first place - one element per field,
+            // each already its own default value - so this compiler's own
+            // `visit(StructLiteralExp)` can lay it out the usual way
+            // instead of this needing a second copy of that logic.
+            if (symbol.type.isTypeStruct !is null) {
+                import dmd.typesem: defaultInitLiteral;
+
+                defaultInitLiteral(symbol.type, expression.loc)
+                    .accept(this);
+                return;
+            }
+
             auto classDeclaration = symbol.dsym.isClassDeclaration;
             if (classDeclaration is null)
                 return visit(cast(Expression) expression);
