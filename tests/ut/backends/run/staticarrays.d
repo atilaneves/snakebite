@@ -365,3 +365,70 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// `char[3]`'s default init is `char.init` (`0xFF`) in every element: dmd
+// hands out the element's own `IntegerExp(0xFF)`, typed `char`, for the
+// whole array, so this is the non-zero counterpart of the `IntegerExp(0)`
+// "zero every byte" shorthand at the same odd width.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "confirmed: \"no native layout for a value of type `char[3]`\" - the " ~
+        "interpreter has no element-wise fill for a static array of an " ~
+        "odd width; separate from the zero-init shape the other tests here " ~
+        "cover"),
+)) {
+    @("staticArray.charThreeByteDefaultInit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                char[3] c;
+                assert(c[0] == 0xFF && c[1] == 0xFF && c[2] == 0xFF);
+            }
+        });
+    }
+}
+
+// A scalar initializer fills every element of a static array, so `'x'`
+// is a non-zero `IntegerExp` typed `char` against a 3-byte destination.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "confirmed: \"no native layout for a value of type `char[3]`\" - the " ~
+        "interpreter has no element-wise fill for a static array of an " ~
+        "odd width; separate from the zero-init shape the other tests here " ~
+        "cover"),
+)) {
+    @("staticArray.charThreeByteScalarFill." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                char[3] c = 'x';
+                assert(c[0] == 'x' && c[1] == 'x' && c[2] == 'x');
+            }
+        });
+    }
+}
+
+// The same scalar fill on `ubyte[3]` with a non-zero value, as an
+// initializer and then as an assignment.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "confirmed: \"no native layout for a value of type `ubyte[3]`\" - the " ~
+        "interpreter has no element-wise fill for a static array of an " ~
+        "odd width; separate from the zero-init shape the other tests here " ~
+        "cover"),
+)) {
+    @("staticArray.ubyteThreeByteScalarFill." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ubyte[3] c = 7;
+                assert(c[0] == 7 && c[1] == 7 && c[2] == 7);
+                c = 9;
+                assert(c[0] == 9 && c[1] == 9 && c[2] == 9);
+            }
+        });
+    }
+}

@@ -3144,3 +3144,99 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// The `rt-cerealed-1` shape: `Decerealiser.value!T` declares `T val;` for
+// a 3-byte struct that has a postblit, then fills it field by field and
+// returns it. A postblit does not change `zeroInit`, so dmd still gives
+// the declaration the `IntegerExp(0)` "zero every byte" shorthand at the
+// 3-byte width; the postblit only matters for copies made afterwards,
+// which `postblitRunsOnceOnCopyIntoVariable` covers separately.
+static foreach (backend; Matrix!()) {
+    @("oddWidthStructRoundTrip.threeBytesPostblit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct P3 {
+                ubyte a; ubyte b; ubyte c;
+                this(this) { ++c; }
+            }
+
+            P3 fill() {
+                P3 val;
+                assert(val.a == 0 && val.b == 0 && val.c == 0);
+                val.a = 1;
+                val.b = 2;
+                val.c = 3;
+                return val;
+            }
+
+            void main() {
+                auto made = fill();
+                assert(made.a == 1 && made.b == 2 && made.c == 3);
+            }
+        });
+    }
+}
+
+// A static array of a 3-byte zero-init struct: dmd strips the static
+// array type before its `zeroInit` check, so the whole 9-byte array gets
+// the one `IntegerExp(0)` - a width that is neither 3 nor a native one.
+static foreach (backend; Matrix!()) {
+    @("oddWidthStructRoundTrip.threeBytesArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S3 { ubyte a; ubyte b; ubyte c; }
+
+            void main() {
+                S3[3] arr;
+                assert(arr[0].a == 0 && arr[2].c == 0);
+                arr[2] = S3(1, 2, 3);
+                assert(arr[2].a == 1 && arr[2].c == 3 && arr[1].c == 0);
+            }
+        });
+    }
+}
+
+// A 3-byte union is zero-init like a struct, so it too declares through
+// the `IntegerExp(0)` shorthand at an odd width. Reading back through
+// the other member is what proves every byte was zeroed.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE refuses to reinterpret through an overlapped union " ~
+        "field"),
+)) {
+    @("oddWidthStructRoundTrip.threeByteUnion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            union U3 { ubyte[3] bytes; struct { ubyte x; ubyte y; ubyte z; } }
+
+            void main() {
+                U3 u;
+                assert(u.x == 0 && u.bytes[2] == 0);
+                u.bytes = [1, 2, 3];
+                assert(u.x == 1 && u.z == 3);
+            }
+        });
+    }
+}
+
+// A 3-byte struct with a non-zero field default is not zero-init, so its
+// `.init` is the struct's own initializer symbol, never the
+// `IntegerExp(0)` shorthand: the odd width must round-trip through that
+// path too.
+static foreach (backend; Matrix!()) {
+    @("oddWidthStructRoundTrip.threeBytesNonZeroInit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct N3 { ubyte a = 5; ubyte b; ubyte c = 9; }
+
+            void main() {
+                N3 n;
+                assert(n.a == 5 && n.b == 0 && n.c == 9);
+            }
+        });
+    }
+}
