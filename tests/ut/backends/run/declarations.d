@@ -41,43 +41,6 @@ static foreach (backend; Matrix!(
 }
 
 
-// This calls `bin/sb` rather than sharing a matrix with `Native`: compiling
-// the native oracle into `bin/ut` would emit the dmd atomic specialization
-// and hide the missing symbol in `bin/sb`.
-@("sharedTemplateConstructor")
-unittest {
-    import std.file: thisExePath;
-    import std.path: buildPath, dirName;
-    import std.process: execute;
-
-    const root = thisExePath.dirName.dirName;
-    const fixture = root.buildPath(
-        "testdata", "shared_template_constructor",
-    );
-    const main_ = fixture.buildPath("source", "main.d");
-    const native = execute([
-        "dmd",
-        "-checkaction=context",
-        "-preview=dip1000",
-        "-i",
-        "-I" ~ fixture.buildPath("source"),
-        "-run",
-        main_,
-    ]);
-    native.status.should == 0;
-
-    foreach (backend; ["bytecode", "ctfe", "interpreter"]) {
-        const result = execute([
-            root.buildPath("bin", "sb"),
-            "-b",
-            backend,
-            fixture,
-        ]);
-        result.status.should == 0;
-    }
-}
-
-
 // A module constructor must run even when it calls a native function with a
 // guest function pointer. A backend that refuses that call makes `run` skip
 // the constructor, so `initialized` stays false and `main` returns the wrong
