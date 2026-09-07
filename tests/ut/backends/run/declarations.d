@@ -124,3 +124,92 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A module-scope `static immutable string` initialised by a call dmd's
+// CTFE can fold: the call builds its answer with `~=` rather than
+// returning a slice of source text, so the fold is this `ArrayLiteralExp`
+// of individual code units, not a `StringExp`.
+static foreach (backend; Matrix!()) {
+    @("staticImmutableStringFromCtfeCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            string greeting() {
+                string result;
+                result ~= "hel";
+                result ~= "lo";
+                return result;
+            }
+
+            static immutable string greetingText = greeting();
+
+            void main() {
+                assert(greetingText == "hello");
+            }
+        });
+    }
+}
+
+// A `static int` initialised by a CTFE-able call: dmd's CTFE folds the
+// call straight to an `IntegerExp`, the same shape a literal initialiser
+// already has.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE refuses `tripled` with \"static variable " ~
+        "`tripled` cannot be read at compile time\" - the initialiser " ~
+        "runs in the compiler's own CTFE session while compiling the " ~
+        "snippet, and `main()`'s later, separate `ctfeInterpret` call " ~
+        "cannot read a `static` mutated by a prior session"),
+)) {
+    @("staticIntFromCtfeCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int triple(int x) {
+                return x * 3;
+            }
+
+            static int tripled = triple(14);
+
+            void main() {
+                assert(tripled == 42);
+            }
+        });
+    }
+}
+
+// A template-instance `static` (the same shape as `std.conv`'s own
+// `enumRep`) is one storage location shared by every call to that
+// instance: reading it twice must see the same address, not a fresh
+// fold each time.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE refuses `value` with \"static variable " ~
+        "`value` cannot be read at compile time\" - the same confirmed " ~
+        "gap `staticIntFromCtfeCall` above hits"),
+)) {
+    @("templateInstanceStaticIsOneStorageLocation." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            string build() {
+                string result;
+                result ~= "ab";
+                result ~= "c";
+                return result;
+            }
+
+            immutable(char)[] cached(T)() {
+                static immutable(char)[] value = build();
+                return value;
+            }
+
+            void main() {
+                auto first = cached!int();
+                auto second = cached!int();
+                assert(first == "abc");
+                assert(first.ptr == second.ptr);
+            }
+        });
+    }
+}

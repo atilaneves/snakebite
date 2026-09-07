@@ -217,6 +217,11 @@ package struct Function {
     // compiled function, not to a call frame, so every invocation sees the
     // same native-layout bytes.
     package ubyte[] staticData;
+    // Byte content for a `static` string dmd's CTFE folded into an
+    // `ArrayLiteralExp` rather than a `StringExp` - a pointer into one of
+    // these lives inside `staticData`. Kept here so the buffer stays alive
+    // for as long as this `Function` does.
+    package ubyte[][] staticStringData;
     package size_t frameSize;
     package uint frameAlignment;
     // `size_t.max` means this function's locals stay in its activation
