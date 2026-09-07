@@ -4919,6 +4919,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto sourceType = expression.e1.type;
         auto destType = expression.type;
 
+        // `null` is zero bytes at any width, which `visit(NullExp)` already
+        // writes; `_aaDup` casts `null` to an AA type.
+        if (expression.e1.isNullExp !is null)
+            return evalInto(expression.e1, destOffset, width);
+
         const sourceFacts = TypeFacts.of(sourceType);
         const destFacts = TypeFacts.of(destType);
         import dmd.astenums: Tclass, Tpointer, Tsarray;
