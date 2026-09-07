@@ -4926,16 +4926,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const sourceFacts = TypeFacts.of(sourceType);
         const destFacts = TypeFacts.of(destType);
-        import dmd.astenums: Tclass, Tpointer, Tsarray;
+        import dmd.astenums: Taarray, Tclass, Tpointer, Tsarray;
 
         // A class reference upcast to a base class or to an interface it
-        // implements: this compiler gives an interface reference the same
-        // representation as a class reference (`compileVirtualCall`'s own
+        // implements (this compiler gives an interface reference the same
+        // representation as a class reference: `compileVirtualCall`'s own
         // interface branch resolves the real override through the
         // object's `TypeInfo_Class` at run time instead of an ABI thunk
-        // reached through an adjusted `this`), so the cast is a plain
-        // copy of the same one pointer, never an address adjustment.
-        if (sourceType.ty == Tclass && destType.ty == Tclass)
+        // reached through an adjusted `this`), or an AA reference cast to
+        // a differently-qualified AA of the same key/value types - e.g.
+        // `object.d`'s `_aaDup` casting its `const(int[Pair])` result to
+        // the caller's `int[Pair]` - both are one pointer word either
+        // way: dmd's semantic pass already proved the cast legal, so
+        // this is a plain copy, never a representation change.
+        if ((sourceType.ty == Tclass && destType.ty == Tclass)
+                || (sourceType.ty == Taarray && destType.ty == Taarray))
             return evalInto(expression.e1, destOffset, width);
 
         // `cast(T) p`: `_d_newclassT`'s own final step

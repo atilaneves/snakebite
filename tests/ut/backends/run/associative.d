@@ -37,7 +37,10 @@ static foreach (backend; Matrix!(
 }
 
 // Duplicating an associative array preserves its type, including when a
-// struct is the key type. An empty table isolates the cast from AA lookup.
+// struct is the key type and the parameter is `const`: `object.d`'s own
+// `dup` casts its internal `_aaDup` result from a `const`-qualified AA
+// type back to the caller's unqualified one, a qualifier-only cast a
+// backend has to compile even though it moves no different bytes.
 static foreach (backend; Matrix!()) {
     @("assocArrayDupCopiesStructKeyContents." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -48,15 +51,17 @@ static foreach (backend; Matrix!()) {
                 int number;
             }
 
-            int[Pair] duplicate(int[Pair] source) {
+            int[Pair] duplicate(const(int[Pair]) source) {
                 return source.dup;
             }
 
             void main() {
                 int[Pair] source;
+                source[Pair("a", 1)] = 10;
 
                 auto copy = duplicate(source);
-                assert(copy.length == 0);
+                assert(copy.length == 1);
+                assert(copy[Pair("a", 1)] == 10);
             }
         });
     }
@@ -270,6 +275,55 @@ static foreach (backend; Matrix!(
 
                 assert((ArrayKey([1, 2]) in counts) !is null);
                 assert(counts[ArrayKey([1, 2])] == 1);
+            }
+        });
+    }
+}
+
+// A struct literal can initialize an AA-typed field from an AA literal,
+// even when the AA's value type is the struct itself - the AA field is
+// a plain pointer-sized handle to druntime's own hash table, no
+// different from any other field this literal writes.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "`isSupportedStructLiteral` rejects every field but an integral, " ~
+            "a dynamic array, a pointer or a nested plain-old struct - an " ~
+            "AA-typed field falls through that list"),
+)) {
+    @("structLiteralInitializesAssociativeArrayField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Nested {
+                Nested[int] aa;
+            }
+
+            void main() {
+                auto n = Nested([7: Nested()]);
+                assert(n.aa.length == 1);
+                assert(7 in n.aa);
+            }
+        });
+    }
+}
+
+// `is` on a bare AA compares it against `null` without going through any
+// struct field at all.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "the bytecode compiler has no lowering for `is`/`!is` between an " ~
+            "AA and `null`"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter's `is`/`!is` evaluation only handles operands " ~
+            "whose type is not an associative array"),
+)) {
+    @("bareAaIsNull." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[int] aa;
+                assert(aa is null);
             }
         });
     }
