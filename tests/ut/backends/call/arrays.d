@@ -225,6 +225,26 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// Two slices of one array share `.ptr` but differ in `.length`. Only a
+// compare of both words answers `is` false here - a compare of `.ptr`
+// alone would call them identical.
+static foreach (backend; Matrix!()) {
+    @("arrays.identity.sliceLength." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        false.shouldBeRetOf!(
+            backend,
+            q{
+                bool sliceLength() {
+                    int[] arr = [1, 2, 3];
+                    return arr[0 .. 2] is arr[0 .. 3];
+                }
+            },
+            "sliceLength",
+        );
+    }
+}
+
 // `arr2 = arr1` copies the same `{length, ptr}` pair, so the two variables
 // name the same array and `is` between them is true.
 static foreach (backend; Matrix!()) {
@@ -248,15 +268,16 @@ static foreach (backend; Matrix!()) {
 // Two array literals with the same contents are two separate allocations,
 // so `is` between them is false even though `==` between them is true.
 //
-// dmd's own CTFE engine does not honour this: `enum` over an equivalent
-// snippet (confirmed directly with `pragma(msg, ...)` against dmd) prints
-// `true`, so it interns or otherwise unifies the two identical literals
-// instead of giving them separate identities. `Ctfe` calls that same
-// engine, so it disagrees here on purpose.
+// dmd's own CTFE engine does not honour this: `ctfeIdentity` routes two
+// non-null array operands to `ctfeRawCmp(..., identity: true)`, a compare
+// of contents, not of allocation. So CTFE answers `true` for any two
+// arrays with the same contents, however they were built (confirmed with
+// `pragma(msg, ...)` against dmd for literals, `.dup`, `new`, and `~=`).
+// `Ctfe` calls that same engine, so it disagrees here on purpose.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
-        "dmd's CTFE engine unifies two identical array literals into " ~
-        "one identity instead of giving them separate allocations"),
+        "dmd's CTFE engine compares array contents for `is` " ~
+        "(ctfeIdentity -> ctfeRawCmp), not allocation identity"),
 )) {
     @("arrays.identity.differentArray." ~ backend.stringof)
     @Tags(backend.stringof)
