@@ -1677,6 +1677,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // the interpreter. Finished (see `_finished`'s own doc) only when
     // there is an `else` and both branches are.
     private void compileIf(IfStatement statement) {
+        // dmd's own glue (`s2ir.d`) never emits the true body of an
+        // `if (__ctfe) { ... }` block: `Scope.ctfeBlock` is set only for
+        // this exact shape, and its only effect is to leave statements
+        // in the body unlowered (e.g. a `.length` assign keeps no
+        // `_d_arraysetlengthT` call) because dmd's CTFE engine interprets
+        // the body directly instead. At run time the body never runs and
+        // dmd rejects a `goto` into it, so nothing reaches it here either.
+        if (statement.isIfCtfeBlock) {
+            if (statement.elsebody !is null)
+                compileStatement(statement.elsebody);
+            return;
+        }
+
         const conditionOffset = compileCondition(statement.condition);
         const width = conditionWidth(statement.condition);
 

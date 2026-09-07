@@ -933,3 +933,161 @@ unittest {
     interpreter.call(function_, &second, []);
     second.should == 12;
 }
+
+// `if (__ctfe) { arr.length = n; } else { ... }`: dmd's semantic pass
+// (`expressionsem.d`'s `visitAssign`) leaves a `.length` growth assignment
+// unlowered - no `_d_arraysetlengthT` call attached - whenever it sits in
+// a `Scope.ctfeBlock`, since its own CTFE engine interprets the plain
+// `ArrayLengthExp` target directly and never needs that call. This shape
+// is exactly what `std.array.Appender.ensureAddable` writes, guarded by
+// the same `if (__ctfe)`, so growing an array through a pointer field
+// inside one exercises it directly.
+static foreach (backend; Matrix!()) {
+    @("arrays.length.runtime.insideCtfeBlock." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.shouldBeRetOf!(
+            backend,
+            q{
+                struct Data { int[] arr; }
+                struct Holder {
+                    Data* _data;
+                    void grow(int n) {
+                        if (!_data) _data = new Data;
+                        if (__ctfe) {
+                            _data.arr.length = n;
+                        } else {
+                            _data.arr.length = n;
+                        }
+                    }
+                }
+                int growInsideCtfeBlock() {
+                    Holder holder;
+                    holder.grow(3);
+                    return cast(int) holder._data.arr.length;
+                }
+            },
+            "growInsideCtfeBlock",
+        );
+    }
+}
+
+// The same `Scope.ctfeBlock` gate that leaves `.length = n` unlowered also
+// leaves `~=` unlowered (`expressionsem.d`'s `visitCatAssignExp` attaches
+// `_d_arrayappendcTX` only when `sc.needsCodegen()`). `std.array.Appender.
+// ensureAddable` writes exactly this `~=` in its `if (__ctfe)` block for an
+// element type with `@disable this()`. The `if (__ctfe)` arm is elided
+// rather than compiled, so its own `~=` never needs to compile; the `else`
+// arm's growth is what a real run takes and must return.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE takes the `__ctfe` arm, whose `~=` grows the array "
+            ~ "differently from the `else` arm"),
+)) {
+    @("arrays.length.runtime.insideCtfeBlock.catAssign." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.shouldBeRetOf!(
+            backend,
+            q{
+                int growViaCatAssignInsideCtfeBlock() {
+                    int[] arr;
+                    if (__ctfe) {
+                        arr ~= 42;
+                    } else {
+                        arr.length = 3;
+                    }
+                    return cast(int) arr.length;
+                }
+            },
+            "growViaCatAssignInsideCtfeBlock",
+        );
+    }
+}
+
+// `new int[](n)` inside a `ctfeBlock` keeps no `_d_newarrayT` lowering
+// either (`visitNewExp`, `LskipNewArrayLowering` when `!sc.needsCodegen()`).
+// Elided the same way as the `~=` case above.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE takes the `__ctfe` arm, whose `new int[](5)` grows the "
+            ~ "array differently from the `else` arm"),
+)) {
+    @("arrays.length.runtime.insideCtfeBlock.newArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.shouldBeRetOf!(
+            backend,
+            q{
+                int growViaNewInsideCtfeBlock() {
+                    int[] arr;
+                    if (__ctfe) {
+                        arr = new int[](5);
+                    } else {
+                        arr.length = 3;
+                    }
+                    return cast(int) arr.length;
+                }
+            },
+            "growViaNewInsideCtfeBlock",
+        );
+    }
+}
+
+// `.length += n` is rewritten by dmd into `.length = .length + n` and then
+// hits the same unlowered `AssignExp`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE takes the `__ctfe` arm, whose `.length += 2` grows the "
+            ~ "array differently from the `else` arm"),
+)) {
+    @("arrays.length.runtime.insideCtfeBlock.opAssign." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.shouldBeRetOf!(
+            backend,
+            q{
+                int growViaOpAssignInsideCtfeBlock() {
+                    int[] arr;
+                    if (__ctfe) {
+                        arr.length += 2;
+                    } else {
+                        arr.length = 3;
+                    }
+                    return cast(int) arr.length;
+                }
+            },
+            "growViaOpAssignInsideCtfeBlock",
+        );
+    }
+}
+
+// `if (!__ctfe) A else B` is swapped by dmd's `visitIf` into
+// `if (__ctfe) B else A`, so `B` is the `ctfeBlock` here, not `A`. This pins
+// that the elide reaches the swapped-in body, not just a body that is
+// already textually last.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE takes the `!__ctfe` false arm (`__ctfe` block after dmd's "
+            ~ "swap), which grows the array differently from the true arm"),
+)) {
+    @("arrays.length.runtime.insideCtfeBlock.negatedCondition." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.shouldBeRetOf!(
+            backend,
+            q{
+                int growInsideNotCtfeElse() {
+                    int[] arr;
+                    if (!__ctfe) {
+                        arr.length = 3;
+                    } else {
+                        arr.length = 7;
+                    }
+                    return cast(int) arr.length;
+                }
+            },
+            "growInsideNotCtfeElse",
+        );
+    }
+}
