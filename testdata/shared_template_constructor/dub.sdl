@@ -1,0 +1,6 @@
+name "shared-template-constructor"
+description "A shared template constructor for Snakebite tests"
+targetType "executable"
+sourceFiles "source/main.d"
+
+dflags "-checkaction=context" "-preview=dip1000"

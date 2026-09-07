@@ -354,14 +354,17 @@ public struct PlanCache {
         imported!"dmd.func".FuncDeclaration function_,
     ) {
         import dmd.mangle: mangleExact;
+        import snakebite.druntime.constructoratomic: nativeTarget;
         import std.string: fromStringz;
 
         if (auto cached = function_ in _nativeSymbols)
             return *cached;
 
         version(unittest) ++_nativeSymbolLookups;
-        const name = mangleExact(function_).fromStringz;
-        const found = resolve(name) !is null;
+        auto target = nativeTarget(function_);
+        const found = target.address !is null || resolve(
+            mangleExact(function_).fromStringz,
+        ) !is null;
         _nativeSymbols[function_] = found;
         return found;
     }
@@ -419,6 +422,7 @@ private CallPlan prepare(
     ref Resolver resolver,
 ) {
     import snakebite.backends.delegates: hasHiddenThis;
+    import snakebite.druntime.constructoratomic: nativeTarget;
     import snakebite.ffi.abi:
         ArgumentPlan, Register, contextPrecedesHiddenReturnPointer,
         needsHiddenReturnPointer, reversedDParameters,
@@ -480,12 +484,15 @@ private CallPlan prepare(
         plan._contextPrecedesHiddenReturnPointer =
             contextPrecedesHiddenReturnPointer;
 
+        auto target = nativeTarget(function_);
+
         // The symbol's calling convention comes from its declared linkage,
         // and `extern(D)` code built by the host's own compiler can read
         // its parameters out of the registers in reverse order - an ABI
         // fact about this process, not a routing decision about the
         // callee.
-        const linkage = function_.resolvedLinkage;
+        const linkage = target.address is null
+            ? function_.resolvedLinkage : target.linkage;
         plan._reversedArguments = reversedDParameters
             && (linkage == LINK.d || linkage == LINK.default_);
 
@@ -541,7 +548,9 @@ private CallPlan prepare(
         }
 
         auto name = mangleExact(function_);
-        auto address = resolver.resolve(name.fromStringz);
+        void* address = target.address;
+        if (address is null)
+            address = resolver.resolve(name.fromStringz);
         if (address is null)
             throw new Exception(
                 text("ffi cannot resolve the symbol `", name.fromStringz,

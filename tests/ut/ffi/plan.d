@@ -2,9 +2,14 @@ module ut.ffi.plan;
 
 
 import ut;
+import dmd.astenums: LINK;
+import dmd.func: FuncDeclaration;
+import snakebite.druntime.constructoratomic:
+    nativeTarget, snakebite_constructor_atomic_add_int;
 import snakebite.ffi: CallAdapter, PlanCache;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
+import std.array: replace;
 
 
 // `abs` declared the way druntime declares it: `extern(C)`, and with no
@@ -13,6 +18,64 @@ private enum declarations = q{
     extern(C) int abs(int);
     extern(C) void free(void*);
 };
+
+
+@("druntime.sharedCtorAtomicTarget")
+unittest {
+    auto target = nativeTarget(atomicOperation!(int));
+
+    target.address.should == &snakebite_constructor_atomic_add_int;
+    target.linkage.should == LINK.c;
+}
+
+
+@("druntime.otherAtomicSpecializationHasNoTarget")
+unittest {
+    assert(nativeTarget(atomicOperation!(long)).address is null);
+}
+
+
+@("druntime.sharedCtorAtomicPlan")
+unittest {
+    PlanCache cache;
+    const plan = cache.of(atomicOperation!(int));
+    shared int value = 41;
+    int amount = 1;
+    int result;
+    void* valueAddress = cast(void*) &value;
+    const(void*)[2] arguments = [
+        cast(const void*) &valueAddress,
+        cast(const void*) &amount,
+    ];
+
+    plan.call(&result, arguments[]);
+
+    result.should == 42;
+    value.should == 42;
+}
+
+
+private FuncDeclaration atomicOperation(T)() {
+    auto guestModule = parseSnippet(q{
+        import core.atomic: atomicOp;
+
+        T increment(ref shared T value) {
+            return atomicOp!"+="(value, 1);
+        }
+    }.replace("T", T.stringof));
+    auto increment = findFunction(guestModule, "increment");
+    assert(increment !is null, "No function `increment` in the guest program");
+
+    auto statements = increment.fbody.isCompoundStatement.statements;
+    assert(statements !is null && statements.length == 1,
+        "Expected one statement in `increment`");
+    auto return_ = (*statements)[0].isReturnStatement;
+    assert(return_ !is null, "Expected `increment` to return the atomic call");
+    auto call = return_.exp.isCallExp;
+    assert(call !is null && call.f !is null,
+        "Expected a resolved `atomicOp` call");
+    return call.f;
+}
 
 
 @("prepared.once")
