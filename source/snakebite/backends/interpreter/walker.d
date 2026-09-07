@@ -319,7 +319,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // Runs `function_` against a fresh top-level frame, mirroring the
     // `Backend.call` contract: `returnPlace` is where the result goes
     // (`null` if the caller does not want it), `args` are host-to-guest
-    // arguments (not yet supported). `extern(D)`: a dynamic array
+    // arguments in native layout. `extern(D)`: a dynamic array
     // parameter is not valid on an `extern(C++)` method, and this one is
     // never called from C++ - only `Visitor`'s `visit` overloads need
     // that linkage.
@@ -358,10 +358,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         const parameterCount =
             function_.parameters is null ? 0 : function_.parameters.length;
-        if (args.length != 0 || parameterCount != 0)
+        if (args.length != parameterCount)
             throw new SnakebiteException(
-                "host-to-guest arguments not yet supported by the " ~
-                    "interpreter backend",
+                "interpreter expected " ~ text(parameterCount)
+                    ~ " host-to-guest argument(s), got "
+                    ~ text(args.length),
             );
 
         withCompilerLock({
@@ -371,11 +372,31 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
             try
                 _temporaries.withCall({
+                    bindHostArguments(args, frame.base, layout);
                     executeCall(function_, returnPlace, frame.base, layout);
                 });
             catch (GuestException exception)
                 throw exception._guest;
         });
+    }
+
+    extern(D) private void bindHostArguments(
+        void*[] args,
+        ubyte* frameBase,
+        const(FrameLayout)* layout,
+    ) {
+        import core.stdc.string: memcpy;
+
+        foreach (i, parameter; layout.parameters) {
+            auto argument = args[i];
+            parameter.call.store(
+                frameBase + parameter.offset,
+                () => argument,
+                (void* place) {
+                    memcpy(place, argument, parameter.facts.size);
+                },
+            );
+        }
     }
 
     // Every hash lookup this evaluator has made to find where a name

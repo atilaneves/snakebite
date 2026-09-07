@@ -19,6 +19,29 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// The runner passes the program name as the sole argument when no user
+// arguments exist. The entry point must receive its native dynamic-array
+// layout.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed),
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("ret.int.arguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeStatusOf!(
+            backend,
+            q{
+                int main(string[] args) {
+                    if (args.length != 1)
+                        return 1;
+                    return args[0] == "snakebite" ? 42 : 2;
+                }
+            },
+        );
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("ret.int.77." ~ backend.stringof)
     @Tags(backend.stringof)
