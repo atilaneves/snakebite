@@ -364,8 +364,8 @@ import dmd.visitor: SemanticTimeTransitiveVisitor;
 extern(C++) private final class LocalsCollector:
     SemanticTimeTransitiveVisitor {
     import dmd.declaration: VarDeclaration;
-    import dmd.expression:
-        CatAssignExp, DeclarationExp, EqualExp, Expression, LoweredAssignExp;
+    import dmd.expression: DeclarationExp, Expression;
+    import snakebite.backends.loweringvisitor: LoweredExpressionTypes;
     import dmd.statement:
         Catch, CompoundStatement, DoStatement, ExpStatement, ForStatement,
         IfStatement, ImportStatement, LabelStatement, ReturnStatement,
@@ -497,28 +497,20 @@ extern(C++) private final class LocalsCollector:
         collectVariable(variable);
     }
 
-    override void visit(LoweredAssignExp expression) {
-        expression.e1.accept(this);
-        expression.e2.accept(this);
-        collectDeclarations(expression.lowering);
-    }
-
-    override void visit(CatAssignExp expression) {
-        expression.e1.accept(this);
-        expression.e2.accept(this);
-        collectDeclarations(expression.lowering);
-    }
-
-    // `==`/`!=` on arrays lowers to `object.__equals(e1c, e2c)`, whose
-    // second parameter is `scope`, so a bare array literal there
-    // (`xs == [1, 2, 3]`) gets dmd's usual scope-argument rewrite
-    // (`expressionsem.d`'s `functionParameters`): a fresh
-    // `__arrayliteral_on_stack*` temporary declared right there in
-    // `lowering`'s own call arguments, reachable only by walking into it.
-    override void visit(EqualExp expression) {
-        expression.e1.accept(this);
-        expression.e2.accept(this);
-        collectDeclarations(expression.lowering);
+    // Every node `LoweringVisitor` follows into its own `lowering` shares
+    // one list with it (`snakebite.backends.loweringvisitor`): a `~=`'s
+    // `__appendtmp*`, a `==`'s or an AA literal's own
+    // `__arrayliteral_on_stack*` scope-argument temporary, and so on are
+    // otherwise invisible here, buried inside `lowering` rather than in
+    // the node's ordinary children. `super.visit` still walks those
+    // ordinary children first - `e1`/`e2` for the binary ones, the cast
+    // operand, the AA literal's own keys and values - exactly as it would
+    // with no override at all.
+    static foreach (Node; LoweredExpressionTypes) {
+        override void visit(Node expression) {
+            super.visit(expression);
+            collectDeclarations(expression.lowering);
+        }
     }
 
     private void collectVariable(VarDeclaration variable) {

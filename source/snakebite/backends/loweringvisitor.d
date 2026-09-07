@@ -7,6 +7,22 @@ import dmd.expression:
     AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp, EqualExp,
     Expression, LoweredAssignExp;
 import dmd.visitor: Visitor;
+import std.meta: AliasSeq;
+
+
+// Every expression node dmd's semantic pass can attach a `lowering` to and
+// that a backend must follow rather than walk unlowered: the one list
+// `LoweringVisitor` below dispatches on, and the one list a locals-slot
+// pre-pass (`snakebite.backends.layout.LocalsCollector`) must also walk into
+// to find a lowering's own compiler temporaries (`__arrayliteral_on_stack*`,
+// `__appendtmp*`, and so on). Add a type here and to `LoweringVisitor`
+// together; a type missing from `LocalsCollector`'s side surfaces as
+// `FrameLayout.offsetOf` failing to find such a temporary at run time
+// rather than a compile error, which is why both consult this same list
+// instead of keeping their own.
+package alias LoweredExpressionTypes = AliasSeq!(
+    AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp, EqualExp,
+    LoweredAssignExp);
 
 
 // DMD records semantic array equality as an EqualExp lowering. Make handling
