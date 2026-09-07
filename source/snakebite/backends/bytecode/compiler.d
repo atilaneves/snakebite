@@ -5723,13 +5723,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // An index outside the array would otherwise read or write through
     // whatever raw address the arithmetic below happens to land on -
     // corrupting host memory, not failing the guest - so this checks
-    // before computing that address, reusing `opAssert` rather than a
-    // second throwing opcode for the same "fail loudly, now" job.
+    // before computing that address. Compiled D specifies a
+    // `core.exception.RangeError` for an out-of-bounds index, the same
+    // `RangeError` a slice bound failure gets (see `opRangeError`'s own
+    // doc), so a guest `catch (RangeError)` around an index must see one
+    // here too, not the different type `opAssert`'s `AssertError` would be.
     private size_t compileElementAddress(
         IndexExp expression, in TypeFacts arrayFacts,
     ) {
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
-        import std.conv: text;
         import std.string: fromStringz;
 
         const arrayOffset = reserveTemp(arrayFacts);
@@ -5755,13 +5757,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             arrayOffset + arrayLengthOffset, size_t.sizeof);
 
         const site = AssertSite(
-            text("bytecode: index out of bounds: `", expression.e2.toString,
-                "`"),
+            null,
             expression.loc.filename.fromStringz.idup,
             expression.loc.linnum,
         );
         _assertSites ~= site;
-        emit(&opAssert, boundsOffset, _assertSites.length - 1, 1);
+        emit(&opRangeError, boundsOffset, _assertSites.length - 1, 1);
 
         const elementSizeOffset = reserveTemp(pointerFacts);
         emit(&opConstant, elementSizeOffset,
@@ -5829,7 +5830,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `expression.e1`'s reproduces exactly that order, since each nested
     // call does the same in turn.
     private size_t compileStaticElementAddress(IndexExp expression) {
-        import std.conv: text;
         import std.string: fromStringz;
 
         auto sarrayType = expression.e1.type.isTypeSArray;
@@ -5858,14 +5858,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, boundsOffset, indexOffset, size_t.sizeof);
         emit(&opLessThanUnsigned, boundsOffset, dimOffset, size_t.sizeof);
 
+        // Compiled D specifies a `RangeError` here too - see
+        // `compileElementAddress`'s own doc for why this is `opRangeError`,
+        // not `opAssert`.
         const site = AssertSite(
-            text("bytecode: index out of bounds: `", expression.e2.toString,
-                "`"),
+            null,
             expression.loc.filename.fromStringz.idup,
             expression.loc.linnum,
         );
         _assertSites ~= site;
-        emit(&opAssert, boundsOffset, _assertSites.length - 1, 1);
+        emit(&opRangeError, boundsOffset, _assertSites.length - 1, 1);
 
         const baseOffset = compileAddress(expression.e1);
 

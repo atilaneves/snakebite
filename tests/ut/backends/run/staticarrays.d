@@ -457,3 +457,36 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// An out-of-bounds index into a static array is a `RangeError`, the same
+// contract a dynamic array's index has - see
+// `ut.backends.run.arrays.dynamicIndex.outOfBoundsIsRangeError`'s own doc.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "confirmed: the ctfe backend reports an out-of-bounds index as " ~
+        "its own interpreter error, not as a guest-catchable `RangeError`"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "confirmed: the interpreter refuses an out-of-bounds static array " ~
+        "index as its own error, not as a guest-catchable `RangeError`"),
+)) {
+    @("staticArray.outOfBoundsIndexIsRangeError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
+            int index() { return 3; }
+
+            void main() {
+                int[3] a = [1, 2, 3];
+                bool caught;
+                try {
+                    auto val = a[index()];
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}

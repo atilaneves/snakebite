@@ -778,3 +778,32 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// An out-of-bounds index into a dynamic array is a `RangeError`, the same
+// as an out-of-bounds slice - both are one contract in compiled D, not
+// two, so a guest catching `RangeError` around an index must see it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "confirmed: the ctfe backend reports an out-of-bounds index as " ~
+        "its own interpreter error, not as a guest-catchable `RangeError`"),
+)) {
+    @("dynamicIndex.outOfBoundsIsRangeError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
+            void main() {
+                int[] a = [1, 2, 3];
+                bool caught;
+                try {
+                    auto val = a[3];
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
