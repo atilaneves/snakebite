@@ -2628,3 +2628,148 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// A struct literal can initialize an enum-typed field whose base type is
+// `double`, not just an integral base: the enum member's own value is what
+// the field holds, and the interpreter's native-layout path (used to lay
+// out the literal) must recognise a floating-point base the same way it
+// already recognises an integral one.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "no native layout for a value of type `E`"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "bytecode compiler cannot compile `2.5` in `main`"),
+)) {
+    @("structLiteralInitializesDoubleBaseEnumField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum E : double { a = 1.5, b = 2.5 }
+            struct S { E e; }
+
+            void main() {
+                auto s = S(E.b);
+                assert(s.e == E.b);
+            }
+        });
+    }
+}
+
+// The same gap as the `double`-base enum test above, for a `string`-base
+// enum: the field's native layout is the string's own `{length, ptr}`
+// pair, which the same native-layout path must also recognise.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "no native layout for the string literal `\"y\"` as a `E`"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "bytecode compiler cannot compile `\"y\"` in `main`"),
+)) {
+    @("structLiteralInitializesStringBaseEnumField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum E : string { a = "x", b = "y" }
+            struct S { E e; }
+
+            void main() {
+                auto s = S(E.b);
+                assert(s.e == E.b);
+            }
+        });
+    }
+}
+
+// A struct literal can initialize a `double[2]` static-array field from a
+// literal element list, the same way `structLiteralInitializesStaticArrayField`
+// above does for `int[3]`.
+static foreach (backend; Matrix!()) {
+    @("structLiteralInitializesDoubleStaticArrayField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { double[2] xs; int tag; }
+
+            void main() {
+                auto s = S([1.0, 2.0], 3);
+                assert(s.xs[0] == 1.0);
+                assert(s.xs[1] == 2.0);
+                assert(s.tag == 3);
+            }
+        });
+    }
+}
+
+// A function can return a struct with a `real` field by value: the 16-byte,
+// 16-byte-aligned field and its trailing padding must travel back through
+// the return path unchanged, the same way `structLiteralInitializesRealField`
+// above shows a plain copy carries it.
+static foreach (backend; Matrix!()) {
+    @("functionReturnsStructWithRealField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { real r; int tag; }
+
+            S make() {
+                return S(3.5L, 7);
+            }
+
+            void main() {
+                auto s = make();
+                assert(s.r == 3.5L);
+                assert(s.tag == 7);
+            }
+        });
+    }
+}
+
+// `with (s) len = ...;` with a single statement body (no braces) that
+// reads a field of the with-object: the same `WithStatement` gap as
+// `struct.withStatementUsesAggregateStorage` in this module, exercised
+// with a statement body instead of a block.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed, "no WithStatement support"),
+)) {
+    @("withStatementSingleStatementBodyReadsAggregateField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[3] things; }
+
+            void main() {
+                S s = S([1, 2, 3]);
+                int len;
+                with (s)
+                    len = cast(int) things.length - 2;
+                assert(len == 1);
+            }
+        });
+    }
+}
+
+// Pins `to!string` on an enum, the same way `toStringOnInt` above pins it
+// on a plain `int`: `toImpl`'s `enumRep` reads the enum's own member names,
+// a `static` array initializer neither backend below can compile yet.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "bytecode compiler cannot compile the variable `enumRep` in " ~
+        "`toImpl`"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "interpreter: assertion failed: " ~
+        "`assert(to(Color.green) == \"green\")`"),
+)) {
+    @("toStringOnEnum." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.conv: to;
+
+            enum Color { red, green, blue }
+
+            void main() {
+                assert(to!string(Color.green) == "green");
+            }
+        });
+    }
+}
