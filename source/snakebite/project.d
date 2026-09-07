@@ -232,7 +232,7 @@ private string afterBlock(in string source) @safe pure {
 }
 
 
-private string dmdFlagsForOption(in string option) {
+public string dmdFlagsForOption(in string option) @safe pure nothrow {
     switch (option) {
         case "debugMode": return "-debug";
         case "releaseMode": return "-release";

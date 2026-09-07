@@ -11,3 +11,4 @@ compile_commands.json
 examples/ct/ct
 examples/ct/ct-test-application
 .worktrees
+.tools
