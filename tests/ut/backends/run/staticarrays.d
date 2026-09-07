@@ -214,6 +214,28 @@ static foreach (backend; Matrix!(
     }
 }
 
+// `a[] = v` evaluates `v` once, then writes that scalar into every element
+// of `a`. DMD represents `a[]` as a dynamic slice even when `a` itself has
+// static-array storage; this is also the scalar-fill shape it generates for
+// a static array's initialisation. The right side therefore must be evaluated
+// as the element type, not as the slice's `{length, pointer}` value.
+static foreach (backend; Matrix!(
+)) {
+    @("staticArray.sliceScalarFill." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ubyte[3] bytes = [1, 2, 3];
+                bytes[] = cast(ubyte) 0u;
+                assert(bytes[0] == 0);
+                assert(bytes[1] == 0);
+                assert(bytes[2] == 0);
+            }
+        });
+    }
+}
+
 // `a[] = v` is an expression whose value is the slice `a[]` after the
 // fill, so it can initialise a dynamic array that aliases `a`.
 static foreach (backend; Matrix!(
