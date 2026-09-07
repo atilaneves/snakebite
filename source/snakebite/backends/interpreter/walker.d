@@ -107,7 +107,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallbackArguments, CallbackBridge, CallPlan, CallResult, PlanCache;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
-        isIntegralSize, storeValue, TypeFacts;
+        initializerValueOf, isIntegralSize, TypeFacts;
     import object:
         Error, Exception, Throwable, TypeInfo_Class, TypeInfo_Struct;
     import dmd.root.string: toDString;
@@ -135,6 +135,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import dmd.tokens: EXP;
     import dmd.typesem: isIntegral, nextOf;
     import core.thread: ThreadID;
+    import snakebite.nativelayout: NativeData, nativeSymbolName;
 
     alias visit = LoweringVisitor.visit;
 
@@ -142,6 +143,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // call and popped on return. Frames never move; overflow throws
     // loudly.
     private FrameStack _frames;
+    private NativeData _nativeData;
     // Each guest function's frame layout, computed once on that
     // function's first call (the cold path) and reused by every call
     // after it.
@@ -165,12 +167,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private Cache!(FuncDeclaration, DispatchFacts) _dispatchFacts;
-    // Storage for every data-segment variable the guest has reached so
-    // far, keyed by its declaration. Such a variable is one variable per
-    // program, not one per call, so a frame - popped on return - cannot
-    // hold it. This outlives every call on this evaluator, which is the
-    // guest state `Backend.call` promises persists across calls.
-    private Cache!(VarDeclaration, void[]) _statics;
+    version(unittest) private size_t _staticLookups;
     // A guest pointer can live in an unscanned frame, so the evaluator keeps
     // each backing allocation reachable for as long as guest state can be.
     private ubyte[][] _allocations;
@@ -299,6 +296,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import core.thread: Thread;
 
         _program = program;
+        _nativeData = NativeData(&constantSymbolAddress);
         _frames = FrameStack(defaultFrameCapacity);
         _temporaries = new TemporaryLifetime(&destroyTemporary);
         _ownerThread = Thread.getThis.id;
@@ -403,7 +401,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // lives: a variable's storage, or how to reach a called function.
     version(unittest)
     extern(D) final size_t nameLookups() @safe @nogc nothrow pure const scope {
-        return _foreignNameLookups + _layouts.lookups + _statics.lookups
+        return _foreignNameLookups + _layouts.lookups + _staticLookups
             + _plans.nativeSymbolLookups;
     }
 
@@ -1581,19 +1579,19 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(IntegerExp expression) {
-        storeValue(_type, _facts, expression, _place);
+        _nativeData.write(_type, _facts, expression, _place);
     }
 
     override void visit(RealExp expression) {
-        storeValue(_type, _facts, expression, _place);
+        _nativeData.write(_type, _facts, expression, _place);
     }
 
     override void visit(NullExp expression) {
-        storeValue(_type, _facts, expression, _place);
+        _nativeData.write(_type, _facts, expression, _place);
     }
 
     override void visit(StringExp expression) {
-        storeValue(_type, _facts, expression, _place);
+        _nativeData.write(_type, _facts, expression, _place);
     }
 
     // A function literal as a value. The function word holds the
@@ -1749,14 +1747,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // of it.
         if (auto symbol = expression.var.isSymbolDeclaration) {
             if (symbol.type.isTypeStruct !is null) {
-                import dmd.typesem: defaultInitLiteral;
-
-                evaluate(
-                    symbol.dsym.type.defaultInitLiteral(expression.loc),
-                    _type,
-                    _facts,
-                    _place,
-                );
+                initializeDefault(_type, _facts, cast(ubyte*) _place,
+                    expression.loc);
                 return;
             }
 
@@ -2039,70 +2031,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return address;
     }
 
-    // Where `variable` lives outside any frame, created and initialised
-    // the first time the guest reaches it and the same address for every
-    // reach after that. Lazily rather than at layout time because the
-    // initialiser is a compile-time constant - D requires one here - so
-    // no guest code can observe the difference.
     extern(D) private ubyte* staticSlotOf(VarDeclaration variable) {
-        import dmd.astenums: STC;
-        import std.conv: text;
+        version(unittest) ++_staticLookups;
+        return cast(ubyte*) _nativeData.storageOf(variable).ptr;
+    }
 
-        if (auto existing = variable in _statics)
-            return cast(ubyte*) existing.ptr;
+    extern(D) private void* constantSymbolAddress(Declaration symbol) {
+        if (auto function_ = symbol.isFuncDeclaration)
+            return cast(void*) function_;
 
-        // An `extern` variable is defined elsewhere - in a library the
-        // host already links, or in another object file. Storage made
-        // here would be a second variable that only looks like it, so
-        // this refuses rather than answering from a private copy.
-        if (variable.storage_class & STC.extern_)
-            throw new SnakebiteException(
-                text("interpreter cannot reach `", variable.toString,
-                    "`: it is `extern`, so its storage is not the ",
-                    "interpreter's to make"),
-            );
-
-        ExpInitializer expInitializer;
-        if (variable._init !is null) {
-            expInitializer = variable._init.isExpInitializer;
-            if (expInitializer is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot initialize `", variable.toString,
-                        "`: only a plain expression initializer is supported"),
-                );
-        }
-
-        // Over-allocated so the slot can start on the type's own
-        // alignment: the guest reads and writes it in native layout, and
-        // nothing in the GC's interface promises a block aligned for the
-        // type that lands in it. Alignments are powers of two, so the
-        // padding is the address masked into the block.
-        const facts = factsOf(variable.type);
-        const blockSize = facts.size + facts.alignment - 1;
-        auto block = new void[](blockSize);
-        const start = -cast(size_t) block.ptr & (facts.alignment - 1);
-        auto slot = block[start .. start + facts.size];
-
-        // Registered only once the initialiser has run: a slot in
-        // `_statics` means initialised, so a failed initialiser must not
-        // leave one behind for a later reach to read as a value.
-        if (variable._init is null)
-            initializeDefault(
-                variable.type,
-                facts,
-                cast(ubyte*) slot.ptr,
-                variable.loc,
-            );
-        else
-            evaluate(
-                initializerValueOf(expInitializer),
-                variable.type,
-                facts,
-                slot.ptr,
-            );
-        _statics[variable] = slot;
-
-        return cast(ubyte*) slot.ptr;
+        return _plans.resolve(nativeSymbolName(symbol));
     }
 
     // Runs a local's initializer into the frame slot `layoutOf` already
@@ -3385,7 +3323,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             }
 
             if (expression.e1.isNullExp) {
-                storeValue(_type, _facts, expression.e1, _place);
+                _nativeData.write(_type, _facts, expression.e1, _place);
                 return;
             }
         }
@@ -4056,6 +3994,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // here because both key and value are always dynamic arrays of a type
     // this branch already supports.
     override void visit(ArrayLiteralExp expression) {
+        import snakebite.nativelayout: isStoredLiteral;
+
+        if (isStoredLiteral(expression)) {
+            _nativeData.write(_type, _facts, expression, _place);
+            return;
+        }
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
         import std.conv: text;
@@ -4077,7 +4021,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
             foreach (i; 0 .. length)
                 evaluate(
-                    elementAt(expression, i), elementType, elementFacts,
+                    expression[i], elementType, elementFacts,
                     bytes + i * elementFacts.size);
             return;
         }
@@ -4100,7 +4044,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             auto block = new void[](blockSize);
             foreach (i; 0 .. length)
                 evaluate(
-                    elementAt(expression, i), elementType, elementFacts,
+                    expression[i], elementType, elementFacts,
                     cast(ubyte*) block.ptr + i * elementFacts.size);
             elements = cast(ubyte*) block.ptr;
         }
@@ -4366,22 +4310,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // this runs (`classRuntimeInfo` copies the base's own `.init` image
     // in first), so only `declaration`'s own fields are walked here.
     private void fillFieldInits(ClassDeclaration declaration, ubyte* base) {
-        foreach (field; declaration.fields) {
-            if (field._init is null)
-                continue;
-
-            auto initializer = field._init.isExpInitializer;
-            if (initializer is null || field._init.isVoidInitializer !is null)
-                continue;
-
-            auto facts = factsOf(field.type);
-            evaluate(
-                initializerValueOf(initializer),
-                field.type,
-                facts,
-                base + field.offset,
-            );
-        }
+        _nativeData.fillFields(declaration, base);
     }
 
     private void constructClass(NewExp expression, ubyte* object) {
@@ -4538,30 +4467,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         ubyte* place,
         in Loc loc,
     ) {
-        import core.stdc.string: memset;
-        import dmd.typesem: defaultInit;
-        import std.conv: text;
+        import core.stdc.string: memcpy;
 
-        auto structType = type.isTypeStruct;
-        if (structType !is null && structType.sym.zeroInit) {
-            memset(place, 0, facts.size);
-            return;
-        }
-
-        auto initializer = defaultInit(type, loc);
-        if (initializer is null)
-            throw new SnakebiteException(
-                text("interpreter cannot initialize `", type.toString,
-                    "`: its `.init` has no expression"),
-            );
-
-        evaluate(initializer, type, facts, place);
+        const bytes = _nativeData.initialValue(type, loc);
+        assert(bytes.length == facts.size);
+        memcpy(place, bytes.ptr, bytes.length);
     }
 
     override void visit(StructLiteralExp expression) {
         import core.stdc.string: memset;
-        import snakebite.nativelayout: storeIntegral;
+        import snakebite.nativelayout: isStoredLiteral, storeIntegral;
         import std.conv: text;
+
+        if (isStoredLiteral(expression)) {
+            _nativeData.write(_type, _facts, expression, _place);
+            return;
+        }
 
         auto structType = _type.isTypeStruct;
         if (structType is null || structType.sym != expression.sd
@@ -4609,32 +4530,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 cast(ubyte*) _place + field.offset,
             );
         }
-    }
-
-    // `expression.elements`, dmd documents, "can be sparse" whenever
-    // `basis` is set - a default-init literal for a static array
-    // (`typesem.d`'s `TypeSArray.defaultInitLiteral`) is exactly that: an
-    // array of `null`s with `basis` holding the one fill value every
-    // element takes. Indexing `elements` directly, as both branches of
-    // `visit(ArrayLiteralExp)` above used to, reads that `null` straight
-    // through; `expression[i]` is dmd's own `opIndex`, which falls back
-    // to `basis` for a sparse entry the way every other reader of an
-    // `ArrayLiteralExp` is expected to. The result can still be `null` -
-    // sparse without a `basis` is not a case this interpreter has a guest
-    // program that reaches - so this refuses rather than handing
-    // `evaluate` a null `Expression` to dereference.
-    private Expression elementAt(ArrayLiteralExp expression, size_t i) {
-        import std.conv: text;
-
-        auto element = expression[i];
-        if (element is null)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate element ", i, " of `",
-                    expression.toString, "`: it is sparse with no `basis` ",
-                    "fill value"),
-            );
-
-        return element;
     }
 
     protected override void visitUnloweredCat(CatExp expression) {
@@ -5325,20 +5220,4 @@ private struct Cache(Key, Value) {
     public size_t lookups() @safe @nogc nothrow pure const scope {
         return _lookups;
     }
-}
-
-// The value a declaration's initializer stores: dmd rewrites
-// `long sum = 0;`'s initializer into a `ConstructExp` (`sum = 0`), and
-// `int ret;`'s missing initializer into a `BlitExp` (`ret = 0`), so only
-// `e2`, the actual value, needs evaluating.
-private imported!"dmd.expression".Expression initializerValueOf(
-    imported!"dmd.init".ExpInitializer initializer,
-) {
-    auto value = initializer.exp;
-    if (auto construct = value.isConstructExp)
-        return construct.e2;
-    if (auto blit = value.isBlitExp)
-        return blit.e2;
-
-    return value;
 }

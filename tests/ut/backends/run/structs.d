@@ -8,6 +8,40 @@ module ut.backends.run.structs;
 
 import ut.backends;
 
+static foreach (backend; Matrix!()) {
+    @("structInitialValueContainsFunctionPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int answer() { return 42; }
+            immutable int stored = 19;
+            struct S {
+                int function() fn = &answer;
+                int function() lambda = () => 42;
+                int function()[3] functions = &answer;
+                int function()[3] lambdas = () => 45;
+                immutable(int)*[3] pointers = &stored;
+                immutable(int)* p = &stored;
+            }
+            void main() {
+                S value;
+                assert(value.fn() == 42);
+                assert(value.lambda() == 42);
+                foreach (i; 0 .. 3) {
+                    assert(value.functions[i]() == 42);
+                    assert(value.lambdas[i]() == 45);
+                    assert(value.pointers[i] == &stored);
+                }
+                assert(value.p == &stored);
+                assert(*value.p == 19);
+                value.fn = null;
+                value = S.init;
+                assert(value.fn() == 42);
+            }
+        });
+    }
+}
+
 
 // `with` on a struct evaluates the value once, then resolves each unqualified
 // member through that same storage. The assignments must update the source
@@ -287,7 +321,7 @@ static foreach (backend; Matrix!()) {
 
 // A local struct without an explicit initializer starts with each field's
 // declared nonzero default value, not with zero-filled storage.
-static foreach (backend; Matrix!(Omit!(Bytecode, Because.unconfirmed))) {
+static foreach (backend; Matrix!()) {
     @("localStructUsesNonzeroFieldDefault." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -2520,11 +2554,7 @@ static foreach (backend; Matrix!(
 // own. `Widget`'s fields default to non-zero bytes (a non-empty string, a
 // non-first enum member, `true`, a non-`'\0'` `char`) - std.format.spec's
 // `FormatSpec` has the same shape, whose default read reaches this
-// through `to!string`'s own use of it. `isSupportedStructLiteral` (the
-// same predicate `visit(StructLiteralExp)` uses for `Widget(a, b)`)
-// governs this too, since `defaultInit`'s `VarExp` resolves to the exact
-// `StructLiteralExp` dmd would have built from `Widget`'s own field
-// defaults.
+// through `to!string`'s own use of it.
 static foreach (backend; Matrix!()) {
     @("defaultInitializedTemplatedStructReadsAndMutatesNonZeroFields." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -2606,9 +2636,7 @@ static foreach (backend; Matrix!()) {
 // issue 12509) supplies the *element* type's literal `Inner(5)` for the
 // whole `Inner[3]` field, one value that every element takes, rather than
 // an array literal of three.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("structLiteralOmitsStaticArrayOfNonZeroInitStructField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

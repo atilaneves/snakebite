@@ -8,6 +8,59 @@ module ut.backends.run.staticarrays;
 
 import ut.backends;
 
+static foreach (backend; Matrix!()) {
+    @("staticArray.twoHundredElementInitialValues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                ubyte[200] bytes;
+                char[200] chars;
+                wchar[200] wide;
+                int[200] numbers = 37;
+            }
+            struct Element { char c; int n = 37; }
+            void reset(out Element[200] values) {
+                assert(values[199].c == char.init);
+                assert(values[199].n == 37);
+            }
+            void main() {
+                ubyte[200] bytes;
+                char[200] chars;
+                Element[200] elements;
+                char[3][2] rows = "abc";
+                S value;
+                foreach (row; 0 .. 2) {
+                    assert(rows[row][0] == 'a');
+                    assert(rows[row][1] == 'b');
+                    assert(rows[row][2] == 'c');
+                }
+                foreach (i; 0 .. 200) {
+                    assert(bytes[i] == ubyte.init);
+                    assert(chars[i] == char.init);
+                    assert(value.bytes[i] == ubyte.init);
+                    assert(value.chars[i] == char.init);
+                    assert(value.wide[i] == wchar.init);
+                    assert(value.numbers[i] == 37);
+                    assert(elements[i].c == char.init);
+                    assert(elements[i].n == 37);
+                }
+                elements[199].n = 9;
+                reset(elements);
+                assert(elements[199].n == 37);
+                bytes[] = 9;
+                chars[] = 'x';
+                bytes = typeof(bytes).init;
+                chars = typeof(chars).init;
+                foreach (i; 0 .. 200) {
+                    assert(bytes[i] == ubyte.init);
+                    assert(chars[i] == char.init);
+                }
+            }
+        });
+    }
+}
+
 
 // A static array is its elements in place, with no length or pointer
 // header: `int[3][2]` is six contiguous `int`s. Assigning a whole row
@@ -176,19 +229,7 @@ static foreach (backend; Matrix!()) {
 // `char.init` is `0xFF`, not zero, so this only covers the literal shape,
 // not a default-init one (`staticArray.threeByteDefaultInitAndLiteral`
 // already covers the odd-width zero-init path with `ubyte[3]`).
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "confirmed: \"bytecode compiler cannot compile `\\\"xyz\\\"` in " ~
-        "`main`\" - a string literal copied into a `char[3]` static-array " ~
-        "local is a separate gap from the odd-width zero-init bug this " ~
-        "file's other new tests cover, not fixed here"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "confirmed: \"no native layout for the string literal `\\\"xyz\\\"` " ~
-        "as a `char[3]`\" - `nativelayout.storeValue` refuses a string " ~
-        "literal's width against a static array's element width here; a " ~
-        "separate gap from the odd-width zero-init bug this file's other " ~
-        "new tests cover, not fixed here"),
-)) {
+static foreach (backend; Matrix!()) {
     @("staticArray.charThreeByteLiteral." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -372,13 +413,7 @@ static foreach (backend; Matrix!()) {
 // hands out the element's own `IntegerExp(0xFF)`, typed `char`, for the
 // whole array, so this is the non-zero counterpart of the `IntegerExp(0)`
 // "zero every byte" shorthand at the same odd width.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "confirmed: \"no native layout for a value of type `char[3]`\" - the " ~
-        "interpreter has no element-wise fill for a static array of an " ~
-        "odd width; separate from the zero-init shape the other tests here " ~
-        "cover"),
-)) {
+static foreach (backend; Matrix!()) {
     @("staticArray.charThreeByteDefaultInit." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -393,13 +428,7 @@ static foreach (backend; Matrix!(
 
 // A scalar initializer fills every element of a static array, so `'x'`
 // is a non-zero `IntegerExp` typed `char` against a 3-byte destination.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "confirmed: \"no native layout for a value of type `char[3]`\" - the " ~
-        "interpreter has no element-wise fill for a static array of an " ~
-        "odd width; separate from the zero-init shape the other tests here " ~
-        "cover"),
-)) {
+static foreach (backend; Matrix!()) {
     @("staticArray.charThreeByteScalarFill." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -414,13 +443,7 @@ static foreach (backend; Matrix!(
 
 // The same scalar fill on `ubyte[3]` with a non-zero value, as an
 // initializer and then as an assignment.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "confirmed: \"no native layout for a value of type `ubyte[3]`\" - the " ~
-        "interpreter has no element-wise fill for a static array of an " ~
-        "odd width; separate from the zero-init shape the other tests here " ~
-        "cover"),
-)) {
+static foreach (backend; Matrix!()) {
     @("staticArray.ubyteThreeByteScalarFill." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

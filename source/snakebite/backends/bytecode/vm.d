@@ -166,8 +166,7 @@ package struct Instruction {
     //    already carries.
     //  - a resolved static-storage address, cast to a `size_t`: the
     //    `source` of `opStaticLoad`/`opStaticAddress` and the
-    //    `destination` of `opStaticStore`, patched after compilation once
-    //    the function's persistent storage has an address.
+    //    `destination` of `opStaticStore`.
     //  - a source offset's width, for floating-point conversions whose
     //    destination and source widths can differ.
     //  - a resolved instruction address, cast to a `size_t`: `opJump`'s
@@ -213,10 +212,6 @@ package struct Function {
     package CallSite[] callSites;
     package AssertSite[] assertSites;
     package ExceptionHandler[] exceptionHandlers;
-    // Storage for this function's data-segment locals. It belongs to the
-    // compiled function, not to a call frame, so every invocation sees the
-    // same native-layout bytes.
-    package ubyte[] staticData;
     package size_t frameSize;
     package uint frameAlignment;
     // `size_t.max` means this function's locals stay in its activation
@@ -407,7 +402,7 @@ package const(Instruction)* opCopy(
 
 // Constant lengths let the native compiler inline copies without requiring
 // aligned frame slots or typed pointer access.
-package const(Instruction)* opCopyFixed(size_t width)(
+package const(Instruction)* opCopyFixed(size_t width, bool staticSource = false)(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -418,14 +413,16 @@ package const(Instruction)* opCopyFixed(size_t width)(
 ) {
     import core.stdc.string: memcpy;
 
-    memcpy(frame + pc.destination, frame + pc.source, width);
+    static if (staticSource)
+        const source = cast(const(void)*) pc.source;
+    else
+        const source = frame + pc.source;
+    memcpy(frame + pc.destination, source, width);
     return pc + 1;
 }
 
 
-// Copies a function-local static from its persistent native-layout storage
-// into the current frame. The compiler resolves `pc.source` from a temporary
-// static offset to the storage address after the function is built.
+// Persistent storage can belong to a constant or a data-segment variable.
 package const(Instruction)* opStaticLoad(
     const(Instruction)* pc,
     ubyte* frame,
@@ -443,10 +440,6 @@ package const(Instruction)* opStaticLoad(
 }
 
 
-// Copies a value from the current frame into a function-local static's
-// persistent native-layout storage. The compiler resolves `pc.destination`
-// from a temporary static offset to the storage address after the function
-// is built.
 package const(Instruction)* opStaticStore(
     const(Instruction)* pc,
     ubyte* frame,
