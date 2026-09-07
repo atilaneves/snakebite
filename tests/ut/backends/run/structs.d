@@ -9,6 +9,37 @@ module ut.backends.run.structs;
 import ut.backends;
 
 
+// `with` on a struct evaluates the value once, then resolves each unqualified
+// member through that same storage. The assignments must update the source
+// value, not a copied temporary.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed, "no WithStatement support"),
+)) {
+    @("struct.withStatementUsesAggregateStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Value {
+                int first;
+                int second;
+            }
+
+            void main() {
+                Value value = Value(3, 5);
+
+                with (value) {
+                    first = 8;
+                    second += first;
+                }
+
+                assert(value.first == 8);
+                assert(value.second == 13);
+            }
+        });
+    }
+}
+
+
 // A field of a non-plain aggregate still has the aggregate's native address.
 // The destructor is handled by the DMD-generated cleanup around the local.
 static foreach (backend; Matrix!()) {

@@ -14,7 +14,6 @@ import ut.backends;
 static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.unconfirmed, "no WithStatement support"),
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("withStatementScopesEnumMembers." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -43,6 +42,7 @@ static foreach (backend; Matrix!(
     }
 }
 
+
 // An enum declared inside a function body has no run-time effect of its
 // own: semantic analysis has already resolved its members to constants,
 // so casting bytes to the enum type and comparing against its members
@@ -70,4 +70,3 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
-

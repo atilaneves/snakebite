@@ -131,7 +131,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         ForStatement, GotoCaseStatement, GotoDefaultStatement, IfStatement,
         ImportStatement, LabelStatement, ReturnStatement, ScopeStatement,
         Statement, SwitchStatement, ThrowStatement, TryCatchStatement,
-        TryFinallyStatement, UnrolledLoopStatement;
+        TryFinallyStatement, UnrolledLoopStatement, WithStatement;
     import dmd.tokens: EXP;
     import dmd.typesem: isIntegral, nextOf;
     import core.thread: ThreadID;
@@ -1064,6 +1064,30 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
 
         statement.statement.accept(this);
+    }
+
+    // Semantic analysis resolves every member in a `with` body through its
+    // compiler-generated `wthis` temporary. Initialise that temporary once
+    // before the body, so an aggregate expression has the same evaluation
+    // and aliasing behaviour as compiled D. A type `with` has no temporary:
+    // it only changes name lookup, which semantic analysis already did.
+    override void visit(WithStatement statement) {
+        if (statement.wthis !is null) {
+            auto initializer = statement.wthis._init.isExpInitializer;
+            if (initializer is null)
+                throw new SnakebiteException(
+                    "interpreter cannot initialize `with` expression",
+                );
+
+            evaluate(
+                initializerValueOf(initializer),
+                statement.wthis.type,
+                storageOf(statement.wthis),
+            );
+        }
+
+        if (statement._body !is null)
+            statement._body.accept(this);
     }
 
     override void visit(ReturnStatement statement) {
