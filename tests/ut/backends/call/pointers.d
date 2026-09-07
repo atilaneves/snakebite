@@ -125,6 +125,39 @@ private enum boolCallbackExceptionCode = q{
 };
 
 
+// `new T` allocates storage with `T.init` before the program writes through
+// the returned pointer. The integer checks its default state; a long uses a
+// scalar initial value and the floating-point write proves no struct is needed.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "bytecode does not initialize a scalar `new` argument"),
+)) {
+    @("pointers.new.scalar." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                int answer() {
+                    auto integer = new int;
+                    auto parenthesized = new short();
+                    auto initialized = new long(8);
+                    auto floating = new double;
+                    assert(*integer == int.init);
+                    assert(*parenthesized == short.init);
+                    assert(*initialized == 8);
+                    *integer = 31;
+                    *floating = 11.0;
+                    assert(*floating == 11.0);
+                    return *integer + 11;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
 // `&b` is dmd's `SymOffExp`, not a general `&expression`: taking a local's
 // address and reading back through it is the simplest lvalue-to-pointer
 // round trip there is.

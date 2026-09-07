@@ -3985,6 +3985,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // call.
     override void visit(NewExp expression) {
         import dmd.astenums: Taarray;
+        import dmd.typesem: isScalar;
 
         if (expression.type.ty == Tarray || expression.type.ty == Taarray) {
             if (expression.lowering is null)
@@ -4072,40 +4073,54 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         if (expression.type.ty == Tpointer) {
             const structType = expression.newtype.isTypeStruct;
-            if (structType is null || expression.placement !is null
-                    || expression.thisexp !is null)
+            if ((structType is null
+                    && !expression.newtype.isScalar())
+                    || expression.placement !is null || expression.thisexp !is null)
                 throw new SnakebiteException(
                     text("interpreter cannot evaluate `", expression.op,
                         "` expression: `", expression.toString, "`"),
                 );
 
-            const declaration = structType.sym;
-            const alignment = declaration.alignsize == 0
-                ? 1 : declaration.alignsize;
+            const objectFacts = factsOf(expression.newtype);
+            const alignment = objectFacts.alignment;
             const padding = alignment - 1;
-            if (declaration.structsize > size_t.max - padding)
+            if (objectFacts.size > size_t.max - padding)
                 throw new SnakebiteException(
                     text("interpreter cannot allocate `",
                         expression.toString, "`: its alignment padding " ~
                         "overflows `size_t`"),
                 );
 
-            auto allocation = new ubyte[](declaration.structsize + padding);
+            auto allocation = new ubyte[](objectFacts.size + padding);
             _allocations ~= allocation;
             const start = -cast(size_t) allocation.ptr
                 & (alignment - 1);
             auto object = cast(ubyte*) allocation.ptr + start;
-            initializeDefault(
-                expression.newtype,
-                factsOf(expression.newtype),
-                object,
-                expression.loc,
-            );
 
-            if (expression.member !is null)
-                constructStruct(expression, object);
-            else if (arguments !is null)
-                initializeStructArguments(expression, object);
+            if (structType !is null) {
+                initializeDefault(
+                    expression.newtype,
+                    objectFacts,
+                    object,
+                    expression.loc,
+                );
+
+                if (expression.member !is null)
+                    constructStruct(expression, object);
+                else if (arguments !is null)
+                    initializeStructArguments(expression, object);
+            } else if (arguments is null || arguments.length == 0) {
+                initializeDefault(
+                    expression.newtype,
+                    objectFacts,
+                    object,
+                    expression.loc,
+                );
+            } else {
+                evaluate(
+                    (*arguments)[0], expression.newtype, objectFacts, object,
+                );
+            }
 
             storeIntegral(_place, cast(size_t) object, _facts.size);
             return;
