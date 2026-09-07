@@ -2381,3 +2381,120 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A struct return is copied straight into the caller's own frame slot,
+// which the compiler sizes from the return type, so a struct wider than
+// two machine words returns by value the same way a narrower one does.
+static foreach (backend; Matrix!()) {
+    @("fourWordStructReturnedByValueFromNamedFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide {
+                long a;
+                long b;
+                long c;
+                long d;
+            }
+
+            Wide makeWide() {
+                return Wide(1, 2, 3, 4);
+            }
+
+            void main() {
+                auto w = makeWide();
+                assert(w.a == 1);
+                assert(w.b == 2);
+                assert(w.c == 3);
+                assert(w.d == 4);
+            }
+        });
+    }
+}
+
+// As above, from a lambda: the same width rule applies to every guest
+// callee whatever syntax declared it.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed), // segfaults
+)) {
+    @("fourWordStructReturnedByValueFromLambda." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide {
+                long a;
+                long b;
+                long c;
+                long d;
+            }
+
+            void main() {
+                auto make = () => Wide(1, 2, 3, 4);
+                auto w = make();
+                assert(w.a + w.b + w.c + w.d == 10);
+            }
+        });
+    }
+}
+
+// A five-word struct with pointer and class-reference fields returned
+// from a method and handed straight to another call as its argument: the
+// returned bytes land in the temporary the call site reserved for that
+// argument, however wide the struct is.
+static foreach (backend; Matrix!()) {
+    @("fiveWordStructReturnedFromMethodPassedAsArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Inner {
+                int value;
+                this(int value) { this.value = value; }
+            }
+
+            struct Wide {
+                int* p;
+                Inner inner;
+                long a;
+                long b;
+                long c;
+            }
+
+            struct Factory {
+                int payload;
+                Wide make() {
+                    return Wide(&payload, new Inner(9), 1, 2, 3);
+                }
+            }
+
+            long sum(Wide w) {
+                return *w.p + w.inner.value + w.a + w.b + w.c;
+            }
+
+            void main() {
+                Factory f = Factory(100);
+                assert(sum(f.make()) == 115);
+            }
+        });
+    }
+}
+
+// A user attribute and a storage class on one local struct (`@("tag")
+// static struct S`) nest one attribute declaration inside another (a
+// storage class alone merges into a single one, `@safe static` included);
+// the struct underneath still has no runtime action.
+static foreach (backend; Matrix!(
+    // the interpreter recurses through one attribute wrapper, not two
+    Omit!(Interpreter, Because.unconfirmed),
+)) {
+    @("userAttributeOnStaticLocalStructDeclarationHasNoRuntimeAction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f() {
+                @("tag") static struct S { int v; }
+                return S(3).v;
+            }
+            void main() { assert(f() == 3); }
+        });
+    }
+}
