@@ -630,20 +630,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // regardless of which module owns it.
         auto body_ = function_.fbody;
         const dispatchFacts = dispatchFactsOf(function_);
-        const interpretsDelegateArgument = body_ !is null
-            && hasInterpretedDelegateArgument(callSite);
-        // A template instance can inherit the guest module of its call site,
-        // even when dmd also emitted a native specialization for it. Check
-        // the process symbol for every instantiated body so guest ownership
-        // does not force a duplicate walk of code druntime already provides.
-        const interpretsTemplate = dispatchFacts._isTemplate
-            && (!dispatchFacts._hasNativeSymbol
-                || interpretsDelegateArgument);
-        const interprets = body_ !is null
-            && (dispatchFacts._isGuest && !dispatchFacts._isTemplate
-                || interpretsTemplate
-                || interpretsDelegateArgument
-                || isNestedInCurrentlyWalkedFunction(function_));
+        import snakebite.backends.calls: usesGuestBody;
+
+        const interprets = usesGuestBody(
+            function_, callSite is null ? null : callSite.arguments,
+            (callee) => _program.isInterpreted(callee),
+            dispatchFacts._isGuest && !dispatchFacts._isTemplate
+                || dispatchFacts._isTemplate && !dispatchFacts._hasNativeSymbol,
+            _function,
+        );
         if (!interprets) {
             const plan = callSite is null
                 ? &_plans.of(function_)
@@ -776,51 +771,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     private void destroyTemporary(Expression expression) {
         runForEffect(expression);
-    }
-
-    // A guest delegate's function word holds its declaration, not an
-    // executable address. Walking the available callee keeps every call to
-    // that delegate in this evaluator. Native delegates still use FFI.
-    private bool hasInterpretedDelegateArgument(CallExp callSite) {
-        if (callSite is null || callSite.arguments is null)
-            return false;
-
-        foreach (argument; *callSite.arguments) {
-            auto expression = argument;
-            while (auto cast_ = expression.isCastExp)
-                expression = cast_.e1;
-
-            FuncDeclaration delegateFunction;
-            if (auto funcExp = expression.isFuncExp)
-                delegateFunction = funcExp.fd;
-            else if (auto delegateExp = expression.isDelegateExp)
-                delegateFunction = delegateExp.func;
-
-            if (delegateFunction !is null
-                    && _program.isInterpreted(delegateFunction))
-                return true;
-        }
-
-        return false;
-    }
-
-    // A closure literal lexically nested inside the function this
-    // evaluator is currently walking (e.g. druntime's `_toAA` cast
-    // wrapper inside a common `_d_aaApply2` instantiation) closes over
-    // this walk's own closure allocation, read back through
-    // `tryContextOf`. Both this evaluator and native D builds use the
-    // DMD frontend's native layout, but a non-escaping native closure
-    // may have no heap layout at all and read captured variables from
-    // its compiled stack frame, a frame this walk never builds. Walking
-    // the literal's body here instead keeps every reader of this walk's
-    // context the walker that wrote it, regardless of whether druntime
-    // also links a native specialization of the literal's declaration.
-    private bool isNestedInCurrentlyWalkedFunction(FuncDeclaration function_) {
-        if (_function is null)
-            return false;
-
-        auto parent = function_.toParent2();
-        return parent !is null && parent.isFuncDeclaration is _function;
     }
 
     private const(CallPlan)* callPlanOf(

@@ -5452,30 +5452,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: STC, Tvoid;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        // A callee druntime already supplies as native code (`Exception.
-        // this`, reached constructing a guest exception class's base, or
-        // an ordinary FFI-backed function) is called through FFI rather
-        // than compiled as a guest body - compiling a native constructor's
-        // body would walk druntime's own `object.d` a second time (the
-        // first is this compiler's own lookups of `Throwable`/`Exception`)
-        // and reach constructs this compiler does not support there.
-        //
-        // A template instance (`enforce`, `shouldThrow`, ...) druntime
-        // already supplies native code for is the one exception: when an
-        // argument is itself a delegate this compiler's own `visit(FuncExp)`
-        // builds (a `lazy` argument's implicit delegate included - see
-        // `delegatize.d`'s `toDelegate`), the native code has no way to
-        // call back into a value only this compiler's own bytecode knows
-        // how to run. `callee.fbody` is still there for a template
-        // instance - it is only a body-less `extern` declaration that
-        // never has one - so walking it here reaches the guest branch
-        // below instead, the same call graph the interpreter's own
-        // `executeRaw`/`hasInterpretedDelegateArgument` already walks for
-        // exactly this reason.
-        const callsIntoGuestDelegate = callee.fbody !is null
-            && hasInterpretedDelegateArgument(arguments);
-        if (!callsIntoGuestDelegate
-                && (callee.fbody is null || _bytecode.hasNativeSymbol(callee))) {
+        import snakebite.backends.calls: usesGuestBody;
+
+        const guest = usesGuestBody(
+            callee, arguments, &_bytecode.isGuestFunction,
+            !_bytecode.hasNativeSymbol(callee),
+        );
+        if (!guest) {
             auto type = typeFunctionOf(callee);
 
             Arg[] initialArgs;
@@ -5836,41 +5819,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.nativelayout: delegateValueSize;
 
         return TypeFacts(delegateValueSize, size_t.sizeof, false, false);
-    }
-
-    // Whether any of `arguments` is a delegate literal (a `lazy` argument's
-    // own implicit one included - `delegatize.d`'s `toDelegate` builds it
-    // the same shape as a guest source `delegate` literal) naming a
-    // function this program interprets. `compileResolvedCall`'s own
-    // native/guest choice asks this before trusting `hasNativeSymbol`:
-    // druntime's compiled code for a template instance like `enforce` has
-    // no way to call back into a value only this compiler's bytecode can
-    // run, so such an argument forces the callee itself to compile as a
-    // guest body too, mirroring the interpreter's own
-    // `hasInterpretedDelegateArgument`.
-    private bool hasInterpretedDelegateArgument(
-        imported!"dmd.arraytypes".Expressions* arguments,
-    ) {
-        if (arguments is null)
-            return false;
-
-        foreach (argument; *arguments) {
-            auto expression = argument;
-            while (auto cast_ = expression.isCastExp)
-                expression = cast_.e1;
-
-            FuncDeclaration delegateFunction;
-            if (auto funcExp = expression.isFuncExp)
-                delegateFunction = funcExp.fd;
-            else if (auto delegateExp = expression.isDelegateExp)
-                delegateFunction = delegateExp.func;
-
-            if (delegateFunction !is null
-                    && _bytecode.isGuestFunction(delegateFunction))
-                return true;
-        }
-
-        return false;
     }
 
     // Where `expression`'s element actually lives: `expression.e1`'s own
