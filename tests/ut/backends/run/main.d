@@ -74,6 +74,27 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A template instance contributes its expanded declarations to the module.
+// `main` must therefore be found there, as a compiled program finds it.
+static foreach (backend; Matrix!()) {
+    @("ret.int.templateMixin." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeStatusOf!(
+            backend,
+            q{
+                template Main() {
+                    int main() {
+                        return 42;
+                    }
+                }
+
+                mixin Main!();
+            },
+        );
+    }
+}
+
 // A failed assertion leaves `main` as a `Throwable` and the process fails,
 // which is the contract `run` reports as a status.
 static foreach (backend; Matrix!(
