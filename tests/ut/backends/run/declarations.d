@@ -70,6 +70,34 @@ static foreach (backend; Matrix!(
 }
 
 
+// A root module can declare a native `extern(C)` function without providing
+// its body. Its module constructor must call the host symbol through the FFI,
+// then make that result visible to `main`.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "Bytecode cannot call a root bodyless extern(C) declaration"),
+    Omit!(Ctfe, Because.inexpressible, "Ctfe cannot call native functions"),
+)) {
+    @("rootExternCModuleConstructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            extern(C) pragma(mangle, "abs") int abs(int);
+
+            __gshared bool initialized;
+
+            shared static this() {
+                initialized = abs(-42) == 42;
+            }
+
+            int main() {
+                return initialized ? 0 : 1;
+            }
+        });
+    }
+}
+
+
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),

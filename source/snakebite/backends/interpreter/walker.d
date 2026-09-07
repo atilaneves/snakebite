@@ -606,8 +606,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // no function name, package, or template argument gets a vote.
         // Other non-root declarations still run as native code already
         // linked into the process.
+        // A declaration without a body can only describe a host call,
+        // regardless of which module owns it.
+        auto body_ = function_.fbody;
         const dispatchFacts = dispatchFactsOf(function_);
-        const interpretsDelegateArgument = function_.fbody !is null
+        const interpretsDelegateArgument = body_ !is null
             && hasInterpretedDelegateArgument(callSite);
         // A template instance can inherit the guest module of its call site,
         // even when dmd also emitted a native specialization for it. Check
@@ -616,11 +619,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const interpretsTemplate = dispatchFacts._isTemplate
             && (!dispatchFacts._hasNativeSymbol
                 || interpretsDelegateArgument);
-        const interprets = dispatchFacts._isGuest
-            && !dispatchFacts._isTemplate
-            || interpretsTemplate
-            || interpretsDelegateArgument
-            || isNestedInCurrentlyWalkedFunction(function_);
+        const interprets = body_ !is null
+            && (dispatchFacts._isGuest && !dispatchFacts._isTemplate
+                || interpretsTemplate
+                || interpretsDelegateArgument
+                || isNestedInCurrentlyWalkedFunction(function_));
         if (!interprets) {
             const plan = callSite is null
                 ? &_plans.of(function_)
@@ -647,15 +650,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             throw new SnakebiteException(
                 text("interpreter cannot call `", function_.toString,
                     "`: its class `this` is not bound"),
-            );
-
-        // A root-owned declaration with no body has no code anywhere: the
-        // program owns it, so no library can be expected to implement it.
-        auto body_ = function_.fbody;
-        if (body_ is null)
-            throw new SnakebiteException(
-                text("interpreter cannot call a function with no body: `",
-                    function_.toString, "`"),
             );
 
         const guard = CallStateGuard(this);
