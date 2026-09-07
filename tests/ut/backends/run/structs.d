@@ -3009,8 +3009,7 @@ static foreach (backend; Matrix!(
 // that odd width first reaches `opConstant`. This exercises every shape
 // that width can reach the compiler through: `.init`, a literal, an
 // assignment, a by-value parameter, and a by-value return.
-static foreach (backend; Matrix!(
-)) {
+static foreach (backend; Matrix!()) {
     @("oddWidthStructRoundTrip.threeBytes." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -3043,8 +3042,7 @@ static foreach (backend; Matrix!(
 // The same shapes as `oddWidthStructRoundTrip.threeBytes`, at 5 bytes:
 // `opConstant`'s `storeWidth` still has no native layout for this width
 // either, one byte past the 4-byte one it does.
-static foreach (backend; Matrix!(
-)) {
+static foreach (backend; Matrix!()) {
     @("oddWidthStructRoundTrip.fiveBytes." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -3076,8 +3074,7 @@ static foreach (backend; Matrix!(
 
 // The same shapes again, at 6 bytes - one byte past the 5-byte one above,
 // still short of the next native width (8).
-static foreach (backend; Matrix!(
-)) {
+static foreach (backend; Matrix!()) {
     @("oddWidthStructRoundTrip.sixBytes." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -3111,8 +3108,7 @@ static foreach (backend; Matrix!(
 
 // The same shapes again, at 7 bytes - the last odd width short of the
 // next native one (8).
-static foreach (backend; Matrix!(
-)) {
+static foreach (backend; Matrix!()) {
     @("oddWidthStructRoundTrip.sevenBytes." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

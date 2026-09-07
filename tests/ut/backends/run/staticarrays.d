@@ -150,10 +150,12 @@ static foreach (backend; Matrix!()) {
 }
 
 // `ubyte[3]`'s own size is 3 bytes - not one of the native integral
-// widths (1/2/4/8) `opConstant`'s `storeWidth` lays out - so this is the
-// same odd-width zero-init shape as `staticArray.defaultInitIsZero`
-// above, but a static array reaching it directly rather than through an
-// `int[3][2]`'s 24-byte outer size, and a literal alongside it.
+// widths (1/2/4/8) `opConstant`'s `storeWidth` lays out. But dmd's
+// static-array default init is the *element*'s own `IntegerExp(0)`,
+// typed `ubyte` (width 1), not a width-3 constant - so this does not
+// reach the struct shorthand this branch fixes, and passes on master's
+// source unchanged. It covers this neighbour shape plus a literal
+// alongside it.
 static foreach (backend; Matrix!()) {
     @("staticArray.threeByteDefaultInitAndLiteral." ~ backend.stringof)
     @Tags(backend.stringof)

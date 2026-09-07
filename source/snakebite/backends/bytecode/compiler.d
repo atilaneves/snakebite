@@ -3535,6 +3535,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     override void visit(IntegerExp expression) {
         import snakebite.nativelayout: isIntegralSize;
+        import std.conv: text;
 
         requireDestination(expression);
 
@@ -3559,6 +3560,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
+        // The guard above sends every width `opConstant`'s `storeWidth`
+        // cannot lay out to `opZero` instead, so this `assert` is a
+        // compile-time guarantee, not a VM-side check on the hot path: a
+        // debug build catches a compiler bug here, at emit time, with the
+        // width that broke the guarantee still in scope.
+        assert(isIntegralSize(_width),
+            text("opConstant: unsupported integral width ", _width));
         emit(&opConstant, _destination,
             addConstant(expression.toInteger), _width);
     }
