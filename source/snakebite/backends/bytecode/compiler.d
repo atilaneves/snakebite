@@ -3534,17 +3534,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(IntegerExp expression) {
+        import snakebite.nativelayout: isIntegralSize;
+        import std.conv: text;
+
         requireDestination(expression);
 
         // A zero-init struct's own `.init` is `IntegerExp(0)` - dmd's own
         // shorthand for "zero every byte", the same one
         // `nativelayout.storeValue` already special-cases for a struct
-        // target. `opConstant`'s `storeWidth` only lays out up to 8 bytes,
-        // the widest integral this compiler ever moves through a single
-        // constant, so a wider destination (only ever a zero-init struct's
-        // own slot; every other value this compiler evaluates is `long`s
-        // sized or narrower) reaches for `opZero` instead.
-        if (_width > long.sizeof) {
+        // target. `opConstant`'s `storeWidth` only lays out the widths
+        // `isIntegralSize` recognises (1/2/4/8 bytes) - the only widths a
+        // real integral literal this compiler evaluates ever has, since
+        // every one is `long`-sized or narrower. A destination of any
+        // other width (wider than 8, like a 16-byte zero-init struct, or
+        // in between, like a 3-byte all-`ubyte` struct's own slot) is
+        // never a real integral value, only a zero-init struct reusing
+        // `IntegerExp(0)`'s "zero every byte" shorthand, so it reaches for
+        // `opZero` instead.
+        if (!isIntegralSize(_width)) {
             if (expression.toInteger != 0)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
@@ -3553,6 +3560,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
+        // The guard above sends every width `opConstant`'s `storeWidth`
+        // cannot lay out to `opZero` instead, so this `assert` is a
+        // compile-time guarantee, not a VM-side check on the hot path: a
+        // debug build catches a compiler bug here, at emit time, with the
+        // width that broke the guarantee still in scope.
+        assert(isIntegralSize(_width),
+            text("opConstant: unsupported integral width ", _width));
         emit(&opConstant, _destination,
             addConstant(expression.toInteger), _width);
     }

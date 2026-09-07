@@ -3000,3 +3000,239 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A struct built entirely of `ubyte` fields needs no padding, so its own
+// size is exactly its field count - not rounded up to 1/2/4/8 like every
+// other value the bytecode compiler moves through a single `opConstant`.
+// Its zero-init `.init` is `IntegerExp(0)`, dmd's own "zero every byte"
+// shorthand (see `Bytecode.visit(IntegerExp)`'s own doc), which is where
+// that odd width first reaches `opConstant`. This exercises every shape
+// that width can reach the compiler through: `.init`, a literal, an
+// assignment, a by-value parameter, and a by-value return.
+static foreach (backend; Matrix!()) {
+    @("oddWidthStructRoundTrip.threeBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S3 { ubyte a; ubyte b; ubyte c; }
+
+            S3 passThrough(S3 s) { return s; }
+            S3 makeS3() { return S3(1, 2, 3); }
+
+            void main() {
+                S3 zero;
+                assert(zero.a == 0 && zero.b == 0 && zero.c == 0);
+
+                auto lit = S3(1, 2, 3);
+                assert(lit.a == 1 && lit.b == 2 && lit.c == 3);
+
+                zero = lit;
+                assert(zero.a == 1 && zero.b == 2 && zero.c == 3);
+
+                auto passed = passThrough(lit);
+                assert(passed.a == 1 && passed.b == 2 && passed.c == 3);
+
+                auto made = makeS3();
+                assert(made.a == 1 && made.b == 2 && made.c == 3);
+            }
+        });
+    }
+}
+
+// The same shapes as `oddWidthStructRoundTrip.threeBytes`, at 5 bytes:
+// `opConstant`'s `storeWidth` still has no native layout for this width
+// either, one byte past the 4-byte one it does.
+static foreach (backend; Matrix!()) {
+    @("oddWidthStructRoundTrip.fiveBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S5 { ubyte a; ubyte b; ubyte c; ubyte d; ubyte e; }
+
+            S5 passThrough(S5 s) { return s; }
+            S5 makeS5() { return S5(1, 2, 3, 4, 5); }
+
+            void main() {
+                S5 zero;
+                assert(zero.a == 0 && zero.e == 0);
+
+                auto lit = S5(1, 2, 3, 4, 5);
+                assert(lit.a == 1 && lit.c == 3 && lit.e == 5);
+
+                zero = lit;
+                assert(zero.a == 1 && zero.c == 3 && zero.e == 5);
+
+                auto passed = passThrough(lit);
+                assert(passed.a == 1 && passed.c == 3 && passed.e == 5);
+
+                auto made = makeS5();
+                assert(made.a == 1 && made.c == 3 && made.e == 5);
+            }
+        });
+    }
+}
+
+// The same shapes again, at 6 bytes - one byte past the 5-byte one above,
+// still short of the next native width (8).
+static foreach (backend; Matrix!()) {
+    @("oddWidthStructRoundTrip.sixBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S6 {
+                ubyte a; ubyte b; ubyte c; ubyte d; ubyte e; ubyte f;
+            }
+
+            S6 passThrough(S6 s) { return s; }
+            S6 makeS6() { return S6(1, 2, 3, 4, 5, 6); }
+
+            void main() {
+                S6 zero;
+                assert(zero.a == 0 && zero.f == 0);
+
+                auto lit = S6(1, 2, 3, 4, 5, 6);
+                assert(lit.a == 1 && lit.d == 4 && lit.f == 6);
+
+                zero = lit;
+                assert(zero.a == 1 && zero.d == 4 && zero.f == 6);
+
+                auto passed = passThrough(lit);
+                assert(passed.a == 1 && passed.d == 4 && passed.f == 6);
+
+                auto made = makeS6();
+                assert(made.a == 1 && made.d == 4 && made.f == 6);
+            }
+        });
+    }
+}
+
+// The same shapes again, at 7 bytes - the last odd width short of the
+// next native one (8).
+static foreach (backend; Matrix!()) {
+    @("oddWidthStructRoundTrip.sevenBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S7 {
+                ubyte a; ubyte b; ubyte c; ubyte d;
+                ubyte e; ubyte f; ubyte g;
+            }
+
+            S7 passThrough(S7 s) { return s; }
+            S7 makeS7() { return S7(1, 2, 3, 4, 5, 6, 7); }
+
+            void main() {
+                S7 zero;
+                assert(zero.a == 0 && zero.g == 0);
+
+                auto lit = S7(1, 2, 3, 4, 5, 6, 7);
+                assert(lit.a == 1 && lit.d == 4 && lit.g == 7);
+
+                zero = lit;
+                assert(zero.a == 1 && zero.d == 4 && zero.g == 7);
+
+                auto passed = passThrough(lit);
+                assert(passed.a == 1 && passed.d == 4 && passed.g == 7);
+
+                auto made = makeS7();
+                assert(made.a == 1 && made.d == 4 && made.g == 7);
+            }
+        });
+    }
+}
+
+// The `rt-cerealed-1` shape: `Decerealiser.value!T` declares `T val;` for
+// a 3-byte struct that has a postblit, then fills it field by field and
+// returns it. A postblit does not change `zeroInit`, so dmd still gives
+// the declaration the `IntegerExp(0)` "zero every byte" shorthand at the
+// 3-byte width; the postblit only matters for copies made afterwards,
+// which `postblitRunsOnceOnCopyIntoVariable` covers separately.
+static foreach (backend; Matrix!()) {
+    @("oddWidthStructRoundTrip.threeBytesPostblit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct P3 {
+                ubyte a; ubyte b; ubyte c;
+                this(this) { ++c; }
+            }
+
+            P3 fill() {
+                P3 val;
+                assert(val.a == 0 && val.b == 0 && val.c == 0);
+                val.a = 1;
+                val.b = 2;
+                val.c = 3;
+                return val;
+            }
+
+            void main() {
+                auto made = fill();
+                assert(made.a == 1 && made.b == 2 && made.c == 3);
+            }
+        });
+    }
+}
+
+// A static array of a 3-byte zero-init struct: dmd strips the static
+// array type before its `zeroInit` check, so the whole 9-byte array gets
+// the one `IntegerExp(0)` - a width that is neither 3 nor a native one.
+static foreach (backend; Matrix!()) {
+    @("oddWidthStructRoundTrip.threeBytesArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S3 { ubyte a; ubyte b; ubyte c; }
+
+            void main() {
+                S3[3] arr;
+                assert(arr[0].a == 0 && arr[2].c == 0);
+                arr[2] = S3(1, 2, 3);
+                assert(arr[2].a == 1 && arr[2].c == 3 && arr[1].c == 0);
+            }
+        });
+    }
+}
+
+// A 3-byte union is zero-init like a struct, so it too declares through
+// the `IntegerExp(0)` shorthand at an odd width. Reading back through
+// the other member is what proves every byte was zeroed.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE refuses to reinterpret through an overlapped union " ~
+        "field"),
+)) {
+    @("oddWidthStructRoundTrip.threeByteUnion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            union U3 { ubyte[3] bytes; struct { ubyte x; ubyte y; ubyte z; } }
+
+            void main() {
+                U3 u;
+                assert(u.x == 0 && u.bytes[2] == 0);
+                u.bytes = [1, 2, 3];
+                assert(u.x == 1 && u.z == 3);
+            }
+        });
+    }
+}
+
+// A 3-byte struct with a non-zero field default is not zero-init, so its
+// `.init` is the struct's own initializer symbol, never the
+// `IntegerExp(0)` shorthand: the odd width must round-trip through that
+// path too.
+static foreach (backend; Matrix!()) {
+    @("oddWidthStructRoundTrip.threeBytesNonZeroInit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct N3 { ubyte a = 5; ubyte b; ubyte c = 9; }
+
+            void main() {
+                N3 n;
+                assert(n.a == 5 && n.b == 0 && n.c == 9);
+            }
+        });
+    }
+}
