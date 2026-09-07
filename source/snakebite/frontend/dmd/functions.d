@@ -172,6 +172,13 @@ private imported!"dmd.func".FuncDeclaration findFunction(
             if (auto found = findFunction(include(attributes, null), name))
                 return found;
         }
+
+        // An instantiated template contributes its expanded declarations to
+        // this module. An uninstantiated template is not part of the build.
+        if (auto instance = member.isTemplateInstance) {
+            if (auto found = findFunction(instance.members, name))
+                return found;
+        }
     }
 
     return null;

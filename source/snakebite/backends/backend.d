@@ -18,15 +18,24 @@ public struct Program {
     imported!"dmd.dmodule".Module[] rootModules;
     imported!"dmd.func".FuncDeclaration[] moduleConstructors;
     Main main;
+    string name;
 
     // The entry point is found the way a compiled build finds it: the first
     // root module declaring a module-level `main`.
     this(imported!"dmd.dmodule".Module[] rootModules) {
+        this(rootModules, "");
+    }
+
+    this(
+        imported!"dmd.dmodule".Module[] rootModules,
+        in string name,
+    ) {
         import snakebite.frontend.dmd.functions:
             findFunction,
             findModuleConstructors;
 
         this.rootModules = rootModules;
+        this.name = name;
         foreach (module_; rootModules)
             moduleConstructors ~= findModuleConstructors(module_);
 
@@ -122,7 +131,7 @@ public int run(Backend backend, Program program) {
     if (runModuleConstructors(backend, program.moduleConstructors))
         return 1;
 
-    return runMain(backend, program.main.func);
+    return runMain(backend, program);
 }
 
 // A constructor that cannot run is a failed program startup. Report it
@@ -164,18 +173,25 @@ private int runModuleConstructors(
 // at all is not an error: the status is 0.
 private int runMain(
     Backend backend,
-    imported!"dmd.func".FuncDeclaration main_,
+    Program program,
 ) {
     import dmd.astenums: Tvoid;
     import dmd.typesem: nextOf;
 
+    auto main_ = program.main.func;
     if (main_ is null)
         return 0;
 
     const isVoid = main_.type.nextOf.ty == Tvoid;
     int status;
+    string[] arguments;
+    void*[] mainArguments;
+    if (main_.parameters !is null && main_.parameters.length != 0) {
+        arguments = [program.name];
+        mainArguments = [cast(void*) &arguments];
+    }
     return failing(() {
-        backend.call(main_, isVoid ? null : &status, []);
+        backend.call(main_, isVoid ? null : &status, mainArguments);
     }) ? 1 : status;
 }
 

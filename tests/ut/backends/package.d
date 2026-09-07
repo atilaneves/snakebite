@@ -146,7 +146,7 @@ public void shouldBeStatusOf(
         nativeMainStatus!code.should == expected;
     else {
         enum program_ = RegisterProgram!(module_, code).program;
-        auto program = Program([parsedProgram(program_)]);
+        auto program = Program([parsedProgram(program_)], "snakebite");
         asTestFailure(run(new BackendType(program), program), file, line)
             .should == expected;
     }
@@ -169,17 +169,30 @@ private int nativeMainStatus(string code)() {
     static if (!__traits(hasMember, Guest, "main"))
         return 0;
     else {
-        static assert(__traits(compiles, Guest.main()),
-            "nativeMainStatus only supports a zero-argument main");
+        static if (__traits(compiles, Guest.main())) {
+            try {
+                static if (is(typeof(Guest.main()) == void)) {
+                    Guest.main();
+                    return 0;
+                } else
+                    return Guest.main();
+            } catch (Throwable) {
+                return 1;
+            }
+        } else {
+            static assert(__traits(compiles, Guest.main(["snakebite"])),
+                "nativeMainStatus only supports `main()` and "
+                ~ "`main(string[] args)`");
 
-        try {
-            static if (is(typeof(Guest.main()) == void)) {
-                Guest.main();
-                return 0;
-            } else
-                return Guest.main();
-        } catch (Throwable) {
-            return 1;
+            try {
+                static if (is(typeof(Guest.main(["snakebite"])) == void)) {
+                    Guest.main(["snakebite"]);
+                    return 0;
+                } else
+                    return Guest.main(["snakebite"]);
+            } catch (Throwable) {
+                return 1;
+            }
         }
     }
 }

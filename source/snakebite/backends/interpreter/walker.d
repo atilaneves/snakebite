@@ -319,7 +319,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // Runs `function_` against a fresh top-level frame, mirroring the
     // `Backend.call` contract: `returnPlace` is where the result goes
     // (`null` if the caller does not want it), `args` are host-to-guest
-    // arguments (not yet supported). `extern(D)`: a dynamic array
+    // arguments in native layout. `extern(D)`: a dynamic array
     // parameter is not valid on an `extern(C++)` method, and this one is
     // never called from C++ - only `Visitor`'s `visit` overloads need
     // that linkage.
@@ -358,10 +358,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         const parameterCount =
             function_.parameters is null ? 0 : function_.parameters.length;
-        if (args.length != 0 || parameterCount != 0)
+        if (args.length != parameterCount)
             throw new SnakebiteException(
-                "host-to-guest arguments not yet supported by the " ~
-                    "interpreter backend",
+                "interpreter expected " ~ text(parameterCount)
+                    ~ " host-to-guest argument(s), got "
+                    ~ text(args.length),
             );
 
         withCompilerLock({
@@ -371,11 +372,31 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
             try
                 _temporaries.withCall({
+                    bindHostArguments(args, frame.base, layout);
                     executeCall(function_, returnPlace, frame.base, layout);
                 });
             catch (GuestException exception)
                 throw exception._guest;
         });
+    }
+
+    extern(D) private void bindHostArguments(
+        void*[] args,
+        ubyte* frameBase,
+        const(FrameLayout)* layout,
+    ) {
+        import core.stdc.string: memcpy;
+
+        foreach (i, parameter; layout.parameters) {
+            auto argument = args[i];
+            parameter.call.store(
+                frameBase + parameter.offset,
+                () => argument,
+                (void* place) {
+                    memcpy(place, argument, parameter.facts.size);
+                },
+            );
+        }
     }
 
     // Every hash lookup this evaluator has made to find where a name
@@ -606,8 +627,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // no function name, package, or template argument gets a vote.
         // Other non-root declarations still run as native code already
         // linked into the process.
+        // A declaration without a body can only describe a host call,
+        // regardless of which module owns it.
+        auto body_ = function_.fbody;
         const dispatchFacts = dispatchFactsOf(function_);
-        const interpretsDelegateArgument = function_.fbody !is null
+        const interpretsDelegateArgument = body_ !is null
             && hasInterpretedDelegateArgument(callSite);
         // A template instance can inherit the guest module of its call site,
         // even when dmd also emitted a native specialization for it. Check
@@ -616,11 +640,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const interpretsTemplate = dispatchFacts._isTemplate
             && (!dispatchFacts._hasNativeSymbol
                 || interpretsDelegateArgument);
-        const interprets = dispatchFacts._isGuest
-            && !dispatchFacts._isTemplate
-            || interpretsTemplate
-            || interpretsDelegateArgument
-            || isNestedInCurrentlyWalkedFunction(function_);
+        const interprets = body_ !is null
+            && (dispatchFacts._isGuest && !dispatchFacts._isTemplate
+                || interpretsTemplate
+                || interpretsDelegateArgument
+                || isNestedInCurrentlyWalkedFunction(function_));
         if (!interprets) {
             const plan = callSite is null
                 ? &_plans.of(function_)
@@ -647,15 +671,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             throw new SnakebiteException(
                 text("interpreter cannot call `", function_.toString,
                     "`: its class `this` is not bound"),
-            );
-
-        // A root-owned declaration with no body has no code anywhere: the
-        // program owns it, so no library can be expected to implement it.
-        auto body_ = function_.fbody;
-        if (body_ is null)
-            throw new SnakebiteException(
-                text("interpreter cannot call a function with no body: `",
-                    function_.toString, "`"),
             );
 
         const guard = CallStateGuard(this);
@@ -3398,6 +3413,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         if (sourceType.ty == Tpointer && _type.ty == Tpointer) {
             evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
+            return;
+        }
+
+        // An explicit pointer-to-integral cast preserves the native address
+        // bits. `bool` has truth-conversion semantics, so it stays outside
+        // this byte-preserving conversion.
+        if (sourceType.ty == Tpointer && _facts.isIntegral
+                && _type.ty != Tbool) {
+            storeIntegral(
+                _place, cast(size_t) asPointer(expression.e1), _facts.size);
             return;
         }
 

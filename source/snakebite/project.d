@@ -48,7 +48,7 @@ public Project loadProject(in string directory, SourceSet sources) {
         flags,
         project.sources.sourceOverrides,
     );
-    project.program = Program(parsed);
+    project.program = Program(parsed, project.name);
 
     return project;
 }

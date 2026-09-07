@@ -179,6 +179,33 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A pointer-to-integral cast preserves the native address bits. The local
+// array makes the pointer values runtime values, and its two elements show
+// that the bits preserve an `int`-sized address offset, not only non-null.
+static foreach (backend; Matrix!(
+    BytecodeUnconfirmed,
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast a pointer to an integral type"),
+)) {
+    @("cast.pointerToUlong.preservesAddressOffset." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool pointerBitsPreserveOffset() {
+                    int[2] values;
+                    int* first = &values[0];
+                    int* second = &values[1];
+                    return cast(ulong) second - cast(ulong) first
+                        == int.sizeof;
+                }
+            },
+            "pointerBitsPreserveOffset",
+        );
+    }
+}
+
 // `cast(void[])` of a `T[]` scales the length by `T.sizeof`, the same
 // conversion `core.internal.array.appending` applies before calling
 // `gc_expandArrayUsed`/`gc_shrinkArrayUsed`, both of which take `void[]`.
