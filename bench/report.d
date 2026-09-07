@@ -80,7 +80,7 @@ void printTable(in BackendReport[] reports) {
     // Absent (e.g. `-b ctfe` excludes it) means nothing to cross-check
     // against, not a failure.
     const oracleFailed = !oracle.empty && !clean(oracle.front);
-    const ordered = orderByMinimumRunTime(reports);
+    const ordered = orderByMedianRunTime(reports);
 
     string[][] rows = [
         [
@@ -156,12 +156,12 @@ string cycleLine(in BackendReport report) {
     );
 }
 
-BackendReport[] orderByMinimumRunTime(in BackendReport[] reports) {
+BackendReport[] orderByMedianRunTime(in BackendReport[] reports) {
     import std.algorithm.sorting: sort;
 
     auto ordered = reports.dup;
     ordered.sort!((left, right) =>
-        left.runTime.minimum < right.runTime.minimum,
+        left.runTime.median < right.runTime.median,
     );
     return ordered;
 }
