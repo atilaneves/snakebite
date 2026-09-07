@@ -1173,6 +1173,51 @@ package const(Instruction)* opEqual(
     return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
 }
 
+// Integral comparison whose result is used only to choose a control-flow
+// target. `sourceWidth` stores the resolved target address; unlike the
+// value-producing comparison handlers this does not write a temporary bool.
+private const(Instruction)* opCompareBranch(string operation, bool unsigned,
+    bool branchWhenTrue)(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    static if (unsigned)
+        alias load = loadUnsigned;
+    else
+        alias load = loadSigned;
+    const left = load(frame + pc.destination, pc.width);
+    const right = load(frame + pc.source, pc.width);
+    const result = mixin("left " ~ operation ~ " right");
+    if (result == branchWhenTrue)
+        return cast(const(Instruction)*) pc.sourceWidth;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
+}
+
+package alias opLessThanSignedBranch =
+    opCompareBranch!("<", false, false);
+package alias opLessThanUnsignedBranch =
+    opCompareBranch!("<", true, false);
+package alias opLessOrEqualSignedBranch =
+    opCompareBranch!("<=", false, false);
+package alias opLessOrEqualUnsignedBranch =
+    opCompareBranch!("<=", true, false);
+package alias opGreaterThanSignedBranch =
+    opCompareBranch!(">", false, false);
+package alias opGreaterThanUnsignedBranch =
+    opCompareBranch!(">", true, false);
+package alias opGreaterOrEqualSignedBranch =
+    opCompareBranch!(">=", false, false);
+package alias opGreaterOrEqualUnsignedBranch =
+    opCompareBranch!(">=", true, false);
+package alias opEqualBranch = opCompareBranch!("==", false, false);
+package alias opNotEqualBranch = opCompareBranch!("!=", false, false);
+
 // Bytewise equality for two native dynamic-array values. The compiler emits
 // this only when DMD left EqualExp.lowering null, which means the element
 // types are safe for memcmp. `destination` holds the left array on entry and

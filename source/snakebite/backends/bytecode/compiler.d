@@ -702,7 +702,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
         opArrayEqual, opConstant, opCopy, opCopyFixed,
         opDivideSigned, opDivideUnsigned,
-        opEqual,
+        opEqual, opEqualBranch, opGreaterOrEqualSignedBranch,
+        opGreaterOrEqualUnsignedBranch, opGreaterThanSignedBranch,
+        opGreaterThanUnsignedBranch, opLessOrEqualSignedBranch,
+        opLessOrEqualUnsignedBranch, opLessThanSignedBranch,
+        opLessThanUnsignedBranch, opNotEqualBranch,
         opFloatAdd, opFloatDivide, opFloatEqual, opFloatGreaterOrEqual,
         opFloatGreaterThan, opFloatLessOrEqual, opFloatLessThan,
         opFloatModulo, opFloatMultiply, opFloatNegate, opFloatNotEqual,
@@ -1116,7 +1120,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || instruction.handler is &opBranchTrue)
             return &instruction.source;
 
+        if (isComparisonBranch(instruction.handler))
+            return &instruction.sourceWidth;
+
         return null;
+    }
+
+    private bool isComparisonBranch(Instruction.Handler handler) {
+        return handler is &opLessThanSignedBranch
+            || handler is &opLessThanUnsignedBranch
+            || handler is &opLessOrEqualSignedBranch
+            || handler is &opLessOrEqualUnsignedBranch
+            || handler is &opGreaterThanSignedBranch
+            || handler is &opGreaterThanUnsignedBranch
+            || handler is &opGreaterOrEqualSignedBranch
+            || handler is &opGreaterOrEqualUnsignedBranch
+            || handler is &opEqualBranch
+            || handler is &opNotEqualBranch;
     }
 
     private void compileStatement(Statement statement) {
@@ -1631,6 +1651,59 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return offset;
     }
 
+    // Emits one integral comparison and its false branch. This path is only
+    // used when the comparison result is consumed by an enclosing statement;
+    // value-producing comparisons keep the existing lowering.
+    private size_t compileIntegralComparisonBranch(
+        BinExp expression,
+    ) {
+        const facts = TypeFacts.of(expression.e1.type);
+        if (!facts.isIntegral || !isIntegralSize(facts.size))
+            return size_t.max;
+
+        auto handler = comparisonBranchHandler(
+            expression, facts.isUnsigned);
+        if (handler is null)
+            return size_t.max;
+        const leftOffset = reserveTemp(facts);
+        evalInto(expression.e1, leftOffset, facts.size);
+        const rightOffset = reserveTemp(facts);
+        evalInto(expression.e2, rightOffset, facts.size);
+        const index = _instructions.length;
+        emit(handler, leftOffset, rightOffset, facts.size, 0);
+        return index;
+    }
+
+    private Instruction.Handler comparisonBranchHandler(
+        BinExp expression, in bool unsigned,
+    ) {
+        import dmd.tokens: EXP;
+
+        with (EXP) switch (expression.op) {
+            case lessThan:
+                return unsigned
+                    ? &opLessThanUnsignedBranch : &opLessThanSignedBranch;
+            case lessOrEqual:
+                return unsigned
+                    ? &opLessOrEqualUnsignedBranch
+                    : &opLessOrEqualSignedBranch;
+            case greaterThan:
+                return unsigned
+                    ? &opGreaterThanUnsignedBranch
+                    : &opGreaterThanSignedBranch;
+            case greaterOrEqual:
+                return unsigned
+                    ? &opGreaterOrEqualUnsignedBranch
+                    : &opGreaterOrEqualSignedBranch;
+            case equal:
+                return &opEqualBranch;
+            case notEqual:
+                return &opNotEqualBranch;
+            default:
+                return null;
+        }
+    }
+
     private size_t conditionWidth(Expression condition) {
         const facts = TypeFacts.of(condition.type);
         return facts.isDynamicArray ? size_t.sizeof : facts.size;
@@ -1678,17 +1751,25 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        const conditionOffset = compileCondition(statement.condition);
-        const width = conditionWidth(statement.condition);
-
-        const branchIndex = _instructions.length;
-        emit(&opBranchFalse, conditionOffset, 0, width);
+        size_t branchIndex;
+        auto comparison = statement.condition.isBinExp;
+        const comparisonIndex = comparison is null
+            ? size_t.max : compileIntegralComparisonBranch(comparison);
+        if (comparisonIndex != size_t.max) {
+            branchIndex = comparisonIndex;
+        } else {
+            const conditionOffset = compileCondition(statement.condition);
+            const width = conditionWidth(statement.condition);
+            branchIndex = _instructions.length;
+            emit(&opBranchFalse, conditionOffset, 0, width);
+        }
 
         compileStatement(statement.ifbody);
         const ifFinished = _finished;
 
         if (statement.elsebody is null) {
-            _instructions[branchIndex].source = _instructions.length;
+            *branchTargetField(_instructions[branchIndex]) =
+                _instructions.length;
             _finished = false;
             return;
         }
@@ -1706,7 +1787,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             jumpIndex = _instructions.length;
             emit(&opJump, 0, 0, 0);
         }
-        _instructions[branchIndex].source = _instructions.length;
+        *branchTargetField(_instructions[branchIndex]) =
+            _instructions.length;
 
         compileStatement(statement.elsebody);
         const elseFinished = _finished;
@@ -1765,10 +1847,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const conditionIndex = _instructions.length;
         size_t branchIndex = size_t.max;
         if (guarded) {
-            const conditionOffset = compileCondition(statement.condition);
-            const width = conditionWidth(statement.condition);
-            branchIndex = _instructions.length;
-            emit(&opBranchFalse, conditionOffset, 0, width);
+            auto comparison = statement.condition.isBinExp;
+            branchIndex = comparison is null
+                ? size_t.max : compileIntegralComparisonBranch(comparison);
+            if (branchIndex == size_t.max) {
+                const conditionOffset = compileCondition(statement.condition);
+                const width = conditionWidth(statement.condition);
+                branchIndex = _instructions.length;
+                emit(&opBranchFalse, conditionOffset, 0, width);
+            }
         }
 
         _loops ~= LoopContext(label);
@@ -1789,7 +1876,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const afterLoop = _instructions.length;
         if (branchIndex != size_t.max)
-            _instructions[branchIndex].source = afterLoop;
+            *branchTargetField(_instructions[branchIndex]) = afterLoop;
 
         foreach (index; breakable.pendingBreakJumps)
             patchTarget(index, afterLoop);
