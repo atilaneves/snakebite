@@ -6,11 +6,19 @@ import bench.report: BackendReport, timingStatistics, updateTestCounts;
 import snakebite.project: SourceSet;
 
 
-enum wasmName = "wasm32";
+enum wasmName = "wasm32-jit";
+enum wasmAlias = "wasm32";
+enum wasmInterpreterName = "wasm32-interpreter";
+
+enum WasmRuntime {
+    wasmtime,
+    wizard,
+}
 
 struct WasmTools {
     string compiler;
     string runtime;
+    WasmRuntime runtimeKind = WasmRuntime.wasmtime;
 }
 
 // This external row includes the compiler frontend in both cmp and run.
@@ -31,11 +39,14 @@ BackendReport wasmReport(
     import std.uuid: randomUUID;
 
     BackendReport report;
-    report.name = wasmName;
+    report.name = tools.runtimeKind == WasmRuntime.wizard
+        ? wasmInterpreterName : wasmName;
     report.hasCompile = true;
     report.passed = true;
     report.timingNote = "cmp and run include the compiler frontend; "
-        ~ "run also includes Wasmtime startup and JIT compilation";
+        ~ (tools.runtimeKind == WasmRuntime.wizard
+            ? "run also includes Wizard interpreter startup"
+            : "run also includes Wasmtime startup and JIT compilation");
 
     const temporary = buildPath(tempDir, "snakebite-wasm32-" ~ randomUUID.toString);
     mkdir(temporary);
@@ -50,10 +61,11 @@ BackendReport wasmReport(
             ~ dmdArguments(sources)
             ~ ["-unittest", "-main", "-od=" ~ temporary, "-of=" ~ output]
             ~ prepared.timedSources ~ prepared.objects ~ prepared.archives;
-        const execute = [
-            tools.runtime, "run", "-C", "cache=n", "-W", "exceptions=y",
-            "--dir=/", "--env", "PWD=" ~ prepared.workingDirectory, output,
-        ];
+        const execute = tools.runtimeKind == WasmRuntime.wizard
+            ? [tools.runtime, "--mode=int", "--dir=/",
+                "--env=PWD=" ~ prepared.workingDirectory, output]
+            : [tools.runtime, "run", "-C", "cache=n", "-W", "exceptions=y",
+                "--dir=/", "--env", "PWD=" ~ prepared.workingDirectory, output];
 
         Duration[] compileTimes;
         Duration[] cycleTimes;
@@ -99,6 +111,22 @@ private string diagnostic(in ProcessResult result) {
     import std.conv: text;
 
     return text("exit status ", result.status, "\n", result.stderr_, result.stdout_);
+}
+
+WasmTools defaultWizardTools() {
+    import std.file: thisExePath;
+    import std.path: absolutePath, buildNormalizedPath, buildPath, dirName;
+    import std.process: environment;
+
+    const root = environment.get(
+        "SNAKEBITE_WASM32_ROOT",
+        thisExePath.dirName.buildNormalizedPath("..", ".tools", "wasm32"),
+    ).absolutePath;
+    return WasmTools(
+        buildPath(root, "dmd", "generated", "linux", "release", "64", "dmd"),
+        buildPath(root, "bin", "wizeng"),
+        WasmRuntime.wizard,
+    );
 }
 
 private WasmTools defaultWasmTools() {
