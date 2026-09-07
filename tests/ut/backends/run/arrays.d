@@ -347,6 +347,53 @@ static foreach (backend; Matrix!(
     }
 }
 
+// `a[] = v` for a dynamic array evaluates the scalar `v` once, then
+// broadcasts it into every element, at a length known only at run time -
+// the same shape `core/internal/newaa.d`'s own `allocEntry` needs for
+// `(cast(ubyte*)&entry.value)[0 .. V.sizeof] = 0` when zeroing a freshly
+// allocated associative array entry whose value type is not already
+// zero-initialised. Unlike `dynamicSliceCopyFromDynamicSlice` above, no
+// element-by-element source read is needed, only one broadcast write per
+// element.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] a = [1, 2, 3];
+                a[] = 7;
+                assert(a[0] == 7);
+                assert(a[1] == 7);
+                assert(a[2] == 7);
+            }
+        });
+    }
+}
+
+// `a[m .. n] = v` fills only the bounded slice, at whatever run-time
+// start `m` names - not necessarily zero - leaving the elements outside
+// the slice untouched.
+static foreach (backend; Matrix!(
+)) {
+    @("dynamicSliceScalarFill.nonZeroStart." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] a = [1, 2, 3, 4, 5];
+                a[1 .. 4] = 9;
+                assert(a[0] == 1);
+                assert(a[1] == 9);
+                assert(a[2] == 9);
+                assert(a[3] == 9);
+                assert(a[4] == 5);
+            }
+        });
+    }
+}
+
 // `a[] += b[]` for two dynamic arrays of the same length adds `b`'s
 // elements into `a`'s, in place, at a length known only at run time.
 // druntime lowers this to `core.internal.array.operations`'s `arrayOp`

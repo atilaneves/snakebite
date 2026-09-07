@@ -323,3 +323,31 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// Inserting into an associative array whose value type's own `.init` is
+// not all zero bits (`Value`'s own defaults are `1.5` and `'x'`, neither
+// zero) reaches `core/internal/newaa.d`'s own `allocEntry`, which zeroes
+// the freshly carved-out entry by hand - `(cast(ubyte*)&entry.value)[0
+// .. V.sizeof] = 0` - since a fresh `malloc`'d bucket is not already
+// zeroed the way `int[int]`'s own zero-init value type (see this
+// module's other AA tests) never needs that fill at all.
+static foreach (backend; Matrix!(
+)) {
+    @("assocArrayInsertWithNonZeroInitValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Value {
+                float f = 1.5;
+                char c = 'x';
+            }
+
+            void main() {
+                Value[int] table;
+                table[1] = Value(2.5, 'y');
+                assert(table[1].f == 2.5);
+                assert(table[1].c == 'y');
+            }
+        });
+    }
+}
