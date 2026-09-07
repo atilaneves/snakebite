@@ -429,6 +429,7 @@ unittest {
 
     (caught !is null).should == true;
     caught.line.should == 5;
+    caught.msg.should == "index [5] is out of bounds for array of length 3";
 }
 
 // The same bounds check, but with an unrelated assertion earlier in the
@@ -465,6 +466,7 @@ unittest {
 
     (caught !is null).should == true;
     caught.line.should == 7;
+    caught.msg.should == "index [9] is out of bounds for array of length 1";
 }
 
 static foreach (backend; Matrix!()) {

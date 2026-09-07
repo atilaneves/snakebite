@@ -784,9 +784,9 @@ static foreach (backend; Matrix!(
 // as an out-of-bounds slice - both are one contract in compiled D, not
 // two, so a guest catching `RangeError` around an index must see it.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed,
-        "confirmed: the ctfe backend reports an out-of-bounds index as " ~
-        "its own interpreter error, not as a guest-catchable `RangeError`"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
 )) {
     @("dynamicIndex.outOfBoundsIsRangeError." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1002,6 +1002,8 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns an out-of-range index into a compile-time error, so " ~
         "it cannot be expressed the same way as a runtime throw"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "cannot compile `a[i]++`: `PostExp` on an `IndexExp` is rejected"),
 )) {
     @("dynamicIndex.incrementIsRangeError." ~ backend.stringof)
     @Tags(backend.stringof)

@@ -462,12 +462,12 @@ static foreach (backend; Matrix!()) {
 // contract a dynamic array's index has - see
 // `ut.backends.run.arrays.dynamicIndex.outOfBoundsIsRangeError`'s own doc.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed,
-        "confirmed: the ctfe backend reports an out-of-bounds index as " ~
-        "its own interpreter error, not as a guest-catchable `RangeError`"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
     Omit!(Interpreter, Because.unconfirmed,
-        "confirmed: the interpreter refuses an out-of-bounds static array " ~
-        "index as its own error, not as a guest-catchable `RangeError`"),
+        "the interpreter refuses an out-of-bounds static array index as " ~
+        "its own error, not as a guest-catchable `RangeError`"),
 )) {
     @("staticArray.outOfBoundsIndexIsRangeError." ~ backend.stringof)
     @Tags(backend.stringof)
