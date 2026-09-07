@@ -280,11 +280,10 @@ static foreach (backend; Matrix!(
     }
 }
 
-// A struct literal can initialize a field of its own AA-typed field
-// (self-referentially, through the AA's value type) from an associative
-// array literal - the AA field is a plain pointer-sized handle to
-// druntime's own hash table, no different from any other field this
-// literal writes.
+// A struct literal can initialize an AA-typed field from an AA literal,
+// even when the AA's value type is the struct itself - the AA field is
+// a plain pointer-sized handle to druntime's own hash table, no
+// different from any other field this literal writes.
 static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.unconfirmed,
         "`isSupportedStructLiteral` rejects every field but an integral, " ~
@@ -303,6 +302,28 @@ static foreach (backend; Matrix!(
                 auto n = Nested([7: Nested()]);
                 assert(n.aa.length == 1);
                 assert(7 in n.aa);
+            }
+        });
+    }
+}
+
+// `is` on a bare AA compares it against `null` without going through any
+// struct field at all.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "the bytecode compiler has no lowering for `is`/`!is` between an " ~
+            "AA and `null`"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter's `is`/`!is` evaluation only handles operands " ~
+            "whose type is not an associative array"),
+)) {
+    @("bareAaIsNull." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[int] aa;
+                assert(aa is null);
             }
         });
     }
