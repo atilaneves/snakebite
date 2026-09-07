@@ -463,3 +463,58 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// `with (obj)` on a class reference: `wthis` holds the reference, so a
+// field write reaches the object and an unqualified virtual call in the
+// body dispatches on the object's dynamic type.
+static foreach (backend; Matrix!()) {
+    @("withClassReferenceWritesFieldAndDispatchesVirtually." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int x;
+                int get() { return x; }
+            }
+            class Derived: Base {
+                override int get() { return x * 2; }
+            }
+
+            void main() {
+                Base b = new Derived;
+                int r;
+                with (b) {
+                    x = 21;
+                    r = get();
+                }
+                assert(b.x == 21);
+                assert(r == 42);
+            }
+        });
+    }
+}
+
+// `with (new C)` on a class rvalue: `wthis` is initialised once with the
+// new reference and the body's members resolve through it.
+static foreach (backend; Matrix!()) {
+    @("withClassRvalue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C {
+                int x;
+                this() { x = 1; }
+            }
+
+            void main() {
+                int r;
+                with (new C) {
+                    x += 1;
+                    r = x;
+                }
+                assert(r == 2);
+            }
+        });
+    }
+}

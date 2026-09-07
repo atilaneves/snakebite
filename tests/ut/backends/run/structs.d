@@ -12,9 +12,7 @@ import ut.backends;
 // `with` on a struct evaluates the value once, then resolves each unqualified
 // member through that same storage. The assignments must update the source
 // value, not a copied temporary.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed, "no WithStatement support"),
-)) {
+static foreach (backend; Matrix!()) {
     @("struct.withStatementUsesAggregateStorage." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -2728,9 +2726,7 @@ static foreach (backend; Matrix!()) {
 // reads a field of the with-object: the same `WithStatement` gap as
 // `struct.withStatementUsesAggregateStorage` in this module, exercised
 // with a statement body instead of a block.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed, "no WithStatement support"),
-)) {
+static foreach (backend; Matrix!()) {
     @("withStatementSingleStatementBodyReadsAggregateField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -2743,6 +2739,36 @@ static foreach (backend; Matrix!(
                 with (s)
                     len = cast(int) things.length - 2;
                 assert(len == 1);
+            }
+        });
+    }
+}
+
+// `with (val) ... things.length ...` where `val` is a `ref` parameter and
+// `things` is a dynamic array field: unlike
+// `withStatementSingleStatementBodyReadsAggregateField`'s static array,
+// whose `.length` is a manifest constant dmd folds away, a dynamic array's
+// `.length` is a runtime read of the `{ size_t length; T* ptr; }` field at
+// offset 0 - so this reaches through `wthis` into the aggregate's own
+// storage instead of skipping it entirely. This is the shape
+// `cerealed.cereal.lengthOfArray`'s `with(val) _tmpLen =
+// cast(int)(things.length);` mixin builds.
+static foreach (backend; Matrix!()) {
+    @("withStatementReadsRefParameterDynamicArrayLength." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int[] things; }
+
+            int lengthOfArray(ref S val) {
+                int _tmpLen;
+                with (val) _tmpLen = cast(int) things.length;
+                return _tmpLen;
+            }
+
+            void main() {
+                S s = S([1, 2, 3, 4]);
+                assert(lengthOfArray(s) == 4);
             }
         });
     }
@@ -2767,6 +2793,209 @@ static foreach (backend; Matrix!(
 
             void main() {
                 assert(to!string(Color.green) == "green");
+            }
+        });
+    }
+}
+
+// `with (makeS())` on an rvalue struct: dmd rewrites it to
+// `{ auto __withtmp = makeS(); with (__withtmp) ... }`, so the temporary
+// is an ordinary local whose destructor runs once when the enclosing
+// scope ends, after the body ran, and the body's writes land in it.
+static foreach (backend; Matrix!()) {
+    @("withRvalueStructRunsDestructorOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int x;
+                int* dtors;
+                ~this() { ++*dtors; }
+            }
+
+            S makeS(int* dtors) { return S(7, dtors); }
+
+            void main() {
+                int count;
+                int seen;
+                {
+                    with (makeS(&count)) {
+                        x += 1;
+                        seen = x;
+                        assert(count == 0);
+                    }
+                    assert(count == 1);
+                }
+                assert(seen == 8);
+                assert(count == 1);
+            }
+        });
+    }
+}
+
+// Nested `with`: the inner body resolves `a` through the inner `wthis`
+// and `b` through the outer one, and both write to the original storage.
+static foreach (backend; Matrix!()) {
+    @("withNestedResolvesThroughBothAggregates." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner { int a; }
+            struct Outer { int b; Inner inner; }
+
+            void main() {
+                Outer outer = Outer(1, Inner(10));
+                with (outer) {
+                    with (inner) {
+                        a += b;
+                        b = 5;
+                    }
+                    b += 1;
+                }
+                assert(outer.inner.a == 11);
+                assert(outer.b == 6);
+            }
+        });
+    }
+}
+
+// A local with a destructor declared inside a `with` body: it gets its
+// own frame slot next to `wthis`, is destroyed once at the end of the
+// body, and the body's write through `wthis` reaches the aggregate.
+static foreach (backend; Matrix!()) {
+    @("withBodyLocalWithDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct T { int v; int* dtors; ~this() { ++*dtors; } }
+            struct S { int x; int y; }
+
+            void main() {
+                int dtors;
+                S s = S(2, 3);
+                with (s) {
+                    int product = x * y;
+                    T t = T(product, &dtors);
+                    x = t.v;
+                    assert(dtors == 0);
+                }
+                assert(dtors == 1);
+                assert(s.x == 6);
+            }
+        });
+    }
+}
+
+// `with (p)` on a pointer to struct and `with (*p)`: dmd inserts a
+// `PtrExp` for the pointer and then takes the address again, so `wthis`
+// is the pointer itself either way and writes reach the pointee.
+static foreach (backend; Matrix!()) {
+    @("withPointerToStructWritesPointee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; int y; }
+
+            void main() {
+                S s = S(1, 2);
+                S* p = &s;
+                with (p) {
+                    x = 10;
+                }
+                with (*p) {
+                    y = x + 10;
+                }
+                assert(s.x == 10);
+                assert(s.y == 20);
+            }
+        });
+    }
+}
+
+// A method called unqualified in a `with` body gets the aggregate's own
+// storage as `this`, so a mutating method changes the original.
+static foreach (backend; Matrix!()) {
+    @("withBodyCallsMethodOnAggregate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int x;
+                void bump() { ++x; }
+                int twice() const { return x * 2; }
+            }
+
+            void main() {
+                S s = S(4);
+                int r;
+                with (s) {
+                    bump();
+                    r = twice();
+                }
+                assert(s.x == 5);
+                assert(r == 10);
+            }
+        });
+    }
+}
+
+// A `return` inside a `with` body over a `ref` parameter: the early
+// return leaves the body, and the fall-through path's write still
+// reaches the caller's storage.
+static foreach (backend; Matrix!()) {
+    @("withBodyReturnsEarly." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+
+            int f(ref S s) {
+                with (s) {
+                    if (x > 0)
+                        return x;
+                    x = -x;
+                }
+                return s.x + 100;
+            }
+
+            void main() {
+                S a = S(3);
+                S b = S(-2);
+                assert(f(a) == 3);
+                assert(f(b) == 102);
+                assert(b.x == 2);
+            }
+        });
+    }
+}
+
+// A delegate declared in the `with` body reads a member unqualified, so
+// dmd resolves it through `wthis` and puts `wthis` itself in the
+// closure: the delegate must still see the aggregate's live storage
+// after the `with` ended.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "confirmed: dmd's CTFE rejects the snippet with \"closures are " ~
+        "not yet supported in CTFE\""),
+)) {
+    @("withBodyDelegateCapturesAggregate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+
+            int delegate() make(ref S s) {
+                with (s) {
+                    int delegate() dg = () => x + 1;
+                    return dg;
+                }
+            }
+
+            void main() {
+                S s = S(41);
+                auto dg = make(s);
+                s.x = 1;
+                assert(dg() == 2);
             }
         });
     }

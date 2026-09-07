@@ -698,7 +698,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         GotoCaseStatement, GotoDefaultStatement, IfStatement, ImportStatement,
         LabelStatement, ReturnStatement, ScopeStatement, Statement,
         SwitchErrorStatement, SwitchStatement, ThrowStatement,
-        TryCatchStatement, TryFinallyStatement, UnrolledLoopStatement;
+        TryCatchStatement, TryFinallyStatement, UnrolledLoopStatement,
+        WithStatement;
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
         Arg, AssertSite, CallSite, ClosureSlot, discardResult,
@@ -1285,6 +1286,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(ImportStatement statement) {
+    }
+
+    // Semantic analysis resolves every member access in a `with` body
+    // through its compiler-generated `wthis` temporary, the same way the
+    // interpreter's own `visit(WithStatement)` describes: initialise that
+    // temporary once, then compile the body as-is - the body's own
+    // `DotVarExp`/`PtrExp` nodes already name `wthis` directly, needing no
+    // support beyond what a hand-written pointer-typed local already gets.
+    // `with (Scope)` and `with (EnumType)` leave `wthis` null: they only
+    // change name lookup, which semantic analysis already resolved, so
+    // only the body needs compiling.
+    override void visit(WithStatement statement) {
+        if (statement.wthis !is null)
+            compileVariableInitializer(statement.wthis, statement.loc,
+                statementText(statement));
+
+        if (statement._body !is null)
+            compileStatement(statement._body);
     }
 
     override void visit(TryCatchStatement statement) {
@@ -2138,10 +2157,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (variable._init.isVoidInitializer !is null)
             return;
 
+        compileVariableInitializer(variable, expression.loc,
+            expressionText(expression));
+    }
+
+    // Runs `variable`'s own initialiser into whichever storage its layout
+    // gave it: a closure slot, a frame slot holding an address (a `ref`
+    // local), or a frame slot holding a value. `with (aggregate) ...`'s
+    // own `wthis` takes the last path: its slot holds the pointer or
+    // class reference value its initialiser evaluates to, not a `ref`
+    // local's address. Shared between a local declaration
+    // (`compileDeclaration`, where `loc`/`operation` name the whole
+    // `int sum = 0;`) and a `with` statement's own compiler-generated
+    // temporary (where they name the `with (...)` itself, since it has no
+    // declaration of its own to render).
+    private void compileVariableInitializer(
+        VarDeclaration variable,
+        imported!"dmd.location".Loc loc,
+        in string operation,
+    ) {
         auto expInitializer = variable._init.isExpInitializer;
         if (expInitializer is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+            throw rejection(_function, loc, operation);
 
         const facts = TypeFacts.of(variable.type);
         auto initializer = initializerValueOf(expInitializer);
@@ -2155,8 +2192,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || _bytecode.hasNativeSymbol(nativeCall.f));
         if (!isSupportedFacts(facts, variable.type)
                 && !nativeAggregateReturn)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+            throw rejection(_function, loc, operation);
 
         if (isClosureVariable(variable)) {
             const slot = _closureLayout.slotOf(variable);
@@ -2184,7 +2220,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // local shape a `ref int x = y;` written by hand has. Its own
         // slot holds `y`'s address, not `y`'s value, so this stores the
         // address `compileAddress` computes rather than evaluating the
-        // initialiser as a value the way a by-value local's is.
+        // initialiser as a value the way a by-value local's is. `with`'s
+        // `wthis` is not laid out this way: `FrameLayout.collectVariable`
+        // sets `isRef` only for `STC.ref_`, and `wthis` is `STC.temp`, so
+        // it falls through to the plain `evalInto` path below instead.
         if (_layout.isRef(variable)) {
             const addressOffset = compileAddress(initializerValueOf(expInitializer));
             emit(&opCopy, offset, addressOffset, size_t.sizeof);
