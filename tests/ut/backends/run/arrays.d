@@ -807,3 +807,270 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// Compiled D's bounds check calls `_d_arraybounds_indexp`, which throws
+// `core.exception.ArrayIndexError`, a `RangeError` subclass - so a guest
+// `catch (ArrayIndexError)` around an index must match, not only a
+// `catch (RangeError)`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("dynamicIndex.catchArrayIndexError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: ArrayIndexError;
+
+            void main() {
+                int[] a = [1, 2, 3];
+                bool caught;
+                try {
+                    auto val = a[3];
+                } catch (ArrayIndexError) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+// druntime's `ArrayIndexError` message names the failing index and the
+// array's length; a guest that reports `e.msg` must see the same text.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("dynamicIndex.msgNamesIndexAndLength." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
+            void main() {
+                int[] a = [1, 2, 3];
+                string msg;
+                try {
+                    auto val = a[3];
+                } catch (RangeError e) {
+                    msg = e.msg;
+                }
+                assert(msg == "index [3] is out of bounds for array of length 3");
+            }
+        });
+    }
+}
+
+// `p[i]` has no length to check against, so compiled D never bounds-checks
+// a pointer index - a read, a write, and an address-of through one must
+// all reach memory the pointer legitimately covers.
+static foreach (backend; Matrix!()) {
+    @("pointerIndex.notBoundsChecked." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] a = [1, 2, 3];
+                int[] b = a[0 .. 1];
+                int* p = b.ptr;
+                assert(p[2] == 3);
+                p[2] = 7;
+                assert(a[2] == 7);
+                assert(*(&p[2]) == 7);
+            }
+        });
+    }
+}
+
+// `$` is the array's length, so `a[$ - 1]` is the last element and `a[$]`
+// is one past it, a `RangeError`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("dynamicIndex.dollarAtLengthIsRangeError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
+            void main() {
+                int[] a = [1, 2, 3];
+                assert(a[$ - 1] == 3);
+                bool caught;
+                try {
+                    auto val = a[$];
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+// An index is converted to `size_t`, so a negative one wraps to a huge
+// value - still a `RangeError`, never a read before the array.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("dynamicIndex.negativeIsRangeError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
+            void main() {
+                int[] a = [1, 2, 3];
+                int i = -1;
+                bool caught;
+                try {
+                    auto val = a[i];
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+// The bounds check applies to a write through the index, not only a read.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("dynamicIndex.lvalueAssignIsRangeError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
+            void main() {
+                int[] a = [1, 2, 3];
+                bool caught;
+                try {
+                    a[3] = 1;
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+// Taking an element's address is bounds-checked the same as reading it:
+// `&a[3]` on a three-element array is a `RangeError`, not a pointer past
+// the end.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("dynamicIndex.addressOfIsRangeError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
+            void main() {
+                int[] a = [1, 2, 3];
+                bool caught;
+                try {
+                    int* p = &a[3];
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+// `a[i]++` indexes as an lvalue and is bounds-checked like any other
+// element write.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("dynamicIndex.incrementIsRangeError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
+            void main() {
+                int[] a = [1, 2, 3];
+                bool caught;
+                try {
+                    a[3]++;
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+// `RangeError` derives from `Error`, so a guest `catch (Error)` handles an
+// out-of-bounds index too.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("dynamicIndex.catchErrorBase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] a = [1, 2, 3];
+                bool caught;
+                try {
+                    auto val = a[3];
+                } catch (Error) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+// A null array has length zero, so `a[0]` on it is a `RangeError` - never
+// a dereference of the null pointer.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("dynamicIndex.nullArrayIsRangeError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
+            void main() {
+                int[] a;
+                bool caught;
+                try {
+                    auto val = a[0];
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}

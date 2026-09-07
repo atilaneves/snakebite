@@ -490,3 +490,96 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// A static array's bounds check covers a write, an address-of, `$`, and a
+// wrapped negative index alike, with the same `RangeError` a read gets.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter reports an out-of-bounds static array index as " ~
+        "its own internal error, not as a guest-catchable `RangeError`"),
+)) {
+    @("staticArray.lvalueShapesAreRangeError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
+            int index() { return 3; }
+
+            void main() {
+                int[3] a = [1, 2, 3];
+                int caught;
+                try { a[index()] = 1; } catch (RangeError) { caught++; }
+                try { int* p = &a[index()]; } catch (RangeError) { caught++; }
+                try { auto v = a[$ - index()]; assert(v == 1); } catch (RangeError) { caught++; }
+                int neg = -1;
+                try { auto v = a[neg]; } catch (RangeError) { caught++; }
+                assert(caught == 3);
+            }
+        });
+    }
+}
+
+// `m[1][i]` checks the inner index against the inner dimension and `m[i]`
+// the outer one against the outer dimension - each level is its own check.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter reports an out-of-bounds static array index as " ~
+        "its own internal error, not as a guest-catchable `RangeError`"),
+)) {
+    @("staticArray.nestedIndexIsRangeError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+
+            int index() { return 3; }
+
+            void main() {
+                int[3][2] m;
+                bool caught;
+                try { m[1][index()] = 1; } catch (RangeError) { caught = true; }
+                assert(caught);
+                caught = false;
+                try { auto row = m[index() - 1]; } catch (RangeError) { caught = true; }
+                assert(caught);
+            }
+        });
+    }
+}
+
+// As `ut.backends.run.arrays.dynamicIndex.catchArrayIndexError`, for a
+// static array: compiled D throws `ArrayIndexError`, a `RangeError`
+// subclass, so a guest `catch (ArrayIndexError)` must match.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "the interpreter reports an out-of-bounds static array index as " ~
+        "its own internal error, not as a guest-catchable `RangeError`"),
+)) {
+    @("staticArray.catchArrayIndexError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: ArrayIndexError;
+
+            int index() { return 3; }
+
+            void main() {
+                int[3] a;
+                bool caught;
+                try { auto v = a[index()]; } catch (ArrayIndexError) { caught = true; }
+                assert(caught);
+            }
+        });
+    }
+}

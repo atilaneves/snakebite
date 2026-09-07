@@ -320,9 +320,6 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns an out-of-range index into a compile-time error, so " ~
         "it cannot be expressed the same way as a runtime throw"),
-    Omit!(Interpreter, Because.diverges,
-        "the interpreter refuses an out-of-range index instead, since it " ~
-        "has no guest try/catch to throw into"),
 )) {
     @("arrays.index.outOfRange.throws.RangeError." ~ backend.stringof)
     @Tags(backend.stringof)
