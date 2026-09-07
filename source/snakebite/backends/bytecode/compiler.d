@@ -59,16 +59,15 @@ private bool isSupportedFacts(
 // `union` (whose fields this compiler cannot lay out from a plain field
 // list) and not nested in an enclosing scope (a local struct with its own
 // `this` captured context, unsupported the same way a method is), whose
-// every field is itself one of an integral this compiler already lays
-// out, a dynamic array (a plain two-word slice, copied the same way an
-// integral field is - by value, sharing whatever it points at), or a
-// nested struct meeting this same predicate. `declaration.zeroInit` is
-// required too: this compiler's only default-value story for a struct is
-// zeroing its bytes (see `opZero`), the same way `nativelayout.storeValue`
-// already special-cases a zero-init struct's own `.init` elsewhere.
+// every field is itself either a nested struct meeting this same
+// predicate or a type `nativelayout.isNativeBytes` accepts.
+// `declaration.zeroInit` is required too: this compiler's only
+// default-value story for a struct is zeroing its bytes (see `opZero`),
+// the same way `nativelayout.storeValue` already special-cases a
+// zero-init struct's own `.init` elsewhere.
 private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: STC, Tarray, Tpointer;
-    import snakebite.nativelayout: isIntegralSize, TypeFacts;
+    import dmd.astenums: STC;
+    import snakebite.nativelayout: isNativeBytes;
 
     auto structType = type.isTypeStruct;
     if (structType is null)
@@ -94,11 +93,7 @@ private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
             continue;
         }
 
-        if (field.type.ty == Tarray || field.type.ty == Tpointer)
-            continue;
-
-        const facts = TypeFacts.of(field.type);
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
+        if (!isNativeBytes(field.type))
             return false;
     }
 
@@ -119,8 +114,8 @@ private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
 // `TrackerHolder(1, tracker)` both qualify even though neither is a
 // plain-old struct on its own.
 private bool isSupportedStructLiteral(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: STC, Tarray, Tpointer;
-    import snakebite.nativelayout: isIntegralSize, TypeFacts;
+    import dmd.astenums: STC;
+    import snakebite.nativelayout: isNativeBytes;
 
     auto structType = type.isTypeStruct;
     if (structType is null)
@@ -143,11 +138,7 @@ private bool isSupportedStructLiteral(imported!"dmd.mtype".Type type) {
             continue;
         }
 
-        if (field.type.ty == Tarray || field.type.ty == Tpointer)
-            continue;
-
-        const facts = TypeFacts.of(field.type);
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
+        if (!isNativeBytes(field.type))
             return false;
     }
 
@@ -173,32 +164,25 @@ private imported!"snakebite.nativelayout".TypeFacts pointerFactsOf() {
     return TypeFacts(size_t.sizeof, size_t.sizeof, false, true);
 }
 
-// An array element type this compiler can lay out: every integral width it
-// already accepts elsewhere, plus `float`/`double`/`real`, which have no
-// `.init` this compiler can write any other way but zero, and a pointer -
-// a plain `size_t.sizeof`-wide value copied by value, sharing whatever it
-// points at, the same way `isPlainOldStruct` already treats a pointer
-// *field* as ordinary bytes rather than something needing an element-wise
-// visit.
-private bool isSupportedElementFacts(
-    in imported!"snakebite.nativelayout".TypeFacts facts,
-    imported!"dmd.mtype".Type type,
-) {
-    import dmd.astenums: Tpointer;
-    import snakebite.nativelayout: isIntegralSize;
+// An array element type this compiler can lay out: any
+// `nativelayout.isNativeBytes` type, whether a plain scalar or a
+// `isPlainOldStruct` aggregate - a nested struct element still needs that
+// stricter aggregate-level rule, not just the field-type check, since an
+// element is copied and constructed the same way a struct's own field is.
+private bool isSupportedElementType(imported!"dmd.mtype".Type type) {
+    import snakebite.nativelayout: isNativeBytes;
 
-    return (facts.isIntegral && isIntegralSize(facts.size))
-        || isFloatingType(type)
-        || type.ty == Tpointer
-        || isPlainOldStruct(type)
-        || isSupportedStaticArray(type);
+    if (type.isTypeStruct !is null)
+        return isPlainOldStruct(type);
+
+    return isNativeBytes(type);
 }
 
 // Whether this compiler can lay `type` out as a static array's own
 // in-place bytes: `T[N]` whose element `T` is itself one this compiler
 // already lays out - an integral, `float`/`double`/`real`, a struct, or
-// another static array (`int[3][2]`, nested). Mutually recursive with
-// `isSupportedElementFacts` for exactly that nesting.
+// another static array (`int[3][2]`, nested - `nativelayout.isNativeBytes`
+// recurses to the innermost element on its own).
 //
 // This asks nothing about postblits or destructors on its own: dmd's own
 // semantic pass (`expressionsem.d`'s `lowerArrayAssign`, and the
@@ -208,18 +192,15 @@ private bool isSupportedElementFacts(
 // compiler ever sees the expression. A plain `AssignExp`/`ArrayLiteralExp`
 // node reaching this compiler is therefore already an element type with
 // no postblit or destructor to run - `isPlainOldStruct`'s check for that,
-// reached through `isSupportedElementFacts` below, is about laying a
+// reached through `isSupportedElementType` below, is about laying a
 // struct's fields out at all, not a second guard against the same thing
 // dmd's lowering already ruled out.
 private bool isSupportedStaticArray(imported!"dmd.mtype".Type type) {
-    import snakebite.nativelayout: TypeFacts;
-
     auto sarrayType = type.isTypeSArray;
     if (sarrayType is null)
         return false;
 
-    auto element = sarrayType.next;
-    return isSupportedElementFacts(TypeFacts.of(element), element);
+    return isSupportedElementType(sarrayType.next);
 }
 
 
@@ -2699,7 +2680,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto sarrayType = target.e1.type.isTypeSArray;
         const elementFacts = TypeFacts.of(sarrayType.next);
-        if (!isSupportedElementFacts(elementFacts, sarrayType.next))
+        if (!isSupportedElementType(sarrayType.next))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -2797,8 +2778,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     //
     // Only a plain-bytes element is supported: `void` (a class `.init`
     // image's own element type, and every element type this reaches
-    // through, since `isSupportedElementFacts` never accepts `void`) or
-    // anything `isSupportedElementFacts` already lays out elsewhere. dmd's
+    // through, since `isSupportedElementType` never accepts `void`) or
+    // anything `isSupportedElementType` already lays out elsewhere. dmd's
     // own semantic pass already rewrites an assignment whose element has
     // a postblit or destructor into a call to
     // `_d_arrayassign_l`/`_d_arrayassign_r` before this compiler ever
@@ -2824,13 +2805,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 expressionText(expression));
 
         if (elementType.ty != Tvoid
-                && !isSupportedElementFacts(
-                    TypeFacts.of(elementType), elementType))
+                && !isSupportedElementType(elementType))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
         if (sourceElementType.ty != Tvoid
-                && !isSupportedElementFacts(
-                    TypeFacts.of(sourceElementType), sourceElementType))
+                && !isSupportedElementType(sourceElementType))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -6091,7 +6070,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 expressionText(expression));
 
         const elementFacts = TypeFacts.of(expression.type.nextOf);
-        if (!isSupportedElementFacts(elementFacts, expression.type.nextOf))
+        if (!isSupportedElementType(expression.type.nextOf))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -6167,7 +6146,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         auto sarrayType = expression.type.isTypeSArray;
         const elementFacts = TypeFacts.of(sarrayType.next);
-        if (!isSupportedElementFacts(elementFacts, sarrayType.next))
+        if (!isSupportedElementType(sarrayType.next))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 

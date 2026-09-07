@@ -2265,6 +2265,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     private bool supportsStruct(Type type) {
         import dmd.astenums: STC;
+        import snakebite.nativelayout: isNativeBytes;
 
         auto structType = type.isTypeStruct;
         if (structType is null)
@@ -2305,29 +2306,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 continue;
             }
 
-            // A dynamic array field is a plain two-word slice - a
-            // length and a pointer, in whichever order the compiler's
-            // ABI puts them - with no copy hook of its own, so the
-            // bytewise copy this predicate guards handles it: the copy
-            // shares the same elements, exactly as compiled D
-            // assignment of a slice does. It is not integral, so
-            // without this the size/integrality check below would
-            // reject it.
-            if (field.type.ty == Tarray)
-                continue;
-
-            // A pointer, associative-array or class-reference field is a
-            // plain machine word too - respectively a raw address, a
-            // pointer to druntime's own hash table, and a pointer to the
-            // object's own instance - none with a copy hook of its own,
-            // the same reason `Tarray` above is a bytewise copy rather
-            // than a rejection.
-            if (field.type.ty == Tpointer || field.type.ty == Taarray
-                || field.type.ty == Tclass)
-                continue;
-
-            const facts = factsOf(field.type);
-            if (!facts.isIntegral || !isIntegralSize(facts.size))
+            if (!isNativeBytes(field.type))
                 return false;
         }
 
