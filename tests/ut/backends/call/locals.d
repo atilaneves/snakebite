@@ -131,7 +131,8 @@ static foreach (backend; Matrix!(
             q{
                 ulong inc() {
                     static ulong n = 7;
-                    n += 1;
+                    static ulong function() step = () => 1;
+                    n += step();
                     return n;
                 }
 

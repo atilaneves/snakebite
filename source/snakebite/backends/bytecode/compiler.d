@@ -50,7 +50,7 @@ private bool isSupportedFacts(
         || type.ty == Taarray
         || type.ty == Tdelegate
         || type.isTypeStruct !is null
-        || isSupportedStaticArray(type);
+        || type.isTypeSArray !is null;
 }
 
 // Whether this compiler can treat `type` as plain bytes it never has to
@@ -61,10 +61,6 @@ private bool isSupportedFacts(
 // `this` captured context, unsupported the same way a method is), whose
 // every field is itself either a nested struct meeting this same
 // predicate or a type `nativelayout.isNativeBytes` accepts.
-// `declaration.zeroInit` is required too: this compiler's only
-// default-value story for a struct is zeroing its bytes (see `opZero`),
-// the same way `nativelayout.storeValue` already special-cases a
-// zero-init struct's own `.init` elsewhere.
 private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
     import dmd.astenums: STC;
     import snakebite.nativelayout: isNativeBytes;
@@ -74,8 +70,7 @@ private bool isPlainOldStruct(imported!"dmd.mtype".Type type) {
         return false;
 
     auto declaration = structType.sym;
-    if (!declaration.zeroInit
-            || declaration.isUnionDeclaration !is null
+    if (declaration.isUnionDeclaration !is null
             || declaration.enclosing !is null
             || declaration.postblit !is null || declaration.hasCopyCtor
             || declaration.dtor !is null
@@ -186,33 +181,8 @@ private bool isSupportedElementType(imported!"dmd.mtype".Type type) {
     return isNativeBytes(type);
 }
 
-// Whether this compiler can lay `type` out as a static array's own
-// in-place bytes: `T[N]` whose element `T` is itself one this compiler
-// already lays out - an integral, `float`/`double`/`real`, a struct, or
-// another static array (`int[3][2]`, nested - `nativelayout.isNativeBytes`
-// recurses to the innermost element on its own).
-//
-// This asks nothing about postblits or destructors on its own: dmd's own
-// semantic pass (`expressionsem.d`'s `lowerArrayAssign`, and the
-// `ConstructExp` handling next to it) already rewrites an assignment,
-// construction or literal whose element has one of those into a call to
-// `_d_array{setassign,assign_l,assign_r,ctor,setctor}` before this
-// compiler ever sees the expression. A plain `AssignExp`/`ArrayLiteralExp`
-// node reaching this compiler is therefore already an element type with
-// no postblit or destructor to run - `isPlainOldStruct`'s check for that,
-// reached through `isSupportedElementType` below, is about laying a
-// struct's fields out at all, not a second guard against the same thing
-// dmd's lowering already ruled out.
-private bool isSupportedStaticArray(imported!"dmd.mtype".Type type) {
-    auto sarrayType = type.isTypeSArray;
-    if (sarrayType is null)
-        return false;
-
-    return isSupportedElementType(sarrayType.next);
-}
-
-
 public final class Bytecode: imported!"snakebite.backends.backend".Backend {
+    import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
     import dmd.root.string: toDString;
     import snakebite.backends.backend: Program;
@@ -220,8 +190,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.backends.bytecode.vm: Function, Vm;
     import snakebite.exception: SnakebiteException;
     import snakebite.framestack: defaultFrameCapacity;
+    import snakebite.nativelayout: NativeData, nativeSymbolName;
 
     private Vm _vm;
+    private NativeData _nativeData;
     private PlanCache _plans;
     // Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
@@ -256,6 +228,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
     public this(const Program program) {
         super(program);
+        _nativeData = NativeData(&constantSymbolAddress);
         _vm = Vm(defaultFrameCapacity);
         _callbacks = new CallbackBridge(
             &invokeBoolFunction,
@@ -264,6 +237,15 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             cast(void*) this,
             "bytecode",
         );
+    }
+
+    private void* constantSymbolAddress(
+        Declaration symbol,
+    ) {
+        if (auto function_ = symbol.isFuncDeclaration)
+            return cast(void*) compileFunction(function_);
+
+        return _plans.resolve(nativeSymbolName(symbol));
     }
 
     public ~this() {
@@ -507,47 +489,11 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return vtbl;
     }
 
-    // Every field `declaration` itself declares - an inherited one is
-    // already present in `base`, copied down from the base class's own
-    // `.init` bytes by `snakebite.backends.classinfo.classRuntimeInfo`
-    // before this runs. The same "skip a `void` initializer" rule the
-    // interpreter's own `initializeClass` applies at every `new`, just
-    // written once into `base`'s bytes here instead of run fresh on every
-    // construction - `storeValue` already knows how to lay out the
-    // constant-foldable initializers this reaches (an integer, a float,
-    // `null`, a zero struct); one dmd cannot fold to a constant throws,
-    // the same "unsupported" rejection any other value this compiler
-    // cannot lay out gives.
     private void fillFieldInits(
         imported!"dmd.dclass".ClassDeclaration declaration, ubyte* base,
     ) {
-        import snakebite.nativelayout: storeValue;
-        import std.conv: text;
-
-        foreach (field; declaration.fields) {
-            if (field._init is null)
-                continue;
-
-            auto initializer = field._init.isExpInitializer;
-            if (initializer is null || field._init.isVoidInitializer !is null)
-                continue;
-
-            auto value = initializer.exp;
-            if (auto construct = value.isConstructExp)
-                value = construct.e2;
-            else if (auto blit = value.isBlitExp)
-                value = blit.e2;
-
-            try
-                storeValue(field.type, value, base + field.offset);
-            catch (Exception)
-                throw new SnakebiteException(text(
-                    "bytecode compiler cannot compile the default value of `",
-                    field.toString, "`: `", value.toString, "`",
-                ));
-        }
+        _nativeData.fillFields(declaration, base);
     }
-
     // `type`'s own `TypeInfo_Shared`/`TypeInfo_Const` wrapper, `base` set
     // to `unqualified` - see `runtimeTypeInfo`'s own doc for why a
     // qualified class type needs one rather than reusing the unqualified
@@ -736,7 +682,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout:
-        alignUp, isIntegralSize, storeValue, TypeFacts;
+        alignUp, initializerValueOf, isIntegralSize, TypeFacts;
 
     alias visit = LoweringVisitor.visit;
 
@@ -763,12 +709,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t _tempSize;
     private uint _tempAlignment;
     private size_t _closureOffset = size_t.max;
-    private struct StaticSlot {
-        private size_t _offset;
-    }
-    private StaticSlot[VarDeclaration] _staticSlots;
-    private ubyte[] _staticInitialValue;
-    private uint _staticAlignment = 1;
     // Set once nothing after the statement just compiled can run: a
     // `return`, a `continue`, or an `if`/loop whose every path already
     // ends one of those. Every statement kind after one in the same block
@@ -928,6 +868,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private LoopContext[] _loops;
     private size_t _destination;
     private size_t _width;
+    private Type _valueType;
     // The `$` currently in scope, if any: the `VarDeclaration` dmd hands
     // out for it (`IndexExp.lengthVar`) and where its value - the
     // enclosing array's own length, already evaluated - sits in this
@@ -991,8 +932,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             );
         }
 
-        auto staticData = allocateStaticData;
-        resolveStaticAddresses(staticData);
+        optimizeStaticLoads;
 
         ClosureSlot[] closureSlots;
         if (_closureOffset != size_t.max)
@@ -1008,7 +948,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return Function(
             _instructions, _constants, _callSites, _assertSites,
             exceptionHandlers,
-            staticData,
             _tempSize, _tempAlignment,
             _closureOffset, contextOffset,
             _closureOffset == size_t.max ? 0 : _closureLayout.size,
@@ -1043,33 +982,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return _constants.length - 1;
     }
 
-    private ubyte[] allocateStaticData() {
-        if (_staticInitialValue.length == 0)
-            return null;
-
-        auto block = new ubyte[
-            _staticInitialValue.length + _staticAlignment - 1];
-        const start = -cast(size_t) block.ptr & (_staticAlignment - 1);
-        auto data = block[start .. start + _staticInitialValue.length];
-        data[] = _staticInitialValue[];
-        return data;
-    }
-
-    private void resolveStaticAddresses(ubyte[] staticData) {
-        if (staticData is null)
-            return;
-
+    private void optimizeStaticLoads() {
         foreach (ref instruction; _instructions) {
-            size_t* address;
-            if (instruction.handler is &opStaticLoad
-                    || instruction.handler is &opStaticAddress)
-                address = &instruction.source;
-            else if (instruction.handler is &opStaticStore)
-                address = &instruction.destination;
-            else
-                continue;
-
-            *address = cast(size_t) (staticData.ptr + *address);
+            if (instruction.handler is &opStaticLoad) {
+                static foreach (width; 1 .. 17)
+                    if (instruction.width == width)
+                        instruction.handler = &opCopyFixed!(width, true);
+            }
         }
     }
 
@@ -2140,7 +2059,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 expressionText(expression));
 
         if (variable.isDataseg) {
-            staticOffsetOf(variable);
+            staticAddressOf(variable);
             return;
         }
 
@@ -2182,6 +2101,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const facts = TypeFacts.of(variable.type);
         auto initializer = initializerValueOf(expInitializer);
+        import snakebite.nativelayout: isStoredLiteral;
+
+        auto construct = expInitializer.exp.isConstructExp;
+        const storedLiteral = isStoredLiteral(initializer)
+            && (construct is null || construct.lowering is null);
         auto nativeCall = initializer.isCallExp;
         // A native aggregate return already writes directly to caller-owned
         // storage. It does not need the bytewise copy path, which is only
@@ -2205,8 +2129,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             } else {
                 const valueOffset = reserveTemp(facts);
                 evalInto(
-                    nativeAggregateReturn ? initializer : expInitializer.exp,
-                    valueOffset, facts.size,
+                    nativeAggregateReturn || storedLiteral
+                        ? initializer : expInitializer.exp,
+                    valueOffset, facts.size, variable.type,
                 );
                 emit(&opStoreIndirect, target, valueOffset, facts.size);
             }
@@ -2231,122 +2156,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         evalInto(
-            nativeAggregateReturn ? initializer : expInitializer.exp,
+            nativeAggregateReturn || storedLiteral
+                ? initializer : expInitializer.exp,
             offset,
             facts.size,
-        );
-    }
-
-    // Reserves one native-layout slot for a function-local static and stores
-    // its constant initializer in the same layout. A static initializer is
-    // part of the compiled function's persistent data, so the declaration
-    // statement itself has no per-call instruction to run.
-    private size_t staticOffsetOf(VarDeclaration variable) {
-        import dmd.typesem: defaultInit;
-        import std.conv: text;
-
-        if (auto found = variable in _staticSlots)
-            return found._offset;
-
-        if (!variable.isDataseg)
-            throw rejection(_function, variable.loc,
-                text("the variable `", variable.toString, "`"));
-
-        const facts = TypeFacts.of(variable.type);
-        if (!isSupportedFacts(facts, variable.type))
-            throw rejection(_function, variable.loc,
-                text("the variable `", variable.toString, "`"));
-
-        auto initializer = variable._init is null
-            ? null : variable._init.isExpInitializer;
-        if (variable._init !is null && initializer is null)
-            throw rejection(_function, variable.loc, text(
-                "the variable `", variable.toString, "`",
-            ));
-        auto value = initializer is null
-            ? defaultInit(variable.type, variable.loc)
-            : initializerValueOf(initializer);
-
-        // dmd's CTFE assembles a string it built itself (`~=`/`Appender`,
-        // the way `std.conv`'s own `enumRep` does) as an `ArrayLiteralExp`
-        // of individual code units, not a `StringExp`: CTFE has no source
-        // text to point back into for a value it assembled itself. dmd's
-        // own `toStringExp` already knows how to fold such a literal back
-        // into a `StringExp`, so ask it before checking what this compiler
-        // supports - that keeps this compiler's static-data layout down to
-        // the one `StringExp` case `nativelayout.storeValue` already
-        // handles.
-        if (auto literal = value.isArrayLiteralExp) {
-            import dmd.expressionsem: toStringExp;
-
-            if (auto folded = toStringExp(literal))
-                value = folded;
-        }
-
-        if (!isSupportedStaticInitializer(variable.type, facts, value))
-            throw rejection(_function, variable.loc,
-                text("the variable `", variable.toString, "`"));
-
-        const offset = alignUp(_staticInitialValue.length, facts.alignment);
-        const end = offset + facts.size;
-        _staticInitialValue.length = end;
-        if (facts.alignment > _staticAlignment)
-            _staticAlignment = facts.alignment;
-        _staticSlots[variable] = StaticSlot(offset);
-
-        storeValue(
             variable.type,
-            facts,
-            value,
-            _staticInitialValue.ptr + offset,
         );
-        return offset;
     }
 
-    private static bool isSupportedStaticInitializer(
-        Type type,
-        in TypeFacts facts,
-        Expression value,
-    ) {
-        import dmd.astenums: Tarray;
-        import dmd.expressionsem: toInteger;
-        import dmd.typesem: nextOf, size;
-        import snakebite.nativelayout: arrayValueSize;
-
-        if (value.isNullExp !is null)
-            return true;
-
-        if (auto literal = value.isStringExp) {
-            auto element = type.nextOf;
-            return type.ty == Tarray && facts.size == arrayValueSize
-                && element !is null && literal.sz == element.size;
-        }
-
-        if (isFloatingType(type))
-            return value.isRealExp !is null;
-
-        if (type.isTypeStruct !is null) {
-            auto integer = value.isIntegerExp;
-            return integer !is null && integer.toInteger == 0;
-        }
-
-        return facts.isIntegral && value.isIntegerExp !is null;
-    }
-
-    // A `ref` local's `ExpInitializer` holds a full `value = target`
-    // assignment (a `ConstructExp`, dmd's node for initialising storage the
-    // guest has not touched yet) rather than bare `target` the way a
-    // by-value local's does - `compileAddress` wants `target` alone, the
-    // right side that names the storage to bind to. Unwrapped the same way
-    // `snakebite.backends.layout`'s own `collectDeclarations` already does
-    // for the temporaries `~=`'s lowering leaves the same way.
-    private Expression initializerValueOf(ExpInitializer expInitializer) {
-        auto value = expInitializer.exp;
-        if (auto construct = value.isConstructExp)
-            return construct.e2;
-        if (auto blit = value.isBlitExp)
-            return blit.e2;
-        return value;
+    private size_t staticAddressOf(VarDeclaration variable) {
+        return cast(size_t) _bytecode._nativeData.storageOf(variable).ptr;
     }
 
     // A plain `=` to a local or parameter. `destOffset` is where the
@@ -2395,7 +2214,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (variable.isDataseg) {
             const valueOffset = reserveTemp(facts);
-            evalInto(expression.e2, valueOffset, facts.size);
+            evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
             emitStaticStore(variable, valueOffset, facts.size);
 
             if (destOffset != discardResult)
@@ -2409,7 +2228,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (!_layout.hasSlot(variable) || isClosureVariable(variable)) {
             const refOffset = addressOfVariable(variable);
             const valueOffset = reserveTemp(facts);
-            evalInto(expression.e2, valueOffset, facts.size);
+            evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
             emit(&opStoreIndirect, refOffset, valueOffset, facts.size);
 
             if (destOffset != discardResult)
@@ -2429,12 +2248,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? null : postVarExp.var.isVarDeclaration;
         if (postVariable is variable) {
             const tempOffset = reserveTemp(facts);
-            evalInto(expression.e2, tempOffset, facts.size);
+            evalInto(expression.e2, tempOffset, facts.size, expression.e1.type);
             emit(&opCopy, targetOffset, tempOffset, facts.size);
             return;
         }
 
-        evalInto(expression.e2, targetOffset, facts.size);
+        evalInto(expression.e2, targetOffset, facts.size, expression.e1.type);
 
         if (destOffset != discardResult && destOffset != targetOffset)
             emit(&opCopy, destOffset, targetOffset, facts.size);
@@ -2445,7 +2264,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t sourceOffset,
         in size_t width,
     ) {
-        emit(&opStaticStore, staticOffsetOf(variable), sourceOffset, width);
+        emit(&opStaticStore, staticAddressOf(variable), sourceOffset, width);
     }
 
     // Whether a bare identifier names a field reached implicitly through
@@ -2735,7 +2554,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const addressOffset = compileAddress(target);
         const valueOffset = reserveTemp(facts);
-        evalInto(expression.e2, valueOffset, facts.size);
+        evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
         emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
 
         if (destOffset != discardResult)
@@ -2760,7 +2579,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const addressOffset = compileFieldAddress(target);
         const valueOffset = reserveTemp(facts);
-        evalInto(expression.e2, valueOffset, facts.size);
+        evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
         emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
 
         if (destOffset != discardResult)
@@ -2821,7 +2640,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     expressionText(expression));
 
             const valueOffset = reserveTemp(facts);
-            evalInto(expression.e2, valueOffset, facts.size);
+            evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
             emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
 
             if (destOffset != discardResult)
@@ -2841,7 +2660,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const addressOffset = compileElementAddress(target, arrayFacts);
         const valueOffset = reserveTemp(facts);
-        evalInto(expression.e2, valueOffset, facts.size);
+        evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
         emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
 
         if (destOffset != discardResult)
@@ -2862,7 +2681,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const addressOffset = compileStaticElementAddress(target);
         const valueOffset = reserveTemp(facts);
-        evalInto(expression.e2, valueOffset, facts.size);
+        evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
         emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
 
         if (destOffset != discardResult)
@@ -2928,7 +2747,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const baseOffset = compileAddress(target.e1);
 
         const rightTy = expression.e2.type.ty;
-        if (rightTy == Tsarray || rightTy == Tarray) {
+        import snakebite.nativelayout: isStoredLiteral;
+
+        if (isStoredLiteral(expression.e2)) {
+            const facts = TypeFacts.of(sarrayType);
+            const valueOffset = reserveTemp(facts);
+            evalInto(expression.e2, valueOffset, facts.size, sarrayType);
+            emit(&opStoreIndirect, baseOffset, valueOffset, facts.size);
+        } else if (rightTy == Tsarray || rightTy == Tarray) {
             size_t sourceOffset;
             if (rightTy == Tsarray) {
                 sourceOffset = compileAddress(expression.e2);
@@ -3362,7 +3188,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destinationOffset,
         in size_t width,
     ) {
-        emit(&opStaticLoad, destinationOffset, staticOffsetOf(variable), width);
+        emit(&opStaticLoad, destinationOffset, staticAddressOf(variable), width);
     }
 
     private Instruction.Handler compoundHandler(
@@ -3507,14 +3333,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // the operators below.
     private void evalInto(
         Expression expression, in size_t destOffset, in size_t width,
+        Type valueType = null,
     ) {
+        auto savedType = _valueType;
         const destination = _destination;
         const savedWidth = _width;
         scope (exit) {
             _destination = destination;
             _width = savedWidth;
+            _valueType = savedType;
         }
 
+        _valueType = valueType is null ? expression.type : valueType;
         _destination = destOffset;
         _width = width;
         expression.accept(this);
@@ -3533,107 +3363,26 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileDeclaration(expression);
     }
 
+    extern(D) private void emitBytes(in void[] bytes) {
+        assert(bytes.length == _width);
+        emit(&opStaticLoad, _destination, cast(size_t) bytes.ptr, bytes.length);
+    }
+
+    private void compileConstant(Expression expression) {
+        requireDestination(expression);
+        emitBytes(_bytecode._nativeData.value(_valueType, expression));
+    }
+
     override void visit(IntegerExp expression) {
-        import snakebite.nativelayout: isIntegralSize;
-        import std.conv: text;
-
-        requireDestination(expression);
-
-        // A zero-init struct's own `.init` is `IntegerExp(0)` - dmd's own
-        // shorthand for "zero every byte", the same one
-        // `nativelayout.storeValue` already special-cases for a struct
-        // target. `opConstant`'s `storeWidth` only lays out the widths
-        // `isIntegralSize` recognises (1/2/4/8 bytes) - the only widths a
-        // real integral literal this compiler evaluates ever has, since
-        // every one is `long`-sized or narrower. A destination of any
-        // other width (wider than 8, like a 16-byte zero-init struct, or
-        // in between, like a 3-byte all-`ubyte` struct's own slot) is
-        // never a real integral value, only a zero-init struct reusing
-        // `IntegerExp(0)`'s "zero every byte" shorthand, so it reaches for
-        // `opZero` instead.
-        if (!isIntegralSize(_width)) {
-            if (expression.toInteger != 0)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            emit(&opZero, _destination, 0, _width);
-            return;
-        }
-
-        // The guard above sends every width `opConstant`'s `storeWidth`
-        // cannot lay out to `opZero` instead, so this `assert` is a
-        // compile-time guarantee, not a VM-side check on the hot path: a
-        // debug build catches a compiler bug here, at emit time, with the
-        // width that broke the guarantee still in scope.
-        assert(isIntegralSize(_width),
-            text("opConstant: unsupported integral width ", _width));
-        emit(&opConstant, _destination,
-            addConstant(expression.toInteger), _width);
+        compileConstant(expression);
     }
 
-    // A `float`/`double` literal, as the raw bits `opConstant` writes -
-    // `storeValue` already knows how to lay either width out (see its own
-    // doc), so this only has to fold that same compile-time write into one
-    // constant rather than reimplementing the float-to-bits conversion.
-    // `real` is wider than the `long` a single constant carries, so it
-    // instead folds into the two 8-byte halves of its own 16-byte native
-    // layout, the same way `StringExp` below folds its own two words into
-    // two separate constants.
     override void visit(RealExp expression) {
-        import snakebite.nativelayout: storeValue;
-
-        requireDestination(expression);
-
-        const facts = TypeFacts.of(expression.type);
-        if (!isFloatingType(expression.type))
-            return visit(cast(Expression) expression);
-
-        if (_width > long.sizeof) {
-            align(real.alignof) ubyte[real.sizeof] bits = 0;
-            storeValue(expression.type, facts, expression, bits.ptr);
-            auto halves = cast(const(long)*) bits.ptr;
-            emit(&opConstant, _destination, addConstant(halves[0]),
-                long.sizeof);
-            emit(&opConstant, _destination + long.sizeof,
-                addConstant(halves[1]), _width - long.sizeof);
-            return;
-        }
-
-        long bits;
-        storeValue(expression.type, facts, expression, &bits);
-        emit(&opConstant, _destination, addConstant(bits), _width);
+        compileConstant(expression);
     }
 
-    // A string literal is a slice over dmd's own memory, never copied or
-    // allocated - `storeValue` already knows how to write that pair of
-    // words at compile time (see its own doc), the same way it already
-    // writes an `IntegerExp`'s bytes; this only has to fold that same
-    // compile-time write into two constants `opConstant` can hand to the
-    // VM, since a temporary this compiler owns is host memory dmd's
-    // `storeValue` can write straight into.
     override void visit(StringExp expression) {
-        import core.stdc.string: memcpy;
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset, arrayValueSize,
-            storeValue;
-
-        requireDestination(expression);
-
-        const facts = TypeFacts.of(expression.type);
-        if (!facts.isDynamicArray)
-            return visit(cast(Expression) expression);
-
-        ubyte[arrayValueSize] bytes = void;
-        storeValue(expression.type, facts, expression, bytes.ptr);
-
-        long length, pointer;
-        memcpy(&length, bytes.ptr + arrayLengthOffset, size_t.sizeof);
-        memcpy(&pointer, bytes.ptr + arrayPointerOffset, size_t.sizeof);
-
-        emit(&opConstant, _destination + arrayLengthOffset,
-            addConstant(length), size_t.sizeof);
-        emit(&opConstant, _destination + arrayPointerOffset,
-            addConstant(pointer), size_t.sizeof);
+        compileConstant(expression);
     }
 
     override void visit(VarExp expression) {
@@ -3663,23 +3412,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // `typeid` - this reads it back rather than emitting a second copy
         // of it.
         if (auto symbol = expression.var.isSymbolDeclaration) {
-            // `T.init` for a struct `T`: dmd's own `TypeStruct.defaultInit`
-            // (`typesem.d`) hands back this exact `VarExp` shape, whether
-            // written by hand or reached through a plain declaration with
-            // no initialiser (`FormatSpec!char f;`) whose own `.init` is
-            // not all zero bytes. `defaultInitLiteral` turns the same
-            // `SymbolDeclaration` back into the `StructLiteralExp` dmd
-            // built it from in the first place - one element per field,
-            // except a static-array field, whose element is a sparse
-            // `ArrayLiteralExp` with its one fill value in `basis` - so
-            // this compiler's own `visit(StructLiteralExp)` can lay it
-            // out the usual way instead of this needing a second copy of
-            // that logic.
             if (symbol.type.isTypeStruct !is null) {
-                import dmd.typesem: defaultInitLiteral;
-
-                defaultInitLiteral(symbol.type, expression.loc)
-                    .accept(this);
+                emitBytes(_bytecode._nativeData.initialValue(
+                    _valueType, expression.loc));
                 return;
             }
 
@@ -3887,7 +3622,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t compileStaticAddress(VarDeclaration variable) {
         const addressOffset = reserveTemp(pointerFacts);
         emit(&opStaticAddress, addressOffset,
-            staticOffsetOf(variable), size_t.sizeof);
+            staticAddressOf(variable), size_t.sizeof);
         return addressOffset;
     }
 
@@ -4049,6 +3784,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `StructLiteralExp.elements` sparseness both call for.
     override void visit(StructLiteralExp expression) {
         requireDestination(expression);
+        import snakebite.nativelayout: isStoredLiteral;
+
+        if (isStoredLiteral(expression))
+            return compileConstant(expression);
 
         if (!isSupportedStructLiteral(expression.type))
             return visit(cast(Expression) expression);
@@ -4087,7 +3826,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
 
             const facts = TypeFacts.of(field.type);
-            evalInto(element, _destination + field.offset, facts.size);
+            evalInto(element, _destination + field.offset, facts.size, field.type);
         }
     }
 
@@ -4327,6 +4066,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // failure here untested.
     override void visit(ArrayLiteralExp expression) {
         requireDestination(expression);
+        import snakebite.nativelayout: isStoredLiteral;
+
+        if (isStoredLiteral(expression))
+            return compileConstant(expression);
         compileArrayLiteral(expression, _destination);
     }
 
@@ -4481,16 +4224,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(NullExp expression) {
         requireDestination(expression);
 
-        // `opConstant`'s `storeWidth` only lays out up to 8 bytes, so a
-        // wider destination - a dynamic array's own 16-byte `{length,
-        // pointer}` pair - reaches for `opZero` instead, the same choice
-        // `visit(IntegerExp)` makes for its own zero-init case.
-        if (_width > long.sizeof) {
-            emit(&opZero, _destination, 0, _width);
-            return;
-        }
-
-        emit(&opConstant, _destination, addConstant(0), _width);
+        emit(&opZero, _destination, 0, _width);
     }
 
     override void visit(TypeidExp expression) {
@@ -6613,7 +6347,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emitAllocate(sizeOffset, pointerOffset);
 
         foreach (i; 0 .. count) {
-            auto element = elementAt(expression, i);
+            auto element = expression[i];
             const elementOffset = reserveTemp(elementFacts);
             evalInto(element, elementOffset, elementFacts.size);
 
@@ -6673,7 +6407,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const facts = TypeFacts.of(expression.type);
         const tempOffset = reserveTemp(facts);
         foreach (i; 0 .. count) {
-            auto element = elementAt(expression, i);
+            auto element = expression[i];
             evalInto(
                 element, tempOffset + i * elementFacts.size,
                 elementFacts.size,
@@ -6682,24 +6416,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, destOffset, tempOffset, count * elementFacts.size);
     }
 
-    // `expression.elements[i]` directly, the way both callers above used
-    // to, reads a sparse entry's `null` straight through. `defaultInitLiteral`
-    // (`typesem.d`'s `TypeSArray.defaultInitLiteral`) builds exactly this
-    // shape for a static-array field: every entry `null`, the one shared
-    // fill value held in `basis`. `expression[i]` is dmd's own `opIndex`,
-    // which falls back to `basis` for a sparse entry, the same as the
-    // interpreter's own `elementAt` (`walker.d`). The result can still be
-    // `null` - sparse without a `basis` is not a shape either backend has
-    // a guest program that reaches - so this rejects rather than handing
-    // `evalInto` a null `Expression` to dereference.
-    private Expression elementAt(ArrayLiteralExp expression, size_t i) {
-        auto element = expression[i];
-        if (element is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        return element;
-    }
 
 }
 
