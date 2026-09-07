@@ -68,7 +68,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // A `lazy` parameter is a delegate in the native ABI. Its expression runs
 // in the caller when the callee reads the parameter, not when the call is
 // bound.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("lazy.param.evaluatesAtRead." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -78,20 +78,20 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
                 return value;
             }
 
-            int main() {
+            int kindaMain() {
                 int evaluations;
                 return read(++evaluations, evaluations) * 10 + evaluations;
             }
-        }, "main");
+        }, "kindaMain");
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("lazy.param.evaluatesForEachRead." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         122.shouldBeRetOf!(backend, q{
-            int main() {
+            int kindaMain() {
                 int evaluations;
                 int readTwice(lazy int value) {
                     return value * 10 + value;
@@ -99,7 +99,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 
                 return readTwice(++evaluations) * 10 + evaluations;
             }
-        }, "main");
+        }, "kindaMain");
     }
 }
 

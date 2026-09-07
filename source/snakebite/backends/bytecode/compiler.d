@@ -5391,7 +5391,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         size_t delegate() thisOffsetOf,
         in size_t destOffset,
     ) {
-        import dmd.astenums: Tvoid;
+        import dmd.astenums: STC, Tvoid;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         // A callee druntime already supplies as native code (`Exception.
@@ -5401,7 +5401,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // body would walk druntime's own `object.d` a second time (the
         // first is this compiler's own lookups of `Throwable`/`Exception`)
         // and reach constructs this compiler does not support there.
-        if (callee.fbody is null || _bytecode.hasNativeSymbol(callee)) {
+        //
+        // A template instance (`enforce`, `shouldThrow`, ...) druntime
+        // already supplies native code for is the one exception: when an
+        // argument is itself a delegate this compiler's own `visit(FuncExp)`
+        // builds (a `lazy` argument's implicit delegate included - see
+        // `delegatize.d`'s `toDelegate`), the native code has no way to
+        // call back into a value only this compiler's own bytecode knows
+        // how to run. `callee.fbody` is still there for a template
+        // instance - it is only a body-less `extern` declaration that
+        // never has one - so walking it here reaches the guest branch
+        // below instead, the same call graph the interpreter's own
+        // `executeRaw`/`hasInterpretedDelegateArgument` already walks for
+        // exactly this reason.
+        const callsIntoGuestDelegate = callee.fbody !is null
+            && hasInterpretedDelegateArgument(arguments);
+        if (!callsIntoGuestDelegate
+                && (callee.fbody is null || _bytecode.hasNativeSymbol(callee))) {
             auto type = typeFunctionOf(callee);
 
             Arg[] initialArgs;
@@ -5454,7 +5470,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 continue;
             }
 
-            if (!isSupportedFacts(parameter.facts,
+            // A `lazy` parameter's `facts` are already the fixed
+            // delegate shape `FrameLayout.packParameter` gives every
+            // `lazy` slot, not the declared type's own - `isSupportedFacts`
+            // would compare that shape against the declared type and
+            // wrongly refuse it, so this check is skipped for `lazy`
+            // the same way `Bytecode.compileFunction` skips it above.
+            const isLazyParameter =
+                (calleeType.parameterList[i].storageClass & STC.lazy_) != 0;
+            if (!isLazyParameter && !isSupportedFacts(parameter.facts,
                     calleeType.parameterList[i].type))
                 throw rejection(_function, loc, exprText);
 
@@ -5528,8 +5552,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg[] args = initialArgs;
         foreach (i; 0 .. parameterCount) {
             auto parameter = type.parameterList[i];
-            if (parameter.storageClass & STC.lazy_)
-                throw rejection(_function, loc, exprText);
 
             // The bool-function callback bridge only ever stands in
             // for a plain function-pointer parameter (the one native
@@ -5566,7 +5588,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 continue;
             }
 
-            const facts = TypeFacts.of(parameter.type);
+            // A `lazy` parameter's native ABI is dmd's own implicit
+            // delegate, two pointer-sized registers
+            // (`snakebite.ffi.plan.CallPlan.prepare` already plans it that
+            // way), not whatever plain type it appears to declare - dmd's
+            // own semantic pass already wrapped `(*arguments)[i]` into
+            // that delegate (`expressionsem.d`'s `functionParameters`
+            // calls `toDelegate`), so only the destination slot's own
+            // facts need to widen to match it.
+            const facts = parameter.storageClass & STC.lazy_
+                ? lazyFacts()
+                : TypeFacts.of(parameter.type);
             const argumentOffset = reserveTemp(facts);
             evalInto((*arguments)[i], argumentOffset, facts.size);
             args ~= Arg(argumentOffset, 0, facts.size);
@@ -5737,6 +5769,50 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private TypeFacts pointerFacts() {
         return pointerFactsOf;
+    }
+
+    // A `lazy` parameter's own frame slot: dmd's own implicit delegate,
+    // the same fixed shape `FrameLayout.packParameter` gives every `lazy`
+    // parameter slot regardless of the declared type it wraps.
+    private TypeFacts lazyFacts() {
+        import snakebite.nativelayout: delegateValueSize;
+
+        return TypeFacts(delegateValueSize, size_t.sizeof, false, false);
+    }
+
+    // Whether any of `arguments` is a delegate literal (a `lazy` argument's
+    // own implicit one included - `delegatize.d`'s `toDelegate` builds it
+    // the same shape as a guest source `delegate` literal) naming a
+    // function this program interprets. `compileResolvedCall`'s own
+    // native/guest choice asks this before trusting `hasNativeSymbol`:
+    // druntime's compiled code for a template instance like `enforce` has
+    // no way to call back into a value only this compiler's bytecode can
+    // run, so such an argument forces the callee itself to compile as a
+    // guest body too, mirroring the interpreter's own
+    // `hasInterpretedDelegateArgument`.
+    private bool hasInterpretedDelegateArgument(
+        imported!"dmd.arraytypes".Expressions* arguments,
+    ) {
+        if (arguments is null)
+            return false;
+
+        foreach (argument; *arguments) {
+            auto expression = argument;
+            while (auto cast_ = expression.isCastExp)
+                expression = cast_.e1;
+
+            FuncDeclaration delegateFunction;
+            if (auto funcExp = expression.isFuncExp)
+                delegateFunction = funcExp.fd;
+            else if (auto delegateExp = expression.isDelegateExp)
+                delegateFunction = delegateExp.func;
+
+            if (delegateFunction !is null
+                    && _bytecode.isGuestFunction(delegateFunction))
+                return true;
+        }
+
+        return false;
     }
 
     // Where `expression`'s element actually lives: `expression.e1`'s own
