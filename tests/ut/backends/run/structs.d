@@ -3000,3 +3000,147 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A struct built entirely of `ubyte` fields needs no padding, so its own
+// size is exactly its field count - not rounded up to 1/2/4/8 like every
+// other value the bytecode compiler moves through a single `opConstant`.
+// Its zero-init `.init` is `IntegerExp(0)`, dmd's own "zero every byte"
+// shorthand (see `Bytecode.visit(IntegerExp)`'s own doc), which is where
+// that odd width first reaches `opConstant`. This exercises every shape
+// that width can reach the compiler through: `.init`, a literal, an
+// assignment, a by-value parameter, and a by-value return.
+static foreach (backend; Matrix!(
+)) {
+    @("oddWidthStructRoundTrip.threeBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S3 { ubyte a; ubyte b; ubyte c; }
+
+            S3 passThrough(S3 s) { return s; }
+            S3 makeS3() { return S3(1, 2, 3); }
+
+            void main() {
+                S3 zero;
+                assert(zero.a == 0 && zero.b == 0 && zero.c == 0);
+
+                auto lit = S3(1, 2, 3);
+                assert(lit.a == 1 && lit.b == 2 && lit.c == 3);
+
+                zero = lit;
+                assert(zero.a == 1 && zero.b == 2 && zero.c == 3);
+
+                auto passed = passThrough(lit);
+                assert(passed.a == 1 && passed.b == 2 && passed.c == 3);
+
+                auto made = makeS3();
+                assert(made.a == 1 && made.b == 2 && made.c == 3);
+            }
+        });
+    }
+}
+
+// The same shapes as `oddWidthStructRoundTrip.threeBytes`, at 5 bytes:
+// `opConstant`'s `storeWidth` still has no native layout for this width
+// either, one byte past the 4-byte one it does.
+static foreach (backend; Matrix!(
+)) {
+    @("oddWidthStructRoundTrip.fiveBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S5 { ubyte a; ubyte b; ubyte c; ubyte d; ubyte e; }
+
+            S5 passThrough(S5 s) { return s; }
+            S5 makeS5() { return S5(1, 2, 3, 4, 5); }
+
+            void main() {
+                S5 zero;
+                assert(zero.a == 0 && zero.e == 0);
+
+                auto lit = S5(1, 2, 3, 4, 5);
+                assert(lit.a == 1 && lit.c == 3 && lit.e == 5);
+
+                zero = lit;
+                assert(zero.a == 1 && zero.c == 3 && zero.e == 5);
+
+                auto passed = passThrough(lit);
+                assert(passed.a == 1 && passed.c == 3 && passed.e == 5);
+
+                auto made = makeS5();
+                assert(made.a == 1 && made.c == 3 && made.e == 5);
+            }
+        });
+    }
+}
+
+// The same shapes again, at 6 bytes - one byte past the 5-byte one above,
+// still short of the next native width (8).
+static foreach (backend; Matrix!(
+)) {
+    @("oddWidthStructRoundTrip.sixBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S6 {
+                ubyte a; ubyte b; ubyte c; ubyte d; ubyte e; ubyte f;
+            }
+
+            S6 passThrough(S6 s) { return s; }
+            S6 makeS6() { return S6(1, 2, 3, 4, 5, 6); }
+
+            void main() {
+                S6 zero;
+                assert(zero.a == 0 && zero.f == 0);
+
+                auto lit = S6(1, 2, 3, 4, 5, 6);
+                assert(lit.a == 1 && lit.d == 4 && lit.f == 6);
+
+                zero = lit;
+                assert(zero.a == 1 && zero.d == 4 && zero.f == 6);
+
+                auto passed = passThrough(lit);
+                assert(passed.a == 1 && passed.d == 4 && passed.f == 6);
+
+                auto made = makeS6();
+                assert(made.a == 1 && made.d == 4 && made.f == 6);
+            }
+        });
+    }
+}
+
+// The same shapes again, at 7 bytes - the last odd width short of the
+// next native one (8).
+static foreach (backend; Matrix!(
+)) {
+    @("oddWidthStructRoundTrip.sevenBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S7 {
+                ubyte a; ubyte b; ubyte c; ubyte d;
+                ubyte e; ubyte f; ubyte g;
+            }
+
+            S7 passThrough(S7 s) { return s; }
+            S7 makeS7() { return S7(1, 2, 3, 4, 5, 6, 7); }
+
+            void main() {
+                S7 zero;
+                assert(zero.a == 0 && zero.g == 0);
+
+                auto lit = S7(1, 2, 3, 4, 5, 6, 7);
+                assert(lit.a == 1 && lit.d == 4 && lit.g == 7);
+
+                zero = lit;
+                assert(zero.a == 1 && zero.d == 4 && zero.g == 7);
+
+                auto passed = passThrough(lit);
+                assert(passed.a == 1 && passed.d == 4 && passed.g == 7);
+
+                auto made = makeS7();
+                assert(made.a == 1 && made.d == 4 && made.g == 7);
+            }
+        });
+    }
+}

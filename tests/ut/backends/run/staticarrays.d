@@ -149,6 +149,56 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `ubyte[3]`'s own size is 3 bytes - not one of the native integral
+// widths (1/2/4/8) `opConstant`'s `storeWidth` lays out - so this is the
+// same odd-width zero-init shape as `staticArray.defaultInitIsZero`
+// above, but a static array reaching it directly rather than through an
+// `int[3][2]`'s 24-byte outer size, and a literal alongside it.
+static foreach (backend; Matrix!()) {
+    @("staticArray.threeByteDefaultInitAndLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ubyte[3] zero;
+                assert(zero[0] == 0 && zero[1] == 0 && zero[2] == 0);
+
+                ubyte[3] lit = [1, 2, 3];
+                assert(lit[0] == 1 && lit[1] == 2 && lit[2] == 3);
+            }
+        });
+    }
+}
+
+// A `char[3]` literal - the same 3-byte width as `ubyte[3]` above, but
+// `char.init` is `0xFF`, not zero, so this only covers the literal shape,
+// not a default-init one (`staticArray.threeByteDefaultInitAndLiteral`
+// already covers the odd-width zero-init path with `ubyte[3]`).
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "confirmed: \"bytecode compiler cannot compile `\\\"xyz\\\"` in " ~
+        "`main`\" - a string literal copied into a `char[3]` static-array " ~
+        "local is a separate gap from the odd-width zero-init bug this " ~
+        "file's other new tests cover, not fixed here"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "confirmed: \"no native layout for the string literal `\\\"xyz\\\"` " ~
+        "as a `char[3]`\" - `nativelayout.storeValue` refuses a string " ~
+        "literal's width against a static array's element width here; a " ~
+        "separate gap from the odd-width zero-init bug this file's other " ~
+        "new tests cover, not fixed here"),
+)) {
+    @("staticArray.charThreeByteLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                char[3] a = "xyz";
+                assert(a[0] == 'x' && a[1] == 'y' && a[2] == 'z');
+            }
+        });
+    }
+}
+
 // An array literal assigned to a static array is one whole value: every
 // element is evaluated from the array's old contents before any of
 // them is written, so `a = [a[1], a[0]]` swaps the two elements rather
