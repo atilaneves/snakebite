@@ -304,6 +304,51 @@ static foreach (backend; Matrix!(
     }
 }
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE engine aliases a static-array local on `=` " ~
+        "instead of copying it, unlike its runtime codegen"),
+)) {
+    @("packedArrayFieldCopiesByValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void check(size_t width)() {
+                struct Packed {
+                    align(1):
+                    ubyte prefix;
+                    ubyte[width] value;
+                    ubyte suffix;
+                }
+
+                Packed source = void;
+                source.prefix = 91;
+                source.suffix = 92;
+                foreach (i; 0 .. width)
+                    source.value[i] = cast(ubyte) (i + 1);
+
+                auto copy = source.value;
+                foreach (i; 0 .. width)
+                    assert(copy[i] == i + 1);
+                copy[0] = 99;
+                assert(source.value[0] == 1);
+                assert(source.prefix == 91);
+                assert(source.suffix == 92);
+            }
+
+            void main() {
+                check!1;
+                check!2;
+                check!4;
+                check!8;
+                check!16;
+                check!3;
+                check!24;
+            }
+        });
+    }
+}
+
 // Assigning one struct local to another copies every field's bytes, not a
 // reference: mutating the copy leaves the original untouched.
 static foreach (backend; Matrix!()) {
