@@ -155,6 +155,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // answers so execution does not repeat the same AST walk for functions
     // that stay in this evaluator's program.
     private Cache!(FuncDeclaration, bool) _needsClosure;
+    // These properties of a callee do not change while an evaluator runs.
+    // Keep them apart from call-site decisions: delegate arguments and the
+    // active nesting context still need to be checked for every call.
+    private struct DispatchFacts {
+        bool _isGuest;
+        bool _isTemplate;
+        bool _hasNativeSymbol;
+    }
+
+    private Cache!(FuncDeclaration, DispatchFacts) _dispatchFacts;
     // Storage for every data-segment variable the guest has reached so
     // far, keyed by its declaration. Such a variable is one variable per
     // program, not one per call, so a frame - popped on return - cannot
@@ -401,6 +411,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return _plans.hasNativeSymbol(function_);
     }
 
+    private DispatchFacts dispatchFactsOf(FuncDeclaration function_) {
+        if (auto cached = function_ in _dispatchFacts)
+            return *cached;
+
+        const hasBody = function_.fbody !is null;
+        const isTemplate = function_.isInstantiated() !is null && hasBody;
+        const facts = DispatchFacts(
+            _program.isInterpreted(function_),
+            isTemplate,
+            isTemplate && hasNativeSymbol(function_),
+        );
+        _dispatchFacts[function_] = facts;
+        return facts;
+    }
+
     // `function_`'s frame layout, from the cache; computed on its first
     // call. The returned pointer aims into the cache and stays valid: AA
     // entries do not move.
@@ -581,19 +606,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // no function name, package, or template argument gets a vote.
         // Other non-root declarations still run as native code already
         // linked into the process.
-        const isGuest = _program.isInterpreted(function_);
-        const isTemplate = function_.isInstantiated() !is null
-            && function_.fbody !is null;
+        const dispatchFacts = dispatchFactsOf(function_);
         const interpretsDelegateArgument = function_.fbody !is null
             && hasInterpretedDelegateArgument(callSite);
         // A template instance can inherit the guest module of its call site,
         // even when dmd also emitted a native specialization for it. Check
         // the process symbol for every instantiated body so guest ownership
         // does not force a duplicate walk of code druntime already provides.
-        const interpretsTemplate = isTemplate
-            && (!hasNativeSymbol(function_)
+        const interpretsTemplate = dispatchFacts._isTemplate
+            && (!dispatchFacts._hasNativeSymbol
                 || interpretsDelegateArgument);
-        const interprets = isGuest && !isTemplate
+        const interprets = dispatchFacts._isGuest
+            && !dispatchFacts._isTemplate
             || interpretsTemplate
             || interpretsDelegateArgument
             || isNestedInCurrentlyWalkedFunction(function_);
