@@ -2978,8 +2978,7 @@ static foreach (backend; Matrix!()) {
 // units rather than a `StringExp`.
 static foreach (backend; Matrix!(
     Omit!(Interpreter, Because.unconfirmed,
-        "interpreter: assertion failed: " ~
-        "`assert(to(Color.green) == \"green\")`"),
+        "`assert(to!string(Color.green) == \"green\")` fails"),
 )) {
     @("toStringOnEnum." ~ backend.stringof)
     @Tags(backend.stringof)

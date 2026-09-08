@@ -3708,22 +3708,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (truthOf(expression.e1))
             return;
 
-        import snakebite.backends.exceptions: assertFailure, assertMessage;
-        import std.string: fromStringz;
+        import core.exception: AssertError;
+        import snakebite.backends.exceptions: assertFailureOf;
 
         // What D does here is throw an `AssertError` the guest can catch.
         // Keep it inside an interpreter-owned wrapper so a guest catch does
         // not also catch the interpreter's own unsupported-node failures.
-        // `expression.loc` is the guest source location of the assertion
-        // itself, the same one the bytecode compiler builds its own
-        // `AssertSite` from, so a guest catch sees the same file/line
-        // regardless of which backend ran it.
-        auto guest = assertFailure(
-            assertMessage("interpreter", expression.toString),
-            expression.loc.filename.fromStringz.idup,
-            expression.loc.linnum,
-        );
-        throw new GuestException(guest);
+        const failure = assertFailureOf(expression);
+        throw new GuestException(
+            new AssertError(failure.message, failure.file, failure.line));
     }
 
     override void visit(ThrowExp expression) {

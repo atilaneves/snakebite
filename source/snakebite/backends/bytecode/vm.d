@@ -520,10 +520,10 @@ package const(Instruction)* opAssert(
         return advance(pc, frame, returnPlace, constants, callSites,
             assertSites, frames);
 
-    import snakebite.backends.exceptions: assertFailure;
+    import core.exception: AssertError;
 
     const site = assertSites[pc.source];
-    throw assertFailure(site.message, site.file, site.line);
+    throw new AssertError(site.message, site.file, site.line);
 }
 
 

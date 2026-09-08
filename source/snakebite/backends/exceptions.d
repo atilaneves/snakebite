@@ -5,7 +5,6 @@ private:
 
 
 import object: TypeInfo_Class;
-import core.exception: AssertError;
 
 
 // Whether a guest `catch` naming `expected` accepts a throwable whose own
@@ -23,21 +22,32 @@ public bool catchMatches(
     return expected !is null && actual !is null && expected.isBaseOf(actual);
 }
 
-// The message a failed `assert` reports, shared so a guest catch sees the
-// same wording regardless of which backend evaluated the assertion -
-// `backend` is the one difference between them, naming which one failed
-// it.
-public string assertMessage(string backend, const(char)[] conditionText) {
-    import std.conv: text;
-
-    return text(backend, ": assertion failed: `", conditionText, "`");
+// What a failed `assert` throws, decided once from the assertion itself
+// so that a guest catch sees the same `AssertError` whichever backend
+// evaluated it: `message` is D's own (`core.exception.onAssertError`'s
+// wording, or the literal an `assert(cond, "text")` names), and
+// `file`/`line` are the assertion's own guest source location, not
+// wherever in this project's sources a backend happened to build the
+// error. A message that is not a literal is not evaluated here.
+public struct AssertFailure {
+    public string message;
+    public string file;
+    public size_t line;
 }
 
-// The `AssertError` D's own failed-assertion semantics produce: same
-// shape regardless of which backend evaluates the assertion, built at
-// `file`/`line` - the guest source location of the assertion itself, not
-// wherever in this project's own sources the backend happened to build
-// it.
-public AssertError assertFailure(string message, string file, size_t line) {
-    return new AssertError(message, file, line);
+public AssertFailure assertFailureOf(
+    imported!"dmd.expression".AssertExp expression,
+) {
+    import std.string: fromStringz;
+
+    auto literal = expression.msg is null ? null : expression.msg.isStringExp;
+    const message = literal is null
+        ? "Assertion failure"
+        : literal.toStringz.fromStringz.idup;
+
+    return AssertFailure(
+        message,
+        expression.loc.filename.fromStringz.idup,
+        expression.loc.linnum,
+    );
 }

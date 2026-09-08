@@ -139,7 +139,7 @@ unittest {
 
     result.kind.should == SubmitResult.Kind.error;
     result.text.should == "unittest at <repl cell 1>(1) failed: " ~
-        "interpreter: assertion failed: `assert(a == b)`";
+        "Assertion failure";
 }
 
 

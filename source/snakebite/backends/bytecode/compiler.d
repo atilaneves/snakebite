@@ -1412,18 +1412,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     //
     private void compileAssert(AssertExp expression) {
         import dmd.astenums: Tnoreturn;
-        import snakebite.backends.exceptions: assertMessage;
-        import std.string: fromStringz;
+        import snakebite.backends.exceptions: assertFailureOf;
 
         const conditionOffset = compileCondition(expression.e1);
         const width = conditionWidth(expression.e1);
 
-        const site = AssertSite(
-            assertMessage("bytecode", expression.e1.toString),
-            expression.loc.filename.fromStringz.idup,
-            expression.loc.linnum,
-        );
-        _assertSites ~= site;
+        const failure = assertFailureOf(expression);
+        _assertSites ~= AssertSite(failure.message, failure.file, failure.line);
         emit(&opAssert, conditionOffset, _assertSites.length - 1, width);
         _finished = expression.type.ty == Tnoreturn;
     }
