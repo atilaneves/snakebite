@@ -54,11 +54,11 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // once and never relocates, unlike an associative array's own
     // storage, which can rehash as more entries go in.
     private Function*[FuncDeclaration] _compiled;
-    // The resolved address of druntime's own allocator, looked up once and
+    // The prepared FFI plan for druntime's own allocator, built once and
     // reused by every `new T[](n)`/array literal any function compiles -
-    // the same `Resolver` `_plans` already owns, so this costs nothing new
-    // besides the one symbol lookup.
-    private void* _allocatorAddress;
+    // the same `rawPlanOf` a bounds hook already goes through, so this
+    // costs nothing new besides the one symbol lookup.
+    private const(void)* _allocatorPlan;
     private RuntimeTypes _runtimeTypes;
     // Guest classes never reach dmd's own code generator, so nothing ever
     // emits their `TypeInfo_Class`, instance vtable or `.init` bytes as
@@ -181,21 +181,31 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return result;
     }
 
-    // The address of druntime's own `gc_malloc`, the real allocator a
-    // `new T[](n)`/array literal calls through the same FFI `Resolver`
-    // every guest-declared native call already goes through - never a
-    // private bump allocator or free list of this compiler's own.
-    package void* allocatorAddress() {
-        if (_allocatorAddress is null) {
-            _allocatorAddress = _plans.resolve("gc_malloc");
-            if (_allocatorAddress is null)
+    // The prepared FFI plan for druntime's own `gc_malloc`, the real
+    // allocator a `new T[](n)`/array literal calls through the same
+    // `rawPlanOf` a bounds hook already goes through - never a private
+    // bump allocator or free list of this compiler's own, and never a
+    // signature this module hardcodes: the VM that runs the plan reads
+    // it back only as an opaque `CallSite.native` payload.
+    package const(void)* allocatorPlan() {
+        if (_allocatorPlan is null) {
+            _allocatorPlan = _plans.rawPlanOf(
+                "gc_malloc",
+                [
+                    Register(Register.Kind.unsigned, 8),
+                    Register(Register.Kind.unsigned, 4),
+                    Register(Register.Kind.pointer, 8),
+                ],
+                Register(Register.Kind.pointer, 8),
+            );
+            if (_allocatorPlan is null)
                 throw new SnakebiteException(
                     "bytecode compiler cannot resolve druntime's " ~
                         "`gc_malloc`",
                 );
         }
 
-        return _allocatorAddress;
+        return _allocatorPlan;
     }
 
     // The native metadata a guest class needs at run time: an instance
@@ -409,6 +419,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opLessThanUnsigned, opLoadBitfield, opLoadIndirect, opLogicalNot,
         opModuloSigned,
         opModuloUnsigned, opMultiply, opNegate, opNotEqual,
+        opResolveInterfaceMethod,
         opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
         opSliceCopy, opSliceFill,
@@ -4080,8 +4091,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // symbol with no `FuncDeclaration` behind it - so, unlike every other
     // `~=` lowering here, there is no `CallExp` this compiler could walk
     // through the ordinary native-call path. This resolves and calls that
-    // same hook directly (see `CallSite.isAppendDchar`), the same symbol a
-    // real build's glue layer would call.
+    // same hook directly, through the same `rawPlanOf`/`CallSite.native`
+    // shape `compileBoundsHook` already uses for a druntime hook dmd
+    // never resolves to a `FuncDeclaration`, the same symbol a real
+    // build's glue layer would call. The hook takes `x` by `ref` and
+    // appends into it in place, so its own return value (that same
+    // `{length, pointer}` pair again) is never read back here - the call
+    // itself runs with its result discarded, and `opLoadIndirect` reads
+    // the updated pair straight out of `x`'s own storage instead.
     override void visitUnloweredCatDcharAssign(CatDcharAssignExp expression) {
         import dmd.astenums: Tchar, Twchar;
         import snakebite.nativelayout: arrayValueSize;
@@ -4094,8 +4111,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        auto address = _bytecode._plans.resolve(name);
-        if (address is null)
+        auto plan = _bytecode._plans.rawPlanOf(
+            name,
+            [
+                Register(Register.Kind.pointer, 8),
+                Register(Register.Kind.unsigned, 4),
+            ],
+        );
+        if (plan is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -4105,20 +4128,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const valueOffset = reserveTemp(valueFacts);
         evalInto(expression.e2, valueOffset, valueFacts.size);
 
-        _callSites ~= CallSite(
-            null,
+        _callSites ~= CallSite.native(
+            cast(const(void)*) plan,
             [
                 Arg(arrayOffset, 0, size_t.sizeof),
                 Arg(valueOffset, 0, valueFacts.size),
             ],
-            arrayValueSize,
-            null,
-            address,
-            false,
             0,
-            true,
         );
-        emit(&opCall, _destination, _callSites.length - 1, 0);
+        emit(&opCall, discardResult, _callSites.length - 1, 0);
+
+        if (_destination != discardResult)
+            emit(&opLoadIndirect, _destination, arrayOffset, arrayValueSize);
     }
 
     protected override void visitUnloweredCat(CatExp expression) {
@@ -5010,7 +5031,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // class or an interface declares, never the guest override that
     // actually runs. `compileClassVtableSlot`/`compileInterfaceVtableSlot`
     // read the real one back out of the object at run time, into a
-    // temporary this reuses the same `isIndirect` `CallSite` shape
+    // temporary this reuses the same `CallSite.indirect` shape
     // `compileIndirectCall` already built for a function-pointer value -
     // the receiver's dynamic type decides which compiled callee that
     // slot holds, at a compile time this compiler cannot know, but every
@@ -5078,14 +5099,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             args ~= Arg(argumentOffset, parameter.offset, parameter.facts.size);
         }
 
-        CallSite site;
-        site.args = args;
-        site.returnWidth = isVoidCallee ? 0 : returnFacts.size;
-        site.isIndirect = true;
-        site.calleeSlotOffset = calleeSlotOffset;
-
         const siteIndex = _callSites.length;
-        _callSites ~= site;
+        _callSites ~= CallSite.indirect(
+            calleeSlotOffset, args, isVoidCallee ? 0 : returnFacts.size,
+        );
         emit(&opCall, destOffset, siteIndex, 0);
     }
 
@@ -5122,20 +5139,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // out to hold at run time - never at a fixed vtable index the way a
     // class's own virtual method is (a different implementing class
     // places the same interface method at a different index in its own
-    // main vtable), so this reaches `snakebite.backends.bytecode.vm`'s
-    // own `resolveInterfaceMethod` instead, through the same native call
-    // site shape `emitAllocate` already uses for a druntime hook dmd
-    // never resolves to a `FuncDeclaration`. `interfaceInfo` and
-    // `callee.vtblIndex` are both fixed once `expression.e1`'s own static
-    // type (`Factory`, not whichever class actually implements it) is
-    // known, so both travel as the call site's own constants, never read
-    // from a frame.
+    // main vtable), so this reaches for `opResolveInterfaceMethod`
+    // instead of an ordinary call: not a call at all, just an address
+    // computation. `interfaceInfo` and `callee.vtblIndex` are both fixed
+    // once `expression.e1`'s own static type (`Factory`, not whichever
+    // class actually implements it) is known, so both travel as the
+    // instruction's own operands, never read from a frame.
     private size_t compileInterfaceVtableSlot(
         CallExp expression, in size_t objectOffset, FuncDeclaration callee,
         imported!"dmd.dclass".ClassDeclaration interfaceDeclaration,
     ) {
-        import snakebite.backends.bytecode.vm: resolveInterfaceMethod;
-
         const index = callee.vtblIndex;
         if (index <= 0)
             throw rejection(_function, expression.loc,
@@ -5143,18 +5156,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto interfaceInfo = _bytecode.classRuntimeInfo(interfaceDeclaration);
 
-        CallSite site;
-        site.args = [Arg(objectOffset, 0, size_t.sizeof)];
-        site.returnWidth = size_t.sizeof;
-        site.nativeAddress = cast(void*) &resolveInterfaceMethod;
-        site.isInterfaceResolve = true;
-        site.interfaceInfo = cast(void*) interfaceInfo;
-        site.methodIndex = cast(size_t) index;
-
         const calleeOffset = reserveTemp(pointerFacts);
-        const siteIndex = _callSites.length;
-        _callSites ~= site;
-        emit(&opCall, calleeOffset, siteIndex, 0);
+        emit(&opResolveInterfaceMethod, calleeOffset, objectOffset,
+            cast(size_t) index, cast(size_t) cast(void*) interfaceInfo);
         return calleeOffset;
     }
 
@@ -5378,7 +5382,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, loc, exprText);
 
         const siteIndex = _callSites.length;
-        _callSites ~= CallSite(
+        _callSites ~= CallSite.guest(
             calleeFunction, args,
             isVoidCallee ? 0 : returnShape.returnFacts.size,
         );
@@ -5480,9 +5484,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         auto plan = &_bytecode._plans.of(callee);
-        _callSites ~= CallSite(
-            null, args, isVoidCallee ? 0 : returnShape.returnFacts.size,
-            cast(const(void)*) plan,
+        _callSites ~= CallSite.native(
+            cast(const(void)*) plan, args,
+            isVoidCallee ? 0 : returnShape.returnFacts.size,
         );
         emit(&opCall, destOffset, _callSites.length - 1, 0);
     }
@@ -5596,14 +5600,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             args ~= Arg(argumentOffset, slot.offset, slot.facts.size);
         }
 
-        CallSite site;
-        site.args = args;
-        site.returnWidth = isVoidCallee ? 0 : returnShape.returnFacts.size;
-        site.isIndirect = true;
-        site.calleeSlotOffset = calleeOffset;
-
         const siteIndex = _callSites.length;
-        _callSites ~= site;
+        _callSites ~= CallSite.indirect(
+            calleeOffset, args, isVoidCallee ? 0 : returnShape.returnFacts.size,
+        );
         emit(&opCall, destOffset, siteIndex, 0);
     }
 
@@ -5679,7 +5679,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             Arg(fileOffset, 0, size_t.sizeof),
             Arg(lineOffset, 0, uint.sizeof),
         ] ~ extraArgs;
-        _callSites ~= CallSite(null, args, 0, cast(const(void)*) plan);
+        _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
         emit(&opCall, discardResult, _callSites.length - 1, 0);
 
         *branchTargetField(_instructions[branchIndex]) = _instructions.length;
@@ -6004,15 +6004,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void emitAllocate(in size_t sizeOffset, in size_t resultOffset) {
         import core.memory: GC;
 
+        const bitsOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, bitsOffset,
+            addConstant(cast(long) GC.BlkAttr.NO_SCAN), uint.sizeof);
+
+        const typeInfoOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, typeInfoOffset, addConstant(0), size_t.sizeof);
+
         const siteIndex = _callSites.length;
-        _callSites ~= CallSite(
-            null,
-            [Arg(sizeOffset, 0, size_t.sizeof)],
+        _callSites ~= CallSite.native(
+            _bytecode.allocatorPlan,
+            [
+                Arg(sizeOffset, 0, size_t.sizeof),
+                Arg(bitsOffset, 0, uint.sizeof),
+                Arg(typeInfoOffset, 0, size_t.sizeof),
+            ],
             (void*).sizeof,
-            null,
-            _bytecode.allocatorAddress,
-            true,
-            GC.BlkAttr.NO_SCAN,
         );
         emit(&opCall, resultOffset, siteIndex, 0);
     }

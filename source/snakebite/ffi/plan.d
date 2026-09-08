@@ -104,18 +104,22 @@ public struct CallPlan {
 
     // Prepares a plan for a raw address that has no `FuncDeclaration`
     // behind it - a druntime glue-layer hook such as
-    // `_d_arraybounds_indexp`, called by linker symbol the same way
-    // `snakebite.backends.bytecode.compiler`'s `CatDcharAssignExp` visitor
-    // already resolves `_d_arrayappendcd` - rather than a guest
-    // declaration `prepare` walks a dmd type for. Every parameter here is
-    // one plain integer-class register, already the exact width its own
-    // hook expects, so the caller hands over the register shapes directly
-    // instead of this classifying a dmd `Type`. The hook itself never
-    // returns, so the return stays void: no hidden pointer, nothing to
-    // read back.
+    // `_d_arraybounds_indexp`, `gc_malloc` or `_d_arrayappendcd`, called
+    // by linker symbol rather than a guest declaration `prepare` walks a
+    // dmd type for. Every parameter here is one plain integer-class
+    // register, already the exact width its own hook expects, so the
+    // caller hands over the register shapes directly instead of this
+    // classifying a dmd `Type`. `returnRegister` defaults to
+    // `Register.Kind.none`, for a hook such as a bounds check that never
+    // returns at all: no hidden pointer, nothing to read back. A hook
+    // that does return a plain register-width value, such as `gc_malloc`'s
+    // pointer, names its own register instead - never more than one
+    // eightbyte, the one shape every hook this backend calls this way
+    // needs.
     package static CallPlan ofRawAddress(
         const(void)* address,
         scope const(Register)[] parameterRegisters,
+        Register returnRegister = Register(Register.Kind.none, 0),
     ) {
         CallPlan plan;
         plan._address = cast(void*) address;
@@ -123,6 +127,9 @@ public struct CallPlan {
         foreach (i, register; parameterRegisters)
             plan._arguments[i] =
                 ArgumentPlan([register, Register.init], 1, false);
+        if (returnRegister.kind != Register.Kind.none)
+            plan._return =
+                ArgumentPlan([returnRegister, Register.init], 1, false);
         return plan;
     }
 
@@ -444,6 +451,9 @@ public struct PlanCache {
         string name,
         scope const(imported!"snakebite.ffi.abi".Register)[]
             parameterRegisters,
+        imported!"snakebite.ffi.abi".Register returnRegister =
+            imported!"snakebite.ffi.abi".Register(
+                imported!"snakebite.ffi.abi".Register.Kind.none, 0),
     ) {
         if (auto cached = name in _rawPlans)
             return *cached;
@@ -454,7 +464,8 @@ public struct PlanCache {
 
         ++_preparations;
         auto plan = new CallPlan;
-        *plan = CallPlan.ofRawAddress(address, parameterRegisters);
+        *plan = CallPlan.ofRawAddress(
+            address, parameterRegisters, returnRegister);
         _rawPlans[name] = plan;
         return plan;
     }
