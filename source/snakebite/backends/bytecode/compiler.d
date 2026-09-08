@@ -5749,12 +5749,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `expression.e1`'s reproduces exactly that order, since each nested
     // call does the same in turn.
     private size_t compileStaticElementAddress(IndexExp expression) {
+        import dmd.expressionsem: toInteger;
         import snakebite.backends.elementaddress:
-            classify, indexBoundsHook, indexBoundsRegisters;
+            indexBoundsHook, indexBoundsRegisters;
 
-        const plan = classify(expression.e1.type);
-        const elementFacts = plan.elementFacts;
-        const dim = plan.staticLength;
+        auto arrayType = expression.e1.type.isTypeSArray;
+        const elementFacts = TypeFacts.of(arrayType.next);
+        const dim = cast(size_t) arrayType.dim.toInteger;
 
         const dimOffset = reserveTemp(pointerFacts);
         emit(&opConstant, dimOffset, addConstant(cast(long) dim),
