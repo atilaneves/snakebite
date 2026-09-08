@@ -3504,50 +3504,90 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, _destination, baseOffset + field.offset, _width);
     }
 
-    // Writes the enclosing context a nested struct captured (`sd.vthis`)
-    // into its own field, wherever the struct being built lives:
-    // `destination` is a frame offset holding the struct's own bytes
-    // directly for a value (`visit(StructLiteralExp)`), or a frame offset
-    // holding a pointer to the struct's allocation for `new`
-    // (`compileNew`) - `isPointer` picks which. Every construction route
-    // that can build a nested struct must call this: leaving `vthis` at
-    // its `.init` zero, rather than rejecting the struct outright
-    // (field construction does not), reads back a null
-    // context the first time a method on that instance uses it.
+    // Executes one step of an `AggregateInitPlan` (`aggregateinit.d`),
+    // wherever the aggregate being built lives: `base` is a frame offset
+    // holding the aggregate's own bytes directly for a value
+    // (`visit(StructLiteralExp)`), or a frame offset holding a pointer to
+    // an allocation for `new` (`compileNew`) - `isPointer` picks which.
+    // The plan already decided which field is a plain value, a bitfield,
+    // or a static-array broadcast, and whether `vthis` needs filling; this
+    // is the only place that turns a step into bytecode.
     //
-    // `isNested()` is true only when dmd gave the struct a hidden `vthis`
-    // field; a `static struct` declared inside a function is lexically
-    // nested but has no such field. For a `StructDeclaration`, dmd's
-    // `makeNested` only ever sets a function as `enclosing` - unlike a
-    // class nested in a class, where a class parent is used instead - so
-    // `sd.toParent2()` landing on anything but a function here is a
-    // rejection, not a silent no-op.
-    private void fillVthis(
-        imported!"dmd.dstruct".StructDeclaration sd,
+    // A `vthis` step whose `parentFunction` is `null` means the struct's
+    // lexical parent is not a function - dmd fact, not itself an error for
+    // `planStructLiteral`/`planPositionalFields` to detect, but every
+    // construction route that can build a nested struct must reject it
+    // here: leaving `vthis` at its `.init` zero instead reads back a null
+    // context the first time a method on that instance uses it.
+    private void applyStep(
+        imported!"snakebite.backends.aggregateinit".InitStep step,
         imported!"dmd.location".Loc loc,
-        size_t destination,
+        size_t base,
         bool isPointer,
     ) {
-        if (!sd.isNested() || sd.vthis is null)
+        import snakebite.backends.aggregateinit: StepKind;
+
+        final switch (step.kind) with (StepKind) {
+        case vthis:
+            if (step.parentFunction is null)
+                throw rejection(_function, loc, "a nested struct's static chain");
+
+            const context = contextAddressOf(step.parentFunction);
+            if (!isPointer) {
+                emit(&opCopy, base + step.offset, context, size_t.sizeof);
+                return;
+            }
+
+            const fieldAddress = reserveTemp(pointerFacts);
+            emit(&opCopy, fieldAddress, base, size_t.sizeof);
+            addPointerOffset(fieldAddress, step.offset);
+            emit(&opStoreIndirect, fieldAddress, context, size_t.sizeof);
             return;
 
-        auto parent = sd.toParent2();
-        auto parentFunction = parent is null ? null : parent.isFuncDeclaration;
-        if (parentFunction is null)
-            throw rejection(_function, loc, "a nested struct's static chain");
+        case value:
+            if (!isPointer) {
+                evalInto(step.source, base + step.offset, step.facts.size,
+                    step.type);
+                return;
+            }
 
-        const context = contextAddressOf(parentFunction);
+            const valueOffset = reserveTemp(step.facts);
+            evalInto(step.source, valueOffset, step.facts.size, step.type);
+            const fieldAddress = reserveTemp(pointerFacts);
+            emit(&opCopy, fieldAddress, base, size_t.sizeof);
+            addPointerOffset(fieldAddress, step.offset);
+            emit(&opStoreIndirect, fieldAddress, valueOffset, step.facts.size);
+            return;
 
-        if (!isPointer) {
-            emit(&opCopy, destination + sd.vthis.offset, context,
-                size_t.sizeof);
+        case bitfield:
+            const valueOffset = reserveTemp(step.facts);
+            evalInto(step.source, valueOffset, step.facts.size, step.type);
+
+            const addressOffset = reserveTemp(pointerFacts);
+            if (isPointer) {
+                emit(&opCopy, addressOffset, base, size_t.sizeof);
+                addPointerOffset(addressOffset, step.offset);
+            } else
+                emit(&opFrameAddress, addressOffset, base + step.offset,
+                    size_t.sizeof);
+
+            emitBitfieldStore(step.field, addressOffset, valueOffset,
+                step.facts.size);
+            return;
+
+        case broadcast:
+            // Only reached for a value destination: a `NewExp`'s
+            // positional arguments are never padded by dmd's own `fill`
+            // (`expressionsem.d`, issue 12509), so `planPositionalFields`
+            // never emits this step for `isPointer`.
+            const tempOffset = reserveTemp(step.facts);
+            evalInto(step.source, tempOffset, step.facts.size);
+
+            foreach (i; 0 .. step.count)
+                emit(&opCopy, base + step.offset + i * step.facts.size,
+                    tempOffset, step.facts.size);
             return;
         }
-
-        const fieldAddress = reserveTemp(pointerFacts);
-        emit(&opCopy, fieldAddress, destination, size_t.sizeof);
-        addPointerOffset(fieldAddress, sd.vthis.offset);
-        emit(&opStoreIndirect, fieldAddress, context, size_t.sizeof);
     }
 
     // `Point(3, 4)`, dmd's own literal form for a plain-old struct with no
@@ -3565,72 +3605,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         emit(&opZero, _destination, 0, _width);
 
-        // `elements` never carries a value for `vthis` itself (dmd leaves
-        // it out, expecting whoever builds the literal to fill it in -
-        // the same gap the interpreter's own `visit(StructLiteralExp)`
-        // fills). The context this struct captures is whatever encloses
-        // it lexically, whether that is a function directly or a struct
-        // nested inside another nested struct's method
-        // (`fillVthis`/`contextAddressOf` hop through either).
-        fillVthis(expression.sd, expression.loc, _destination, false);
+        import snakebite.backends.aggregateinit: planStructLiteral;
 
-        if (expression.elements is null)
-            return;
-
-        foreach (i, element; *expression.elements) {
-            if (element is null)
-                continue;
-
-            auto field = expression.sd.fields[i];
-            auto sarrayType = field.type.isTypeSArray;
-
-            // dmd's `fill` (`expressionsem.d`, issue 12509) can supply,
-            // for a static-array field whose element type has a non-zero
-            // `.init`, a single literal of that *element* type rather
-            // than an array literal with one entry per slot: one value
-            // that every slot takes. Broadcast it, the same as dmd's own
-            // glue (`e2ir.d`'s `StructLiteralExp` case) does.
-            if (sarrayType !is null && !element.type.equals(field.type)) {
-                compileBroadcastArrayField(
-                    element, sarrayType, _destination + field.offset);
-                continue;
-            }
-
-            const facts = TypeFacts.of(field.type);
-            if (field.isBitFieldDeclaration !is null) {
-                const valueOffset = reserveTemp(facts);
-                evalInto(element, valueOffset, facts.size, field.type);
-                const addressOffset = reserveTemp(pointerFacts);
-                emit(&opFrameAddress, addressOffset,
-                    _destination + field.offset, size_t.sizeof);
-                emitBitfieldStore(field, addressOffset, valueOffset,
-                    facts.size);
-                continue;
-            }
-            evalInto(element, _destination + field.offset, facts.size, field.type);
-        }
-    }
-
-    // Fills every slot of a static-array field with the one element `dmd`
-    // gave for the whole array (see the call site above). `elementFacts`
-    // is the actual literal's own type, so this broadcasts correctly
-    // however many array dimensions still lie between it and
-    // `sarrayType` - a nested `T[2][3]` field works the same way, one
-    // flat run of `elementFacts.size`-sized copies.
-    private void compileBroadcastArrayField(
-        Expression element, imported!"dmd.mtype".TypeSArray sarrayType,
-        in size_t destOffset,
-    ) {
-        const elementFacts = TypeFacts.of(element.type);
-        const fieldFacts = TypeFacts.of(sarrayType);
-        const count = fieldFacts.size / elementFacts.size;
-
-        const tempOffset = reserveTemp(elementFacts);
-        evalInto(element, tempOffset, elementFacts.size);
-
-        foreach (i; 0 .. count)
-            emit(&opCopy, destOffset + i * elementFacts.size, tempOffset,
-                elementFacts.size);
+        auto plan = planStructLiteral(expression);
+        foreach (step; plan.steps)
+            applyStep(step, expression.loc, _destination, false);
     }
 
     // `arr.length`: the array's own length word, read straight out of its
@@ -3955,8 +3934,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // stores further down, so both a `new Adder(2)` with a
         // constructor and a bare `new Reader` (no arguments at all) get
         // a real context rather than `.init`'s zero.
-        if (structType !is null)
-            fillVthis(structType.sym, expression.loc, objectOffset, true);
+        import snakebite.backends.aggregateinit: planPositionalFields, StepKind;
+
+        if (structType !is null) {
+            auto vthisPlan = planPositionalFields(structType.sym, null);
+            foreach (step; vthisPlan.steps)
+                applyStep(step, expression.loc, objectOffset, true);
+        }
 
         if (expression.member !is null) {
             compileResolvedCall(
@@ -3973,33 +3957,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        foreach (i, argument; *expression.arguments) {
-            auto field = structType.sym.fields[i];
-            const facts = TypeFacts.of(field.type);
-
-            const valueOffset = reserveTemp(facts);
-            evalInto(argument, valueOffset, facts.size);
-
-            if (field.isBitFieldDeclaration !is null) {
-                auto addressOffset = reserveTemp(pointerFacts);
-                emit(&opCopy, addressOffset, objectOffset, size_t.sizeof);
-                if (field.offset != 0) {
-                    const fieldOffset = reserveTemp(pointerFacts);
-                    emit(&opConstant, fieldOffset,
-                        addConstant(cast(long) field.offset), size_t.sizeof);
-                    emit(&opAdd, addressOffset, fieldOffset, size_t.sizeof);
-                }
-                emitBitfieldStore(field, addressOffset, valueOffset,
-                    facts.size);
-                continue;
-            }
-
-            const fieldAddressOffset = reserveTemp(pointerFacts);
-            emit(&opConstant, fieldAddressOffset,
-                addConstant(cast(long) field.offset), size_t.sizeof);
-            emit(&opAdd, fieldAddressOffset, objectOffset, size_t.sizeof);
-            emit(&opStoreIndirect, fieldAddressOffset, valueOffset,
-                facts.size);
+        auto plan = planPositionalFields(structType.sym, expression.arguments);
+        foreach (step; plan.steps) {
+            if (step.kind == StepKind.vthis)
+                continue; // Already filled above.
+            applyStep(step, expression.loc, objectOffset, true);
         }
     }
 

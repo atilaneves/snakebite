@@ -4088,31 +4088,41 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private void finishNew(NewExp expression, ubyte* object) {
-        import snakebite.nativelayout: storeIntegral;
-
         auto classType = expression.newtype.isTypeClass;
         if (classType !is null) {
             if (expression.member !is null)
-                constructClass(expression, object);
+                constructAggregate(expression, object);
             return;
         }
 
+        import snakebite.backends.aggregateinit:
+            planPositionalFields, StepKind;
+
         auto declaration = expression.newtype.isTypeStruct.sym;
-        if (declaration.isNested() && declaration.vthis !is null) {
-            auto parent = declaration.toParent2();
-            auto parentFunction = parent is null
-                ? null : parent.isFuncDeclaration;
-            if (parentFunction !is null)
-                storeIntegral(
-                    object + declaration.vthis.offset,
-                    cast(size_t) contextOf(parentFunction), size_t.sizeof,
-                );
+        auto plan = planPositionalFields(declaration,
+            expression.member is null ? expression.arguments : null);
+
+        foreach (step; plan.steps)
+            if (step.kind == StepKind.vthis)
+                applyStep(step, object);
+
+        if (expression.member !is null) {
+            constructAggregate(expression, object);
+            return;
         }
 
-        if (expression.member !is null)
-            constructStruct(expression, object);
-        else if (expression.arguments !is null)
-            initializeStructArguments(expression, object);
+        if (expression.arguments is null)
+            return;
+
+        if (expression.arguments.length > declaration.fields.length)
+            throw new SnakebiteException(
+                text("interpreter cannot initialize `", expression.toString,
+                    "`: too many constructor arguments"),
+            );
+
+        foreach (step; plan.steps)
+            if (step.kind != StepKind.vthis)
+                applyStep(step, object);
     }
 
     override void visit(DeleteExp expression) {
@@ -4194,9 +4204,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _nativeData.fillFields(declaration, base);
     }
 
-    private void constructClass(NewExp expression, ubyte* object) {
-        import std.conv: text;
-
+    // A class and a struct constructor call bind `object` to the hidden
+    // `this` the same way: dmd gives both an ordinary `vthis` parameter
+    // slot in their own `FrameLayout`, so nothing here needs to know
+    // which aggregate kind `expression.newtype` names.
+    private void constructAggregate(NewExp expression, ubyte* object) {
         auto constructor = expression.member;
         auto layout = layoutOf(constructor);
         auto frame = _frames.push(layout.size, layout.alignment);
@@ -4205,7 +4217,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         if (constructor.vthis is null)
             throw new SnakebiteException(
-                text("interpreter cannot call class constructor `",
+                text("interpreter cannot call constructor `",
                     constructor.toString, "`: it has no `this`"),
             );
 
@@ -4226,68 +4238,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         );
 
         executeCall(constructor, null, frame.base, layout, null, true);
-    }
-
-    private void constructStruct(NewExp expression, ubyte* object) {
-        import std.conv: text;
-
-        auto constructor = expression.member;
-        auto layout = layoutOf(constructor);
-        auto frame = _frames.push(layout.size, layout.alignment);
-
-        import snakebite.nativelayout: storeIntegral;
-
-        if (constructor.vthis is null)
-            throw new SnakebiteException(
-                text("interpreter cannot call struct constructor `",
-                    constructor.toString, "`: it has no `this`"),
-            );
-
-        storeIntegral(
-            frame.base + layout.hiddenThis.parameter.offset,
-            cast(size_t) object,
-            size_t.sizeof,
-        );
-
-        auto arguments = expression.arguments;
-
-        bindArguments(
-            constructor,
-            arguments,
-            expression.loc,
-            frame.base,
-            layout,
-        );
-
-        executeCall(constructor, null, frame.base, layout, null, true);
-    }
-
-    private void initializeStructArguments(NewExp expression, ubyte* object) {
-        import core.stdc.string: memcpy;
-        import std.conv: text;
-
-        auto declaration = expression.newtype.isTypeStruct.sym;
-        if (expression.arguments.length > declaration.fields.length)
-            throw new SnakebiteException(
-                text("interpreter cannot initialize `", expression.toString,
-                    "`: too many constructor arguments"),
-            );
-
-        foreach (i; 0 .. expression.arguments.length) {
-            auto field = declaration.fields[i];
-            auto valueFacts = factsOf(field.type);
-            auto value = _frames.push(valueFacts.size, valueFacts.alignment);
-            evaluate((*expression.arguments)[i], field.type, valueFacts,
-                value.base);
-            if (field.isBitFieldDeclaration !is null) {
-                import snakebite.nativelayout: loadIntegral;
-                storeBitfieldAt(field, object + field.offset,
-                    loadIntegral(value.base, valueFacts.size,
-                        !valueFacts.isUnsigned));
-                continue;
-            }
-            memcpy(object + field.offset, value.base, valueFacts.size);
-        }
     }
 
     private void bindArguments(
@@ -4365,11 +4315,59 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         memcpy(place, bytes.ptr, bytes.length);
     }
 
+    // Executes one step of an `AggregateInitPlan` (`aggregateinit.d`) at
+    // `base`, the aggregate's own bytes directly - `visit(StructLiteralExp)`
+    // passes `_place`, `finishNew` the fresh allocation, both already plain
+    // `ubyte*` here since the interpreter never distinguishes a value
+    // place from a pointer the way the bytecode compiler's frame offsets
+    // do.
+    private void applyStep(
+        imported!"snakebite.backends.aggregateinit".InitStep step,
+        ubyte* base,
+    ) {
+        import core.stdc.string: memcpy;
+        import snakebite.backends.aggregateinit: StepKind;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+
+        final switch (step.kind) with (StepKind) {
+        case vthis:
+            // `parentFunction` is `null` when the struct's lexical parent
+            // is not a function - dmd fact, not itself an error: leaving
+            // `vthis` at its `.init` zero here matches the language's own
+            // treatment of a `static struct` with no captured context.
+            if (step.parentFunction !is null)
+                storeIntegral(
+                    base + step.offset,
+                    cast(size_t) contextOf(step.parentFunction),
+                    size_t.sizeof,
+                );
+            return;
+
+        case value:
+            evaluate(step.source, step.type, step.facts, base + step.offset);
+            return;
+
+        case bitfield:
+            auto value = _frames.push(step.facts.size, step.facts.alignment);
+            evaluate(step.source, step.type, step.facts, value.base);
+            storeBitfieldAt(step.field, base + step.offset,
+                loadIntegral(value.base, step.facts.size,
+                    !step.facts.isUnsigned));
+            return;
+
+        case broadcast:
+            auto value = _frames.push(step.facts.size, step.facts.alignment);
+            evaluate(step.source, step.type, step.facts, value.base);
+            foreach (i; 0 .. step.count)
+                memcpy(base + step.offset + i * step.facts.size, value.base,
+                    step.facts.size);
+            return;
+        }
+    }
+
     override void visit(StructLiteralExp expression) {
         import core.stdc.string: memset;
-        import snakebite.nativelayout:
-            isStoredLiteral, loadIntegral, storeIntegral;
-        import std.conv: text;
+        import snakebite.nativelayout: isStoredLiteral;
 
         if (isStoredLiteral(expression)) {
             _nativeData.write(_type, _facts, expression, _place);
@@ -4383,54 +4381,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: struct literal layout mismatch"),
             );
 
-        memset(_place, 0, _facts.size);
-
-        // `isNested()` is true only when dmd gave the struct a hidden
-        // context field; a `static struct` declared inside a function is
-        // lexically nested but has no such field.
-        if (expression.sd.isNested()) {
-            auto parent = expression.sd.toParent2();
-            auto parentFunction = parent is null
-                ? null : parent.isFuncDeclaration;
-            if (parentFunction !is null)
-                storeIntegral(
-                    _place,
-                    cast(size_t) contextOf(parentFunction),
-                    size_t.sizeof,
-                );
-        }
-
-        if (expression.elements is null || expression.elements.length == 0)
-            return;
-
-        if (expression.elements.length > expression.sd.fields.length)
+        if (expression.elements !is null
+                && expression.elements.length > expression.sd.fields.length)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: its fields do not match the struct layout"),
             );
 
-        foreach (i, element; *expression.elements) {
-            if (element is null)
-                continue;
+        import snakebite.backends.aggregateinit: planStructLiteral;
 
-            auto field = expression.sd.fields[i];
-            if (field.isBitFieldDeclaration !is null) {
-                auto valueFacts = factsOf(field.type);
-                auto value = _frames.push(valueFacts.size,
-                    valueFacts.alignment);
-                evaluate(element, field.type, valueFacts, value.base);
-                storeBitfieldAt(field, cast(ubyte*) _place + field.offset,
-                    loadIntegral(value.base, valueFacts.size,
-                        !valueFacts.isUnsigned));
-                continue;
-            }
-            evaluate(
-                element,
-                field.type,
-                factsOf(field.type),
-                cast(ubyte*) _place + field.offset,
-            );
-        }
+        auto plan = planStructLiteral(expression);
+        if (plan.zeroFill)
+            memset(_place, 0, _facts.size);
+
+        foreach (step; plan.steps)
+            applyStep(step, cast(ubyte*) _place);
     }
 
     protected override void visitUnloweredCat(CatExp expression) {
