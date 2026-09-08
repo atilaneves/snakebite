@@ -51,10 +51,18 @@ public struct Program {
     public bool isInterpreted(
         imported!"dmd.func".FuncDeclaration function_,
     ) const {
-        if (function_ is null)
-            return false;
+        return function_ !is null && isRootOwned(function_);
+    }
 
-        const module_ = function_.getModule;
+    // Whether `declaration` belongs to one of this program's own root
+    // modules, rather than one dmd only reached through an `import` - both
+    // a callee (`isInterpreted`) and a type's own runtime metadata
+    // (`RuntimeTypes`) need this same answer for the same reason: guest
+    // source gets no linked machine code or linked `TypeInfo` of its own.
+    public bool isRootOwned(
+        imported!"dmd.dsymbol".Dsymbol declaration,
+    ) const {
+        const module_ = declaration.getModule;
         foreach (rootModule; rootModules)
             if (module_ is rootModule)
                 return true;

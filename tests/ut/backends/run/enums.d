@@ -76,8 +76,7 @@ static foreach (backend; Matrix!()) {
 // enum `toStringOnEnum` (`structs.d`) pins.
 static foreach (backend; Matrix!(
     Omit!(Interpreter, Because.unconfirmed,
-        "interpreter: assertion failed: " ~
-        "`assert(to(Setting.on) == \"on\")`"),
+        "`assert(to!string(Setting.on) == \"on\")` fails"),
 )) {
     @("toStringOnTwoMemberEnum." ~ backend.stringof)
     @Tags(backend.stringof)

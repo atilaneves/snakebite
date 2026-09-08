@@ -465,9 +465,6 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns an out-of-range index into a compile-time error, so " ~
         "it cannot be expressed the same way as a runtime throw"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter refuses an out-of-bounds static array index as " ~
-        "its own error, not as a guest-catchable `RangeError`"),
 )) {
     @("staticArray.outOfBoundsIndexIsRangeError." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -498,9 +495,6 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns an out-of-range index into a compile-time error, so " ~
         "it cannot be expressed the same way as a runtime throw"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter reports an out-of-bounds static array index as " ~
-        "its own internal error, not as a guest-catchable `RangeError`"),
 )) {
     @("staticArray.lvalueShapesAreRangeError." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -530,9 +524,6 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns an out-of-range index into a compile-time error, so " ~
         "it cannot be expressed the same way as a runtime throw"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter reports an out-of-bounds static array index as " ~
-        "its own internal error, not as a guest-catchable `RangeError`"),
 )) {
     @("staticArray.nestedIndexIsRangeError." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -562,9 +553,6 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns an out-of-range index into a compile-time error, so " ~
         "it cannot be expressed the same way as a runtime throw"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter reports an out-of-bounds static array index as " ~
-        "its own internal error, not as a guest-catchable `RangeError`"),
 )) {
     @("staticArray.catchArrayIndexError." ~ backend.stringof)
     @Tags(backend.stringof)

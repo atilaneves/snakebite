@@ -23,70 +23,89 @@ private alias storeWidth = storeIntegral;
 // and the width to copy - the same three numbers `opCopy` needs for a
 // same-frame copy, just crossing into a frame that does not exist yet
 // when the call instruction runs.
-package struct Arg {
+public struct Arg {
     package size_t callerOffset;
     package size_t calleeOffset;
     package size_t width;
 }
 
 
-// One call site: which compiled function it calls, the arguments to hand
+// One call site: how `opCall` reaches its callee, the arguments to hand
 // it, and the width of the value it hands back (`0` for a `void` callee).
-package struct CallSite {
-    package const(Function)* callee;
+// This is the whole interface the bytecode compiler and this VM agree on
+// for a call: the compiler picks a `Kind` and builds the site through
+// that kind's own factory below, and `opCall`'s `final switch` reads back
+// only the one field its `Kind` names.
+public struct CallSite {
+    public enum Kind {
+        // `callee` already names a function this compiler compiled to
+        // its own `Instruction`s.
+        guest,
+        // `nativePlan` is a `snakebite.ffi.plan.CallPlan`, opaque to this
+        // module, run through `executeCallPlan` - prepared either for a
+        // guest-declared `extern(C)` function or for a druntime hook the
+        // compiler resolved by linker symbol (an allocation, a `~=`
+        // dchar append, a bounds check): the same shape either way, so
+        // this VM hardcodes no druntime signature for any of them.
+        native,
+        // `calleeSlotOffset` is the caller's own frame offset holding a
+        // `const(Function)*` value read back at run time in place of a
+        // fixed `callee` - a call through a function pointer or delegate
+        // value, or through a vtable slot the compiler already resolved
+        // into a temporary (`compileClassVtableSlot`/
+        // `compileInterfaceVtableSlot`).
+        indirect,
+    }
+
+    // `callee` already compiled, called directly.
+    public static CallSite guest(
+        const(Function)* callee, Arg[] args, size_t returnWidth,
+    ) {
+        CallSite site;
+        site.kind = Kind.guest;
+        site.callee = callee;
+        site.args = args;
+        site.returnWidth = returnWidth;
+        return site;
+    }
+
+    // A prepared FFI plan for a native symbol, called through
+    // `executeCallPlan`.
+    public static CallSite native(
+        const(void)* nativePlan, Arg[] args, size_t returnWidth,
+    ) {
+        CallSite site;
+        site.kind = Kind.native;
+        site.nativePlan = nativePlan;
+        site.args = args;
+        site.returnWidth = returnWidth;
+        return site;
+    }
+
+    // `calleeSlotOffset` names the caller frame slot `opCall` reads the
+    // callee's own address back out of at run time.
+    public static CallSite indirect(
+        size_t calleeSlotOffset, Arg[] args, size_t returnWidth,
+    ) {
+        CallSite site;
+        site.kind = Kind.indirect;
+        site.calleeSlotOffset = calleeSlotOffset;
+        site.args = args;
+        site.returnWidth = returnWidth;
+        return site;
+    }
+
+    package Kind kind;
     package Arg[] args;
     package size_t returnWidth;
-    // A declared `extern(C)` guest callee's prepared FFI call, opaque to
-    // this module - see `snakebite.ffi.plan.CallPlan`. `null` for a
-    // guest-declared function's call site.
+    package const(Function)* callee;
     package const(void)* nativePlan;
-    // The other native shape `opCall` knows besides a `nativePlan` call: a
-    // druntime allocator call the compiler synthesises for `new T[](n)`/an
-    // array literal, never one a guest source declaration resolves to.
-    // `allocationBits` is the `GC.BlkAttr` value that call's second
-    // argument passes, fixed by the compiler once per call site from the
-    // element type it already knows, not read from any frame.
-    package void* nativeAddress;
-    package bool isAllocation;
-    package uint allocationBits;
-    // A third native shape, alongside `isAllocation`: `~=` appending a
-    // `dchar` to a `char[]`/`wchar[]`, whose druntime hook
-    // (`_d_arrayappendcd`/`_d_arrayappendwd`) dmd's own semantic pass never
-    // resolves to a `FuncDeclaration` a `nativePlan` could be built from -
-    // see `snakebite.backends.bytecode.compiler`'s `CatDcharAssignExp`
-    // visitor. `args[0]` is the target array's own storage address (the
-    // hook's `ref` parameter) and `args[1]` is the `dchar` value.
-    package bool isAppendDchar;
-    // A fourth shape, alongside the three above: an indirect call through
-    // a function pointer value, where dmd leaves no single
-    // `FuncDeclaration` behind for `callee` to name at compile time.
-    // `calleeSlotOffset` is the caller's own frame offset holding the
-    // pointer's run-time value - the very `const(Function)*` the bytecode
-    // compiler's `SymOffExp`/`FuncExp` visitors already store as a guest
-    // function's value - read back here in place of `callee`.
-    package bool isIndirect;
     package size_t calleeSlotOffset;
-    // A fifth shape: a call through an interface reference
-    // (`compileVirtualCall`'s interface branch). The concrete override a
-    // guest class gives an interface method is not at a fixed vtable
-    // index the way a class's own virtual method is - the same interface
-    // method sits at a different index in every implementing class's own
-    // vtable, and a call site only ever knows the interface's own index,
-    // never which class it will reach at run time. `resolveInterfaceMethod`
-    // (this module's own, so no dmd frontend access is needed here) walks
-    // the object's real `TypeInfo_Class.interfaces` to find the override
-    // `classRuntimeInfo` built for that (class, interface) pair, the same
-    // shape druntime's own interface dispatch reads, just addressed by
-    // `methodIndex` rather than an ABI thunk. `args[0]` is the receiver
-    // object's own address.
-    package bool isInterfaceResolve;
-    package void* interfaceInfo;
-    package size_t methodIndex;
 }
 
 
 // Finds `object`'s own override of the interface method at `methodIndex`
-// (`interfaceInfo`'s own vtable order - see `CallSite.isInterfaceResolve`'s
+// (`interfaceInfo`'s own vtable order - see `opResolveInterfaceMethod`'s
 // doc) by walking `object`'s real class hierarchy, base first to most
 // derived... actually most-derived first, since `object`'s own vptr names
 // its most-derived `TypeInfo_Class` directly, and `.base` walks upward
@@ -127,10 +146,10 @@ package struct ClosureSlot {
 // has, so it cannot collide with one: `_tempSize`/`layout.size` never grow
 // past a compiled function's own frame size, which stays far short of
 // `size_t.max`.
-package enum discardResult = size_t.max;
+public enum discardResult = size_t.max;
 
 
-package struct Instruction {
+public struct Instruction {
     public alias Handler = const(Instruction)* function(
         const(Instruction)* pc,
         ubyte* frame,
@@ -166,9 +185,12 @@ package struct Instruction {
     //    already carries.
     //  - a resolved static-storage address, cast to a `size_t`: the
     //    `source` of `opStaticLoad`/`opStaticAddress` and the
-    //    `destination` of `opStaticStore`.
+    //    `destination` of `opStaticStore`. `opResolveInterfaceMethod`'s
+    //    `sourceWidth` carries an `interfaceInfo` address the same way.
     //  - a source offset's width, for floating-point conversions whose
-    //    destination and source widths can differ.
+    //    destination and source widths can differ - or, for
+    //    `opResolveInterfaceMethod`, the interface method's own index
+    //    (`width`).
     //  - a resolved instruction address, cast to a `size_t`: `opJump`'s
     //    `destination`, and `opBranchFalse`/`opBranchTrue`'s `source`.
     //    The compiler patches every branch with a plain instruction
@@ -206,7 +228,7 @@ package struct ExceptionHandler {
 }
 
 
-package struct Function {
+public struct Function {
     package Instruction[] instructions;
     package long[] constants;
     package CallSite[] callSites;
@@ -227,17 +249,17 @@ package struct Function {
 
 import snakebite.framestack: FrameStack;
 
-package struct Vm {
+public struct Vm {
     private FrameStack _frames;
 
     @disable this();
     @disable this(this);
 
-    package this(in size_t frameCapacity) {
+    public this(in size_t frameCapacity) {
         _frames = FrameStack(frameCapacity);
     }
 
-    package void call(
+    public void call(
         scope const ref Function function_,
         void* returnPlace,
     ) {
@@ -344,10 +366,12 @@ private const(ExceptionHandler)* findHandler(
     const(Instruction)* pc,
     TypeInfo_Class actual,
 ) @nogc nothrow {
+    import snakebite.backends.exceptions: catchMatches;
+
     foreach (ref handler; handlers) {
         if (pc < handler.bodyStart || pc >= handler.bodyEnd)
             continue;
-        if (handler.type !is null && handler.type.isBaseOf(actual))
+        if (catchMatches(handler.type, actual))
             return &handler;
     }
     return null;
@@ -363,7 +387,7 @@ private const(ExceptionHandler)* findHandler(
 // handler that returns through it, this one included, has to go without
 // them too even though nothing this handler itself does allocates or
 // throws.
-package const(Instruction)* opConstant(
+public const(Instruction)* opConstant(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -520,12 +544,11 @@ package const(Instruction)* opThrow(
 }
 
 
-// Calls `callSites[pc.source]`'s callee: pushes its frame, copies each
-// argument in, runs it to its own return instruction through the nested
-// dispatch loop with `frame + pc.destination` as its result slot (unless
-// `pc.destination` is `discardResult`), and returns this call's own next
-// instruction. `pc.width` is unused.
-package const(Instruction)* opCall(
+// Calls `callSites[pc.source]`'s callee, one of the three `CallSite.Kind`s:
+// a guest callee already compiled to `Instruction`s, a native one reached
+// through a prepared FFI plan, or an indirect one whose own address sits
+// in the caller's frame. `pc.width` is unused.
+public const(Instruction)* opCall(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -534,46 +557,15 @@ package const(Instruction)* opCall(
     scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
-    import core.stdc.string: memcpy;
-
     const site = callSites[pc.source];
-    if (site.isAllocation) {
-        assert(site.args.length == 1);
-        assert(site.returnWidth == (void*).sizeof);
-        alias Allocate =
-            extern(C) void* function(size_t, uint, const(void)*);
-        auto size = *cast(const size_t*) (frame + site.args[0].callerOffset);
-        auto block = (cast(Allocate) site.nativeAddress)(
-            size, site.allocationBits, null);
-        if (pc.destination != discardResult)
-            *cast(void**) (frame + pc.destination) = block;
-        return pc + 1;
-    }
-    if (site.isInterfaceResolve) {
-        assert(site.args.length == 1);
-        auto object = *cast(void**) (frame + site.args[0].callerOffset);
-        auto result = resolveInterfaceMethod(
-            object, cast(void*) site.interfaceInfo, site.methodIndex);
-        if (pc.destination != discardResult)
-            *cast(void**) (frame + pc.destination) = result;
-        return pc + 1;
-    }
-    if (site.isAppendDchar) {
-        assert(site.args.length == 2);
-        alias AppendDchar = extern(C) void[] function(void*, dchar);
-
-        auto array = *cast(void**) (frame + site.args[0].callerOffset);
-        auto value = *cast(const dchar*) (frame + site.args[1].callerOffset);
-        (cast(AppendDchar) site.nativeAddress)(array, value);
-
-        // The hook takes `x` by `ref` and appends into it in place, so
-        // `array` already points at the updated `{length, pointer}` pair -
-        // its own return value is that same pair again, not read here.
-        if (pc.destination != discardResult)
-            memcpy(frame + pc.destination, array, site.returnWidth);
-        return pc + 1;
-    }
-    if (site.nativePlan !is null) {
+    final switch (site.kind) with (CallSite.Kind) {
+    case guest:
+        return callFunction(pc, frame, site, site.callee, frames);
+    case indirect:
+        auto callee =
+            *cast(const(Function)**) (frame + site.calleeSlotOffset);
+        return callFunction(pc, frame, site, callee, frames);
+    case native:
         const(void)*[maxArguments] arguments;
         foreach (i, arg; site.args)
             arguments[i] = frame + arg.callerOffset;
@@ -585,9 +577,22 @@ package const(Instruction)* opCall(
         );
         return pc + 1;
     }
-    auto callee = site.isIndirect
-        ? *cast(const(Function)**) (frame + site.calleeSlotOffset)
-        : site.callee;
+}
+
+
+// `opCall`'s own `guest`/`indirect` arms, once each has found its own
+// `callee`: pushes its frame, copies `site.args` into it, and runs it to
+// its own return instruction through the nested dispatch loop with
+// `frame + pc.destination` as its result slot (unless `pc.destination` is
+// `discardResult`).
+private const(Instruction)* callFunction(
+    const(Instruction)* pc,
+    ubyte* frame,
+    scope const ref CallSite site,
+    const(Function)* callee,
+    FrameStack* frames,
+) {
+    import core.stdc.string: memcpy;
 
     auto calleeFrame = frames.push(callee.frameSize, callee.frameAlignment);
 
@@ -612,8 +617,37 @@ package const(Instruction)* opCall(
         callee.callSites, callee.assertSites, callee.exceptionHandlers, frames,
     );
 
-    const next = pc + 1;
-    return next;
+    return pc + 1;
+}
+
+
+// Not a call: the concrete override a guest class gives an interface
+// method is not at a fixed vtable index the way a class's own virtual
+// method is - the same interface method sits at a different index in
+// every implementing class's own vtable, and a call site only ever knows
+// the interface's own index, never which class it will reach at run time.
+// This resolves `frame + pc.source`'s own override through
+// `resolveInterfaceMethod` and stores the result at `frame +
+// pc.destination`, for `compileVirtualCall`'s interface branch to call
+// through the same way it would any other indirect call. `pc.width` is
+// the interface's own `methodIndex`; `pc.sourceWidth` is `interfaceInfo`,
+// cast to a `size_t` the same way `opStaticLoad`'s own `source` carries a
+// resolved address.
+public const(Instruction)* opResolveInterfaceMethod(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    auto object = *cast(void**) (frame + pc.source);
+    auto result = resolveInterfaceMethod(
+        object, cast(void*) pc.sourceWidth, pc.width);
+    *cast(void**) (frame + pc.destination) = result;
+    return advance(pc, frame, returnPlace, constants, callSites,
+        assertSites, frames);
 }
 
 
@@ -621,7 +655,7 @@ package const(Instruction)* opCall(
 // `null` when the caller discarded the result, the same convention every
 // backend uses for a call whose value nothing reads. `pc.destination` is
 // unused: there is no frame slot on the receiving end, only `returnPlace`.
-package const(Instruction)* opReturn(
+public const(Instruction)* opReturn(
     const(Instruction)* pc,
     ubyte* frame,
     void* returnPlace,
@@ -638,7 +672,7 @@ package const(Instruction)* opReturn(
 }
 
 
-package const(Instruction)* opReturnVoid(
+public const(Instruction)* opReturnVoid(
     const(Instruction)*,
     ubyte*,
     void*,

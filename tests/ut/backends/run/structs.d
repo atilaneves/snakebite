@@ -2978,8 +2978,7 @@ static foreach (backend; Matrix!()) {
 // units rather than a `StringExp`.
 static foreach (backend; Matrix!(
     Omit!(Interpreter, Because.unconfirmed,
-        "interpreter: assertion failed: " ~
-        "`assert(to(Color.green) == \"green\")`"),
+        "`assert(to!string(Color.green) == \"green\")` fails"),
 )) {
     @("toStringOnEnum." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -3430,6 +3429,37 @@ static foreach (backend; Matrix!()) {
             void main() {
                 N3 n;
                 assert(n.a == 5 && n.b == 0 && n.c == 9);
+            }
+        });
+    }
+}
+
+
+// A struct literal built at run time (its first field a parameter, so
+// dmd cannot fold the whole literal to a constant) still leaves out a
+// static-array field whose element struct has a non-zero `.init`. dmd's
+// `fill` (`expressionsem.d`, issue 12509) hands the literal a single
+// `Inner`-typed value for the whole `Inner[3]` field rather than one
+// entry per slot, so every one of the three elements must come from that
+// one broadcast value.
+static foreach (backend; Matrix!()) {
+    @("structLiteralBroadcastsSingleElementAtRuntime." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner { int x = 5; }
+            struct Outer { int a; Inner[3] inners; }
+
+            Outer makeOuter(int a) {
+                return Outer(a);
+            }
+
+            void main() {
+                auto o = makeOuter(1);
+                assert(o.a == 1);
+                assert(o.inners[0].x == 5);
+                assert(o.inners[1].x == 5);
+                assert(o.inners[2].x == 5);
             }
         });
     }

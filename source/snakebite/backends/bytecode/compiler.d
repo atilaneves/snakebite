@@ -54,11 +54,11 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // once and never relocates, unlike an associative array's own
     // storage, which can rehash as more entries go in.
     private Function*[FuncDeclaration] _compiled;
-    // The resolved address of druntime's own allocator, looked up once and
+    // The prepared FFI plan for druntime's own allocator, built once and
     // reused by every `new T[](n)`/array literal any function compiles -
-    // the same `Resolver` `_plans` already owns, so this costs nothing new
-    // besides the one symbol lookup.
-    private void* _allocatorAddress;
+    // the same `rawPlanOf` a bounds hook already goes through, so this
+    // costs nothing new besides the one symbol lookup.
+    private const(void)* _allocatorPlan;
     private RuntimeTypes _runtimeTypes;
     // Guest classes never reach dmd's own code generator, so nothing ever
     // emits their `TypeInfo_Class`, instance vtable or `.init` bytes as
@@ -74,7 +74,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     public this(const Program program) {
         super(program);
         _nativeData = NativeData(&constantSymbolAddress);
-        _runtimeTypes = RuntimeTypes(program,
+        _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
         _vm = Vm(defaultFrameCapacity);
@@ -181,21 +181,31 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return result;
     }
 
-    // The address of druntime's own `gc_malloc`, the real allocator a
-    // `new T[](n)`/array literal calls through the same FFI `Resolver`
-    // every guest-declared native call already goes through - never a
-    // private bump allocator or free list of this compiler's own.
-    package void* allocatorAddress() {
-        if (_allocatorAddress is null) {
-            _allocatorAddress = _plans.resolve("gc_malloc");
-            if (_allocatorAddress is null)
+    // The prepared FFI plan for druntime's own `gc_malloc`, the real
+    // allocator a `new T[](n)`/array literal calls through the same
+    // `rawPlanOf` a bounds hook already goes through - never a private
+    // bump allocator or free list of this compiler's own, and never a
+    // signature this module hardcodes: the VM that runs the plan reads
+    // it back only as an opaque `CallSite.native` payload.
+    package const(void)* allocatorPlan() {
+        if (_allocatorPlan is null) {
+            _allocatorPlan = _plans.rawPlanOf(
+                "gc_malloc",
+                [
+                    Register(Register.Kind.unsigned, 8),
+                    Register(Register.Kind.unsigned, 4),
+                    Register(Register.Kind.pointer, 8),
+                ],
+                Register(Register.Kind.pointer, 8),
+            );
+            if (_allocatorPlan is null)
                 throw new SnakebiteException(
                     "bytecode compiler cannot resolve druntime's " ~
                         "`gc_malloc`",
                 );
         }
 
-        return _allocatorAddress;
+        return _allocatorPlan;
     }
 
     // The native metadata a guest class needs at run time: an instance
@@ -409,6 +419,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opLessThanUnsigned, opLoadBitfield, opLoadIndirect, opLogicalNot,
         opModuloSigned,
         opModuloUnsigned, opMultiply, opNegate, opNotEqual,
+        opResolveInterfaceMethod,
         opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
         opSliceCopy, opSliceFill,
@@ -416,7 +427,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf;
-    import snakebite.backends.delegates: DelegateTarget, delegateTargetOf;
+    import snakebite.frontend.dmd.delegates:
+        DelegateTarget, delegateTargetOf, functionNeedsClosure,
+        outerFunctionOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout:
@@ -1399,18 +1412,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     //
     private void compileAssert(AssertExp expression) {
         import dmd.astenums: Tnoreturn;
-        import std.conv: text;
-        import std.string: fromStringz;
+        import snakebite.backends.exceptions: assertFailureOf;
 
         const conditionOffset = compileCondition(expression.e1);
         const width = conditionWidth(expression.e1);
 
-        const site = AssertSite(
-            text("bytecode: assertion failed: `", expression.e1.toString, "`"),
-            expression.loc.filename.fromStringz.idup,
-            expression.loc.linnum,
-        );
-        _assertSites ~= site;
+        const failure = assertFailureOf(expression);
+        _assertSites ~= AssertSite(failure.message, failure.file, failure.line);
         emit(&opAssert, conditionOffset, _assertSites.length - 1, width);
         _finished = expression.type.ty == Tnoreturn;
     }
@@ -2017,28 +2025,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             && _closureLayout.hasSlot(variable);
     }
 
-    // Shared with the interpreter
-    // (`snakebite.backends.delegates.outerFunctionOf`): both walk
-    // `toParent2` the same way to find the function a captured variable
-    // belongs to.
-    private FuncDeclaration outerFunctionOf(VarDeclaration variable) const {
-        import snakebite.backends.delegates:
-            sharedOuterFunctionOf = outerFunctionOf;
-
-        return sharedOuterFunctionOf(variable);
-    }
-
-    // Shared with the interpreter
-    // (`snakebite.backends.delegates.functionNeedsClosure`): both ask
-    // dmd's own escape analysis the same question before deciding whether
-    // a captured variable lives in a frame slot or a heap block.
-    private bool functionNeedsClosure(FuncDeclaration function_) const {
-        import snakebite.backends.delegates:
-            sharedFunctionNeedsClosure = functionNeedsClosure;
-
-        return sharedFunctionNeedsClosure(function_);
-    }
-
     private size_t addPointerOffset(
         in size_t pointerOffset,
         in size_t byteOffset,
@@ -2054,23 +2040,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     // The context of `owner`, as a pointer value in a temporary frame slot.
-    // A closure's first word links to its parent context. A non-closure
-    // nested frame stores that link in its hidden `vthis` slot.
-    //
-    // `_function.toParent2()` does not skip over an enclosing aggregate the
-    // way it skips a block or `Catch` scope: a nested struct's method has
-    // that struct as its immediate `toParent2()`, not the function the
-    // struct itself is nested in. Crossing that hop reads the struct's own
-    // `vthis` field (`sd.isNested()`) out of the receiver - `_function`'s
-    // own hidden `this` is that receiver's address, the same as for an
-    // ordinary member method - at the field's own native offset
-    // (`sd.vthis.offset`), the same way any other field is reached by its
-    // `field.offset`. What that field holds is the context this struct's
-    // instance captured when it was built (`visit(StructLiteralExp)`'s own
-    // `isNested()` branch), which may itself be another nested struct's
-    // receiver, so the walk below alternates between a struct hop and a
-    // function hop for as many levels as the guest source actually nests.
+    // `staticChainPath` decides which hops that takes; this only folds them
+    // into loads. The first hop is a plain copy out of the current frame -
+    // that frame's own hidden `this` slot is already addressable by offset
+    // at compile time - every later hop indirects through a pointer value
+    // already sitting in `result`.
     private size_t contextAddressOf(FuncDeclaration owner) {
+        import snakebite.backends.staticchain: staticChainPath;
+
         if (owner is _function) {
             if (_closureOffset != size_t.max)
                 return _closureOffset;
@@ -2080,50 +2057,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return result;
         }
 
-        if (_layout.hiddenThis.variable is null)
+        const path = staticChainPath(_function, owner);
+        if (path is null)
             throw rejection(_function, _function.loc, "a static chain");
 
         const result = reserveTemp(pointerFacts);
-        emit(&opCopy, result,
-            _layout.hiddenThis.parameter.offset, size_t.sizeof);
+        emit(&opCopy, result, path[0].offset, size_t.sizeof);
 
-        auto parent = _function.toParent2();
-        auto currentFunction = parent is null ? null : parent.isFuncDeclaration;
-        auto currentStruct = parent is null ? null : parent.isStructDeclaration;
-
-        while (currentFunction !is owner) {
-            if (currentStruct !is null) {
-                if (!currentStruct.isNested() || currentStruct.vthis is null)
-                    throw rejection(_function, _function.loc,
-                        "a static chain");
-
-                addPointerOffset(result, currentStruct.vthis.offset);
-                emit(&opLoadIndirect, result, result, size_t.sizeof);
-
-                auto next = currentStruct.toParent2();
-                currentFunction = next is null ? null : next.isFuncDeclaration;
-                currentStruct = next is null ? null : next.isStructDeclaration;
-                continue;
-            }
-
-            if (currentFunction is null)
-                throw rejection(_function, _function.loc, "a static chain");
-
-            if (functionNeedsClosure(currentFunction)) {
-                emit(&opLoadIndirect, result, result, size_t.sizeof);
-            } else {
-                const layout = FrameLayout.of(currentFunction);
-                if (layout.hiddenThis.variable is null)
-                    throw rejection(_function, _function.loc,
-                        "a static chain");
-
-                addPointerOffset(result, layout.hiddenThis.parameter.offset);
-                emit(&opLoadIndirect, result, result, size_t.sizeof);
-            }
-
-            auto next = currentFunction.toParent2();
-            currentFunction = next is null ? null : next.isFuncDeclaration;
-            currentStruct = next is null ? null : next.isStructDeclaration;
+        foreach (const hop; path[1 .. $]) {
+            addPointerOffset(result, hop.offset);
+            emit(&opLoadIndirect, result, result, size_t.sizeof);
         }
 
         return result;
@@ -3169,10 +3112,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         requireDestination(expression);
 
-        // See `snakebite.backends.delegates.isCtfeVariable`: shared with
+        // See `snakebite.frontend.dmd.delegates.isCtfeVariable`: shared with
         // the interpreter, which folds the same read to a constant.
         {
-            import snakebite.backends.delegates: isCtfeVariable;
+            import snakebite.frontend.dmd.delegates: isCtfeVariable;
 
             if (isCtfeVariable(expression.var)) {
                 emit(&opConstant, _destination, addConstant(0L), _width);
@@ -3334,7 +3277,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // `&nested` (`&obj.method` and a bound `this`-capturing literal are
     // out of scope, matching the interpreter's own `visit(DelegateExp)`/
-    // `visit(FuncExp)` - see `snakebite.backends.delegates.
+    // `visit(FuncExp)` - see `snakebite.frontend.dmd.delegates.
     // delegateTargetOf`'s own doc for why): dmd lowers a nested function's
     // address-of to this node, naming the function directly in
     // `expression.func`.
@@ -3346,7 +3289,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     // Shared tail of `visit(FuncExp)`/`visit(DelegateExp)`: once
-    // `snakebite.backends.delegates.delegateTargetOf` has decided what the
+    // `snakebite.frontend.dmd.delegates.delegateTargetOf` has decided what the
     // delegate value needs (frame-independent, dmd-only facts - see its
     // own doc), this resolves that decision to instructions in this
     // compiler's own representation - `contextAddressOf` walks the same
@@ -3403,8 +3346,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileDelegateWord(Expression expression, in size_t offset) {
         import snakebite.nativelayout: delegateValueSize;
 
-        const delegateOffset = reserveTemp(
-            TypeFacts(delegateValueSize, size_t.sizeof, false, false));
+        const delegateOffset = reserveTemp(TypeFacts.delegateValue);
         evalInto(expression, delegateOffset, delegateValueSize);
         emit(&opCopy, _destination, delegateOffset + offset, _width);
     }
@@ -3525,50 +3467,90 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, _destination, baseOffset + field.offset, _width);
     }
 
-    // Writes the enclosing context a nested struct captured (`sd.vthis`)
-    // into its own field, wherever the struct being built lives:
-    // `destination` is a frame offset holding the struct's own bytes
-    // directly for a value (`visit(StructLiteralExp)`), or a frame offset
-    // holding a pointer to the struct's allocation for `new`
-    // (`compileNew`) - `isPointer` picks which. Every construction route
-    // that can build a nested struct must call this: leaving `vthis` at
-    // its `.init` zero, rather than rejecting the struct outright
-    // (field construction does not), reads back a null
-    // context the first time a method on that instance uses it.
+    // Executes one step of an `AggregateInitPlan` (`aggregateinit.d`),
+    // wherever the aggregate being built lives: `base` is a frame offset
+    // holding the aggregate's own bytes directly for a value
+    // (`visit(StructLiteralExp)`), or a frame offset holding a pointer to
+    // an allocation for `new` (`compileNew`) - `isPointer` picks which.
+    // The plan already decided which field is a plain value, a bitfield,
+    // or a static-array broadcast, and whether `vthis` needs filling; this
+    // is the only place that turns a step into bytecode.
     //
-    // `isNested()` is true only when dmd gave the struct a hidden `vthis`
-    // field; a `static struct` declared inside a function is lexically
-    // nested but has no such field. For a `StructDeclaration`, dmd's
-    // `makeNested` only ever sets a function as `enclosing` - unlike a
-    // class nested in a class, where a class parent is used instead - so
-    // `sd.toParent2()` landing on anything but a function here is a
-    // rejection, not a silent no-op.
-    private void fillVthis(
-        imported!"dmd.dstruct".StructDeclaration sd,
+    // A `vthis` step whose `parentFunction` is `null` means the struct's
+    // lexical parent is not a function - dmd fact, not itself an error for
+    // `planStructLiteral`/`planPositionalFields` to detect, but every
+    // construction route that can build a nested struct must reject it
+    // here: leaving `vthis` at its `.init` zero instead reads back a null
+    // context the first time a method on that instance uses it.
+    private void applyStep(
+        imported!"snakebite.backends.aggregateinit".InitStep step,
         imported!"dmd.location".Loc loc,
-        size_t destination,
+        size_t base,
         bool isPointer,
     ) {
-        if (!sd.isNested() || sd.vthis is null)
+        import snakebite.backends.aggregateinit: InitStep;
+
+        final switch (step.kind) with (InitStep.Kind) {
+        case vthis:
+            if (step.parentFunction is null)
+                throw rejection(_function, loc, "a nested struct's static chain");
+
+            const context = contextAddressOf(step.parentFunction);
+            if (!isPointer) {
+                emit(&opCopy, base + step.offset, context, size_t.sizeof);
+                return;
+            }
+
+            const fieldAddress = reserveTemp(pointerFacts);
+            emit(&opCopy, fieldAddress, base, size_t.sizeof);
+            addPointerOffset(fieldAddress, step.offset);
+            emit(&opStoreIndirect, fieldAddress, context, size_t.sizeof);
             return;
 
-        auto parent = sd.toParent2();
-        auto parentFunction = parent is null ? null : parent.isFuncDeclaration;
-        if (parentFunction is null)
-            throw rejection(_function, loc, "a nested struct's static chain");
+        case value:
+            if (!isPointer) {
+                evalInto(step.source, base + step.offset, step.facts.size,
+                    step.type);
+                return;
+            }
 
-        const context = contextAddressOf(parentFunction);
+            const valueOffset = reserveTemp(step.facts);
+            evalInto(step.source, valueOffset, step.facts.size, step.type);
+            const fieldAddress = reserveTemp(pointerFacts);
+            emit(&opCopy, fieldAddress, base, size_t.sizeof);
+            addPointerOffset(fieldAddress, step.offset);
+            emit(&opStoreIndirect, fieldAddress, valueOffset, step.facts.size);
+            return;
 
-        if (!isPointer) {
-            emit(&opCopy, destination + sd.vthis.offset, context,
-                size_t.sizeof);
+        case bitfield:
+            const valueOffset = reserveTemp(step.facts);
+            evalInto(step.source, valueOffset, step.facts.size, step.type);
+
+            const addressOffset = reserveTemp(pointerFacts);
+            if (isPointer) {
+                emit(&opCopy, addressOffset, base, size_t.sizeof);
+                addPointerOffset(addressOffset, step.offset);
+            } else
+                emit(&opFrameAddress, addressOffset, base + step.offset,
+                    size_t.sizeof);
+
+            emitBitfieldStore(step.field, addressOffset, valueOffset,
+                step.facts.size);
+            return;
+
+        case broadcast:
+            // Only reached for a value destination: a `NewExp`'s
+            // positional arguments are never padded by dmd's own `fill`
+            // (`expressionsem.d`, issue 12509), so `planPositionalFields`
+            // never emits this step for `isPointer`.
+            const tempOffset = reserveTemp(step.facts);
+            evalInto(step.source, tempOffset, step.facts.size);
+
+            foreach (i; 0 .. step.count)
+                emit(&opCopy, base + step.offset + i * step.facts.size,
+                    tempOffset, step.facts.size);
             return;
         }
-
-        const fieldAddress = reserveTemp(pointerFacts);
-        emit(&opCopy, fieldAddress, destination, size_t.sizeof);
-        addPointerOffset(fieldAddress, sd.vthis.offset);
-        emit(&opStoreIndirect, fieldAddress, context, size_t.sizeof);
     }
 
     // `Point(3, 4)`, dmd's own literal form for a plain-old struct with no
@@ -3586,72 +3568,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         emit(&opZero, _destination, 0, _width);
 
-        // `elements` never carries a value for `vthis` itself (dmd leaves
-        // it out, expecting whoever builds the literal to fill it in -
-        // the same gap the interpreter's own `visit(StructLiteralExp)`
-        // fills). The context this struct captures is whatever encloses
-        // it lexically, whether that is a function directly or a struct
-        // nested inside another nested struct's method
-        // (`fillVthis`/`contextAddressOf` hop through either).
-        fillVthis(expression.sd, expression.loc, _destination, false);
+        import snakebite.backends.aggregateinit: planStructLiteral;
 
-        if (expression.elements is null)
-            return;
-
-        foreach (i, element; *expression.elements) {
-            if (element is null)
-                continue;
-
-            auto field = expression.sd.fields[i];
-            auto sarrayType = field.type.isTypeSArray;
-
-            // dmd's `fill` (`expressionsem.d`, issue 12509) can supply,
-            // for a static-array field whose element type has a non-zero
-            // `.init`, a single literal of that *element* type rather
-            // than an array literal with one entry per slot: one value
-            // that every slot takes. Broadcast it, the same as dmd's own
-            // glue (`e2ir.d`'s `StructLiteralExp` case) does.
-            if (sarrayType !is null && !element.type.equals(field.type)) {
-                compileBroadcastArrayField(
-                    element, sarrayType, _destination + field.offset);
-                continue;
-            }
-
-            const facts = TypeFacts.of(field.type);
-            if (field.isBitFieldDeclaration !is null) {
-                const valueOffset = reserveTemp(facts);
-                evalInto(element, valueOffset, facts.size, field.type);
-                const addressOffset = reserveTemp(pointerFacts);
-                emit(&opFrameAddress, addressOffset,
-                    _destination + field.offset, size_t.sizeof);
-                emitBitfieldStore(field, addressOffset, valueOffset,
-                    facts.size);
-                continue;
-            }
-            evalInto(element, _destination + field.offset, facts.size, field.type);
-        }
-    }
-
-    // Fills every slot of a static-array field with the one element `dmd`
-    // gave for the whole array (see the call site above). `elementFacts`
-    // is the actual literal's own type, so this broadcasts correctly
-    // however many array dimensions still lie between it and
-    // `sarrayType` - a nested `T[2][3]` field works the same way, one
-    // flat run of `elementFacts.size`-sized copies.
-    private void compileBroadcastArrayField(
-        Expression element, imported!"dmd.mtype".TypeSArray sarrayType,
-        in size_t destOffset,
-    ) {
-        const elementFacts = TypeFacts.of(element.type);
-        const fieldFacts = TypeFacts.of(sarrayType);
-        const count = fieldFacts.size / elementFacts.size;
-
-        const tempOffset = reserveTemp(elementFacts);
-        evalInto(element, tempOffset, elementFacts.size);
-
-        foreach (i; 0 .. count)
-            emit(&opCopy, destOffset + i * elementFacts.size, tempOffset,
-                elementFacts.size);
+        auto plan = planStructLiteral(expression);
+        foreach (step; plan.steps)
+            applyStep(step, expression.loc, _destination, false);
     }
 
     // `arr.length`: the array's own length word, read straight out of its
@@ -3779,20 +3700,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // larger-lower-than-upper failure from an out-of-range one apart
         // (`ArraySliceError.msg`) - so this calls it twice, once per
         // condition, rather than building one combined flag first.
-        const sliceRegisters = [
-            Register(Register.Kind.pointer, 8),
-            Register(Register.Kind.unsigned, 4),
-            Register(Register.Kind.unsigned, 8),
-            Register(Register.Kind.unsigned, 8),
-            Register(Register.Kind.unsigned, 8),
-        ];
+        import snakebite.backends.elementaddress:
+            sliceBoundsHook, sliceBoundsRegisters;
+
         const orderOffset = reserveTemp(pointerFacts);
         emit(&opCopy, orderOffset, lowOffset, size_t.sizeof);
         emit(&opLessOrEqualUnsigned, orderOffset, highOffset, size_t.sizeof);
         compileBoundsHook(
             orderOffset,
-            "_d_arraybounds_slicep",
-            sliceRegisters,
+            sliceBoundsHook,
+            sliceBoundsRegisters,
             [
                 Arg(lowOffset, 0, size_t.sizeof),
                 Arg(highOffset, 0, size_t.sizeof),
@@ -3806,8 +3723,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             arrayOffset + arrayLengthOffset, size_t.sizeof);
         compileBoundsHook(
             orderOffset,
-            "_d_arraybounds_slicep",
-            sliceRegisters,
+            sliceBoundsHook,
+            sliceBoundsRegisters,
             [
                 Arg(lowOffset, 0, size_t.sizeof),
                 Arg(highOffset, 0, size_t.sizeof),
@@ -3980,8 +3897,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // stores further down, so both a `new Adder(2)` with a
         // constructor and a bare `new Reader` (no arguments at all) get
         // a real context rather than `.init`'s zero.
-        if (structType !is null)
-            fillVthis(structType.sym, expression.loc, objectOffset, true);
+        import snakebite.backends.aggregateinit:
+            AggregateInitPlan, InitStep, planPositionalFields;
+
+        auto plan = structType is null
+            ? AggregateInitPlan.init
+            : planPositionalFields(structType.sym,
+                expression.member is null ? expression.arguments : null);
+
+        foreach (step; plan.steps)
+            if (step.kind == InitStep.Kind.vthis)
+                applyStep(step, expression.loc, objectOffset, true);
 
         if (expression.member !is null) {
             compileResolvedCall(
@@ -3991,41 +3917,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        if (structType is null || expression.arguments is null)
-            return;
-
-        if (expression.arguments.length > structType.sym.fields.length)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        foreach (i, argument; *expression.arguments) {
-            auto field = structType.sym.fields[i];
-            const facts = TypeFacts.of(field.type);
-
-            const valueOffset = reserveTemp(facts);
-            evalInto(argument, valueOffset, facts.size);
-
-            if (field.isBitFieldDeclaration !is null) {
-                auto addressOffset = reserveTemp(pointerFacts);
-                emit(&opCopy, addressOffset, objectOffset, size_t.sizeof);
-                if (field.offset != 0) {
-                    const fieldOffset = reserveTemp(pointerFacts);
-                    emit(&opConstant, fieldOffset,
-                        addConstant(cast(long) field.offset), size_t.sizeof);
-                    emit(&opAdd, addressOffset, fieldOffset, size_t.sizeof);
-                }
-                emitBitfieldStore(field, addressOffset, valueOffset,
-                    facts.size);
-                continue;
-            }
-
-            const fieldAddressOffset = reserveTemp(pointerFacts);
-            emit(&opConstant, fieldAddressOffset,
-                addConstant(cast(long) field.offset), size_t.sizeof);
-            emit(&opAdd, fieldAddressOffset, objectOffset, size_t.sizeof);
-            emit(&opStoreIndirect, fieldAddressOffset, valueOffset,
-                facts.size);
-        }
+        foreach (step; plan.steps)
+            if (step.kind != InitStep.Kind.vthis)
+                applyStep(step, expression.loc, objectOffset, true);
     }
 
     // `null` is all-zero bytes whatever it means - a pointer, a class
@@ -4143,8 +4037,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // symbol with no `FuncDeclaration` behind it - so, unlike every other
     // `~=` lowering here, there is no `CallExp` this compiler could walk
     // through the ordinary native-call path. This resolves and calls that
-    // same hook directly (see `CallSite.isAppendDchar`), the same symbol a
-    // real build's glue layer would call.
+    // same hook directly, through the same `rawPlanOf`/`CallSite.native`
+    // shape `compileBoundsHook` already uses for a druntime hook dmd
+    // never resolves to a `FuncDeclaration`, the same symbol a real
+    // build's glue layer would call. The hook takes `x` by `ref` and
+    // appends into it in place, so its own return value (that same
+    // `{length, pointer}` pair again) is never read back here - the call
+    // itself runs with its result discarded, and `opLoadIndirect` reads
+    // the updated pair straight out of `x`'s own storage instead.
     override void visitUnloweredCatDcharAssign(CatDcharAssignExp expression) {
         import dmd.astenums: Tchar, Twchar;
         import snakebite.nativelayout: arrayValueSize;
@@ -4157,8 +4057,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        auto address = _bytecode._plans.resolve(name);
-        if (address is null)
+        auto plan = _bytecode._plans.rawPlanOf(
+            name,
+            [
+                Register(Register.Kind.pointer, 8),
+                Register(Register.Kind.unsigned, 4),
+            ],
+        );
+        if (plan is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -4168,20 +4074,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const valueOffset = reserveTemp(valueFacts);
         evalInto(expression.e2, valueOffset, valueFacts.size);
 
-        _callSites ~= CallSite(
-            null,
+        _callSites ~= CallSite.native(
+            cast(const(void)*) plan,
             [
                 Arg(arrayOffset, 0, size_t.sizeof),
                 Arg(valueOffset, 0, valueFacts.size),
             ],
-            arrayValueSize,
-            null,
-            address,
-            false,
             0,
-            true,
         );
-        emit(&opCall, _destination, _callSites.length - 1, 0);
+        emit(&opCall, discardResult, _callSites.length - 1, 0);
+
+        if (_destination != discardResult)
+            emit(&opLoadIndirect, _destination, arrayOffset, arrayValueSize);
     }
 
     protected override void visitUnloweredCat(CatExp expression) {
@@ -4857,12 +4761,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _instructions[jumpIndex].destination = _instructions.length;
     }
 
-    // `cast(T) x`. `cast(bool)` is not a narrowing: dmd classifies `bool`
-    // as an integral type, so a plain low-byte truncation would answer
-    // `cast(bool) 256` as `false` rather than D's own `true`, and this
-    // refuses that shortcut by name rather than by width. A cast that
-    // does not change width is a reinterpretation of the same bits -
-    // `cast(uint)` of an `int`, say - so it just evaluates the operand
+    // `cast(T) x`. `snakebite.backends.casts.classify` has already turned
+    // the source and destination types into a `Kind`; this is the
+    // adapter that executes each one, with no type inspection of its
+    // own. `cast(bool)` is not a narrowing: dmd classifies `bool` as an
+    // integral type, so a plain low-byte truncation would answer
+    // `cast(bool) 256` as `false` rather than D's own `true`. A cast
+    // that does not change width is a reinterpretation of the same bits
+    // - `cast(uint)` of an `int`, say - so it just evaluates the operand
     // straight into `destOffset`; narrowing does too, into a wider
     // temporary first, since this VM's little-endian layout already
     // makes the low bytes of a wider stored value its truncation to a
@@ -4873,6 +4779,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileCast(
         CastExp expression, in size_t destOffset, in size_t width,
     ) {
+        import snakebite.backends.casts: classify, CastPlan;
         import std.conv: text;
 
         auto sourceType = expression.e1.type;
@@ -4883,106 +4790,76 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (expression.e1.isNullExp !is null)
             return evalInto(expression.e1, destOffset, width);
 
-        const sourceFacts = TypeFacts.of(sourceType);
-        const destFacts = TypeFacts.of(destType);
-        import dmd.astenums: Taarray, Tclass, Tpointer, Tsarray;
+        const plan = classify(sourceType, destType);
 
-        // A class reference upcast to a base class or to an interface it
-        // implements (this compiler gives an interface reference the same
-        // representation as a class reference: `compileVirtualCall`'s own
-        // interface branch resolves the real override through the
-        // object's `TypeInfo_Class` at run time instead of an ABI thunk
-        // reached through an adjusted `this`), or an AA reference cast to
-        // a differently-qualified AA of the same key/value types - e.g.
-        // `object.d`'s `_aaDup` casting its `const(int[Pair])` result to
-        // the caller's `int[Pair]` - both are one pointer word either
-        // way: dmd's semantic pass already proved the cast legal, so
-        // this is a plain copy, never a representation change.
-        if ((sourceType.ty == Tclass && destType.ty == Tclass)
-                || (sourceType.ty == Taarray && destType.ty == Taarray))
+        final switch (plan.kind) with (CastPlan.Kind) {
+        case copy:
             return evalInto(expression.e1, destOffset, width);
 
-        // `cast(T) p`: `_d_newclassT`'s own final step
-        // (`core/lifetime.d`), reinterpreting the `void*` its allocation
-        // returned as the guest class reference it hands back. A class
-        // reference's native layout is one pointer word, the same as any
-        // other pointer (`isSupportedFacts` already treats `Tclass` that
-        // way), so this is a plain copy in either direction, never an
-        // address adjustment.
-        if ((sourceType.ty == Tclass && destType.ty == Tpointer)
-                || (sourceType.ty == Tpointer && destType.ty == Tclass))
+        case classReference:
             return evalInto(expression.e1, destOffset, width);
 
-        if (isFloatingType(destType)) {
-            if (isFloatingType(sourceType)) {
-                if (sourceFacts.size == destFacts.size)
-                    return evalInto(expression.e1, destOffset, width);
+        case floatWidth: {
+            const sourceOffset = plan.sourceFacts.size > plan.destFacts.size
+                ? reserveTemp(plan.sourceFacts) : destOffset;
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(&opFloatWidthCast, destOffset, sourceOffset,
+                plan.destFacts.size, plan.sourceFacts.size);
+            return;
+        }
 
-                const sourceOffset = sourceFacts.size > destFacts.size
-                    ? reserveTemp(sourceFacts) : destOffset;
-                evalInto(expression.e1, sourceOffset, sourceFacts.size);
-                emit(&opFloatWidthCast, destOffset, sourceOffset, destFacts.size,
-                    sourceFacts.size);
-                return;
-            }
-
-            if (!sourceFacts.isIntegral
-                    || !isIntegralSize(sourceFacts.size))
-                throw rejection(_function, expression.loc,
-                    text("a cast from `", sourceType.toString, "` to `",
-                        destType.toString, "`"));
-
-            const sourceOffset = reserveTemp(sourceFacts);
-            evalInto(expression.e1, sourceOffset, sourceFacts.size);
+        case integralToFloat: {
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
             emit(
-                sourceFacts.isUnsigned
+                plan.sourceFacts.isUnsigned
                     ? &opIntegralToFloatUnsigned
                     : &opIntegralToFloatSigned,
-                destOffset, sourceOffset, destFacts.size, sourceFacts.size,
+                destOffset, sourceOffset, plan.destFacts.size,
+                plan.sourceFacts.size,
             );
             return;
         }
 
-        if (isFloatingType(sourceType)) {
-            if (!destFacts.isIntegral || !isIntegralSize(destFacts.size))
-                throw rejection(_function, expression.loc,
-                    text("a cast from `", sourceType.toString, "` to `",
-                        destType.toString, "`"));
-
-            const sourceOffset = reserveTemp(sourceFacts);
-            evalInto(expression.e1, sourceOffset, sourceFacts.size);
+        case floatToIntegral: {
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
             emit(
-                destFacts.isUnsigned
+                plan.destFacts.isUnsigned
                     ? &opFloatToIntegralUnsigned
                     : &opFloatToIntegralSigned,
-                destOffset, sourceOffset, destFacts.size, sourceFacts.size,
+                destOffset, sourceOffset, plan.destFacts.size,
+                plan.sourceFacts.size,
             );
             return;
         }
 
-        if (sourceType.ty == Tpointer && destType.ty == Tpointer
-                && width == sourceFacts.size)
-            return evalInto(expression.e1, destOffset, width);
-
-        if (sourceType.ty == Tpointer && destFacts.isDynamicArray) {
+        case pointerToArray: {
             const addressOffset = reserveTemp(pointerFacts);
-            evalInto(expression.e1, addressOffset, sourceFacts.size);
+            evalInto(expression.e1, addressOffset, plan.sourceFacts.size);
             emit(&opLoadIndirect, destOffset, addressOffset,
-                destFacts.size);
+                plan.destFacts.size);
             return;
         }
 
-        if (sourceType.ty == Tsarray && destFacts.isDynamicArray
-                && destType.nextOf !is null
-                && sourceType.nextOf.equals(destType.nextOf)) {
+        // An explicit pointer-to-integral cast preserves the native
+        // address bits: `sourceOffset` already holds them as a
+        // `size_t`, so keeping the low `destFacts.size` bytes is the
+        // same truncation a narrowing integral cast performs.
+        case pointerToIntegral: {
+            const sourceOffset = reserveTemp(pointerFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(&opCopy, destOffset, sourceOffset, plan.destFacts.size);
+            return;
+        }
+
+        case sarrayToSlice: {
             import snakebite.nativelayout:
                 arrayLengthOffset, arrayPointerOffset;
 
-            const length = cast(size_t)
-                sourceType.isTypeSArray.dim.toInteger;
             const addressOffset = compileAddress(expression.e1);
             emit(&opConstant, destOffset + arrayLengthOffset,
-                addConstant(cast(long) length), size_t.sizeof);
+                addConstant(cast(long) plan.staticLength), size_t.sizeof);
             emit(&opCopy, destOffset + arrayPointerOffset,
                 addressOffset, size_t.sizeof);
             return;
@@ -4992,63 +4869,79 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // (`TypeSArray.dotExp`) casts straight to a pointer to its element
         // type - the array's own address is already that pointer, with no
         // bytes to move.
-        if (sourceType.ty == Tsarray && destType.ty == Tpointer
-                && destType.nextOf !is null
-                && sourceType.nextOf.equals(destType.nextOf)) {
+        case sarrayToPointer: {
             const addressOffset = compileAddress(expression.e1);
             emit(&opCopy, destOffset, addressOffset, size_t.sizeof);
             return;
         }
 
-        if (sourceFacts.isDynamicArray && destType.ty == Tpointer
-                && destType.nextOf !is null
-                && sourceType.nextOf.equals(destType.nextOf)) {
+        case sliceToPointer: {
             import snakebite.nativelayout: arrayPointerOffset;
 
-            const arrayOffset = reserveTemp(sourceFacts);
-            evalInto(expression.e1, arrayOffset, sourceFacts.size);
+            const arrayOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, arrayOffset, plan.sourceFacts.size);
             emit(&opCopy, destOffset, arrayOffset + arrayPointerOffset,
                 size_t.sizeof);
             return;
         }
 
-        if (sourceFacts.isDynamicArray && destFacts.isDynamicArray
-                && width == sourceFacts.size) {
-            evalInto(expression.e1, destOffset, width);
+        // D reinterprets the same bytes at the new element width, so the
+        // byte count - not the element count - is what has to stay the
+        // same across the cast: the destination's length is the
+        // source's own length scaled by the ratio of the two element
+        // sizes, both compile-time constants here.
+        case reinterpretSlice: {
+            import snakebite.nativelayout:
+                arrayLengthOffset, arrayPointerOffset;
+
+            const arrayOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, arrayOffset, plan.sourceFacts.size);
+            emit(&opCopy, destOffset + arrayPointerOffset,
+                arrayOffset + arrayPointerOffset, size_t.sizeof);
+            emit(&opCopy, destOffset + arrayLengthOffset,
+                arrayOffset + arrayLengthOffset, size_t.sizeof);
+
+            const ratioOffset = reserveTemp(pointerFacts);
+            emit(&opConstant, ratioOffset,
+                addConstant(cast(long) plan.sourceFacts.elementSize),
+                size_t.sizeof);
+            emit(&opMultiply, destOffset + arrayLengthOffset, ratioOffset,
+                size_t.sizeof);
+            emit(&opConstant, ratioOffset,
+                addConstant(cast(long) plan.destFacts.elementSize),
+                size_t.sizeof);
+            emit(&opDivideUnsigned, destOffset + arrayLengthOffset,
+                ratioOffset, size_t.sizeof);
             return;
         }
 
-        if (!sourceFacts.isIntegral || !isIntegralSize(sourceFacts.size)
-                || !destFacts.isIntegral)
-            throw rejection(_function, expression.loc,
-                text("a cast from `", sourceType.toString, "` to `",
-                    destType.toString, "`"));
-
-        import dmd.astenums: Tbool;
-
-        if (destType.ty == Tbool) {
-            evalInto(expression.e1, destOffset, sourceFacts.size);
-            emit(&opCastToBool, destOffset, 0, sourceFacts.size);
+        case toBool:
+            evalInto(expression.e1, destOffset, plan.sourceFacts.size);
+            emit(&opCastToBool, destOffset, 0, plan.sourceFacts.size);
             return;
-        }
 
-        if (width == sourceFacts.size) {
-            evalInto(expression.e1, destOffset, width);
-            return;
-        }
-
-        if (width < sourceFacts.size) {
-            const temp = reserveTemp(sourceFacts);
-            evalInto(expression.e1, temp, sourceFacts.size);
+        case narrow: {
+            const temp = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, temp, plan.sourceFacts.size);
             emit(&opCopy, destOffset, temp, width);
             return;
         }
 
-        evalInto(expression.e1, destOffset, sourceFacts.size);
-        emit(
-            sourceFacts.isUnsigned ? &opCastWidenUnsigned : &opCastWidenSigned,
-            destOffset, sourceFacts.size, width,
-        );
+        case widenSigned:
+        case widenUnsigned:
+            evalInto(expression.e1, destOffset, plan.sourceFacts.size);
+            emit(
+                plan.kind == widenUnsigned
+                    ? &opCastWidenUnsigned : &opCastWidenSigned,
+                destOffset, plan.sourceFacts.size, width,
+            );
+            return;
+
+        case unsupported:
+            throw rejection(_function, expression.loc,
+                text("a cast from `", sourceType.toString, "` to `",
+                    destType.toString, "`"));
+        }
     }
 
     // Whether `expression` has to reach `callee` through the receiver's
@@ -5075,7 +4968,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // class or an interface declares, never the guest override that
     // actually runs. `compileClassVtableSlot`/`compileInterfaceVtableSlot`
     // read the real one back out of the object at run time, into a
-    // temporary this reuses the same `isIndirect` `CallSite` shape
+    // temporary this reuses the same `CallSite.indirect` shape
     // `compileIndirectCall` already built for a function-pointer value -
     // the receiver's dynamic type decides which compiled callee that
     // slot holds, at a compile time this compiler cannot know, but every
@@ -5143,14 +5036,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             args ~= Arg(argumentOffset, parameter.offset, parameter.facts.size);
         }
 
-        CallSite site;
-        site.args = args;
-        site.returnWidth = isVoidCallee ? 0 : returnFacts.size;
-        site.isIndirect = true;
-        site.calleeSlotOffset = calleeSlotOffset;
-
         const siteIndex = _callSites.length;
-        _callSites ~= site;
+        _callSites ~= CallSite.indirect(
+            calleeSlotOffset, args, isVoidCallee ? 0 : returnFacts.size,
+        );
         emit(&opCall, destOffset, siteIndex, 0);
     }
 
@@ -5187,20 +5076,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // out to hold at run time - never at a fixed vtable index the way a
     // class's own virtual method is (a different implementing class
     // places the same interface method at a different index in its own
-    // main vtable), so this reaches `snakebite.backends.bytecode.vm`'s
-    // own `resolveInterfaceMethod` instead, through the same native call
-    // site shape `emitAllocate` already uses for a druntime hook dmd
-    // never resolves to a `FuncDeclaration`. `interfaceInfo` and
-    // `callee.vtblIndex` are both fixed once `expression.e1`'s own static
-    // type (`Factory`, not whichever class actually implements it) is
-    // known, so both travel as the call site's own constants, never read
-    // from a frame.
+    // main vtable), so this reaches for `opResolveInterfaceMethod`
+    // instead of an ordinary call: not a call at all, just an address
+    // computation. `interfaceInfo` and `callee.vtblIndex` are both fixed
+    // once `expression.e1`'s own static type (`Factory`, not whichever
+    // class actually implements it) is known, so both travel as the
+    // instruction's own operands, never read from a frame.
     private size_t compileInterfaceVtableSlot(
         CallExp expression, in size_t objectOffset, FuncDeclaration callee,
         imported!"dmd.dclass".ClassDeclaration interfaceDeclaration,
     ) {
-        import snakebite.backends.bytecode.vm: resolveInterfaceMethod;
-
         const index = callee.vtblIndex;
         if (index <= 0)
             throw rejection(_function, expression.loc,
@@ -5208,18 +5093,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto interfaceInfo = _bytecode.classRuntimeInfo(interfaceDeclaration);
 
-        CallSite site;
-        site.args = [Arg(objectOffset, 0, size_t.sizeof)];
-        site.returnWidth = size_t.sizeof;
-        site.nativeAddress = cast(void*) &resolveInterfaceMethod;
-        site.isInterfaceResolve = true;
-        site.interfaceInfo = cast(void*) interfaceInfo;
-        site.methodIndex = cast(size_t) index;
-
         const calleeOffset = reserveTemp(pointerFacts);
-        const siteIndex = _callSites.length;
-        _callSites ~= site;
-        emit(&opCall, calleeOffset, siteIndex, 0);
+        emit(&opResolveInterfaceMethod, calleeOffset, objectOffset,
+            cast(size_t) index, cast(size_t) cast(void*) interfaceInfo);
         return calleeOffset;
     }
 
@@ -5256,7 +5132,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // declaration this compiler never walks the body of - `Exception.
         // this` is one, reached through `super(...)` delegation from a
         // guest exception constructor.
-        import snakebite.backends.delegates: hasHiddenThis;
+        import snakebite.frontend.dmd.delegates: hasHiddenThis;
 
         const hasThis = hasHiddenThis(callee);
         compileResolvedCall(
@@ -5362,10 +5238,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         size_t delegate() thisOffsetOf,
         in size_t destOffset,
     ) {
-        import dmd.astenums: STC, Tvoid;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        import snakebite.backends.calls: prefersGuestBody, usesGuestBody;
+        import snakebite.backends.calls:
+            arityMismatches, prefersGuestBody, usesGuestBody;
 
         const guest = usesGuestBody(
             callee, arguments, &_bytecode.isGuestFunction,
@@ -5390,8 +5266,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto calleeType = typeFunctionOf(callee);
 
         const parameterCount = calleeType.parameterList.length;
-        const argumentCount = arguments is null ? 0 : arguments.length;
-        if (argumentCount != parameterCount)
+        if (arityMismatches(calleeType.parameterList, arguments))
             throw rejection(_function, loc, exprText);
 
         Arg[] args;
@@ -5432,20 +5307,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // A `ref` return hands the caller the callee's own returned
         // storage's address - `compileAddress`'s `CallExp` case is the one
         // place that address is read back out, and `compileIndirectAssign`
-        // is the one place it is written through.
-        const isRefCallee = calleeType.isRef;
-        auto calleeReturnType = calleeType.next;
-        const isVoidCallee = isConstructor || calleeReturnType is null
-            || calleeReturnType.ty == Tvoid;
-        const returnFacts = isRefCallee
-            ? pointerFacts
-            : isVoidCallee ? TypeFacts.init : TypeFacts.of(calleeReturnType);
+        // is the one place it is written through. The same shape decides a
+        // native callee's own return place (`compileNativeCall`) and an
+        // indirect one's (`compileIndirectCall`), so it is decided once,
+        // by `CallAdapter`, rather than re-derived at each of the three.
+        import snakebite.ffi.call: CallAdapter;
+
+        const returnShape = CallAdapter.ofType(calleeType, isConstructor);
+        const isVoidCallee = returnShape.isVoid;
         if (isVoidCallee && !isConstructor && destOffset != discardResult)
             throw rejection(_function, loc, exprText);
 
         const siteIndex = _callSites.length;
-        _callSites ~=
-            CallSite(calleeFunction, args, isVoidCallee ? 0 : returnFacts.size);
+        _callSites ~= CallSite.guest(
+            calleeFunction, args,
+            isVoidCallee ? 0 : returnShape.returnFacts.size,
+        );
         emit(&opCall, destOffset, siteIndex, 0);
     }
 
@@ -5465,23 +5342,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg[] initialArgs,
         in size_t destOffset,
     ) {
-        import dmd.astenums: STC, Tvoid;
+        import dmd.astenums: STC;
+        import snakebite.backends.calls: arityMismatches;
 
         const parameterCount = type.parameterList.length;
-        const argumentCount = arguments is null ? 0 : arguments.length;
-        if (argumentCount != parameterCount)
+        if (arityMismatches(type.parameterList, arguments))
             throw rejection(_function, loc, exprText);
 
         // A `ref` return hands back its target's address in the
         // return register, whatever the pointee's own facts are - the
         // same convention `snakebite.ffi.plan` already prepares for a
-        // native callee (see `CallPlan.prepare`'s own `returnsRef`).
-        const isRefCallee = type.isRef;
-        auto returnType = type.next;
-        const isVoidCallee = returnType is null || returnType.ty == Tvoid;
-        const returnFacts = isRefCallee
-            ? pointerFacts
-            : isVoidCallee ? TypeFacts.init : TypeFacts.of(returnType);
+        // native callee (see `CallPlan.prepare`'s own `returnsRef`), and
+        // the same shape `CallAdapter` already decides once for
+        // `compileResolvedCall`'s guest branch and for `compileIndirectCall`.
+        import snakebite.ffi.call: CallAdapter;
+
+        const returnShape = CallAdapter.ofType(type);
+        const isVoidCallee = returnShape.isVoid;
         if (isVoidCallee && destOffset != discardResult)
             throw rejection(_function, loc, exprText);
 
@@ -5517,8 +5394,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // at the ABI boundary - a native callee zero-initialises
             // an `out` argument itself, the same as compiled D's own
             // caller never does, so this compiler need only hand over
-            // the argument's own address either way.
-            if (parameter.storageClass & (STC.ref_ | STC.out_)) {
+            // the argument's own address either way. The same fact,
+            // from the same `CallAdapter.Argument`, is what
+            // `Evaluator.bindArguments` reads to pick address over value
+            // for a guest-body callee's own parameter.
+            if (CallAdapter.Argument.of(parameter).isReference) {
                 const argumentOffset = compileAddress((*arguments)[i]);
                 args ~= Arg(argumentOffset, 0, size_t.sizeof);
                 continue;
@@ -5533,7 +5413,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // calls `toDelegate`), so only the destination slot's own
             // facts need to widen to match it.
             const facts = parameter.storageClass & STC.lazy_
-                ? lazyFacts()
+                ? TypeFacts.lazyArgument
                 : TypeFacts.of(parameter.type);
             const argumentOffset = reserveTemp(facts);
             evalInto((*arguments)[i], argumentOffset, facts.size);
@@ -5541,9 +5421,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         auto plan = &_bytecode._plans.of(callee);
-        _callSites ~= CallSite(
-            null, args, isVoidCallee ? 0 : returnFacts.size,
-            cast(const(void)*) plan,
+        _callSites ~= CallSite.native(
+            cast(const(void)*) plan, args,
+            isVoidCallee ? 0 : returnShape.returnFacts.size,
         );
         emit(&opCall, destOffset, _callSites.length - 1, 0);
     }
@@ -5566,8 +5446,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `this` before its declared parameters (see `ofParameters`'s own
     // `hasContext` doc).
     private void compileIndirectCall(CallExp expression, in size_t destOffset) {
-        import dmd.astenums: STC, Tdelegate, Tvoid;
+        import dmd.astenums: STC, Tdelegate;
         import dmd.mtype: TypeFunction;
+        import snakebite.backends.calls: arityMismatches;
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize;
 
@@ -5588,8 +5469,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (isDelegateCall) {
             functionType = expression.e1.type.nextOf.isTypeFunction;
 
-            const delegateOffset = reserveTemp(
-                TypeFacts(delegateValueSize, size_t.sizeof, false, false));
+            const delegateOffset = reserveTemp(TypeFacts.delegateValue);
             evalInto(expression.e1, delegateOffset, delegateValueSize);
             contextOffset = delegateOffset + delegateContextOffset;
             calleeOffset = delegateOffset + delegateFunctionOffset;
@@ -5604,22 +5484,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const parameterCount = functionType.parameterList.length;
-        const argumentCount =
-            expression.arguments is null ? 0 : expression.arguments.length;
-        if (argumentCount != parameterCount)
+        if (arityMismatches(functionType.parameterList, expression.arguments))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
         // A `ref` return hands back its target's address in the return
-        // register regardless of the pointee's own width - the same
-        // convention `compileCall`'s own `isRefCallee` follows for a
-        // resolved callee.
-        const isRefCallee = functionType.isRef;
-        auto returnType = functionType.next;
-        const isVoidCallee = returnType is null || returnType.ty == Tvoid;
-        const returnFacts = isRefCallee
-            ? pointerFacts
-            : isVoidCallee ? TypeFacts.init : TypeFacts.of(returnType);
+        // register regardless of the pointee's own width - the same shape
+        // `CallAdapter` already decides once for `compileResolvedCall`'s
+        // guest branch and for `compileNativeCall`.
+        import snakebite.ffi.call: CallAdapter;
+
+        const returnShape = CallAdapter.ofType(functionType);
+        const isVoidCallee = returnShape.isVoid;
         if (isVoidCallee && destOffset != discardResult)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
@@ -5661,14 +5537,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             args ~= Arg(argumentOffset, slot.offset, slot.facts.size);
         }
 
-        CallSite site;
-        site.args = args;
-        site.returnWidth = isVoidCallee ? 0 : returnFacts.size;
-        site.isIndirect = true;
-        site.calleeSlotOffset = calleeOffset;
-
         const siteIndex = _callSites.length;
-        _callSites ~= site;
+        _callSites ~= CallSite.indirect(
+            calleeOffset, args, isVoidCallee ? 0 : returnShape.returnFacts.size,
+        );
         emit(&opCall, destOffset, siteIndex, 0);
     }
 
@@ -5698,15 +5570,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private TypeFacts pointerFacts() {
         return pointerFactsOf;
-    }
-
-    // A `lazy` parameter's own frame slot: dmd's own implicit delegate,
-    // the same fixed shape `FrameLayout.packParameter` gives every `lazy`
-    // parameter slot regardless of the declared type it wraps.
-    private TypeFacts lazyFacts() {
-        import snakebite.nativelayout: delegateValueSize;
-
-        return TypeFacts(delegateValueSize, size_t.sizeof, false, false);
     }
 
     // Emits the conditional call to one of druntime's own bounds-failure
@@ -5753,7 +5616,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             Arg(fileOffset, 0, size_t.sizeof),
             Arg(lineOffset, 0, uint.sizeof),
         ] ~ extraArgs;
-        _callSites ~= CallSite(null, args, 0, cast(const(void)*) plan);
+        _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
         emit(&opCall, discardResult, _callSites.length - 1, 0);
 
         *branchTargetField(_instructions[branchIndex]) = _instructions.length;
@@ -5777,6 +5640,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t compileElementAddress(
         IndexExp expression, in TypeFacts arrayFacts,
     ) {
+        import snakebite.backends.elementaddress:
+            indexBoundsHook, indexBoundsRegisters;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
         const arrayOffset = reserveTemp(arrayFacts);
@@ -5803,13 +5668,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         compileBoundsHook(
             boundsOffset,
-            "_d_arraybounds_indexp",
-            [
-                Register(Register.Kind.pointer, 8),
-                Register(Register.Kind.unsigned, 4),
-                Register(Register.Kind.unsigned, 8),
-                Register(Register.Kind.unsigned, 8),
-            ],
+            indexBoundsHook,
+            indexBoundsRegisters,
             [
                 Arg(indexOffset, 0, size_t.sizeof),
                 Arg(arrayOffset + arrayLengthOffset, 0, size_t.sizeof),
@@ -5883,9 +5743,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `expression.e1`'s reproduces exactly that order, since each nested
     // call does the same in turn.
     private size_t compileStaticElementAddress(IndexExp expression) {
-        auto sarrayType = expression.e1.type.isTypeSArray;
-        const elementFacts = TypeFacts.of(sarrayType.next);
-        const dim = cast(size_t) sarrayType.dim.toInteger;
+        import dmd.expressionsem: toInteger;
+        import snakebite.backends.elementaddress:
+            indexBoundsHook, indexBoundsRegisters;
+
+        auto arrayType = expression.e1.type.isTypeSArray;
+        const elementFacts = TypeFacts.of(arrayType.next);
+        const dim = cast(size_t) arrayType.dim.toInteger;
 
         const dimOffset = reserveTemp(pointerFacts);
         emit(&opConstant, dimOffset, addConstant(cast(long) dim),
@@ -5914,13 +5778,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // hook instead of `opAssert`.
         compileBoundsHook(
             boundsOffset,
-            "_d_arraybounds_indexp",
-            [
-                Register(Register.Kind.pointer, 8),
-                Register(Register.Kind.unsigned, 4),
-                Register(Register.Kind.unsigned, 8),
-                Register(Register.Kind.unsigned, 8),
-            ],
+            indexBoundsHook,
+            indexBoundsRegisters,
             [
                 Arg(indexOffset, 0, size_t.sizeof),
                 Arg(dimOffset, 0, size_t.sizeof),
@@ -6083,15 +5942,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void emitAllocate(in size_t sizeOffset, in size_t resultOffset) {
         import core.memory: GC;
 
+        const bitsOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, bitsOffset,
+            addConstant(cast(long) GC.BlkAttr.NO_SCAN), uint.sizeof);
+
+        const typeInfoOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, typeInfoOffset, addConstant(0), size_t.sizeof);
+
         const siteIndex = _callSites.length;
-        _callSites ~= CallSite(
-            null,
-            [Arg(sizeOffset, 0, size_t.sizeof)],
+        _callSites ~= CallSite.native(
+            _bytecode.allocatorPlan,
+            [
+                Arg(sizeOffset, 0, size_t.sizeof),
+                Arg(bitsOffset, 0, uint.sizeof),
+                Arg(typeInfoOffset, 0, size_t.sizeof),
+            ],
             (void*).sizeof,
-            null,
-            _bytecode.allocatorAddress,
-            true,
-            GC.BlkAttr.NO_SCAN,
         );
         emit(&opCall, resultOffset, siteIndex, 0);
     }

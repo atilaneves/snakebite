@@ -9,29 +9,32 @@ private:
 // host metadata whenever it is available.
 public struct RuntimeTypes {
     import dmd.dclass: ClassDeclaration;
-    import dmd.dmodule: Module;
     import dmd.denum: EnumDeclaration;
     import dmd.location: Loc;
     import dmd.dstruct: StructDeclaration;
     import dmd.dsymbol: Dsymbol;
     import dmd.mtype: Type;
-    import snakebite.backends.backend: Program;
     import object: TypeInfo, TypeInfo_Class, TypeInfo_Struct;
 
-    private const(Module)[] _rootModules;
+    private bool delegate(Dsymbol) const _isRootOwned;
     private void* delegate(const(char)[]) _resolve;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
     private const(void)[] delegate(Type, Loc) _initialValue;
     private TypeInfo[Type] _types;
     private TypeInfo_Struct[StructDeclaration] _structs;
 
+    // `isRootOwned` is the owning `Program`'s own decision
+    // (`Program.isRootOwned`), not a copy of its root module list: a
+    // guest class or struct's `TypeInfo` and a guest function's call
+    // target ask the one question "does this program itself declare
+    // `declaration`" the same way.
     public this(
-        in Program program,
+        bool delegate(Dsymbol) const isRootOwned,
         void* delegate(const(char)[]) resolve,
         TypeInfo_Class delegate(ClassDeclaration) classInfo,
         const(void)[] delegate(Type, Loc) initialValue,
     ) {
-        _rootModules = program.rootModules;
+        _isRootOwned = isRootOwned;
         _resolve = resolve;
         _classInfo = classInfo;
         _initialValue = initialValue;
@@ -154,11 +157,7 @@ public struct RuntimeTypes {
     }
 
     public bool isRootOwned(Dsymbol declaration) const {
-        const module_ = declaration.getModule;
-        foreach (rootModule; _rootModules)
-            if (module_ is rootModule)
-                return true;
-        return false;
+        return _isRootOwned(declaration);
     }
 
     private TypeInfo linkedInfo(Type type) {

@@ -59,6 +59,16 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         return _evaluator.symbolLookups();
     }
 
+    // Frame layouts built on this thread - by this evaluator or by any
+    // shared code it reaches - since the thread started. Global, so only a
+    // difference between two readings on the same thread means anything.
+    version(unittest)
+    public size_t layoutBuilds() @safe @nogc nothrow const scope {
+        import snakebite.backends.layout: FrameLayout;
+
+        return FrameLayout.builds;
+    }
+
 }
 
 import snakebite.exception: SnakebiteException;
@@ -69,15 +79,10 @@ import snakebite.exception: SnakebiteException;
 // unchanged.
 private final class GuestException: Exception {
     private Throwable _guest;
-    private imported!"dmd.dclass".ClassDeclaration _class;
 
-    public this(
-        Throwable guest,
-        imported!"dmd.dclass".ClassDeclaration class_ = null,
-    ) {
+    public this(Throwable guest) {
         super(guest.msg);
         _guest = guest;
-        _class = class_;
     }
 }
 
@@ -97,14 +102,17 @@ import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 // `Interpreter`-side cache to hold.
 extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.backends.backend: Program;
-    import snakebite.backends.delegates: DelegateTarget;
+    import snakebite.frontend.dmd.delegates: DelegateTarget, outerFunctionOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
+    import snakebite.backends.staticchain: Hop;
     import snakebite.backends.classinfo;
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
     import snakebite.ffi:
-        CallbackArguments, CallbackBridge, CallPlan, CallResult, PlanCache;
+        CallAdapter, CallbackArguments, CallbackBridge, CallPlan, CallResult,
+        PlanCache;
+    import snakebite.ffi.abi: Register;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
         initializerValueOf, isIntegralSize, TypeFacts;
@@ -149,6 +157,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // function's first call (the cold path) and reused by every call
     // after it.
     private Cache!(FuncDeclaration, FrameLayout) _layouts;
+    // The FFI call adapter for a guest callee's own signature: whether it
+    // returns by `ref`, and whether each declared parameter passes an
+    // address or a value. `FrameLayout` describes storage, not the calling
+    // convention layered on top of it, so this stays its own cache beside
+    // `_layouts` rather than a field of it - the bytecode compiler never
+    // reads a `FuncDeclaration`'s call adapter at all, only this evaluator
+    // does, on every call.
+    private Cache!(FuncDeclaration, CallShape) _calls;
     // Storage for locals that dmd moves out of an activation frame when it
     // decides that the frame must survive its call. The backing bytes are
     // kept in `_allocations`, so a delegate can retain this context after
@@ -158,6 +174,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // answers so execution does not repeat the same AST walk for functions
     // that stay in this evaluator's program.
     private Cache!(FuncDeclaration, bool) _needsClosure;
+    // The static-chain hops from one function's frame to an enclosing
+    // function's context, keyed by that pair. Working the hops out builds
+    // the frame layout of every function on the way, so it is done once
+    // per pair and read back on every reach of a captured variable.
+    private Cache!(StaticChainKey, Hop[]) _staticChains;
     // Whether a callee's own body is preferred does not change while an
     // evaluator runs. Keep it apart from call-site decisions: delegate
     // arguments and the active nesting context still need to be checked
@@ -167,11 +188,27 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // A guest pointer can live in an unscanned frame, so the evaluator keeps
     // each backing allocation reachable for as long as guest state can be.
     private ubyte[][] _allocations;
-    // Guest class references point into these allocations. Keep the
-    // declaration beside each object so a catch can match the actual
-    // derived class after the reference has been widened.
-    private ClassDeclaration[void*] _classes;
     private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
+    // The reverse of `_classRuntime`: which declaration a generated
+    // `TypeInfo_Class` stands for. An object's own dynamic type is read
+    // straight out of its native layout (word 0's vtable, slot 0 - the
+    // same place a real compiled object keeps its `classinfo`), the same
+    // way the bytecode VM reads it; this is the one place that answer
+    // needs to travel back to the `ClassDeclaration` this backend still
+    // dispatches virtual calls and `DeleteExp`'s destructor through. A
+    // native object's own dynamic type is never a key here, since only
+    // `classRuntimeInfo` below ever inserts one - that absence is how a
+    // native receiver is told apart from a guest one. Keyed by the
+    // `TypeInfo_Class` object's own address: `TypeInfo` compares and
+    // hashes by name, and a native class can share a guest class's fully
+    // qualified name (a root module also linked into this process), so a
+    // name-keyed table would answer a native object with the guest
+    // declaration.
+    private ClassDeclaration[const(void)*] _declarationOf;
+    // Each catch clause's own runtime type, resolved once the first time
+    // `visit(TryCatchStatement)` reaches it and reused by every throw that
+    // later unwinds through it.
+    private Cache!(Catch, TypeInfo_Class) _catchTypes;
     private RuntimeTypes _runtimeTypes;
     // dmd gives every `arr[... $ ...]` a `lengthVar` declaration for its
     // `$`, which no statement declares and which therefore has no frame
@@ -289,7 +326,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         _program = program;
         _nativeData = NativeData(&constantSymbolAddress);
-        _runtimeTypes = RuntimeTypes(program, &resolveTypeInfo,
+        _runtimeTypes = RuntimeTypes(&_program.isRootOwned, &resolveTypeInfo,
             (declaration) => classRuntimeInfo(declaration),
             (type, loc) => _nativeData.initialValue(type, loc));
         _frames = FrameStack(defaultFrameCapacity);
@@ -360,12 +397,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         withCompilerLock({
             auto layout = layoutOf(function_);
-            layout.call.rejectHostReferenceReturn(function_);
+            auto shape = callShapeOf(function_);
+            shape.adapter.rejectHostReferenceReturn(function_);
             auto frame = _frames.push(layout.size, layout.alignment);
 
             try
                 _temporaries.withCall({
-                    bindHostArguments(args, frame.base, layout);
+                    bindHostArguments(args, frame.base, layout, shape);
                     executeCall(function_, returnPlace, frame.base, layout);
                 });
             catch (GuestException exception)
@@ -377,12 +415,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void*[] args,
         ubyte* frameBase,
         const(FrameLayout)* layout,
+        const(CallShape)* shape,
     ) {
         import core.stdc.string: memcpy;
 
         foreach (i, parameter; layout.parameters) {
             auto argument = args[i];
-            parameter.call.store(
+            shape.arguments[i].store(
                 frameBase + parameter.offset,
                 () => argument,
                 (void* place) {
@@ -397,7 +436,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     version(unittest)
     extern(D) final size_t nameLookups() @safe @nogc nothrow pure const scope {
         return _foreignNameLookups + _layouts.lookups + _staticLookups
-            + _plans.nativeSymbolLookups;
+            + _staticChains.lookups + _plans.nativeSymbolLookups;
     }
 
     // Every hash lookup this evaluator has made to find out what a `Type`
@@ -477,6 +516,29 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         _layouts[function_] = FrameLayout.of(function_);
         return function_ in _layouts;
+    }
+
+    // `CallAdapter` paired with one `CallAdapter.Argument` per declared
+    // parameter, parallel to `FrameLayout.parameters` - both are pure
+    // functions of the same `FuncDeclaration`'s type, so both are worked
+    // out from it together and kept in this evaluator's own cache.
+    private static struct CallShape {
+        private CallAdapter adapter;
+        private CallAdapter.Argument[] arguments;
+    }
+
+    private const(CallShape)* callShapeOf(FuncDeclaration function_) {
+        if (auto cached = function_ in _calls)
+            return cached;
+
+        auto parameterList = typeFunctionOf(function_).parameterList;
+        CallAdapter.Argument[] arguments;
+        arguments.length = parameterList.length;
+        foreach (i; 0 .. parameterList.length)
+            arguments[i] = CallAdapter.Argument.of(parameterList[i]);
+
+        _calls[function_] = CallShape(CallAdapter.of(function_), arguments);
+        return function_ in _calls;
     }
 
     private const(ClosureLayout)* closureLayoutOf(
@@ -574,7 +636,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
         }
 
-        auto result = layout.call.invoke(
+        auto result = callShapeOf(function_).adapter.invoke(
             returnPlace,
             argumentSlots(slots, frameBase, layout),
             &executeCallee,
@@ -714,6 +776,43 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // as a guest-catchable exception.
         try
             plan.call(returnPlace, adapted.values);
+        catch (SnakebiteException exception)
+            throw exception;
+        catch (GuestException exception)
+            throw exception;
+        catch (Throwable guest)
+            throw new GuestException(guest);
+    }
+
+    // Calls druntime's own bounds-failure hook - `_d_arraybounds_indexp`
+    // or `_d_arraybounds_slicep`, see `snakebite.backends.elementaddress`
+    // - the same one the bytecode compiler emits a call to. It never
+    // returns, so every caller here only reaches this once its own bounds
+    // check already failed; wrapping its throw the same way `callHost`
+    // wraps any other native call lets a guest `catch (RangeError)` see
+    // it, instead of the interpreter's own refusal or a hand-built guest
+    // exception.
+    extern(D) private void throwArrayBounds(
+        string hookName,
+        scope const(Register)[] parameterRegisters,
+        in Loc loc,
+        scope const(void*)[] extraArguments,
+    ) {
+        auto plan = _plans.rawPlanOf(hookName, parameterRegisters);
+        if (plan is null)
+            throw new SnakebiteException(
+                text("interpreter cannot resolve the symbol `", hookName,
+                    "`: it is not in this process"),
+            );
+
+        const file = cast(const(char)*) loc.filename;
+        const line = cast(uint) loc.linnum;
+        const(void*)[] arguments =
+            [cast(const(void)*) &file, cast(const(void)*) &line]
+            ~ extraArguments;
+
+        try
+            plan.call(null, arguments);
         catch (SnakebiteException exception)
             throw exception;
         catch (GuestException exception)
@@ -928,32 +1027,39 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
     }
 
-    // Match the actual guest class against the catch class and its base
-    // chain. A native assertion has no guest declaration, but it is still
-    // a Throwable and keeps the existing catch(Throwable) behavior.
-    private bool matchesThrowable(
-        Catch catch_,
-        GuestException exception,
-    ) {
+    // Whether `catch_`'s own declared type accepts `exception`'s actual
+    // thrown object. A guest throwable's actual declaration is already
+    // known (`_declarationOf`, the reverse of `classRuntimeInfo`'s own
+    // cache), so this stays the AST-level comparison it always was for
+    // that case - no runtime metadata to build while unwinding a guest
+    // `throw`, the hot path every guest exception takes. A native
+    // throwable has no such declaration; matching it reads the same
+    // native `TypeInfo_Class` the bytecode VM's `findHandler` already
+    // compares by identity, in place of the name string this used to
+    // compare instead.
+    private bool matchesThrowable(Catch catch_, GuestException exception) {
         auto typeClass = catch_.type.isTypeClass;
         if (typeClass is null)
             return false;
 
-        if (exception._class is null) {
-            if (typeClass.sym is ClassDeclaration.throwable)
-                return true;
+        auto actual = exception._guest.classinfo;
+        auto declaration = declarationOf(actual);
+        if (declaration !is null)
+            return typeClass.sym is *declaration
+                || typeClass.sym.isBaseOf(*declaration, null);
 
-            auto expected = classRuntimeInfo(typeClass.sym);
-            for (auto actual = exception._guest.classinfo;
-                    actual !is null; actual = actual.base)
-                if (actual.name == expected.name)
-                    return true;
+        import snakebite.backends.exceptions: catchMatches;
 
-            return false;
-        }
+        return catchMatches(catchRuntimeInfo(catch_), actual);
+    }
 
-        return typeClass.sym is exception._class
-            || typeClass.sym.isBaseOf(exception._class, null);
+    private TypeInfo_Class catchRuntimeInfo(Catch catch_) {
+        if (auto cached = catch_ in _catchTypes)
+            return *cached;
+
+        auto info = cast(TypeInfo_Class) _runtimeTypes.get(catch_.type);
+        _catchTypes[catch_] = info;
+        return info;
     }
 
     private void bindCatchVariable(Catch catch_, Throwable guest) {
@@ -1111,7 +1217,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 evaluate(statement.exp, _type, _facts, frame.base);
             }
 
-            _layout.call.returnFromCall(
+            callShapeOf(_function).adapter.returnFromCall(
                 _place, &referenceAddress, &evaluateValue,
             );
         });
@@ -1542,7 +1648,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // enclosing frame or closure as its context, and that storage remains
     // reachable through `_allocations` when the enclosing call returns.
     override void visit(FuncExp expression) {
-        import snakebite.backends.delegates: delegateTargetOf;
+        import snakebite.frontend.dmd.delegates: delegateTargetOf;
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, storeIntegral;
         import std.conv: text;
@@ -1577,14 +1683,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // closure, just as for a delegate literal. The function declaration is
     // retained in the function word for the interpreter to resolve later.
     override void visit(DelegateExp expression) {
-        import snakebite.backends.delegates: delegateTargetOf;
+        import snakebite.frontend.dmd.delegates: delegateTargetOf;
 
         storeDelegateValue(
             delegateTargetOf(expression.func, _type), expression, _place);
     }
 
     // Shared tail of `visit(FuncExp)`/`visit(DelegateExp)`: once
-    // `snakebite.backends.delegates.delegateTargetOf` has decided what the
+    // `snakebite.frontend.dmd.delegates.delegateTargetOf` has decided what the
     // delegate value needs (see its own doc), this resolves that decision
     // to actual bytes - the interpreter's own context representation
     // (`tryContextOf`, a native pointer) and its own function-word
@@ -1661,11 +1767,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     override void visit(VarExp expression) {
         import core.stdc.string: memcpy;
-        import snakebite.backends.delegates: isCtfeVariable;
+        import snakebite.frontend.dmd.delegates: isCtfeVariable;
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
-        // See `snakebite.backends.delegates.isCtfeVariable`: shared with
+        // See `snakebite.frontend.dmd.delegates.isCtfeVariable`: shared with
         // the bytecode backend.
         if (isCtfeVariable(expression.var)) {
             storeIntegral(_place, 0, _facts.size);
@@ -1745,22 +1851,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         memcpy(_place, slot, _facts.size);
     }
 
-    // The function `variable` is a parameter or local of - shared with the
-    // bytecode compiler (`snakebite.backends.delegates.outerFunctionOf`)
-    // since both walk `toParent2` the same way, past any block or `Catch`
-    // scope in between, straight to the nearest enclosing function or
-    // aggregate. `null` for anything else it could be a member of (an
-    // aggregate's field, reached through `this` rather than a static
-    // chain, or a module-scope symbol) - `frameOf`'s caller is the one
-    // that turns that into a refusal, since only it knows whether "not a
-    // frame variable at all" or "not on the chain from here" is the
-    // right thing to say.
-    private FuncDeclaration outerFunctionOf(VarDeclaration variable) {
-        import snakebite.backends.delegates: sharedOuterFunctionOf = outerFunctionOf;
-
-        return sharedOuterFunctionOf(variable);
-    }
-
     // Where `owner`'s own context is: `owner` itself if it is the function
     // currently executing, otherwise found by following the static chain
     // up from there - one context hop per level of nesting. A context is
@@ -1784,64 +1874,52 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private ubyte* tryContextOf(FuncDeclaration owner) {
         import snakebite.nativelayout: loadIntegral;
 
-        auto fn = _function;
-        auto base = functionNeedsClosure(fn)
-            ? _closureBase : _frameBase;
-        while (fn !is owner) {
+        if (owner is _function)
+            return functionNeedsClosure(_function) ? _closureBase : _frameBase;
+
+        const path = staticChainOf(owner);
+        if (path is null)
+            return null;
+
+        auto base = _frameBase;
+        foreach (const hop; path) {
             if (base is null)
                 return null;
-
-            if (functionNeedsClosure(fn))
-                base = cast(ubyte*) loadIntegral(
-                    base, size_t.sizeof, false);
-            else {
-                auto layout = layoutOf(fn);
-                if (layout.hiddenThis.variable is null)
-                    return null;
-                base = cast(ubyte*) loadIntegral(
-                    base + layout.hiddenThis.parameter.offset,
-                    size_t.sizeof, false);
-            }
-            auto parent = fn.toParent2();
-            auto parentFunction = parent is null
-                ? null : parent.isFuncDeclaration;
-            if (parentFunction is null) {
-                auto struct_ = parent is null
-                    ? null : parent.isStructDeclaration;
-                if (struct_ is null || base is null)
-                    return null;
-
-                // A nested struct stores its enclosing context in the
-                // receiver's first word before the method's own context
-                // chain continues through the enclosing function.
-                base = cast(ubyte*) loadIntegral(
-                    base, size_t.sizeof, false);
-                parent = struct_.toParent2();
-                parentFunction = parent is null
-                    ? null : parent.isFuncDeclaration;
-            }
-
-            fn = parentFunction;
-            if (fn is null)
-                return null;
+            base = cast(ubyte*) loadIntegral(
+                base + hop.offset, size_t.sizeof, false);
         }
 
         return base;
     }
 
-    // Shared with the bytecode compiler
-    // (`snakebite.backends.delegates.functionNeedsClosure`): both backends
-    // ask dmd's own escape analysis the same question before deciding
-    // whether a captured variable lives in a frame slot or a heap block.
+    // The hops from `_function`'s own frame to `owner`'s context, as
+    // `staticChainPath` decides them; `null` when `owner` is not on the
+    // chain at all.
+    extern(D) private const(Hop)[] staticChainOf(FuncDeclaration owner) {
+        import snakebite.backends.staticchain: staticChainPath;
+
+        const key = StaticChainKey(
+            cast(const(void)*) _function, cast(const(void)*) owner);
+        if (auto cached = key in _staticChains)
+            return *cached;
+
+        auto path = staticChainPath(_function, owner);
+        _staticChains[key] = path;
+        return path;
+    }
+
+    // The answer shared with the bytecode compiler
+    // (`snakebite.frontend.dmd.delegates.functionNeedsClosure`), kept: dmd
+    // works it out by walking every captured variable's references each
+    // time it is asked, and this evaluator asks on every reach of a
+    // variable.
     private bool functionNeedsClosure(FuncDeclaration function_) {
         if (auto cached = function_ in _needsClosure)
             return *cached;
 
-        import dmd.funcsem: functionSemantic3;
-        import snakebite.backends.delegates:
+        import snakebite.frontend.dmd.delegates:
             sharedFunctionNeedsClosure = functionNeedsClosure;
 
-        functionSemantic3(function_);
         const result = sharedFunctionNeedsClosure(function_);
         _needsClosure[function_] = result;
         return result;
@@ -2432,7 +2510,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private ElementAddress indexAddressOf(IndexExp expression) {
-        import core.exception: ArrayIndexError;
+        import snakebite.backends.elementaddress:
+            indexBoundsHook, indexBoundsRegisters;
         import std.conv: text;
 
         auto array = expression.e1;
@@ -2471,12 +2550,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (array.type.ty == Tsarray) {
             const length = cast(size_t) array.type.isTypeSArray.dim.toInteger;
             const index = indexOf(expression, length);
-            if (index < 0 || cast(size_t) index >= length)
-                throw new SnakebiteException(
-                    text("interpreter cannot index `", array.toString,
-                        "` at ", index, ": the array is ", length,
-                        " long"),
+            if (index < 0 || cast(size_t) index >= length) {
+                const boundedIndex = cast(size_t) index;
+                throwArrayBounds(
+                    indexBoundsHook, indexBoundsRegisters, expression.loc,
+                    [cast(const(void)*) &boundedIndex,
+                        cast(const(void)*) &length],
                 );
+            }
 
             const stride = factsOf(array.type.nextOf).size;
             auto base = cast(ubyte*) addressOf(array);
@@ -2487,13 +2568,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const value = evaluateArray(array, factsOf(array.type));
         const index = indexOf(expression, value.length);
 
-        if (index < 0 || cast(size_t) index >= value.length)
-            throw new GuestException(new ArrayIndexError(
-                cast(size_t) index,
-                value.length,
-                __FILE__,
-                __LINE__,
-            ));
+        if (index < 0 || cast(size_t) index >= value.length) {
+            const boundedIndex = cast(size_t) index;
+            const length = value.length;
+            throwArrayBounds(
+                indexBoundsHook, indexBoundsRegisters, expression.loc,
+                [cast(const(void)*) &boundedIndex,
+                    cast(const(void)*) &length],
+            );
+        }
 
         const stride = factsOf(array.type.nextOf).size;
         return ElementAddress(
@@ -3186,35 +3269,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         storeIntegral(_place, cast(ulong) mixin(op ~ "a"), _facts.size);
     }
 
-    // `asIntegral` already sign- or zero-extends the operand to 64
-    // bits per its own signedness, so storing the destination's low bytes
-    // of that value is correct whichever way the width changes - the same
-    // widen-then-truncate the `combine`d binary operators already rely on,
-    // just with the two types differing instead of matching. A pointer
-    // cast reinterprets the same bits at their native width instead: a
-    // pointer's representation does not depend on its pointee, so no
-    // conversion is needed, only a copy. A dynamic-array-to-dynamic-array
-    // cast is the same idea again *when the element size does not
-    // change*: druntime's own append hooks cast their result across a
-    // change of qualifiers alone (`Tarr` to `Unqual_Tarr` and back),
-    // never a change of element type, so the two share the same
-    // `{length, ptr}` layout and the cast is a copy too. A change of
-    // element size - `T[]` to `void[]`, which the same append hooks also
-    // do, to pass a `void[]` byte range through hooks with no reason to
-    // know the element type - is not that cast: D defines it as scaling
-    // the length by the ratio of the two element sizes, not copying it
-    // verbatim, and that scaling is what this does below. `arr.ptr` is
-    // handled too, further down, since dmd lowers it into a `Tarray` to
-    // `Tpointer` cast over the array itself. An integral-to-floating
-    // cast rounds the operand's mathematical value to the destination's
-    // own precision, read as signed or unsigned per the operand's type -
-    // the host's own `cast(float)`/`cast(double)` is exactly that
-    // conversion, so it is applied per destination width rather than
-    // through a shared wider intermediate, which for `float` would round
-    // twice. Anything else this node could mean - a class downcast, a
-    // floating-to-integral cast - is refused the same way an unhandled
-    // node already is.
+    // `snakebite.backends.casts.classify` has already turned the source
+    // and destination types into a `Kind`; this is the adapter that
+    // executes each one, with no type inspection of its own beyond the
+    // pre-checks below that classify does not see: `cast(void) e`, whose
+    // meaning is "keep `e`'s effects, produce no value", and a `null`-to-AA
+    // cast, whose destination write does not depend on the source's type.
     protected override void visitUnloweredCast(CastExp expression) {
+        import snakebite.backends.casts: classify, CastPlan;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
         import std.conv: text;
@@ -3245,98 +3307,37 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             }
         }
 
-        if (sourceType.ty == Tclass && _type.ty == Tclass) {
-            auto value = classReferenceOf(expression.e1);
-            if (value is null) {
-                storeIntegral(_place, 0, _facts.size);
-                return;
-            }
+        auto plan = classify(sourceType, _type);
 
-            auto actual = value in _classes;
-            auto target = _type.isTypeClass.sym;
-            const matches = actual is null
-                ? target is sourceType.isTypeClass.sym
-                : target is *actual
-                    || target.isBaseOf(*actual, null);
-            storeIntegral(
-                _place,
-                matches ? cast(size_t) value : 0,
-                _facts.size,
-            );
-            return;
-        }
-
-        if (sourceType.ty == Tpointer && _type.ty == Tpointer) {
+        final switch (plan.kind) with (CastPlan.Kind) {
+        case copy:
             evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
             return;
-        }
 
-        // An explicit pointer-to-integral cast preserves the native address
-        // bits. `bool` has truth-conversion semantics, so it stays outside
-        // this byte-preserving conversion.
-        if (sourceType.ty == Tpointer && _facts.isIntegral
-                && _type.ty != Tbool) {
+        case classReference:
+            evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
+            return;
+
+        // An explicit pointer-to-integral cast preserves the native
+        // address bits.
+        case pointerToIntegral:
             storeIntegral(
                 _place, cast(size_t) asPointer(expression.e1), _facts.size);
             return;
-        }
 
-        // `cast(T) p`: `_d_newclassT`'s own final step (`core/lifetime.d`),
-        // reinterpreting the `void*` its allocation returned as the guest
-        // class reference it hands back. A class reference's native layout
-        // is one pointer word, the same as any other pointer, so this is a
-        // plain copy in either direction, never an address adjustment.
-        if ((sourceType.ty == Tclass && _type.ty == Tpointer)
-                || (sourceType.ty == Tpointer && _type.ty == Tclass)) {
-            evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
-            return;
-        }
-
-        if (sourceType.ty == Tsarray && _type.ty == Tarray
-                && sourceType.nextOf.equals(_type.nextOf)) {
-            import snakebite.nativelayout:
-                arrayLengthOffset, arrayPointerOffset, storeIntegral;
-
-            const sourceFacts = factsOf(sourceType);
-            const elementSize = factsOf(sourceType.nextOf).size;
-            const length = sourceFacts.size / elementSize;
+        case sarrayToSlice: {
             auto bytes = cast(ubyte*) _place;
             storeIntegral(
-                bytes + arrayLengthOffset, length, size_t.sizeof);
+                bytes + arrayLengthOffset, plan.staticLength, size_t.sizeof);
             *cast(void**) (bytes + arrayPointerOffset) =
                 addressOf(expression.e1);
             return;
         }
 
-        if (sourceType.ty == Tarray && _type.ty == Tarray) {
-            const sourceElementSize = factsOf(sourceType.nextOf).size;
-            const destElementSize = factsOf(_type.nextOf).size;
-
-            if (sourceElementSize == destElementSize) {
-                evaluate(
-                    expression.e1, sourceType, factsOf(sourceType), _place);
-                return;
-            }
-
-            // D reinterprets the same bytes at the new element width, so
-            // the byte count - not the element count - is what has to
-            // stay the same across the cast. `newlength` is truncated,
-            // the same truncation `object.d`'s own `T[] to U[]` cast
-            // does, rather than refused on a remainder: a remainder means
-            // the source array's byte length is not a whole number of
-            // destination elements, which is druntime's call to make, not
-            // this interpreter's.
-            const value = evaluateArray(expression.e1, factsOf(sourceType));
-            const newLength =
-                value.length * sourceElementSize / destElementSize;
-
-            auto bytes = cast(ubyte*) _place;
+        case sarrayToPointer:
             storeIntegral(
-                bytes + arrayLengthOffset, newLength, size_t.sizeof);
-            *cast(const(void)**) (bytes + arrayPointerOffset) =
-                value.elements;
+                _place, cast(size_t) addressOf(expression.e1), _facts.size);
             return;
-        }
 
         // `arr.ptr` is not a real member: `.ptr` is one of the two
         // properties dmd recognises directly on a dynamic array, and its
@@ -3347,48 +3348,77 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // `_d_arrayappendcTX_`, on the `~=` lowering's own chain, reads
         // `px.ptr` this way to ask the GC what it already knows about the
         // block backing the array being grown.
-        if (sourceType.ty == Tarray && _type.ty == Tpointer
-                && sourceType.nextOf.equals(_type.nextOf)) {
+        case sliceToPointer: {
             const bytes = cast(ubyte*) addressOf(expression.e1);
             const value = *cast(void**) (bytes + arrayPointerOffset);
-            storeIntegral(
-                _place, cast(size_t) value, _facts.size);
+            storeIntegral(_place, cast(size_t) value, _facts.size);
             return;
         }
 
-        const sourceFacts = factsOf(sourceType);
+        // D reinterprets the same bytes at the new element width, so the
+        // byte count - not the element count - is what has to stay the
+        // same across the cast. `newLength` is truncated, the same
+        // truncation `object.d`'s own `T[] to U[]` cast does, rather than
+        // refused on a remainder: a remainder means the source array's
+        // byte length is not a whole number of destination elements,
+        // which is druntime's call to make, not this interpreter's.
+        case reinterpretSlice: {
+            const value = evaluateArray(expression.e1, plan.sourceFacts);
+            const newLength = value.length * plan.sourceFacts.elementSize
+                / plan.destFacts.elementSize;
+
+            auto bytes = cast(ubyte*) _place;
+            storeIntegral(bytes + arrayLengthOffset, newLength, size_t.sizeof);
+            *cast(const(void)**) (bytes + arrayPointerOffset) =
+                value.elements;
+            return;
+        }
 
         // dmd classifies `bool` as `integral | unsigned` (`mtype.d`), so
-        // without this check the branch below would take it as an
-        // ordinary integral-to-integral narrowing and store the operand's
-        // low byte. D specifies `cast(bool) x` as `x != 0`, not "keep the
-        // low byte": `cast(bool) 256` is `true` in D, not the `false` a
-        // truncation would store, and a truncation can also store a value
-        // like `2` in a `bool` slot that no compiled D ever produces.
-        if (sourceFacts.isIntegral && _type.ty == Tbool) {
-            const value = asIntegral(expression.e1, sourceFacts);
+        // this has to be its own kind rather than an ordinary
+        // integral-to-integral narrowing: D specifies `cast(bool) x` as
+        // `x != 0`, not "keep the low byte" - `cast(bool) 256` is `true`
+        // in D, not the `false` a truncation would store.
+        case toBool: {
+            const value = asIntegral(expression.e1, plan.sourceFacts);
             storeIntegral(_place, value != 0, _facts.size);
             return;
         }
 
-        if (sourceFacts.isIntegral && _facts.isIntegral) {
+        // `asIntegral` already sign- or zero-extends the operand to 64
+        // bits per its own signedness, so storing the destination's low
+        // bytes of that value is correct whichever way the width
+        // changes - the same widen-then-truncate the `combine`d binary
+        // operators already rely on, just with the two types differing
+        // instead of matching.
+        case narrow:
+        case widenSigned:
+        case widenUnsigned:
             storeIntegral(
                 _place,
-                asIntegral(expression.e1, sourceFacts),
+                asIntegral(expression.e1, plan.sourceFacts),
                 _facts.size,
             );
             return;
-        }
 
-        if (sourceFacts.isIntegral
-                && (_type.ty == Tfloat32 || _type.ty == Tfloat64)) {
-            const value = asIntegral(expression.e1, sourceFacts);
+        // An integral-to-floating cast rounds the operand's mathematical
+        // value to the destination's own precision, read as signed or
+        // unsigned per the operand's type - the host's own
+        // `cast(float)`/`cast(double)` is exactly that conversion, so it
+        // is applied per destination width rather than through a shared
+        // wider intermediate, which for `float` would round twice. `real`
+        // is not one of the two widths this reaches for yet.
+        case integralToFloat: {
+            if (_type.ty != Tfloat32 && _type.ty != Tfloat64)
+                goto case unsupported;
+
+            const value = asIntegral(expression.e1, plan.sourceFacts);
             if (_type.ty == Tfloat32)
-                *cast(float*) _place = sourceFacts.isUnsigned
+                *cast(float*) _place = plan.sourceFacts.isUnsigned
                     ? cast(float) cast(ulong) value
                     : cast(float) value;
             else
-                *cast(double*) _place = sourceFacts.isUnsigned
+                *cast(double*) _place = plan.sourceFacts.isUnsigned
                     ? cast(double) cast(ulong) value
                     : cast(double) value;
             return;
@@ -3399,10 +3429,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // any of the three to `real` without loss, so narrowing that back
         // to the destination's width is the one rounding the host's own
         // `cast(float)`/`cast(double)`/`cast(real)` performs.
-        if ((sourceType.ty == Tfloat32 || sourceType.ty == Tfloat64
-                    || sourceType.ty == Tfloat80)
-                && (_type.ty == Tfloat32 || _type.ty == Tfloat64
-                    || _type.ty == Tfloat80)) {
+        case floatWidth: {
             const value = asFloating(expression.e1);
             if (_type.ty == Tfloat32)
                 *cast(float*) _place = cast(float) value;
@@ -3413,10 +3440,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        throw new SnakebiteException(
-            text("interpreter cannot evaluate a `", expression.op,
-                "` expression: `", expression.toString, "`"),
-        );
+        // Neither reached yet: a pointer reinterpreted as a dynamic
+        // array's own `{length, ptr}` header, and a floating-to-integral
+        // cast.
+        case pointerToArray:
+        case floatToIntegral:
+        case unsupported:
+            throw new SnakebiteException(
+                text("interpreter cannot evaluate a `", expression.op,
+                    "` expression: `", expression.toString, "`"),
+            );
+        }
     }
 
     // dmd folds `&variable` into this node directly rather than wrapping
@@ -3505,14 +3539,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return;
             }
 
-            auto declaration = object in _classes;
-            if (declaration !is null) {
-                auto info = classRuntimeInfo(*declaration);
-                storeIntegral(
-                    _place, cast(size_t) cast(void*) info, _facts.size);
-                return;
-            }
-
+            // `object.classinfo`: word 0 is the vtable, whose own slot 0
+            // is the classinfo pointer - real native layout, so this
+            // reads the object's own dynamic `TypeInfo_Class` the same
+            // way for a guest object (`finishNew` already left one there)
+            // and a native one.
             auto vtable = cast(void*) loadIntegral(
                 object, size_t.sizeof, false);
             storeIntegral(
@@ -3678,17 +3709,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
 
         import core.exception: AssertError;
+        import snakebite.backends.exceptions: assertFailureOf;
 
         // What D does here is throw an `AssertError` the guest can catch.
         // Keep it inside an interpreter-owned wrapper so a guest catch does
         // not also catch the interpreter's own unsupported-node failures.
-        auto guest = new AssertError(
-            text("interpreter: assertion failed: `", expression.toString,
-                "`"),
-            __FILE__,
-            __LINE__,
-        );
-        throw new GuestException(guest);
+        const failure = assertFailureOf(expression);
+        throw new GuestException(
+            new AssertError(failure.message, failure.file, failure.line));
     }
 
     override void visit(ThrowExp expression) {
@@ -3718,11 +3746,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: it is null"),
             );
 
-        auto classDeclaration = cast(void*) guest in _classes;
-        throw new GuestException(
-            guest,
-            classDeclaration is null ? null : *classDeclaration,
-        );
+        throw new GuestException(guest);
     }
 
     override void visit(ArrayLengthExp expression) {
@@ -3737,7 +3761,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // The array is evaluated before the index, the order D specifies.
     override void visit(IndexExp expression) {
         import core.stdc.string: memcpy;
-        import std.conv: text;
+        import snakebite.backends.elementaddress:
+            indexBoundsHook, indexBoundsRegisters;
 
         auto array = expression.e1;
 
@@ -3750,12 +3775,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (array.type.ty == Tsarray) {
             const length = cast(size_t) array.type.isTypeSArray.dim.toInteger;
             const index = indexOf(expression, length);
-            if (index < 0 || cast(size_t) index >= length)
-                throw new SnakebiteException(
-                    text("interpreter cannot index `", array.toString,
-                        "` at ", index, ": the array is ", length,
-                        " long"),
+            if (index < 0 || cast(size_t) index >= length) {
+                const boundedIndex = cast(size_t) index;
+                throwArrayBounds(
+                    indexBoundsHook, indexBoundsRegisters, expression.loc,
+                    [cast(const(void)*) &boundedIndex,
+                        cast(const(void)*) &length],
                 );
+            }
 
             const stride = factsOf(array.type.nextOf).size;
             assert(stride == _facts.size, "an index changed width");
@@ -3858,8 +3885,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const hi = expression.upr is null
             ? cast(long) sourceLength : asIntegral(expression.upr);
 
-        if (lo < 0 || hi < lo
-                || (knownLength && cast(size_t) hi > sourceLength))
+        if (knownLength) {
+            if (lo < 0 || hi < lo || cast(size_t) hi > sourceLength) {
+                import snakebite.backends.elementaddress:
+                    sliceBoundsHook, sliceBoundsRegisters;
+
+                const lower = cast(size_t) lo;
+                const upper = cast(size_t) hi;
+                throwArrayBounds(
+                    sliceBoundsHook, sliceBoundsRegisters, expression.loc,
+                    [cast(const(void)*) &lower, cast(const(void)*) &upper,
+                        cast(const(void)*) &sourceLength],
+                );
+            }
+        } else if (lo < 0 || hi < lo)
             throw new SnakebiteException(
                 text("interpreter cannot slice `", array.toString, "` [",
                     lo, " .. ", hi, "]"),
@@ -4028,32 +4067,32 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private void finishNew(NewExp expression, ubyte* object) {
-        import snakebite.nativelayout: storeIntegral;
-
         auto classType = expression.newtype.isTypeClass;
         if (classType !is null) {
-            _classes[object] = classType.sym;
             if (expression.member !is null)
-                constructClass(expression, object);
+                constructAggregate(expression, object);
             return;
         }
 
+        import snakebite.backends.aggregateinit:
+            InitStep, planPositionalFields;
+
         auto declaration = expression.newtype.isTypeStruct.sym;
-        if (declaration.isNested() && declaration.vthis !is null) {
-            auto parent = declaration.toParent2();
-            auto parentFunction = parent is null
-                ? null : parent.isFuncDeclaration;
-            if (parentFunction !is null)
-                storeIntegral(
-                    object + declaration.vthis.offset,
-                    cast(size_t) contextOf(parentFunction), size_t.sizeof,
-                );
+        auto plan = planPositionalFields(declaration,
+            expression.member is null ? expression.arguments : null);
+
+        foreach (step; plan.steps)
+            if (step.kind == InitStep.Kind.vthis)
+                applyStep(step, object);
+
+        if (expression.member !is null) {
+            constructAggregate(expression, object);
+            return;
         }
 
-        if (expression.member !is null)
-            constructStruct(expression, object);
-        else if (expression.arguments !is null)
-            initializeStructArguments(expression, object);
+        foreach (step; plan.steps)
+            if (step.kind != InitStep.Kind.vthis)
+                applyStep(step, object);
     }
 
     override void visit(DeleteExp expression) {
@@ -4069,11 +4108,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (object is null)
             return;
 
-        auto classDeclaration = object in _classes;
-        if (classDeclaration is null)
+        auto info = *cast(TypeInfo_Class*) (*cast(void**) object);
+        auto declaration = declarationOf(info);
+        if (declaration is null)
             return;
 
-        auto destructor = (*classDeclaration).dtor;
+        auto destructor = (*declaration).dtor;
         if (destructor !is null) {
             auto layout = layoutOf(destructor);
             auto frame = _frames.push(layout.size, layout.alignment);
@@ -4091,20 +4131,25 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 true,
             );
         }
-
-        _classes.remove(object);
     }
 
     // Parsed guest classes have no emitted native ClassInfo. Build the
     // native TypeInfo_Class metadata druntime needs for allocation and
-    // classinfo; guest virtual calls still use dmd declarations below,
-    // never this vtable, so a guest override's own slot is left however
-    // `snakebite.backends.classinfo.classRuntimeInfo` already leaves it.
+    // classinfo. This vtable is real native layout that native code
+    // reaching a guest object can call through directly (an unoverridden
+    // base method, a template instantiated natively over a guest type,
+    // ...), so every slot stays whatever `classRuntimeInfo_` already
+    // copies down from the base - a real address, never a
+    // `FuncDeclaration` this evaluator alone knows how to walk. Guest
+    // virtual dispatch instead resolves through `_declarationOf`
+    // (`virtualFunction`), the object's own dynamic type answered back
+    // into the `ClassDeclaration` whose own `vtbl` this backend already
+    // walks for an ordinary call.
     private TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
         import snakebite.backends.classinfo:
             classRuntimeInfo_ = classRuntimeInfo, Hooks;
 
-        return classRuntimeInfo_(
+        auto result = classRuntimeInfo_(
             declaration,
             _classRuntime,
             Hooks(
@@ -4113,6 +4158,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 (decl, base) => fillFieldInits(decl, base),
             ),
         );
+        _declarationOf[cast(const(void)*) result] = declaration;
+        return result;
+    }
+
+    // The guest declaration `info` was generated for, or `null` for a
+    // native class's own linked `TypeInfo_Class`.
+    private ClassDeclaration* declarationOf(const TypeInfo_Class info) {
+        return cast(const(void)*) info in _declarationOf;
     }
 
     // Every field's own default value, written once into `classRuntimeInfo`'s
@@ -4127,9 +4180,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _nativeData.fillFields(declaration, base);
     }
 
-    private void constructClass(NewExp expression, ubyte* object) {
-        import std.conv: text;
-
+    // A class and a struct constructor call bind `object` to the hidden
+    // `this` the same way: dmd gives both an ordinary `vthis` parameter
+    // slot in their own `FrameLayout`, so nothing here needs to know
+    // which aggregate kind `expression.newtype` names.
+    private void constructAggregate(NewExp expression, ubyte* object) {
         auto constructor = expression.member;
         auto layout = layoutOf(constructor);
         auto frame = _frames.push(layout.size, layout.alignment);
@@ -4138,7 +4193,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         if (constructor.vthis is null)
             throw new SnakebiteException(
-                text("interpreter cannot call class constructor `",
+                text("interpreter cannot call constructor `",
                     constructor.toString, "`: it has no `this`"),
             );
 
@@ -4159,68 +4214,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         );
 
         executeCall(constructor, null, frame.base, layout, null, true);
-    }
-
-    private void constructStruct(NewExp expression, ubyte* object) {
-        import std.conv: text;
-
-        auto constructor = expression.member;
-        auto layout = layoutOf(constructor);
-        auto frame = _frames.push(layout.size, layout.alignment);
-
-        import snakebite.nativelayout: storeIntegral;
-
-        if (constructor.vthis is null)
-            throw new SnakebiteException(
-                text("interpreter cannot call struct constructor `",
-                    constructor.toString, "`: it has no `this`"),
-            );
-
-        storeIntegral(
-            frame.base + layout.hiddenThis.parameter.offset,
-            cast(size_t) object,
-            size_t.sizeof,
-        );
-
-        auto arguments = expression.arguments;
-
-        bindArguments(
-            constructor,
-            arguments,
-            expression.loc,
-            frame.base,
-            layout,
-        );
-
-        executeCall(constructor, null, frame.base, layout, null, true);
-    }
-
-    private void initializeStructArguments(NewExp expression, ubyte* object) {
-        import core.stdc.string: memcpy;
-        import std.conv: text;
-
-        auto declaration = expression.newtype.isTypeStruct.sym;
-        if (expression.arguments.length > declaration.fields.length)
-            throw new SnakebiteException(
-                text("interpreter cannot initialize `", expression.toString,
-                    "`: too many constructor arguments"),
-            );
-
-        foreach (i; 0 .. expression.arguments.length) {
-            auto field = declaration.fields[i];
-            auto valueFacts = factsOf(field.type);
-            auto value = _frames.push(valueFacts.size, valueFacts.alignment);
-            evaluate((*expression.arguments)[i], field.type, valueFacts,
-                value.base);
-            if (field.isBitFieldDeclaration !is null) {
-                import snakebite.nativelayout: loadIntegral;
-                storeBitfieldAt(field, object + field.offset,
-                    loadIntegral(value.base, valueFacts.size,
-                        !valueFacts.isUnsigned));
-                continue;
-            }
-            memcpy(object + field.offset, value.base, valueFacts.size);
-        }
     }
 
     private void bindArguments(
@@ -4231,15 +4224,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const(FrameLayout)* layout,
     ) {
         import dmd.astenums: STC;
+        import snakebite.backends.calls: arityMismatches;
         import std.conv: text;
 
         auto parameterList = typeFunctionOf(function_).parameterList;
-        const argumentCount = arguments is null ? 0 : arguments.length;
-        if (argumentCount != parameterList.length)
+        if (arityMismatches(parameterList, arguments))
             throw new SnakebiteException(
                 text("interpreter: `", function_.toString, "` expects ",
-                    parameterList.length, " argument(s), got ", argumentCount),
+                    parameterList.length, " argument(s), got ",
+                    arguments is null ? 0 : arguments.length),
             );
+
+        auto shape = callShapeOf(function_);
 
         foreach (i; 0 .. parameterList.length) {
             auto argument = (*arguments)[i];
@@ -4266,7 +4262,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 );
             }
 
-            parameter.call.store(
+            shape.arguments[i].store(
                 slot,
                 &argumentAddress,
                 &evaluateArgument,
@@ -4295,11 +4291,59 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         memcpy(place, bytes.ptr, bytes.length);
     }
 
+    // Executes one step of an `AggregateInitPlan` (`aggregateinit.d`) at
+    // `base`, the aggregate's own bytes directly - `visit(StructLiteralExp)`
+    // passes `_place`, `finishNew` the fresh allocation, both already plain
+    // `ubyte*` here since the interpreter never distinguishes a value
+    // place from a pointer the way the bytecode compiler's frame offsets
+    // do.
+    private void applyStep(
+        imported!"snakebite.backends.aggregateinit".InitStep step,
+        ubyte* base,
+    ) {
+        import core.stdc.string: memcpy;
+        import snakebite.backends.aggregateinit: InitStep;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+
+        final switch (step.kind) with (InitStep.Kind) {
+        case vthis:
+            // `parentFunction` is `null` when the struct's lexical parent
+            // is not a function - dmd fact, not itself an error: leaving
+            // `vthis` at its `.init` zero here matches the language's own
+            // treatment of a `static struct` with no captured context.
+            if (step.parentFunction !is null)
+                storeIntegral(
+                    base + step.offset,
+                    cast(size_t) contextOf(step.parentFunction),
+                    size_t.sizeof,
+                );
+            return;
+
+        case value:
+            evaluate(step.source, step.type, step.facts, base + step.offset);
+            return;
+
+        case bitfield:
+            auto value = _frames.push(step.facts.size, step.facts.alignment);
+            evaluate(step.source, step.type, step.facts, value.base);
+            storeBitfieldAt(step.field, base + step.offset,
+                loadIntegral(value.base, step.facts.size,
+                    !step.facts.isUnsigned));
+            return;
+
+        case broadcast:
+            auto value = _frames.push(step.facts.size, step.facts.alignment);
+            evaluate(step.source, step.type, step.facts, value.base);
+            foreach (i; 0 .. step.count)
+                memcpy(base + step.offset + i * step.facts.size, value.base,
+                    step.facts.size);
+            return;
+        }
+    }
+
     override void visit(StructLiteralExp expression) {
         import core.stdc.string: memset;
-        import snakebite.nativelayout:
-            isStoredLiteral, loadIntegral, storeIntegral;
-        import std.conv: text;
+        import snakebite.nativelayout: isStoredLiteral;
 
         if (isStoredLiteral(expression)) {
             _nativeData.write(_type, _facts, expression, _place);
@@ -4313,54 +4357,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: struct literal layout mismatch"),
             );
 
-        memset(_place, 0, _facts.size);
-
-        // `isNested()` is true only when dmd gave the struct a hidden
-        // context field; a `static struct` declared inside a function is
-        // lexically nested but has no such field.
-        if (expression.sd.isNested()) {
-            auto parent = expression.sd.toParent2();
-            auto parentFunction = parent is null
-                ? null : parent.isFuncDeclaration;
-            if (parentFunction !is null)
-                storeIntegral(
-                    _place,
-                    cast(size_t) contextOf(parentFunction),
-                    size_t.sizeof,
-                );
-        }
-
-        if (expression.elements is null || expression.elements.length == 0)
-            return;
-
-        if (expression.elements.length > expression.sd.fields.length)
+        if (expression.elements !is null
+                && expression.elements.length > expression.sd.fields.length)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: its fields do not match the struct layout"),
             );
 
-        foreach (i, element; *expression.elements) {
-            if (element is null)
-                continue;
+        import snakebite.backends.aggregateinit: planStructLiteral;
 
-            auto field = expression.sd.fields[i];
-            if (field.isBitFieldDeclaration !is null) {
-                auto valueFacts = factsOf(field.type);
-                auto value = _frames.push(valueFacts.size,
-                    valueFacts.alignment);
-                evaluate(element, field.type, valueFacts, value.base);
-                storeBitfieldAt(field, cast(ubyte*) _place + field.offset,
-                    loadIntegral(value.base, valueFacts.size,
-                        !valueFacts.isUnsigned));
-                continue;
-            }
-            evaluate(
-                element,
-                field.type,
-                factsOf(field.type),
-                cast(ubyte*) _place + field.offset,
-            );
-        }
+        auto plan = planStructLiteral(expression);
+        if (plan.zeroFill)
+            memset(_place, 0, _facts.size);
+
+        foreach (step; plan.steps)
+            applyStep(step, cast(ubyte*) _place);
     }
 
     protected override void visitUnloweredCat(CatExp expression) {
@@ -4517,11 +4528,30 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         );
     }
 
+    // `receiver`'s own dynamic `TypeInfo_Class`, read the same way `visit
+    // (PtrExp)`'s `.classinfo` read does - word 0 is the vtable, whose own
+    // slot 0 is the classinfo pointer, real native layout for a guest
+    // object and a native one alike. Looking it up in `_declarationOf`
+    // tells the two apart: only a generated one, built by this backend's
+    // own `classRuntimeInfo`, is ever a key there.
+    private TypeInfo_Class dynamicClassInfo(void* receiver) {
+        import snakebite.nativelayout: loadIntegral;
+
+        return *cast(TypeInfo_Class*) cast(void*) loadIntegral(
+            receiver, size_t.sizeof, false);
+    }
+
+    // A genuinely native receiver's own vtable already holds real,
+    // directly callable addresses - the only slots `classRuntimeInfo`'s
+    // hooks never touch (see its own doc) - so this is the one shape a
+    // guest virtual call can hand straight to the FFI seam instead of
+    // walking a `FuncDeclaration`.
     private void* nativeVirtualAddress(
         FuncDeclaration staticFunction,
         void* receiver,
     ) {
-        if (receiver is null || receiver in _classes
+        if (receiver is null
+                || declarationOf(dynamicClassInfo(receiver)) !is null
                 || !staticFunction.isVirtualMethod)
             return null;
 
@@ -4533,6 +4563,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return vtable[index];
     }
 
+    // `staticFunction`'s own override, for whichever class `receiver`
+    // turns out to hold at run time - dmd's own `ClassDeclaration.vtbl`
+    // already resolves this correctly for any declaration, guest or
+    // native, so once `receiver`'s actual declaration is known (its own
+    // dynamic `TypeInfo_Class`, looked back up in `_declarationOf` - the
+    // reverse of `classRuntimeInfo`'s own cache) this walks that
+    // declaration's own AST vtable rather than this backend's generated
+    // one: `classRuntimeInfo`'s vtable stays real native layout end to
+    // end (see its own doc), so it never holds a `FuncDeclaration` this
+    // evaluator could read back out of it.
     private FuncDeclaration virtualFunction(
         FuncDeclaration staticFunction,
         void* receiver,
@@ -4540,7 +4580,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (!staticFunction.isVirtualMethod)
             return staticFunction;
 
-        auto actual = receiver in _classes;
+        auto actual = declarationOf(dynamicClassInfo(receiver));
         if (actual is null)
             return staticFunction;
 
@@ -4665,6 +4705,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         bool fromDelegate = false,
     ) {
         import snakebite.nativelayout: storeIntegral;
+        import snakebite.backends.calls: arityMismatches;
         import std.conv: text;
         import dmd.astenums: STC;
 
@@ -4673,11 +4714,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // only a body has.
         auto parameterList = typeFunctionOf(function_).parameterList;
         auto arguments = expression.arguments;
-        const argCount = arguments is null ? 0 : arguments.length;
-        if (argCount != parameterList.length)
+        if (arityMismatches(parameterList, arguments))
             throw new SnakebiteException(
                 text("interpreter: `", function_.toString, "` expects ",
-                    parameterList.length, " argument(s), got ", argCount),
+                    parameterList.length, " argument(s), got ",
+                    arguments is null ? 0 : arguments.length),
             );
 
         auto frame = _frames.push(layout.size, layout.alignment);
@@ -5006,6 +5047,14 @@ private ulong shifted(string op)(
         return bits >> b;
     }
 }
+// A (nested function, enclosing function) pair, by address: which chain of
+// hops leads from the one's frame to the other's context is fixed for
+// the pair.
+private struct StaticChainKey {
+    const(void)* from;
+    const(void)* to;
+}
+
 // One of the evaluator's caches: an answer worked out on a cold path,
 // kept for the life of the evaluator, and read back by key on a hot one.
 // A plain associative array, and the number of times it has been probed.
