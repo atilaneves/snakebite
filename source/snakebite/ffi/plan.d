@@ -133,6 +133,26 @@ public struct CallPlan {
         return plan;
     }
 
+    // Whether this plan, built by `ofRawAddress`, was built from exactly
+    // these register shapes - the cache keys such a plan by symbol name
+    // alone, so a second caller naming the same symbol has to agree.
+    private bool hasShape(
+        scope const(Register)[] parameterRegisters,
+        in Register returnRegister,
+    ) const {
+        if (_parameterCount != parameterRegisters.length)
+            return false;
+
+        foreach (i, register; parameterRegisters)
+            if (_arguments[i].registers[0] != register)
+                return false;
+
+        const expectedReturn = returnRegister.kind == Register.Kind.none
+            ? ArgumentPlan.init
+            : ArgumentPlan([returnRegister, Register.init], 1, false);
+        return _return == expectedReturn;
+    }
+
     private void callGeneric(
         const(void)* address,
         void* returnPlace,
@@ -455,8 +475,14 @@ public struct PlanCache {
             imported!"snakebite.ffi.abi".Register(
                 imported!"snakebite.ffi.abi".Register.Kind.none, 0),
     ) {
-        if (auto cached = name in _rawPlans)
+        if (auto cached = name in _rawPlans) {
+            import std.conv: text;
+
+            assert((*cached).hasShape(parameterRegisters, returnRegister),
+                text("ffi: `", name, "` was already planned with a ",
+                    "different register shape"));
             return *cached;
+        }
 
         auto address = resolve(name);
         if (address is null)
