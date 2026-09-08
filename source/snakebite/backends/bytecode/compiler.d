@@ -3309,6 +3309,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
+        // `SomeClass.classinfo` on a static class type dmd resolves at
+        // compile time to `&SomeClass.vclassinfo` (a
+        // `TypeInfoClassDeclaration`), folded into this same node - not a
+        // real guest or linked global. Nothing ever emits that symbol for
+        // a guest class (see `snakebite.backends.classinfo`'s own doc), so
+        // this reaches for the same run-time `TypeInfo_Class` `TypeidExp`
+        // already resolves `typeid(SomeClass)` to, instead of falling into
+        // the generic static-variable path below and reading whatever
+        // unrelated storage its symbol name happens to resolve to.
+        if (auto typeInfo = expression.var.isTypeInfoDeclaration)
+            return emitRuntimeTypeInfoConstant(expression, typeInfo.tinfo);
+
         auto variable = expression.var.isVarDeclaration;
         if (variable is null || expression.offset != 0)
             return visit(cast(Expression) expression);
@@ -4068,10 +4080,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 text("`", expression.toString,
                     "` without resolved type information"));
 
+        emitRuntimeTypeInfoConstant(expression, type);
+    }
+
+    // Shared tail of `visit(TypeidExp)` and `visit(SymOffExp)`'s
+    // `TypeInfoDeclaration` case: resolve `type`'s run-time `TypeInfo`
+    // through `_runtimeTypes.get` and emit its address into the current
+    // destination. A null result is a rejection, not a fallback to
+    // another compilation path - `RuntimeTypes.get` returning null means
+    // there is no such run-time type to read.
+    private void emitRuntimeTypeInfoConstant(Expression expression, Type type) {
+        import std.conv: text;
+
         auto address = cast(void*) _bytecode._runtimeTypes.get(type);
         if (address is null)
             throw rejection(_function, expression.loc,
-                text("unresolved `", expression.toString, "`"));
+                text("unresolved ", expressionText(expression)));
 
         emit(&opConstant, _destination,
             addConstant(cast(long) cast(size_t) address), _width);

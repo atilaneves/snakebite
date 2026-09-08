@@ -167,6 +167,30 @@ static foreach (backend; Matrix!(
     }
 }
 
+// `catch (Exception)` matches a thrown native `Exception` with no guest
+// subclass in its chain at all.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("catchMatchesBareNativeException." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                bool threw = false;
+
+                try {
+                    throw new Exception("boom");
+                } catch (Exception e) {
+                    threw = true;
+                }
+
+                assert(threw);
+            }
+        });
+    }
+}
+
 // `throw` is an expression, so it can be a branch of a ternary whose other
 // branch has a value.
 static foreach (backend; Matrix!(
@@ -204,6 +228,59 @@ static foreach (backend; Matrix!(
                 }
 
                 assert(length == 8);
+            }
+        });
+    }
+}
+
+
+// A native callee (phobos, called through FFI, no guest frame in between)
+// throws a native `Exception`; the guest's `catch (Exception)` matches it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call `getenv`"),
+)) {
+    @("catchMatchesExceptionThrownByNativeCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.process: environment;
+
+            void main() {
+                bool threw = false;
+                try {
+                    auto value = environment["snakebite_definitely_unset_xyz"];
+                } catch (Exception e) {
+                    threw = true;
+                }
+                assert(threw);
+            }
+        });
+    }
+}
+
+// The same native-callee throw, caught as `Throwable`: the thrown value's
+// own classinfo is the real linked `Exception` one.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call `getenv`"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "`t.classinfo is Exception.classinfo` fails"),
+)) {
+    @("nativeCalleeThrowCarriesLinkedClassInfo." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.process: environment;
+
+            void main() {
+                bool threw = false;
+                try {
+                    auto value = environment["snakebite_definitely_unset_xyz"];
+                } catch (Throwable t) {
+                    threw = t.classinfo is Exception.classinfo;
+                }
+                assert(threw);
             }
         });
     }
