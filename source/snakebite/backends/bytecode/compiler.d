@@ -4807,16 +4807,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         case copy:
             return evalInto(expression.e1, destOffset, width);
 
-        case classDowncast:
-            // `classify` only ever sees this shape once dmd's semantic
-            // pass has already left the cast unlowered, which it only
-            // does when it proved the cast safe without a runtime check
-            // (an upcast, or a cast to an interface the source
-            // implements) - so a plain copy of the one pointer word is
-            // correct here too. A downcast that needs a runtime check
-            // instead reaches this compiler as a `lowering` call, which
-            // `LoweringVisitor.visit(CastExp)` already dispatches before
-            // `visitUnloweredCast` is ever reached.
+        case classReference:
             return evalInto(expression.e1, destOffset, width);
 
         case floatWidth: {

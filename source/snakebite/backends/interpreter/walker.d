@@ -198,8 +198,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // dispatches virtual calls and `DeleteExp`'s destructor through. A
     // native object's own dynamic type is never a key here, since only
     // `classRuntimeInfo` below ever inserts one - that absence is how a
-    // native receiver is told apart from a guest one.
-    private ClassDeclaration[TypeInfo_Class] _declarationOf;
+    // native receiver is told apart from a guest one. Keyed by the
+    // `TypeInfo_Class` object's own address: `TypeInfo` compares and
+    // hashes by name, and a native class can share a guest class's fully
+    // qualified name (a root module also linked into this process), so a
+    // name-keyed table would answer a native object with the guest
+    // declaration.
+    private ClassDeclaration[const(void)*] _declarationOf;
     // Each catch clause's own runtime type, resolved once the first time
     // `visit(TryCatchStatement)` reaches it and reused by every throw that
     // later unwinds through it.
@@ -1038,7 +1043,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return false;
 
         auto actual = exception._guest.classinfo;
-        auto declaration = actual in _declarationOf;
+        auto declaration = declarationOf(actual);
         if (declaration !is null)
             return typeClass.sym is *declaration
                 || typeClass.sym.isBaseOf(*declaration, null);
@@ -3309,32 +3314,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
             return;
 
-        case classDowncast: {
-            auto value = classReferenceOf(expression.e1);
-            if (value is null) {
-                storeIntegral(_place, 0, _facts.size);
-                return;
-            }
-
-            // The object's own dynamic type, read straight out of its
-            // native layout (word 0's vtable, slot 0), answered back into
-            // a declaration through `_declarationOf` - the reverse of
-            // `classRuntimeInfo`'s own cache - for a guest object; a
-            // native object never reaches that cache, so this keeps the
-            // static source class dmd already proved this cast safe for.
-            auto actual = *cast(TypeInfo_Class*) (*cast(void**) value);
-            auto declaration = actual in _declarationOf;
-            auto target = plan.targetClass;
-            const matches = declaration is null
-                ? target is plan.sourceClass
-                : target is *declaration || target.isBaseOf(*declaration, null);
-            storeIntegral(
-                _place,
-                matches ? cast(size_t) value : 0,
-                _facts.size,
-            );
+        case classReference:
+            evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
             return;
-        }
 
         // An explicit pointer-to-integral cast preserves the native
         // address bits.
@@ -4143,7 +4125,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
 
         auto info = *cast(TypeInfo_Class*) (*cast(void**) object);
-        auto declaration = info in _declarationOf;
+        auto declaration = declarationOf(info);
         if (declaration is null)
             return;
 
@@ -4192,8 +4174,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 (decl, base) => fillFieldInits(decl, base),
             ),
         );
-        _declarationOf[result] = declaration;
+        _declarationOf[cast(const(void)*) result] = declaration;
         return result;
+    }
+
+    // The guest declaration `info` was generated for, or `null` for a
+    // native class's own linked `TypeInfo_Class`.
+    private ClassDeclaration* declarationOf(const TypeInfo_Class info) {
+        return cast(const(void)*) info in _declarationOf;
     }
 
     // Every field's own default value, written once into `classRuntimeInfo`'s
@@ -4578,7 +4566,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         FuncDeclaration staticFunction,
         void* receiver,
     ) {
-        if (receiver is null || dynamicClassInfo(receiver) in _declarationOf
+        if (receiver is null
+                || declarationOf(dynamicClassInfo(receiver)) !is null
                 || !staticFunction.isVirtualMethod)
             return null;
 
@@ -4607,7 +4596,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (!staticFunction.isVirtualMethod)
             return staticFunction;
 
-        auto actual = dynamicClassInfo(receiver) in _declarationOf;
+        auto actual = declarationOf(dynamicClassInfo(receiver));
         if (actual is null)
             return staticFunction;
 

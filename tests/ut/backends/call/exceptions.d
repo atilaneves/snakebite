@@ -414,3 +414,65 @@ static foreach (backend; Matrix!(
         }, "result");
     }
 }
+
+
+// D's own failed `assert` raises an `AssertError` whose `msg` is
+// druntime's own wording (`onAssertError`): a guest reading that message
+// sees the one wording whichever backend evaluated the assertion, since
+// which backend did is no part of what the assertion says.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a failing assertion into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("assert.fails.message.isDruntimesOwn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        "Assertion failure".shouldBeRetOf!(backend, q{
+            int one() {
+                return 1;
+            }
+
+            string result() {
+                import core.exception: AssertError;
+
+                try
+                    assert(one() == 2);
+                catch (AssertError error)
+                    return error.msg;
+
+                return "";
+            }
+        }, "result");
+    }
+}
+
+
+// `assert(cond, "text")`: the literal is the message D's own semantics
+// give the `AssertError`, in place of druntime's default wording.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a failing assertion into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("assert.fails.message.isTheLiteralGiven." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        "one is not two".shouldBeRetOf!(backend, q{
+            int one() {
+                return 1;
+            }
+
+            string result() {
+                import core.exception: AssertError;
+
+                try
+                    assert(one() == 2, "one is not two");
+                catch (AssertError error)
+                    return error.msg;
+
+                return "";
+            }
+        }, "result");
+    }
+}

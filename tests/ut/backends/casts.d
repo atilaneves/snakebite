@@ -200,24 +200,23 @@ unittest {
 }
 
 
-// dmd's semantic pass elides an upcast entirely (a `Derived` reference
-// already satisfies a `Base` destination, so it just re-types the operand
-// rather than keeping a `CastExp` node); a downcast keeps the explicit
-// `CastExp` this classifies, since deciding whether the reference is
-// really a `Derived` cannot happen at compile time.
-@("kind.classDowncast")
+// dmd's semantic pass leaves a class cast unlowered only when the
+// destination is a base of the source (`expressionsem.lowerCastExp`):
+// here a cast to an interface the class implements. Every other class
+// cast - a downcast, a cast to an unrelated interface - is lowered to
+// `_d_cast` and never classified at all.
+@("kind.classReference")
 unittest {
     auto function_ = castFunctionOf(q{
-        class Base {}
-        class Derived : Base {}
+        interface Shape {}
+        class Circle : Shape {}
 
-        Derived cast_(Base value) { return cast(Derived) value; }
+        Shape cast_(Circle value) { return cast(Shape) value; }
     });
     auto cast_ = castOf(function_);
+    (cast_.lowering is null).should == true;
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == Kind.classDowncast;
-    plan.sourceClass.ident.toString.should == "Base";
-    plan.targetClass.ident.toString.should == "Derived";
+    plan.kind.should == Kind.classReference;
 }

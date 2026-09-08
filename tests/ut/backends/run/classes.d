@@ -695,3 +695,55 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// A class-to-interface cast dmd proves safe at compile time (`Object.
+// Monitor` is a base of `Mutex`) stays an explicit `CastExp` with no
+// lowering: it is the backend's own job to keep the reference, whether
+// the object's class is a guest one or, as here, a native one the guest
+// only instantiated.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot allocate a native class"),
+)) {
+    @("nativeClassCastToInterfaceKeepsTheObject." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.sync.mutex: Mutex;
+
+            void main() {
+                auto mutex = new Mutex;
+                Object.Monitor monitor = cast(Object.Monitor) mutex;
+                assert(monitor !is null);
+            }
+        });
+    }
+}
+
+
+// A call through an interface reference to a native object: the
+// interface's own method runs on the object the cast above kept.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot allocate a native class"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "the process segfaults resolving the interface method on a native " ~
+        "object"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "`ffi cannot resolve the symbol `_D6object6Object7Monitor4lockMFZv`" ~
+        " declared by `lock`: it is not in this process`"),
+)) {
+    @("nativeClassInterfaceCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.sync.mutex: Mutex;
+
+            void main() {
+                auto mutex = new Mutex;
+                Object.Monitor monitor = mutex;
+                monitor.lock();
+                monitor.unlock();
+            }
+        });
+    }
+}
