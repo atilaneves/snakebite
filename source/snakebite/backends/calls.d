@@ -29,6 +29,23 @@ public bool usesGuestBody(
     return preferGuest;
 }
 
+// Whether a backend should run `function_`'s own body rather than the
+// machine code this process may have for it. A guest function's body is
+// the one being tested, so it runs as guest even when its linker name is
+// also in this process: a guest `main` mangles to `_Dmain`, which the
+// host program itself exports, and calling that re-enters the host. A
+// template instance is the exception, because a native instantiation, when
+// there is one, is the same code the guest would have compiled.
+public bool prefersGuestBody(
+    imported!"dmd.func".FuncDeclaration function_,
+    in bool isGuest,
+    lazy bool hasNativeSymbol,
+) {
+    const isTemplate = function_.isInstantiated() !is null
+        && function_.fbody !is null;
+    return isTemplate ? !hasNativeSymbol : isGuest;
+}
+
 private bool hasGuestDelegateArgument(
     imported!"dmd.arraytypes".Expressions* arguments,
     scope bool delegate(imported!"dmd.func".FuncDeclaration) isGuest,

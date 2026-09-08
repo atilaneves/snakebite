@@ -5,7 +5,6 @@ private:
 
 import std.conv: text;
 import snakebite.ffi.limits: maxArguments;
-import snakebite.backends.aggregates: AggregateFacts;
 
 
 // Walks dmd's AST directly. The one invariant: a result is never boxed
@@ -134,7 +133,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         Statement, SwitchStatement, ThrowStatement, TryCatchStatement,
         TryFinallyStatement, UnrolledLoopStatement, WithStatement;
     import dmd.tokens: EXP;
-    import dmd.typesem: isIntegral, nextOf;
+    import dmd.typesem: isIntegral, nextOf, toBasetype;
     import core.thread: ThreadID;
     import snakebite.nativelayout: NativeData, nativeSymbolName;
     import snakebite.backends.runtimetypes: RuntimeTypes;
@@ -159,16 +158,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // answers so execution does not repeat the same AST walk for functions
     // that stay in this evaluator's program.
     private Cache!(FuncDeclaration, bool) _needsClosure;
-    // These properties of a callee do not change while an evaluator runs.
-    // Keep them apart from call-site decisions: delegate arguments and the
-    // active nesting context still need to be checked for every call.
-    private struct DispatchFacts {
-        bool _isGuest;
-        bool _isTemplate;
-        bool _hasNativeSymbol;
-    }
-
-    private Cache!(FuncDeclaration, DispatchFacts) _dispatchFacts;
+    // Whether a callee's own body is preferred does not change while an
+    // evaluator runs. Keep it apart from call-site decisions: delegate
+    // arguments and the active nesting context still need to be checked
+    // for every call.
+    private Cache!(FuncDeclaration, bool) _prefersGuestBody;
     version(unittest) private size_t _staticLookups;
     // A guest pointer can live in an unscanned frame, so the evaluator keeps
     // each backing allocation reachable for as long as guest state can be.
@@ -296,7 +290,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _program = program;
         _nativeData = NativeData(&constantSymbolAddress);
         _runtimeTypes = RuntimeTypes(program, &resolveTypeInfo,
-            (declaration) => classRuntimeInfo(declaration));
+            (declaration) => classRuntimeInfo(declaration),
+            (type, loc) => _nativeData.initialValue(type, loc));
         _frames = FrameStack(defaultFrameCapacity);
         _temporaries = new TemporaryLifetime(&destroyTemporary);
         _ownerThread = Thread.getThis.id;
@@ -430,19 +425,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return _plans.hasNativeSymbol(function_);
     }
 
-    private DispatchFacts dispatchFactsOf(FuncDeclaration function_) {
-        if (auto cached = function_ in _dispatchFacts)
+    private bool prefersGuestBodyOf(FuncDeclaration function_) {
+        import snakebite.backends.calls: prefersGuestBody;
+
+        if (auto cached = function_ in _prefersGuestBody)
             return *cached;
 
-        const hasBody = function_.fbody !is null;
-        const isTemplate = function_.isInstantiated() !is null && hasBody;
-        const facts = DispatchFacts(
-            _program.isInterpreted(function_),
-            isTemplate,
-            isTemplate && hasNativeSymbol(function_),
-        );
-        _dispatchFacts[function_] = facts;
-        return facts;
+        const prefers = prefersGuestBody(
+            function_, _program.isInterpreted(function_),
+            hasNativeSymbol(function_));
+        _prefersGuestBody[function_] = prefers;
+        return prefers;
     }
 
     // `function_`'s frame layout, from the cache; computed on its first
@@ -628,14 +621,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // A declaration without a body can only describe a host call,
         // regardless of which module owns it.
         auto body_ = function_.fbody;
-        const dispatchFacts = dispatchFactsOf(function_);
         import snakebite.backends.calls: usesGuestBody;
 
         const interprets = usesGuestBody(
             function_, callSite is null ? null : callSite.arguments,
             (callee) => _program.isInterpreted(callee),
-            dispatchFacts._isGuest && !dispatchFacts._isTemplate
-                || dispatchFacts._isTemplate && !dispatchFacts._hasNativeSymbol,
+            prefersGuestBodyOf(function_),
             _function,
         );
         if (!interprets) {
@@ -1446,7 +1437,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             loadIntegral;
         import std.conv: text;
 
-        auto type = expression.type;
+        auto type = expression.type.toBasetype;
         if (type.ty != Tarray)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
@@ -2080,12 +2071,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         );
     }
 
-    override void visit(ConstructExp expression) {
-        if (expression.lowering !is null) {
-            expression.lowering.accept(this);
-            return;
-        }
-
+    protected override void visitUnloweredConstruct(ConstructExp expression) {
         assign(expression);
     }
 
@@ -2102,6 +2088,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     private void* assign(AssignExp expression) {
         import core.stdc.string: memcpy;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
         import std.conv: text;
 
         // DMD records the two meanings of a slice assignment on the node:
@@ -2119,51 +2106,46 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return assignSlice(expression);
         }
 
-        // `ConstructExp` and `BlitExp` arrive as this same node. Over a
-        // type with a destructor or an overloaded assignment, running
-        // either as a plain store would be a wrong answer, not a
-        // refusal, since D specifies construction and assignment
-        // differently there - so both stay refused in general. Integral
-        // and dynamic-array targets have neither: constructing, blitting
-        // and assigning one are the same bytes written the same way, which
-        // is exactly the shape `_d_arrayappendcTX_`'s own lowering
-        // writes, on the `~=` lowering's own chain, into the slot it
-        // just extended (`a[a.length - 1] = 2`, dmd's own `construct`
-        // for filling storage the guest has not touched yet).
+        // `ConstructExp` and `BlitExp` arrive as this same node. DMD emits
+        // explicit lifecycle calls around these byte operations when the
+        // struct needs them, so the operation here only moves the value's
+        // native bytes.
         auto structType = _type.isTypeStruct;
-        const isSupportedStruct = structType !is null
-            && AggregateFacts.of(_type).loweredCopy;
-        // DMD represents the raw copy that precedes its explicit
-        // `__aggrPostblit` call as `BlitExp`. It is not ordinary D
-        // assignment: the following AST node applies the lifecycle hook,
-        // so this node must copy the native bytes even when the struct has
-        // a postblit.
-        const isStructBlit = structType !is null
-            && expression.isBlitExp !is null;
+        const isStruct = structType !is null;
         // A scalar `ConstructExp` initializes storage that has no prior
         // value. This includes immutable fields in a constructor, which
         // cannot use ordinary assignment syntax but still have native bytes
         // that can be written once.
         const isConstruct = expression.isConstructExp !is null;
-        const isSupportedArray = _type.ty == Tarray;
-        if (structType !is null && !isSupportedStruct && !isStructBlit)
-            throw new SnakebiteException(
-                text("interpreter cannot assign unsupported struct `",
-                    structType.toString, "`"),
-            );
-
+        const isArray = _type.ty == Tarray;
         if (expression.op != EXP.assign && !_facts.isIntegral && !isConstruct
-                && !isSupportedStruct && !isStructBlit
-                && !isSupportedArray)
+                && !isStruct
+                && !isArray)
             throw new SnakebiteException(
                 text("interpreter cannot run a `", expression.op,
                     "` on `", expression.e1.toString, "`"),
             );
 
+        if (auto dot = expression.e1.isDotVarExp) {
+            auto field = dot.var.isVarDeclaration;
+            if (field !is null && field.isBitFieldDeclaration !is null) {
+                const valueFacts = factsOf(expression.e2.type);
+                auto scratch = _frames.push(valueFacts.size,
+                    valueFacts.alignment);
+                evaluate(expression.e2, expression.e2.type,
+                    valueFacts, scratch.base);
+                const result = loadIntegral(
+                    scratch.base, valueFacts.size, !valueFacts.isUnsigned);
+                storeBitfield(dot, field, result);
+                storeIntegral(_place, result, _facts.size);
+                return _place;
+            }
+        }
+
         // Naming `e1` rather than the whole expression: dmd lowers
         // `s.length = n` into a node whose `toString` is a bare `=`.
         auto target = addressOf(expression.e1);
-        if (isSupportedStruct || isStructBlit) {
+        if (isStruct) {
             auto scratch = _frames.push(_facts.size, _facts.alignment);
             evaluate(expression.e2, _type, _facts, scratch.base);
             memcpy(target, scratch.base, _facts.size);
@@ -2195,10 +2177,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (!isNativeBytes(elementType))
             throw new SnakebiteException(
                 text("interpreter cannot fill `", expression.e1.toString,
-                    "`: its element type is `", elementType.toString,
-                    "`"),
+                    "`: its element type is `", elementType.toString, "`"),
             );
-
         const elementFacts = factsOf(elementType);
         const sourceFacts = factsOf(expression.e2.type);
         if (sourceFacts.size != elementFacts.size)
@@ -2582,6 +2562,27 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`"),
             );
 
+        // A narrow target (`ubyte`, `short`, ...) arrives wrapped in the
+        // `CastExp` dmd's `integralPromotions` adds for the operation
+        // itself; the field behind it is what is stored to.
+        auto promotion = expression.e1.isCastExp;
+        auto target_ = promotion is null ? expression.e1 : promotion.e1;
+        if (auto dot = target_.isDotVarExp) {
+            auto field = dot.var.isVarDeclaration;
+            if (field !is null && field.isBitFieldDeclaration !is null) {
+                const stepFacts = factsOf(expression.e2.type);
+                const step = asIntegral(expression.e2, stepFacts);
+                auto base = fieldBaseAddress(dot.e1);
+                const current = bitfieldValueAt(base, field);
+                const result = combine!op(
+                    current, step, targetFacts, stepFacts, expression);
+                storeBitfieldAt(field,
+                    cast(ubyte*) base + field.offset, result);
+                storeIntegral(_place, result, _facts.size);
+                return;
+            }
+        }
+
         void* target;
         try {
             target = addressOf(expression.e1);
@@ -2618,6 +2619,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: `", expression.e1.toString,
                     "` is not an integral lvalue"),
             );
+
+        if (auto dot = expression.e1.isDotVarExp) {
+            auto field = dot.var.isVarDeclaration;
+            if (field !is null && field.isBitFieldDeclaration !is null) {
+                auto base = fieldBaseAddress(dot.e1);
+                const current = bitfieldValueAt(base, field);
+                const step = asIntegral(expression.e2);
+                const changed = expression.op == EXP.plusPlus
+                    ? current + step : current - step;
+                storeIntegral(_place, current, _facts.size);
+                storeBitfieldAt(field,
+                    cast(ubyte*) base + field.offset, changed);
+                return;
+            }
+        }
 
         auto target = addressOf(expression.e1);
         const step = asIntegral(expression.e2);
@@ -2715,6 +2731,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     protected override void visitUnloweredEqual(EqualExp expression) {
         import core.stdc.string: memcmp;
         import snakebite.nativelayout: storeIntegral;
+        import dmd.typesem: toBasetype;
         import std.conv: text;
 
         if (expression.op != EXP.equal && expression.op != EXP.notEqual)
@@ -2724,7 +2741,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
 
         // DMD's `Type.nextOf` is not const-correct, so this cannot be const.
-        auto type = expression.e1.type;
+        auto type = expression.e1.type.toBasetype;
         auto structType = type.isTypeStruct;
         if (structType !is null) {
             const facts = factsOf(type);
@@ -3116,7 +3133,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private real asFloating(Expression expression) {
         import std.conv: text;
 
-        auto type = expression.type;
+        auto type = expression.type.toBasetype;
         if (type.ty != Tfloat32 && type.ty != Tfloat64
                 && type.ty != Tfloat80)
             throw new SnakebiteException(
@@ -3524,6 +3541,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // recomputed here.
     override void visit(DotVarExp expression) {
         import core.stdc.string: memcpy;
+        import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
         auto field = expression.var.isVarDeclaration;
@@ -3533,16 +3551,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: only a field read is supported"),
             );
 
-        // `field.offset` below is a whole-byte offset. A bitfield is also
-        // a `VarDeclaration`, but its storage is a sub-byte slice of that
-        // offset's byte, which a plain `memcpy` from it would read as
-        // whole bytes instead - refused rather than run to a wrong
-        // answer, the same way an unhandled node already is.
-        if (field.isBitFieldDeclaration !is null)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: reading a bitfield is not supported"),
-            );
+        if (field.isBitFieldDeclaration !is null) {
+            storeIntegral(_place,
+                bitfieldValue(expression, field),
+                _facts.size);
+            return;
+        }
 
         auto base = cast(ubyte*) fieldBaseAddress(expression.e1);
         memcpy(_place, base + field.offset, _facts.size);
@@ -3558,6 +3572,49 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void* object;
         evaluate(aggregate, aggregate.type, facts, &object);
         return object;
+    }
+
+    private long bitfieldValue(DotVarExp expression, VarDeclaration field) {
+        return bitfieldValueAt(fieldBaseAddress(expression.e1), field);
+    }
+
+    // The storage is read at the field's own width, not at the width of
+    // the expression reading it: a compound assignment promotes the
+    // operation to `int` while a `ubyte` field still has one byte of
+    // storage.
+    private long bitfieldValueAt(void* base, VarDeclaration field) {
+        import snakebite.nativelayout: loadIntegral;
+        const bits = field.isBitFieldDeclaration;
+        const facts = factsOf(field.type);
+        const raw = loadIntegral(
+            cast(ubyte*) base + field.offset,
+            facts.size, false);
+        const mask = ulong.max >> (64 - bits.fieldWidth);
+        auto value = (raw >> bits.bitOffset) & mask;
+        if (!facts.isUnsigned && bits.fieldWidth < 64
+                && (value & (1UL << (bits.fieldWidth - 1))))
+            value |= ulong.max << bits.fieldWidth;
+        return cast(long) value;
+    }
+
+    private void storeBitfield(
+        DotVarExp expression, VarDeclaration field, long value,
+    ) {
+        const bits = field.isBitFieldDeclaration;
+        auto place = cast(ubyte*) fieldBaseAddress(expression.e1) + field.offset;
+        storeBitfieldAt(field, place, value);
+    }
+
+    private void storeBitfieldAt(
+        VarDeclaration field, void* place, long value,
+    ) {
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+        const bits = field.isBitFieldDeclaration;
+        const mask = (ulong.max >> (64 - bits.fieldWidth)) << bits.bitOffset;
+        auto storage = loadIntegral(place, factsOf(field.type).size, false);
+        storage = (storage & ~mask)
+            | ((cast(ulong) value << bits.bitOffset) & mask);
+        storeIntegral(place, storage, factsOf(field.type).size);
     }
 
     override void visit(TypeidExp expression) {
@@ -3828,18 +3885,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // elements need to survive at least as long as whatever slice they
     // are assigned to, `static` or not.
     //
-    // A key or value array literal nested inside an `AssocArrayLiteralExp`
-    // also reaches here despite carrying a non-null `lowering` of its own:
-    // that lowering's body is `_d_arrayliteralTX`'s real druntime source,
-    // which this backend can only run by tree-walking it as if it were
-    // guest code, and it declares locals of its own
-    // (`snakebite.backends.loweringvisitor` explains the resulting
-    // assertion failure in full) that this evaluator does not compute
-    // correctly outside a guest function's own layout. This ignores that
-    // `lowering` and builds the same array by hand instead, which is safe
-    // here because both key and value are always dynamic arrays of a type
-    // this branch already supports.
-    override void visit(ArrayLiteralExp expression) {
+    // The shared LoweringVisitor routes array literals to this residual
+    // implementation. Keep this policy common to all runtime backends.
+    protected override void visitUnloweredArrayLiteral(
+            ArrayLiteralExp expression) {
         import snakebite.nativelayout: isStoredLiteral;
 
         if (isStoredLiteral(expression)) {
@@ -3900,160 +3949,111 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
     }
 
-    // Not one of `LoweringVisitor`'s final overrides - see the comment on
-    // that class (`snakebite.backends.loweringvisitor`) for why: the
-    // constructor call dmd leaves outside a class's own `lowering` still
-    // has to run afterwards, which a single final `accept(this)` dispatch
-    // has nowhere to express. The heap-allocated class case below does
-    // tree-walk `expression.lowering` (`_d_newclassT!T()`) like any other
-    // call.
-    override void visit(NewExp expression) {
-        import dmd.astenums: Taarray;
-        import dmd.typesem: isScalar;
+    private struct NewDestination {
+        void* place;
+        size_t mark;
+    }
 
-        if (expression.type.ty == Tarray || expression.type.ty == Taarray) {
-            if (expression.lowering is null)
+    private NewDestination[] _newDestinations;
+
+    protected override void prepareNew(NewExp expression) {
+        if (expression.placement !is null || expression.thisexp !is null)
+            throw new SnakebiteException(
+                text("interpreter cannot allocate `", expression.toString,
+                    "` with placement or an explicit outer context"),
+            );
+
+        // Keeps pointed-to storage mutable during destination restoration.
+        auto destination = NewDestination(_place, _frames.mark);
+        auto place = _frames.reserve(_facts.size, _facts.alignment);
+        _newDestinations ~= destination;
+        _place = place;
+    }
+
+    protected override void restoreNew() {
+        auto destination = _newDestinations[$ - 1];
+        _newDestinations.length--;
+        _place = destination.place;
+        _frames.release(destination.mark);
+    }
+
+    protected override void visitLoweredNew(NewExp expression) {
+        import dmd.astenums: Tpointer;
+        import core.stdc.string: memcpy;
+        import snakebite.nativelayout: loadIntegral;
+
+        auto structType = expression.newtype.isTypeStruct;
+        if (expression.type.ty == Tclass || structType !is null) {
+            auto object = cast(ubyte*) loadIntegral(
+                _place, size_t.sizeof, false);
+            if (object is null)
                 throw new SnakebiteException(
-                    text("interpreter cannot evaluate `", expression.op,
-                        "` expression: `", expression.toString, "`"),
+                    text("interpreter cannot allocate `", expression.toString,
+                        "`: druntime returned null"),
                 );
 
-            expression.lowering.accept(this);
-            return;
-        }
-
-        import snakebite.nativelayout: storeIntegral;
-        import std.conv: text;
-
-        auto arguments = expression.arguments;
-        if (expression.type.ty == Tclass) {
-            const classType = expression.newtype.isTypeClass;
-            if (classType is null || expression.placement !is null
-                    || expression.thisexp !is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot evaluate `", expression.op,
-                        "` expression: `", expression.toString, "`"),
-                );
-
-            auto declaration = cast(ClassDeclaration) classType.sym;
-            auto runtime = classRuntimeInfo(declaration);
-            ubyte* object;
-            if (expression.onstack) {
-                import core.stdc.string: memcpy;
-
-                const alignment = declaration.alignsize == 0
-                    ? 1 : declaration.alignsize;
-                object = _frames.reserve(
-                    declaration.structsize,
-                    alignment,
-                );
-                memcpy(object, runtime.m_init.ptr, runtime.m_init.length);
-            } else {
-                // `scope class`/`-betterC` are the only shapes dmd leaves
-                // `lowering` null for here (`expressionsem.d`, `NewExp`
-                // semantic) - both stay refused, same as any other
-                // unsupported node, since neither is this evaluator's own
-                // allocation to perform. `expression.lowering` is
-                // `core.lifetime._d_newclassT!T()`
-                // (`snakebite.backends.loweringvisitor` on why `NewExp` is
-                // not one of that visitor's final overrides): a call this
-                // evaluator tree-walks like any other, reaching
-                // `__traits(initSymbol, T)` (`visit(VarExp)`'s
-                // `SymbolDeclaration` case, reading `classRuntimeInfo`'s
-                // own `.init` image, fields already baked in by
-                // `fillFieldInits`) and `GC.malloc` (an ordinary FFI call,
-                // resolved the same way as any other native symbol).
-                if (expression.lowering is null)
-                    throw new SnakebiteException(
-                        text("interpreter cannot evaluate `",
-                            expression.toString,
-                            "`: only heap allocation is supported"),
-                    );
-
-                import snakebite.nativelayout: loadIntegral;
-
-                auto scratch = _frames.push(_facts.size, _facts.alignment);
-                evaluate(
-                    expression.lowering, expression.type, _facts,
-                    scratch.base);
-                object = cast(ubyte*) loadIntegral(
-                    scratch.base, size_t.sizeof, false);
-                if (object is null)
-                    throw new SnakebiteException(
-                        text("interpreter cannot allocate `",
-                            expression.toString,
-                            "`: druntime returned null"),
-                    );
-            }
-
-            _classes[object] = declaration;
-
-            if (expression.member !is null)
-                constructClass(expression, object);
-
-            storeIntegral(_place, cast(size_t) object, _facts.size);
-            return;
-        }
-
-        if (expression.type.ty == Tpointer) {
-            const structType = expression.newtype.isTypeStruct;
-            if ((structType is null
-                    && !expression.newtype.isScalar)
-                    || expression.placement !is null || expression.thisexp !is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot evaluate `", expression.op,
-                        "` expression: `", expression.toString, "`"),
-                );
-
-            const objectFacts = factsOf(expression.newtype);
-            const alignment = objectFacts.alignment;
-            const padding = alignment - 1;
-            if (objectFacts.size > size_t.max - padding)
+            finishNew(expression, object);
+        } else if (expression.type.ty == Tpointer
+                && expression.arguments !is null
+                && expression.arguments.length != 0) {
+            if (expression.arguments.length != 1)
                 throw new SnakebiteException(
                     text("interpreter cannot allocate `",
-                        expression.toString, "`: its alignment padding " ~
-                        "overflows `size_t`"),
+                        expression.toString, "`: expected one initializer"),
                 );
+            evaluate((*expression.arguments)[0], expression.newtype,
+                factsOf(expression.newtype),
+                cast(void*) loadIntegral(_place, size_t.sizeof, false));
+        }
+        memcpy(_newDestinations[$ - 1].place, _place, _facts.size);
+    }
 
-            auto allocation = new ubyte[](objectFacts.size + padding);
-            _allocations ~= allocation;
-            const start = -cast(size_t) allocation.ptr
-                & (alignment - 1);
-            auto object = cast(ubyte*) allocation.ptr + start;
+    protected override void visitUnloweredNew(NewExp expression) {
+        import core.stdc.string: memcpy;
+        import snakebite.nativelayout: storeIntegral;
 
-            if (structType !is null) {
-                initializeDefault(
-                    expression.newtype,
-                    objectFacts,
-                    object,
-                    expression.loc,
-                );
+        auto classType = expression.newtype.isTypeClass;
+        if (!expression.onstack || classType is null
+                || expression.placement !is null || expression.thisexp !is null)
+            return visit(cast(Expression) expression);
 
-                if (expression.member !is null)
-                    constructStruct(expression, object);
-                else if (arguments !is null)
-                    initializeStructArguments(expression, object);
-            } else if (arguments is null || arguments.length == 0) {
-                initializeDefault(
-                    expression.newtype,
-                    objectFacts,
-                    object,
-                    expression.loc,
-                );
-            } else {
-                evaluate(
-                    (*arguments)[0], expression.newtype, objectFacts, object,
-                );
-            }
+        auto declaration = classType.sym;
+        auto runtime = classRuntimeInfo(declaration);
+        const alignment = declaration.alignsize == 0
+            ? 1 : declaration.alignsize;
+        auto object = _frames.reserve(declaration.structsize, alignment);
+        memcpy(object, runtime.m_init.ptr, runtime.m_init.length);
+        finishNew(expression, object);
+        storeIntegral(_place, cast(size_t) object, _facts.size);
+    }
 
-            storeIntegral(_place, cast(size_t) object, _facts.size);
+    private void finishNew(NewExp expression, ubyte* object) {
+        import snakebite.nativelayout: storeIntegral;
+
+        auto classType = expression.newtype.isTypeClass;
+        if (classType !is null) {
+            _classes[object] = classType.sym;
+            if (expression.member !is null)
+                constructClass(expression, object);
             return;
         }
 
-        throw new SnakebiteException(
-            text("interpreter cannot evaluate a `", expression.op,
-                "` expression: `", expression.toString, "`"),
-        );
+        auto declaration = expression.newtype.isTypeStruct.sym;
+        if (declaration.isNested() && declaration.vthis !is null) {
+            auto parent = declaration.toParent2();
+            auto parentFunction = parent is null
+                ? null : parent.isFuncDeclaration;
+            if (parentFunction !is null)
+                storeIntegral(
+                    object + declaration.vthis.offset,
+                    cast(size_t) contextOf(parentFunction), size_t.sizeof,
+                );
+        }
+
+        if (expression.member !is null)
+            constructStruct(expression, object);
+        else if (expression.arguments !is null)
+            initializeStructArguments(expression, object);
     }
 
     override void visit(DeleteExp expression) {
@@ -4196,6 +4196,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private void initializeStructArguments(NewExp expression, ubyte* object) {
+        import core.stdc.string: memcpy;
         import std.conv: text;
 
         auto declaration = expression.newtype.isTypeStruct.sym;
@@ -4207,12 +4208,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         foreach (i; 0 .. expression.arguments.length) {
             auto field = declaration.fields[i];
-            evaluate(
-                (*expression.arguments)[i],
-                field.type,
-                factsOf(field.type),
-                object + field.offset,
-            );
+            auto valueFacts = factsOf(field.type);
+            auto value = _frames.push(valueFacts.size, valueFacts.alignment);
+            evaluate((*expression.arguments)[i], field.type, valueFacts,
+                value.base);
+            if (field.isBitFieldDeclaration !is null) {
+                import snakebite.nativelayout: loadIntegral;
+                storeBitfieldAt(field, object + field.offset,
+                    loadIntegral(value.base, valueFacts.size,
+                        !valueFacts.isUnsigned));
+                continue;
+            }
+            memcpy(object + field.offset, value.base, valueFacts.size);
         }
     }
 
@@ -4290,7 +4297,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     override void visit(StructLiteralExp expression) {
         import core.stdc.string: memset;
-        import snakebite.nativelayout: isStoredLiteral, storeIntegral;
+        import snakebite.nativelayout:
+            isStoredLiteral, loadIntegral, storeIntegral;
         import std.conv: text;
 
         if (isStoredLiteral(expression)) {
@@ -4299,11 +4307,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         auto structType = _type.isTypeStruct;
-        if (structType is null || structType.sym != expression.sd
-                || !AggregateFacts.of(_type).loweredCopy)
+        if (structType is null || structType.sym != expression.sd)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
-                    "`: unsupported struct literal"),
+                    "`: struct literal layout mismatch"),
             );
 
         memset(_place, 0, _facts.size);
@@ -4337,6 +4344,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 continue;
 
             auto field = expression.sd.fields[i];
+            if (field.isBitFieldDeclaration !is null) {
+                auto valueFacts = factsOf(field.type);
+                auto value = _frames.push(valueFacts.size,
+                    valueFacts.alignment);
+                evaluate(element, field.type, valueFacts, value.base);
+                storeBitfieldAt(field, cast(ubyte*) _place + field.offset,
+                    loadIntegral(value.base, valueFacts.size,
+                        !valueFacts.isUnsigned));
+                continue;
+            }
             evaluate(
                 element,
                 field.type,
@@ -4362,7 +4379,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // build would, the same way `TypeidExp` resolves a symbol with no
     // `FuncDeclaration` of its own, rather than reimplementing the
     // UTF-8/UTF-16 encoding here.
-    override void visit(CatDcharAssignExp expression) {
+    override void visitUnloweredCatDcharAssign(CatDcharAssignExp expression) {
         import core.stdc.string: memcpy;
         import std.conv: text;
 

@@ -8,6 +8,61 @@ module ut.backends.run.structs;
 
 import ut.backends;
 
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot inspect guest TypeInfo metadata"),
+)) {
+    @("runtimeTypeInfoBuildsDataMetadata." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Code : int { ready = 7 }
+            struct Value {
+                int field = 42;
+            }
+            void main() {
+                auto structInfo = cast(TypeInfo_Struct) typeid(Value);
+                assert(*cast(int*) structInfo.m_init.ptr == 42);
+                auto enumInfo = cast(TypeInfo_Enum) typeid(Code);
+                assert(*cast(int*) enumInfo.m_init.ptr == 7);
+                assert((cast(TypeInfo_Pointer) typeid(int*)).m_next
+                    is typeid(int));
+                auto sharedInfo = cast(TypeInfo_Shared)
+                    typeid(shared const Value);
+                assert(sharedInfo.base is typeid(const Value));
+                auto qualified = cast(TypeInfo_Const) sharedInfo.base;
+                assert(qualified.base is typeid(Value));
+                structInfo = cast(TypeInfo_Struct) qualified.base;
+                assert(*cast(int*) structInfo.m_init.ptr == 42);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "Bytecode compiler cannot take the address of a `typeid` receiver "
+        ~ "for its `name` call"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read guest typeid metadata"),
+)) {
+    @("runtimeTypeInfoNamesGuestAggregates." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Code : int { ready = 7 }
+            struct Value { int field; }
+            class Product {}
+            void main() {
+                assert((cast(TypeInfo_Enum) typeid(Code)).name.length != 0);
+                assert((cast(TypeInfo_Struct) typeid(Value)).name.length != 0);
+                assert((cast(TypeInfo_Class) typeid(Product)).name.length != 0);
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("structInitialValueContainsFunctionPointer." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -123,7 +178,6 @@ static foreach (backend; Matrix!()) {
 // A slice assignment copies element by element and runs the postblit for
 // each one, rather than blitting the whole slice.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
@@ -156,11 +210,98 @@ static foreach (backend; Matrix!(
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("bitfieldRuntimeOperations." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Signed { int bits : 3; }
+            struct Pair { uint first : 4; uint second : 4; }
+
+            int value(int input) { return input; }
+            Pair* receiver(ref Pair pair, ref int calls) {
+                ++calls;
+                return &pair;
+            }
+
+            void main() {
+                auto signedValue = Signed(value(-1));
+                assert(signedValue.bits == -1);
+                auto pair = Pair(value(2), value(3));
+                int calls;
+
+                receiver(pair, calls).first += 1;
+                assert(pair.first == 3 && pair.second == 3);
+                assert(calls == 1);
+                auto previous = receiver(pair, calls).first++;
+                assert(previous == 3);
+                assert(pair.first == 4 && pair.second == 3);
+                assert(calls == 2);
+            }
+        });
+    }
+}
+
+// A compound assignment to a bitfield promotes the operation to `int`,
+// but the load and the store back must read and write only the field's
+// own storage width. The struct sits in the last byte before a page with
+// no access, so a wider read-modify-write of the storage faults instead
+// of passing unnoticed. Only the neighbour field is asserted: dmd's own
+// native codegen drops a compound assignment to a `ubyte` bitfield, so
+// `first` has no value every backend agrees on.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call native functions"),
+)) {
+    @("bitfieldCompoundAssignStoresStorageWidth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.sys.posix.sys.mman:
+                MAP_ANON, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE,
+                mmap, mprotect, munmap;
+
+            struct Pair { ubyte first : 4; ubyte second : 4; }
+
+            void main() {
+                enum pageSize = 4096;
+                auto base = cast(ubyte*) mmap(
+                    null, 2 * pageSize, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANON, -1, 0);
+                assert(mprotect(base + pageSize, pageSize, PROT_NONE) == 0);
+                auto pair = cast(Pair*) &base[0 .. pageSize][pageSize - 1];
+                pair.first = 2;
+                pair.second = 3;
+                pair.first += 1;
+                assert(pair.second == 3);
+                munmap(base, 2 * pageSize);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE cannot execute full-width ulong bitfield assignment"),
+)) {
+    @("fullWidthUlongBitfield." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Full { ulong bits : 64; }
+            void main() {
+                Full full;
+                full.bits = ulong.max;
+                assert(full.bits == ulong.max);
+            }
+        });
+    }
+}
+
 // A struct allocated with `new` runs its constructor in the allocated
 // storage. An immutable field is initialized with a construct expression,
 // so this also checks that constructor initialization reaches the object
 // field rather than being rejected as an assignment.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("struct.new.constructorInitializesImmutableField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -181,7 +322,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("struct.new.constructorBindsRefParameter." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -207,9 +348,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // The members of an anonymous union occupy the same storage, so writing
 // through one member changes what is read back through another.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("anonymousUnionMembersShareStorage." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -341,9 +480,7 @@ static foreach (backend; Matrix!()) {
 // `static` changes how the local type is represented during semantic
 // analysis, but it does not give an instance static storage. Constructing an
 // instance still creates an ordinary local value with native struct layout.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("staticLocalStructConstruction." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -541,7 +678,6 @@ static foreach (backend; Matrix!(
 // positionally, in declaration order, from the constructor arguments -
 // the same as a struct literal `S(args)` would.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("newStructWithStringField." ~ backend.stringof)
@@ -557,6 +693,59 @@ static foreach (backend; Matrix!(
                 return cast(int) value.text.length;
             }
         }, "main");
+    }
+}
+
+// A discarded allocation still runs its constructor exactly once.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot observe mutable constructor state"),
+)) {
+    @("newStructDiscardedRunsConstructorOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int constructions;
+
+            struct Value {
+                this(int value) { ++constructions; }
+            }
+
+            void main() {
+                new Value(42);
+                assert(constructions == 1);
+            }
+        });
+    }
+}
+
+// An argument containing another allocation is evaluated once before the
+// outer constructor runs.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot observe mutable constructor state"),
+)) {
+    @("nestedNewArgumentEvaluatedOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int innerConstructions;
+            int outerConstructions;
+
+            class Inner {
+                this() { ++innerConstructions; }
+            }
+
+            struct Outer {
+                this(Inner inner) { ++outerConstructions; }
+            }
+
+            void main() {
+                new Outer(new Inner);
+                assert(innerConstructions == 1);
+                assert(outerConstructions == 1);
+            }
+        });
     }
 }
 
@@ -673,7 +862,7 @@ static foreach (backend; Matrix!()) {
 // `Middle` argument by address the same way, and `Middle`'s in turn takes
 // `Part` by address, so both levels of temporary need a frame slot before
 // their constructor runs.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("nestedStructCtorCallArguments." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -712,7 +901,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // constructor argument: the call has no lvalue either, and the interpreter
 // must materialize its return value into a frame slot to hand its address
 // to the outer constructor.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("functionReturningStructAsCtorCallArgument." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -750,7 +939,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // A ternary between two constructor calls, used as a constructor argument:
 // only the branch actually taken ever runs, so only its temporary needs a
 // frame slot - the other branch's temporary is never constructed.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("ternaryBetweenStructCtorCallsAsCtorCallArgument." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -790,7 +979,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // constructor's hidden `this` is bound before that return place is filled,
 // so this exercises the same rvalue-materialization path with no
 // surrounding struct constructor at all.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("structCtorCallReturnedFromAutoRefLambda." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -823,7 +1012,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // frame slot before that ordinary call runs, and the slot must still be
 // there - not reused for the ordinary call's own frame - when the
 // constructor resumes writing to it afterward.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("structCtorCallBodyCallsAnotherFunctionBeforeFinishing." ~
         backend.stringof)
     @Tags(backend.stringof)
@@ -1134,9 +1323,7 @@ static foreach (backend; Matrix!(
 // so this is an ordinary struct-typed variable declaration and an
 // ordinary method call once a struct with a postblit is no longer refused
 // outright.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("postblitRunsOnceOnCopyIntoVariable." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1946,16 +2133,8 @@ static foreach (backend; Matrix!()) {
 // instead - the two nibbles must both still hold `a`'s 3 and `b`'s 5,
 // packed as `0x53` the same way native layout packs them.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "`compileNew` refuses a struct with a bitfield field: " ~
-            "`isSupportedStructLiteral` rejects it before the " ~
-            "positional-field-init loop can write field-wide over a " ~
-            "sibling bitfield's bits"),
     Omit!(Ctfe, Because.unconfirmed,
         "CTFE cannot reinterpret cast `S*` to `ubyte*`"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter's own `initializeStructArguments` has the same " ~
-            "gap - out of scope here, tracked separately"),
 )) {
     @("newStructWithBitfieldSiblingsSurvive." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -2662,12 +2841,7 @@ static foreach (backend; Matrix!()) {
 // the field holds, and the interpreter's native-layout path (used to lay
 // out the literal) must recognise a floating-point base the same way it
 // already recognises an integral one.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "no native layout for a value of type `E`"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "bytecode compiler cannot compile `2.5` in `main`"),
-)) {
+static foreach (backend; Matrix!()) {
     @("structLiteralInitializesDoubleBaseEnumField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -2686,12 +2860,7 @@ static foreach (backend; Matrix!(
 // The same gap as the `double`-base enum test above, for a `string`-base
 // enum: the field's native layout is the string's own `{length, ptr}`
 // pair, which the same native-layout path must also recognise.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "no native layout for the string literal `\"y\"` as a `E`"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "bytecode compiler cannot compile `\"y\"` in `main`"),
-)) {
+static foreach (backend; Matrix!()) {
     @("structLiteralInitializesStringBaseEnumField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
