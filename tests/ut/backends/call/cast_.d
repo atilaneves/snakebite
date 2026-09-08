@@ -213,7 +213,6 @@ static foreach (backend; Matrix!(
 // copy: a 1-byte element would leave the length unchanged and the two
 // implementations indistinguishable.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "dmd's CTFE keeps a `cast(void[])` array's length as an " ~
         "element count, not a byte count - pinned below"),

@@ -4836,12 +4836,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _instructions[jumpIndex].destination = _instructions.length;
     }
 
-    // `cast(T) x`. `cast(bool)` is not a narrowing: dmd classifies `bool`
-    // as an integral type, so a plain low-byte truncation would answer
-    // `cast(bool) 256` as `false` rather than D's own `true`, and this
-    // refuses that shortcut by name rather than by width. A cast that
-    // does not change width is a reinterpretation of the same bits -
-    // `cast(uint)` of an `int`, say - so it just evaluates the operand
+    // `cast(T) x`. `snakebite.backends.casts.classify` has already turned
+    // the source and destination types into a `Kind`; this is the
+    // adapter that executes each one, with no type inspection of its
+    // own. `cast(bool)` is not a narrowing: dmd classifies `bool` as an
+    // integral type, so a plain low-byte truncation would answer
+    // `cast(bool) 256` as `false` rather than D's own `true`. A cast
+    // that does not change width is a reinterpretation of the same bits
+    // - `cast(uint)` of an `int`, say - so it just evaluates the operand
     // straight into `destOffset`; narrowing does too, into a wider
     // temporary first, since this VM's little-endian layout already
     // makes the low bytes of a wider stored value its truncation to a
@@ -4852,6 +4854,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileCast(
         CastExp expression, in size_t destOffset, in size_t width,
     ) {
+        import snakebite.backends.casts: classify, Kind;
         import std.conv: text;
 
         auto sourceType = expression.e1.type;
@@ -4862,106 +4865,85 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (expression.e1.isNullExp !is null)
             return evalInto(expression.e1, destOffset, width);
 
-        const sourceFacts = TypeFacts.of(sourceType);
-        const destFacts = TypeFacts.of(destType);
-        import dmd.astenums: Taarray, Tclass, Tpointer, Tsarray;
+        const plan = classify(sourceType, destType);
 
-        // A class reference upcast to a base class or to an interface it
-        // implements (this compiler gives an interface reference the same
-        // representation as a class reference: `compileVirtualCall`'s own
-        // interface branch resolves the real override through the
-        // object's `TypeInfo_Class` at run time instead of an ABI thunk
-        // reached through an adjusted `this`), or an AA reference cast to
-        // a differently-qualified AA of the same key/value types - e.g.
-        // `object.d`'s `_aaDup` casting its `const(int[Pair])` result to
-        // the caller's `int[Pair]` - both are one pointer word either
-        // way: dmd's semantic pass already proved the cast legal, so
-        // this is a plain copy, never a representation change.
-        if ((sourceType.ty == Tclass && destType.ty == Tclass)
-                || (sourceType.ty == Taarray && destType.ty == Taarray))
+        final switch (plan.kind) with (Kind) {
+        case copy:
             return evalInto(expression.e1, destOffset, width);
 
-        // `cast(T) p`: `_d_newclassT`'s own final step
-        // (`core/lifetime.d`), reinterpreting the `void*` its allocation
-        // returned as the guest class reference it hands back. A class
-        // reference's native layout is one pointer word, the same as any
-        // other pointer (`isSupportedFacts` already treats `Tclass` that
-        // way), so this is a plain copy in either direction, never an
-        // address adjustment.
-        if ((sourceType.ty == Tclass && destType.ty == Tpointer)
-                || (sourceType.ty == Tpointer && destType.ty == Tclass))
+        case classDowncast:
+            // `classify` only ever sees this shape once dmd's semantic
+            // pass has already left the cast unlowered, which it only
+            // does when it proved the cast safe without a runtime check
+            // (an upcast, or a cast to an interface the source
+            // implements) - so a plain copy of the one pointer word is
+            // correct here too. A downcast that needs a runtime check
+            // instead reaches this compiler as a `lowering` call, which
+            // `LoweringVisitor.visit(CastExp)` already dispatches before
+            // `visitUnloweredCast` is ever reached.
             return evalInto(expression.e1, destOffset, width);
 
-        if (isFloatingType(destType)) {
-            if (isFloatingType(sourceType)) {
-                if (sourceFacts.size == destFacts.size)
-                    return evalInto(expression.e1, destOffset, width);
+        case floatWidth: {
+            const sourceOffset = plan.sourceFacts.size > plan.destFacts.size
+                ? reserveTemp(plan.sourceFacts) : destOffset;
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(&opFloatWidthCast, destOffset, sourceOffset,
+                plan.destFacts.size, plan.sourceFacts.size);
+            return;
+        }
 
-                const sourceOffset = sourceFacts.size > destFacts.size
-                    ? reserveTemp(sourceFacts) : destOffset;
-                evalInto(expression.e1, sourceOffset, sourceFacts.size);
-                emit(&opFloatWidthCast, destOffset, sourceOffset, destFacts.size,
-                    sourceFacts.size);
-                return;
-            }
-
-            if (!sourceFacts.isIntegral
-                    || !isIntegralSize(sourceFacts.size))
-                throw rejection(_function, expression.loc,
-                    text("a cast from `", sourceType.toString, "` to `",
-                        destType.toString, "`"));
-
-            const sourceOffset = reserveTemp(sourceFacts);
-            evalInto(expression.e1, sourceOffset, sourceFacts.size);
+        case integralToFloat: {
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
             emit(
-                sourceFacts.isUnsigned
+                plan.sourceFacts.isUnsigned
                     ? &opIntegralToFloatUnsigned
                     : &opIntegralToFloatSigned,
-                destOffset, sourceOffset, destFacts.size, sourceFacts.size,
+                destOffset, sourceOffset, plan.destFacts.size,
+                plan.sourceFacts.size,
             );
             return;
         }
 
-        if (isFloatingType(sourceType)) {
-            if (!destFacts.isIntegral || !isIntegralSize(destFacts.size))
-                throw rejection(_function, expression.loc,
-                    text("a cast from `", sourceType.toString, "` to `",
-                        destType.toString, "`"));
-
-            const sourceOffset = reserveTemp(sourceFacts);
-            evalInto(expression.e1, sourceOffset, sourceFacts.size);
+        case floatToIntegral: {
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
             emit(
-                destFacts.isUnsigned
+                plan.destFacts.isUnsigned
                     ? &opFloatToIntegralUnsigned
                     : &opFloatToIntegralSigned,
-                destOffset, sourceOffset, destFacts.size, sourceFacts.size,
+                destOffset, sourceOffset, plan.destFacts.size,
+                plan.sourceFacts.size,
             );
             return;
         }
 
-        if (sourceType.ty == Tpointer && destType.ty == Tpointer
-                && width == sourceFacts.size)
-            return evalInto(expression.e1, destOffset, width);
-
-        if (sourceType.ty == Tpointer && destFacts.isDynamicArray) {
+        case pointerToArray: {
             const addressOffset = reserveTemp(pointerFacts);
-            evalInto(expression.e1, addressOffset, sourceFacts.size);
+            evalInto(expression.e1, addressOffset, plan.sourceFacts.size);
             emit(&opLoadIndirect, destOffset, addressOffset,
-                destFacts.size);
+                plan.destFacts.size);
             return;
         }
 
-        if (sourceType.ty == Tsarray && destFacts.isDynamicArray
-                && destType.nextOf !is null
-                && sourceType.nextOf.equals(destType.nextOf)) {
+        // An explicit pointer-to-integral cast preserves the native
+        // address bits: `sourceOffset` already holds them as a
+        // `size_t`, so keeping the low `destFacts.size` bytes is the
+        // same truncation a narrowing integral cast performs.
+        case pointerToIntegral: {
+            const sourceOffset = reserveTemp(pointerFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(&opCopy, destOffset, sourceOffset, plan.destFacts.size);
+            return;
+        }
+
+        case sarrayToSlice: {
             import snakebite.nativelayout:
                 arrayLengthOffset, arrayPointerOffset;
 
-            const length = cast(size_t)
-                sourceType.isTypeSArray.dim.toInteger;
             const addressOffset = compileAddress(expression.e1);
             emit(&opConstant, destOffset + arrayLengthOffset,
-                addConstant(cast(long) length), size_t.sizeof);
+                addConstant(cast(long) plan.staticLength), size_t.sizeof);
             emit(&opCopy, destOffset + arrayPointerOffset,
                 addressOffset, size_t.sizeof);
             return;
@@ -4971,63 +4953,79 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // (`TypeSArray.dotExp`) casts straight to a pointer to its element
         // type - the array's own address is already that pointer, with no
         // bytes to move.
-        if (sourceType.ty == Tsarray && destType.ty == Tpointer
-                && destType.nextOf !is null
-                && sourceType.nextOf.equals(destType.nextOf)) {
+        case sarrayToPointer: {
             const addressOffset = compileAddress(expression.e1);
             emit(&opCopy, destOffset, addressOffset, size_t.sizeof);
             return;
         }
 
-        if (sourceFacts.isDynamicArray && destType.ty == Tpointer
-                && destType.nextOf !is null
-                && sourceType.nextOf.equals(destType.nextOf)) {
+        case sliceToPointer: {
             import snakebite.nativelayout: arrayPointerOffset;
 
-            const arrayOffset = reserveTemp(sourceFacts);
-            evalInto(expression.e1, arrayOffset, sourceFacts.size);
+            const arrayOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, arrayOffset, plan.sourceFacts.size);
             emit(&opCopy, destOffset, arrayOffset + arrayPointerOffset,
                 size_t.sizeof);
             return;
         }
 
-        if (sourceFacts.isDynamicArray && destFacts.isDynamicArray
-                && width == sourceFacts.size) {
-            evalInto(expression.e1, destOffset, width);
+        // D reinterprets the same bytes at the new element width, so the
+        // byte count - not the element count - is what has to stay the
+        // same across the cast: the destination's length is the
+        // source's own length scaled by the ratio of the two element
+        // sizes, both compile-time constants here.
+        case reinterpretSlice: {
+            import snakebite.nativelayout:
+                arrayLengthOffset, arrayPointerOffset;
+
+            const arrayOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, arrayOffset, plan.sourceFacts.size);
+            emit(&opCopy, destOffset + arrayPointerOffset,
+                arrayOffset + arrayPointerOffset, size_t.sizeof);
+            emit(&opCopy, destOffset + arrayLengthOffset,
+                arrayOffset + arrayLengthOffset, size_t.sizeof);
+
+            const ratioOffset = reserveTemp(pointerFacts);
+            emit(&opConstant, ratioOffset,
+                addConstant(cast(long) plan.sourceFacts.elementSize),
+                size_t.sizeof);
+            emit(&opMultiply, destOffset + arrayLengthOffset, ratioOffset,
+                size_t.sizeof);
+            emit(&opConstant, ratioOffset,
+                addConstant(cast(long) plan.destFacts.elementSize),
+                size_t.sizeof);
+            emit(&opDivideUnsigned, destOffset + arrayLengthOffset,
+                ratioOffset, size_t.sizeof);
             return;
         }
 
-        if (!sourceFacts.isIntegral || !isIntegralSize(sourceFacts.size)
-                || !destFacts.isIntegral)
-            throw rejection(_function, expression.loc,
-                text("a cast from `", sourceType.toString, "` to `",
-                    destType.toString, "`"));
-
-        import dmd.astenums: Tbool;
-
-        if (destType.ty == Tbool) {
-            evalInto(expression.e1, destOffset, sourceFacts.size);
-            emit(&opCastToBool, destOffset, 0, sourceFacts.size);
+        case toBool:
+            evalInto(expression.e1, destOffset, plan.sourceFacts.size);
+            emit(&opCastToBool, destOffset, 0, plan.sourceFacts.size);
             return;
-        }
 
-        if (width == sourceFacts.size) {
-            evalInto(expression.e1, destOffset, width);
-            return;
-        }
-
-        if (width < sourceFacts.size) {
-            const temp = reserveTemp(sourceFacts);
-            evalInto(expression.e1, temp, sourceFacts.size);
+        case narrow: {
+            const temp = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, temp, plan.sourceFacts.size);
             emit(&opCopy, destOffset, temp, width);
             return;
         }
 
-        evalInto(expression.e1, destOffset, sourceFacts.size);
-        emit(
-            sourceFacts.isUnsigned ? &opCastWidenUnsigned : &opCastWidenSigned,
-            destOffset, sourceFacts.size, width,
-        );
+        case widenSigned:
+        case widenUnsigned:
+            evalInto(expression.e1, destOffset, plan.sourceFacts.size);
+            emit(
+                plan.kind == widenUnsigned
+                    ? &opCastWidenUnsigned : &opCastWidenSigned,
+                destOffset, plan.sourceFacts.size, width,
+            );
+            return;
+
+        case unsupported:
+            throw rejection(_function, expression.loc,
+                text("a cast from `", sourceType.toString, "` to `",
+                    destType.toString, "`"));
+        }
     }
 
     // Whether `expression` has to reach `callee` through the receiver's

@@ -3204,35 +3204,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         storeIntegral(_place, cast(ulong) mixin(op ~ "a"), _facts.size);
     }
 
-    // `asIntegral` already sign- or zero-extends the operand to 64
-    // bits per its own signedness, so storing the destination's low bytes
-    // of that value is correct whichever way the width changes - the same
-    // widen-then-truncate the `combine`d binary operators already rely on,
-    // just with the two types differing instead of matching. A pointer
-    // cast reinterprets the same bits at their native width instead: a
-    // pointer's representation does not depend on its pointee, so no
-    // conversion is needed, only a copy. A dynamic-array-to-dynamic-array
-    // cast is the same idea again *when the element size does not
-    // change*: druntime's own append hooks cast their result across a
-    // change of qualifiers alone (`Tarr` to `Unqual_Tarr` and back),
-    // never a change of element type, so the two share the same
-    // `{length, ptr}` layout and the cast is a copy too. A change of
-    // element size - `T[]` to `void[]`, which the same append hooks also
-    // do, to pass a `void[]` byte range through hooks with no reason to
-    // know the element type - is not that cast: D defines it as scaling
-    // the length by the ratio of the two element sizes, not copying it
-    // verbatim, and that scaling is what this does below. `arr.ptr` is
-    // handled too, further down, since dmd lowers it into a `Tarray` to
-    // `Tpointer` cast over the array itself. An integral-to-floating
-    // cast rounds the operand's mathematical value to the destination's
-    // own precision, read as signed or unsigned per the operand's type -
-    // the host's own `cast(float)`/`cast(double)` is exactly that
-    // conversion, so it is applied per destination width rather than
-    // through a shared wider intermediate, which for `float` would round
-    // twice. Anything else this node could mean - a class downcast, a
-    // floating-to-integral cast - is refused the same way an unhandled
-    // node already is.
+    // `snakebite.backends.casts.classify` has already turned the source
+    // and destination types into a `Kind`; this is the adapter that
+    // executes each one, with no type inspection of its own beyond the
+    // pre-checks below that classify does not see: `cast(void) e`, whose
+    // meaning is "keep `e`'s effects, produce no value", and a `null`-to-AA
+    // cast, whose destination write does not depend on the source's type.
     protected override void visitUnloweredCast(CastExp expression) {
+        import snakebite.backends.casts: classify, Kind;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
         import std.conv: text;
@@ -3263,7 +3242,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             }
         }
 
-        if (sourceType.ty == Tclass && _type.ty == Tclass) {
+        auto plan = classify(sourceType, _type);
+
+        final switch (plan.kind) with (Kind) {
+        case copy:
+            evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
+            return;
+
+        case classDowncast: {
             auto value = classReferenceOf(expression.e1);
             if (value is null) {
                 storeIntegral(_place, 0, _facts.size);
@@ -3271,9 +3257,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             }
 
             auto actual = value in _classes;
-            auto target = _type.isTypeClass.sym;
+            auto target = plan.targetClass;
             const matches = actual is null
-                ? target is sourceType.isTypeClass.sym
+                ? target is plan.sourceClass
                 : target is *actual
                     || target.isBaseOf(*actual, null);
             storeIntegral(
@@ -3284,77 +3270,26 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        if (sourceType.ty == Tpointer && _type.ty == Tpointer) {
-            evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
-            return;
-        }
-
-        // An explicit pointer-to-integral cast preserves the native address
-        // bits. `bool` has truth-conversion semantics, so it stays outside
-        // this byte-preserving conversion.
-        if (sourceType.ty == Tpointer && _facts.isIntegral
-                && _type.ty != Tbool) {
+        // An explicit pointer-to-integral cast preserves the native
+        // address bits.
+        case pointerToIntegral:
             storeIntegral(
                 _place, cast(size_t) asPointer(expression.e1), _facts.size);
             return;
-        }
 
-        // `cast(T) p`: `_d_newclassT`'s own final step (`core/lifetime.d`),
-        // reinterpreting the `void*` its allocation returned as the guest
-        // class reference it hands back. A class reference's native layout
-        // is one pointer word, the same as any other pointer, so this is a
-        // plain copy in either direction, never an address adjustment.
-        if ((sourceType.ty == Tclass && _type.ty == Tpointer)
-                || (sourceType.ty == Tpointer && _type.ty == Tclass)) {
-            evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
-            return;
-        }
-
-        if (sourceType.ty == Tsarray && _type.ty == Tarray
-                && sourceType.nextOf.equals(_type.nextOf)) {
-            import snakebite.nativelayout:
-                arrayLengthOffset, arrayPointerOffset, storeIntegral;
-
-            const sourceFacts = factsOf(sourceType);
-            const elementSize = factsOf(sourceType.nextOf).size;
-            const length = sourceFacts.size / elementSize;
+        case sarrayToSlice: {
             auto bytes = cast(ubyte*) _place;
             storeIntegral(
-                bytes + arrayLengthOffset, length, size_t.sizeof);
+                bytes + arrayLengthOffset, plan.staticLength, size_t.sizeof);
             *cast(void**) (bytes + arrayPointerOffset) =
                 addressOf(expression.e1);
             return;
         }
 
-        if (sourceType.ty == Tarray && _type.ty == Tarray) {
-            const sourceElementSize = factsOf(sourceType.nextOf).size;
-            const destElementSize = factsOf(_type.nextOf).size;
-
-            if (sourceElementSize == destElementSize) {
-                evaluate(
-                    expression.e1, sourceType, factsOf(sourceType), _place);
-                return;
-            }
-
-            // D reinterprets the same bytes at the new element width, so
-            // the byte count - not the element count - is what has to
-            // stay the same across the cast. `newlength` is truncated,
-            // the same truncation `object.d`'s own `T[] to U[]` cast
-            // does, rather than refused on a remainder: a remainder means
-            // the source array's byte length is not a whole number of
-            // destination elements, which is druntime's call to make, not
-            // this interpreter's.
-            const value = evaluateArray(expression.e1, factsOf(sourceType));
-            const newLength =
-                value.length * sourceElementSize / destElementSize;
-
-            auto bytes = cast(ubyte*) _place;
+        case sarrayToPointer:
             storeIntegral(
-                bytes + arrayLengthOffset, newLength, size_t.sizeof);
-            *cast(const(void)**) (bytes + arrayPointerOffset) =
-                value.elements;
+                _place, cast(size_t) addressOf(expression.e1), _facts.size);
             return;
-        }
 
         // `arr.ptr` is not a real member: `.ptr` is one of the two
         // properties dmd recognises directly on a dynamic array, and its
@@ -3365,48 +3300,77 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // `_d_arrayappendcTX_`, on the `~=` lowering's own chain, reads
         // `px.ptr` this way to ask the GC what it already knows about the
         // block backing the array being grown.
-        if (sourceType.ty == Tarray && _type.ty == Tpointer
-                && sourceType.nextOf.equals(_type.nextOf)) {
+        case sliceToPointer: {
             const bytes = cast(ubyte*) addressOf(expression.e1);
             const value = *cast(void**) (bytes + arrayPointerOffset);
-            storeIntegral(
-                _place, cast(size_t) value, _facts.size);
+            storeIntegral(_place, cast(size_t) value, _facts.size);
             return;
         }
 
-        const sourceFacts = factsOf(sourceType);
+        // D reinterprets the same bytes at the new element width, so the
+        // byte count - not the element count - is what has to stay the
+        // same across the cast. `newLength` is truncated, the same
+        // truncation `object.d`'s own `T[] to U[]` cast does, rather than
+        // refused on a remainder: a remainder means the source array's
+        // byte length is not a whole number of destination elements,
+        // which is druntime's call to make, not this interpreter's.
+        case reinterpretSlice: {
+            const value = evaluateArray(expression.e1, plan.sourceFacts);
+            const newLength = value.length * plan.sourceFacts.elementSize
+                / plan.destFacts.elementSize;
+
+            auto bytes = cast(ubyte*) _place;
+            storeIntegral(bytes + arrayLengthOffset, newLength, size_t.sizeof);
+            *cast(const(void)**) (bytes + arrayPointerOffset) =
+                value.elements;
+            return;
+        }
 
         // dmd classifies `bool` as `integral | unsigned` (`mtype.d`), so
-        // without this check the branch below would take it as an
-        // ordinary integral-to-integral narrowing and store the operand's
-        // low byte. D specifies `cast(bool) x` as `x != 0`, not "keep the
-        // low byte": `cast(bool) 256` is `true` in D, not the `false` a
-        // truncation would store, and a truncation can also store a value
-        // like `2` in a `bool` slot that no compiled D ever produces.
-        if (sourceFacts.isIntegral && _type.ty == Tbool) {
-            const value = asIntegral(expression.e1, sourceFacts);
+        // this has to be its own kind rather than an ordinary
+        // integral-to-integral narrowing: D specifies `cast(bool) x` as
+        // `x != 0`, not "keep the low byte" - `cast(bool) 256` is `true`
+        // in D, not the `false` a truncation would store.
+        case toBool: {
+            const value = asIntegral(expression.e1, plan.sourceFacts);
             storeIntegral(_place, value != 0, _facts.size);
             return;
         }
 
-        if (sourceFacts.isIntegral && _facts.isIntegral) {
+        // `asIntegral` already sign- or zero-extends the operand to 64
+        // bits per its own signedness, so storing the destination's low
+        // bytes of that value is correct whichever way the width
+        // changes - the same widen-then-truncate the `combine`d binary
+        // operators already rely on, just with the two types differing
+        // instead of matching.
+        case narrow:
+        case widenSigned:
+        case widenUnsigned:
             storeIntegral(
                 _place,
-                asIntegral(expression.e1, sourceFacts),
+                asIntegral(expression.e1, plan.sourceFacts),
                 _facts.size,
             );
             return;
-        }
 
-        if (sourceFacts.isIntegral
-                && (_type.ty == Tfloat32 || _type.ty == Tfloat64)) {
-            const value = asIntegral(expression.e1, sourceFacts);
+        // An integral-to-floating cast rounds the operand's mathematical
+        // value to the destination's own precision, read as signed or
+        // unsigned per the operand's type - the host's own
+        // `cast(float)`/`cast(double)` is exactly that conversion, so it
+        // is applied per destination width rather than through a shared
+        // wider intermediate, which for `float` would round twice. `real`
+        // is not one of the two widths this reaches for yet.
+        case integralToFloat: {
+            if (_type.ty != Tfloat32 && _type.ty != Tfloat64)
+                goto case unsupported;
+
+            const value = asIntegral(expression.e1, plan.sourceFacts);
             if (_type.ty == Tfloat32)
-                *cast(float*) _place = sourceFacts.isUnsigned
+                *cast(float*) _place = plan.sourceFacts.isUnsigned
                     ? cast(float) cast(ulong) value
                     : cast(float) value;
             else
-                *cast(double*) _place = sourceFacts.isUnsigned
+                *cast(double*) _place = plan.sourceFacts.isUnsigned
                     ? cast(double) cast(ulong) value
                     : cast(double) value;
             return;
@@ -3417,10 +3381,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // any of the three to `real` without loss, so narrowing that back
         // to the destination's width is the one rounding the host's own
         // `cast(float)`/`cast(double)`/`cast(real)` performs.
-        if ((sourceType.ty == Tfloat32 || sourceType.ty == Tfloat64
-                    || sourceType.ty == Tfloat80)
-                && (_type.ty == Tfloat32 || _type.ty == Tfloat64
-                    || _type.ty == Tfloat80)) {
+        case floatWidth: {
             const value = asFloating(expression.e1);
             if (_type.ty == Tfloat32)
                 *cast(float*) _place = cast(float) value;
@@ -3431,10 +3392,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        throw new SnakebiteException(
-            text("interpreter cannot evaluate a `", expression.op,
-                "` expression: `", expression.toString, "`"),
-        );
+        // Neither reached yet: a pointer reinterpreted as a dynamic
+        // array's own `{length, ptr}` header, and a floating-to-integral
+        // cast.
+        case pointerToArray:
+        case floatToIntegral:
+        case unsupported:
+            throw new SnakebiteException(
+                text("interpreter cannot evaluate a `", expression.op,
+                    "` expression: `", expression.toString, "`"),
+            );
+        }
     }
 
     // dmd folds `&variable` into this node directly rather than wrapping
