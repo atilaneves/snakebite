@@ -124,13 +124,9 @@ public struct RuntimeTypes {
 
     private TypeInfo classInfo(Type type, ClassDeclaration declaration) {
         import dmd.astenums: MODFlags;
-        import dmd.root.string: toDString;
         import object: TypeInfo_Const, TypeInfo_Shared;
 
-        TypeInfo_Class base;
-        if (!isRootOwned(declaration))
-            base = cast(TypeInfo_Class) TypeInfo_Class.find(
-                declaration.toPrettyChars.toDString);
+        auto base = linkedClassInfo(declaration);
         if (base is null)
             base = _classInfo(declaration);
         if (type.mod == 0)
@@ -140,6 +136,25 @@ public struct RuntimeTypes {
             ? new TypeInfo_Shared : new TypeInfo_Const;
         wrapper.base = base;
         return wrapper;
+    }
+
+    // The host's own `TypeInfo_Class` for `declaration`, if one is linked
+    // into this process - `null` for a guest class (always fabricated) and
+    // for a native class the host never linked. Never falls back to
+    // fabrication itself, so a caller that fabricates its own metadata
+    // (`Bytecode.classRuntimeInfo`) can call this without looping back
+    // through that same fabrication path.
+    public TypeInfo_Class linkedClassInfo(ClassDeclaration declaration) {
+        import dmd.root.string: toDString;
+
+        if (isRootOwned(declaration))
+            return null;
+
+        if (auto info = cast(TypeInfo_Class) linkedInfo(declaration.type))
+            return info;
+
+        return cast(TypeInfo_Class) TypeInfo_Class.find(
+            declaration.toPrettyChars.toDString);
     }
 
     private TypeInfo_Struct structInfo(StructDeclaration declaration) {

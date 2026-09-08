@@ -669,3 +669,29 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A native template class instantiated with a guest type: the host binary
+// links no metadata for this instance, so the backend builds it. Every
+// reference to the instance's class must still resolve to one run-time
+// object.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot dereference classinfo"),
+)) {
+    @("nativeTemplateClassOverGuestTypeClassInfoIdentity." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.range.interfaces: inputRangeObject, InputRangeObject;
+
+            struct S { int x; }
+
+            void main() {
+                S[] a = [S(1)];
+                Object o = inputRangeObject(a);
+                assert(o.classinfo is typeid(InputRangeObject!(S[])));
+                assert(cast(InputRangeObject!(S[])) o !is null);
+            }
+        });
+    }
+}

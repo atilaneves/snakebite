@@ -270,25 +270,21 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // expression names, including a real native class like `Exception`.
     // Fabricating metadata for a native class would hand back a `TypeInfo_
     // Class` this process never uses anywhere else - a distinct object
-    // from the one `RuntimeTypes.get` resolves for a guest `catch`
-    // clause naming the same class, so `TypeInfo_Class.isBaseOf` would
-    // never consider a thrown instance of it a match. `_runtimeTypes`
-    // already knows how to tell a real class from a guest one and reaches
-    // for the former's own linked singleton (`RuntimeTypes.isRootOwned`/
-    // `linkedInfo`) - deferring to it here keeps every reference to one
-    // class resolving to the same run-time object, the one thing
-    // `isBaseOf` actually compares.
+    // from the one a guest `catch` clause naming the same class resolves
+    // to, so `TypeInfo_Class.isBaseOf` would never consider a thrown
+    // instance of it a match. `RuntimeTypes.linkedClassInfo` hands back
+    // the host's own linked singleton for a native class and `null`
+    // otherwise, never fabricating on its own, so this stays a one-way
+    // lookup: it cannot loop back into this function the way
+    // `RuntimeTypes.get` would for a class with no linked metadata at all.
     package TypeInfo_Class classRuntimeInfo(
         imported!"dmd.dclass".ClassDeclaration declaration,
     ) {
         import snakebite.backends.classinfo:
             classRuntimeInfo_ = classRuntimeInfo, Hooks;
 
-        if (!_runtimeTypes.isRootOwned(declaration)) {
-            auto native = cast(TypeInfo_Class) _runtimeTypes.get(declaration.type);
-            if (native !is null)
-                return native;
-        }
+        if (auto linked = _runtimeTypes.linkedClassInfo(declaration))
+            return linked;
 
         return classRuntimeInfo_(
             declaration,
