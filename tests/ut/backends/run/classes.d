@@ -282,8 +282,6 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.unconfirmed))) {
 }
 
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.inexpressible,
-        "bytecode cannot compile class parameters"),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot dereference classinfo"),
 )) {
@@ -312,8 +310,6 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.inexpressible,
-        "bytecode cannot compile associative arrays of delegates"),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot execute associative arrays of delegates"),
 )) {
@@ -340,8 +336,6 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.inexpressible,
-        "bytecode cannot compile class parameters"),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot dereference classinfo"),
 )) {

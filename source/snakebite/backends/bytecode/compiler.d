@@ -3309,6 +3309,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
+        // `SomeClass.classinfo`/`instance.classinfo` on a static class type
+        // dmd resolves at compile time to `&SomeClass.__ClassInfoZ`, folded
+        // into this same node - a `TypeInfoClassDeclaration`, not a real
+        // guest or linked global. Nothing ever emits that symbol for a
+        // guest class (see `snakebite.backends.classinfo`'s own doc), so
+        // this reaches for the same run-time `TypeInfo_Class` `TypeidExp`
+        // already resolves `typeid(SomeClass)` to, instead of falling into
+        // the generic static-variable path below and reading whatever
+        // unrelated storage its symbol name happens to resolve to.
+        if (auto typeInfo = expression.var.isTypeInfoDeclaration) {
+            auto address = cast(void*) _bytecode._runtimeTypes.get(typeInfo.tinfo);
+            if (address !is null) {
+                emit(&opConstant, _destination,
+                    addConstant(cast(long) cast(size_t) address), _width);
+                return;
+            }
+        }
+
         auto variable = expression.var.isVarDeclaration;
         if (variable is null || expression.offset != 0)
             return visit(cast(Expression) expression);

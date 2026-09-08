@@ -167,6 +167,40 @@ static foreach (backend; Matrix!(
     }
 }
 
+// `catch` matches a thrown native `Exception` with no guest subclass in
+// its chain at all - `handler.type`'s own `TypeInfo_Class` must be the
+// same real, linked `object.Exception` the thrown value's own vtable
+// names, not a second, differently-identified `TypeInfo_Class` the
+// backend built by hand for it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+    Omit!(Bytecode, Because.unconfirmed,
+        "`catch (Exception)` never matches a bare native `Exception` " ~
+            "thrown with no guest subclass in its chain - `catch " ~
+            "(Throwable)` matches the same throw, so the thrown value's " ~
+            "own classinfo is correct; the catch clause's own resolved " ~
+            "`TypeInfo_Class` for `Exception` must be a different, " ~
+            "backend-built object instead of the real linked one"),
+)) {
+    @("catchMatchesBareNativeException." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                bool threw = false;
+
+                try {
+                    throw new Exception("boom");
+                } catch (Exception e) {
+                    threw = true;
+                }
+
+                assert(threw);
+            }
+        });
+    }
+}
+
 // `throw` is an expression, so it can be a branch of a ternary whose other
 // branch has a value.
 static foreach (backend; Matrix!(
