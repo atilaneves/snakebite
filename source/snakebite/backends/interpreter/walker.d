@@ -4249,14 +4249,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const(FrameLayout)* layout,
     ) {
         import dmd.astenums: STC;
+        import snakebite.backends.calls: arityMismatches;
         import std.conv: text;
 
         auto parameterList = typeFunctionOf(function_).parameterList;
-        const argumentCount = arguments is null ? 0 : arguments.length;
-        if (argumentCount != parameterList.length)
+        if (arityMismatches(parameterList, arguments))
             throw new SnakebiteException(
                 text("interpreter: `", function_.toString, "` expects ",
-                    parameterList.length, " argument(s), got ", argumentCount),
+                    parameterList.length, " argument(s), got ",
+                    arguments is null ? 0 : arguments.length),
             );
 
         auto shape = callShapeOf(function_);
@@ -4685,6 +4686,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         bool fromDelegate = false,
     ) {
         import snakebite.nativelayout: storeIntegral;
+        import snakebite.backends.calls: arityMismatches;
         import std.conv: text;
         import dmd.astenums: STC;
 
@@ -4693,11 +4695,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // only a body has.
         auto parameterList = typeFunctionOf(function_).parameterList;
         auto arguments = expression.arguments;
-        const argCount = arguments is null ? 0 : arguments.length;
-        if (argCount != parameterList.length)
+        if (arityMismatches(parameterList, arguments))
             throw new SnakebiteException(
                 text("interpreter: `", function_.toString, "` expects ",
-                    parameterList.length, " argument(s), got ", argCount),
+                    parameterList.length, " argument(s), got ",
+                    arguments is null ? 0 : arguments.length),
             );
 
         auto frame = _frames.push(layout.size, layout.alignment);

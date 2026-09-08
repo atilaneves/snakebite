@@ -20,7 +20,7 @@ import snakebite.exception: SnakebiteException;
 // instance - is not this type's concern; a caller that needs those grows
 // its own frame past `size` on top of what this type already reserved.
 package struct FrameLayout {
-    import snakebite.nativelayout: alignUp, delegateValueSize, TypeFacts;
+    import snakebite.nativelayout: alignUp, TypeFacts;
     import dmd.declaration: VarDeclaration;
     import dmd.func: FuncDeclaration;
     import dmd.mtype: DmdParameter = Parameter, Type, TypeFunction;
@@ -86,8 +86,7 @@ package struct FrameLayout {
         if (hasHiddenThis(function_)) {
             const isRefThis = (function_.vthis.storage_class & STC.ref_) != 0;
             auto slot = isRefThis
-                ? layout.reserveSlot(
-                    TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
+                ? layout.reserveSlot(TypeFacts.pointer)
                 : layout.reserveSlot(function_.vthis.type);
 
             layout.hiddenThis = HiddenThis(
@@ -158,7 +157,7 @@ package struct FrameLayout {
 
         if (hasContext) {
             auto slot = layout.reserveSlot(
-                TypeFacts(size_t.sizeof, size_t.sizeof, false, false));
+                TypeFacts.pointer);
             layout.hiddenThis = HiddenThis(
                 Parameter(slot.offset, slot.facts, false),
                 null,
@@ -214,12 +213,9 @@ package struct FrameLayout {
             & (STC.ref_ | STC.out_)) != 0;
 
         auto slot = isRefParameter
-            ? reserveSlot(
-                TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
+            ? reserveSlot(TypeFacts.pointer)
             : parameter.storageClass & STC.lazy_
-                ? reserveSlot(TypeFacts(
-                    delegateValueSize,
-                    size_t.sizeof, false, false))
+                ? reserveSlot(TypeFacts.lazyArgument)
             : reserveSlot(parameter.type);
 
         return Parameter(slot.offset, slot.facts, isRefParameter);
@@ -278,8 +274,7 @@ package struct FrameLayout {
 package struct ClosureLayout {
     import dmd.declaration: VarDeclaration;
     import dmd.func: FuncDeclaration;
-    import snakebite.nativelayout:
-        alignUp, delegateValueSize, TypeFacts;
+    import snakebite.nativelayout: alignUp, TypeFacts;
 
     package struct Slot {
         package size_t offset;
@@ -302,10 +297,9 @@ package struct ClosureLayout {
             const isRef = (variable.storage_class
                 & (STC.ref_ | STC.out_)) != 0;
             const facts = variable.storage_class & STC.lazy_
-                ? TypeFacts(
-                    delegateValueSize, size_t.sizeof, false, false)
+                ? TypeFacts.lazyArgument
                 : isRef
-                    ? TypeFacts(size_t.sizeof, size_t.sizeof, false, false)
+                    ? TypeFacts.pointer
                     : TypeFacts.of(variable.type);
             const offset = alignUp(closure.size, facts.alignment);
             closure._slots[variable] = Slot(offset, facts, isRef);
@@ -528,7 +522,7 @@ extern(C++) private final class LocalsCollector:
         const isRef = (variable.storage_class & STC.ref_) != 0;
         const slot = isRef
             ? _layout.reserveSlot(
-                TypeFacts(size_t.sizeof, size_t.sizeof, false, false))
+                TypeFacts.pointer)
             : _layout.reserveSlot(variable.type);
         _layout._slotOf[variable] =
             FrameLayout.VariableSlot(slot.offset, isRef);

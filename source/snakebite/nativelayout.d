@@ -99,6 +99,23 @@ public struct TypeFacts {
     // element's byte offset from the array's own pointer word.
     public size_t elementSize;
 
+    // A pointer-sized slot: what a `ref`/`out` parameter or local, a
+    // struct's hidden `this`, or a `ref` return's own place all hold -
+    // the argument's or result's own address, never its pointee's facts.
+    // Every backend that reserves such a slot reserves it with this same
+    // shape, so it is decided once here rather than spelled out with the
+    // same four literals at each call site.
+    public static TypeFacts pointer() {
+        return TypeFacts(size_t.sizeof, size_t.sizeof, false, false);
+    }
+
+    // A `lazy` parameter's own slot: dmd's own implicit delegate, the
+    // fixed two-word shape every `lazy` parameter gets regardless of the
+    // type it wraps - never the wrapped type's own facts.
+    public static TypeFacts lazyArgument() {
+        return TypeFacts(delegateValueSize, size_t.sizeof, false, false);
+    }
+
     // The facts for `type`, read from dmd exactly once by the caller
     // that builds this.
     public static TypeFacts of(Type type) {

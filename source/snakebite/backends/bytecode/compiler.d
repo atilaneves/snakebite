@@ -3383,8 +3383,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileDelegateWord(Expression expression, in size_t offset) {
         import snakebite.nativelayout: delegateValueSize;
 
-        const delegateOffset = reserveTemp(
-            TypeFacts(delegateValueSize, size_t.sizeof, false, false));
+        const delegateOffset = reserveTemp(TypeFacts.lazyArgument);
         evalInto(expression, delegateOffset, delegateValueSize);
         emit(&opCopy, _destination, delegateOffset + offset, _width);
     }
@@ -5342,10 +5341,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         size_t delegate() thisOffsetOf,
         in size_t destOffset,
     ) {
-        import dmd.astenums: STC, Tvoid;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        import snakebite.backends.calls: prefersGuestBody, usesGuestBody;
+        import snakebite.backends.calls:
+            arityMismatches, prefersGuestBody, usesGuestBody;
 
         const guest = usesGuestBody(
             callee, arguments, &_bytecode.isGuestFunction,
@@ -5370,8 +5369,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto calleeType = typeFunctionOf(callee);
 
         const parameterCount = calleeType.parameterList.length;
-        const argumentCount = arguments is null ? 0 : arguments.length;
-        if (argumentCount != parameterCount)
+        if (arityMismatches(calleeType.parameterList, arguments))
             throw rejection(_function, loc, exprText);
 
         Arg[] args;
@@ -5412,20 +5410,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // A `ref` return hands the caller the callee's own returned
         // storage's address - `compileAddress`'s `CallExp` case is the one
         // place that address is read back out, and `compileIndirectAssign`
-        // is the one place it is written through.
-        const isRefCallee = calleeType.isRef;
-        auto calleeReturnType = calleeType.next;
-        const isVoidCallee = isConstructor || calleeReturnType is null
-            || calleeReturnType.ty == Tvoid;
-        const returnFacts = isRefCallee
-            ? pointerFacts
-            : isVoidCallee ? TypeFacts.init : TypeFacts.of(calleeReturnType);
+        // is the one place it is written through. The same shape decides a
+        // native callee's own return place (`compileNativeCall`) and an
+        // indirect one's (`compileIndirectCall`), so it is decided once,
+        // by `CallAdapter`, rather than re-derived at each of the three.
+        import snakebite.ffi.call: CallAdapter;
+
+        const returnShape = CallAdapter.ofType(calleeType, isConstructor);
+        const isVoidCallee = returnShape.isVoid;
         if (isVoidCallee && !isConstructor && destOffset != discardResult)
             throw rejection(_function, loc, exprText);
 
         const siteIndex = _callSites.length;
-        _callSites ~=
-            CallSite(calleeFunction, args, isVoidCallee ? 0 : returnFacts.size);
+        _callSites ~= CallSite(
+            calleeFunction, args,
+            isVoidCallee ? 0 : returnShape.returnFacts.size,
+        );
         emit(&opCall, destOffset, siteIndex, 0);
     }
 
@@ -5445,23 +5445,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg[] initialArgs,
         in size_t destOffset,
     ) {
-        import dmd.astenums: STC, Tvoid;
+        import dmd.astenums: STC;
+        import snakebite.backends.calls: arityMismatches;
 
         const parameterCount = type.parameterList.length;
-        const argumentCount = arguments is null ? 0 : arguments.length;
-        if (argumentCount != parameterCount)
+        if (arityMismatches(type.parameterList, arguments))
             throw rejection(_function, loc, exprText);
 
         // A `ref` return hands back its target's address in the
         // return register, whatever the pointee's own facts are - the
         // same convention `snakebite.ffi.plan` already prepares for a
-        // native callee (see `CallPlan.prepare`'s own `returnsRef`).
-        const isRefCallee = type.isRef;
-        auto returnType = type.next;
-        const isVoidCallee = returnType is null || returnType.ty == Tvoid;
-        const returnFacts = isRefCallee
-            ? pointerFacts
-            : isVoidCallee ? TypeFacts.init : TypeFacts.of(returnType);
+        // native callee (see `CallPlan.prepare`'s own `returnsRef`), and
+        // the same shape `CallAdapter` already decides once for
+        // `compileResolvedCall`'s guest branch and for `compileIndirectCall`.
+        import snakebite.ffi.call: CallAdapter;
+
+        const returnShape = CallAdapter.ofType(type);
+        const isVoidCallee = returnShape.isVoid;
         if (isVoidCallee && destOffset != discardResult)
             throw rejection(_function, loc, exprText);
 
@@ -5497,8 +5497,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // at the ABI boundary - a native callee zero-initialises
             // an `out` argument itself, the same as compiled D's own
             // caller never does, so this compiler need only hand over
-            // the argument's own address either way.
-            if (parameter.storageClass & (STC.ref_ | STC.out_)) {
+            // the argument's own address either way. The same fact,
+            // from the same `CallAdapter.Argument`, is what
+            // `Evaluator.bindArguments` reads to pick address over value
+            // for a guest-body callee's own parameter.
+            if (CallAdapter.Argument.of(parameter).isReference) {
                 const argumentOffset = compileAddress((*arguments)[i]);
                 args ~= Arg(argumentOffset, 0, size_t.sizeof);
                 continue;
@@ -5513,7 +5516,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // calls `toDelegate`), so only the destination slot's own
             // facts need to widen to match it.
             const facts = parameter.storageClass & STC.lazy_
-                ? lazyFacts()
+                ? TypeFacts.lazyArgument
                 : TypeFacts.of(parameter.type);
             const argumentOffset = reserveTemp(facts);
             evalInto((*arguments)[i], argumentOffset, facts.size);
@@ -5522,7 +5525,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto plan = &_bytecode._plans.of(callee);
         _callSites ~= CallSite(
-            null, args, isVoidCallee ? 0 : returnFacts.size,
+            null, args, isVoidCallee ? 0 : returnShape.returnFacts.size,
             cast(const(void)*) plan,
         );
         emit(&opCall, destOffset, _callSites.length - 1, 0);
@@ -5546,8 +5549,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `this` before its declared parameters (see `ofParameters`'s own
     // `hasContext` doc).
     private void compileIndirectCall(CallExp expression, in size_t destOffset) {
-        import dmd.astenums: STC, Tdelegate, Tvoid;
+        import dmd.astenums: STC, Tdelegate;
         import dmd.mtype: TypeFunction;
+        import snakebite.backends.calls: arityMismatches;
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize;
 
@@ -5568,8 +5572,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (isDelegateCall) {
             functionType = expression.e1.type.nextOf.isTypeFunction;
 
-            const delegateOffset = reserveTemp(
-                TypeFacts(delegateValueSize, size_t.sizeof, false, false));
+            const delegateOffset = reserveTemp(TypeFacts.lazyArgument);
             evalInto(expression.e1, delegateOffset, delegateValueSize);
             contextOffset = delegateOffset + delegateContextOffset;
             calleeOffset = delegateOffset + delegateFunctionOffset;
@@ -5584,22 +5587,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const parameterCount = functionType.parameterList.length;
-        const argumentCount =
-            expression.arguments is null ? 0 : expression.arguments.length;
-        if (argumentCount != parameterCount)
+        if (arityMismatches(functionType.parameterList, expression.arguments))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
         // A `ref` return hands back its target's address in the return
-        // register regardless of the pointee's own width - the same
-        // convention `compileCall`'s own `isRefCallee` follows for a
-        // resolved callee.
-        const isRefCallee = functionType.isRef;
-        auto returnType = functionType.next;
-        const isVoidCallee = returnType is null || returnType.ty == Tvoid;
-        const returnFacts = isRefCallee
-            ? pointerFacts
-            : isVoidCallee ? TypeFacts.init : TypeFacts.of(returnType);
+        // register regardless of the pointee's own width - the same shape
+        // `CallAdapter` already decides once for `compileResolvedCall`'s
+        // guest branch and for `compileNativeCall`.
+        import snakebite.ffi.call: CallAdapter;
+
+        const returnShape = CallAdapter.ofType(functionType);
+        const isVoidCallee = returnShape.isVoid;
         if (isVoidCallee && destOffset != discardResult)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
@@ -5643,7 +5642,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         CallSite site;
         site.args = args;
-        site.returnWidth = isVoidCallee ? 0 : returnFacts.size;
+        site.returnWidth = isVoidCallee ? 0 : returnShape.returnFacts.size;
         site.isIndirect = true;
         site.calleeSlotOffset = calleeOffset;
 
@@ -5678,15 +5677,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private TypeFacts pointerFacts() {
         return pointerFactsOf;
-    }
-
-    // A `lazy` parameter's own frame slot: dmd's own implicit delegate,
-    // the same fixed shape `FrameLayout.packParameter` gives every `lazy`
-    // parameter slot regardless of the declared type it wraps.
-    private TypeFacts lazyFacts() {
-        import snakebite.nativelayout: delegateValueSize;
-
-        return TypeFacts(delegateValueSize, size_t.sizeof, false, false);
     }
 
     // Emits the conditional call to one of druntime's own bounds-failure

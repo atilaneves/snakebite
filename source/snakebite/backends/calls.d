@@ -46,6 +46,19 @@ public bool prefersGuestBody(
     return isTemplate ? !hasNativeSymbol : isGuest;
 }
 
+// Whether a call site's own argument list has the wrong length for
+// `parameterList` - the one check every call-compiling and call-binding
+// site makes before reading arguments positionally against parameters,
+// whether the callee is a resolved declaration, a bare `TypeFunction`
+// reached through a pointer or delegate value, or a constructor's own
+// parameter list.
+public bool arityMismatches(
+    imported!"dmd.mtype".ParameterList parameterList,
+    imported!"dmd.arraytypes".Expressions* arguments,
+) {
+    return (arguments is null ? 0 : arguments.length) != parameterList.length;
+}
+
 private bool hasGuestDelegateArgument(
     imported!"dmd.arraytypes".Expressions* arguments,
     scope bool delegate(imported!"dmd.func".FuncDeclaration) isGuest,

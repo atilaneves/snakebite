@@ -37,8 +37,12 @@ public alias CallInvoker = void delegate(
 // once while a function's frame layout is prepared. Calls then cross this
 // seam using only the native-layout facts kept here.
 public struct CallAdapter {
+    import snakebite.nativelayout: TypeFacts;
+
     private bool _referenceResult;
     private size_t _resultSize;
+    private bool _isVoid;
+    private TypeFacts _returnFacts;
 
     public struct Argument {
         private bool _reference;
@@ -51,6 +55,15 @@ public struct CallAdapter {
             return Argument(
                 (parameter.storageClass & (STC.ref_ | STC.out_)) != 0,
             );
+        }
+
+        // Whether this argument is passed by address rather than by value -
+        // a `ref`/`out` parameter's own frame slot holds the argument's
+        // address, never a copy of its value. A backend that only needs
+        // this one fact, without also wanting `store`'s own guest
+        // operations, reads it directly.
+        public bool isReference() const {
+            return _reference;
         }
 
         // A ref parameter needs the guest lvalue's address; other parameters
@@ -71,24 +84,65 @@ public struct CallAdapter {
     public static CallAdapter of(
         imported!"dmd.func".FuncDeclaration function_,
     ) {
-        import dmd.typesem: nextOf;
-        import snakebite.nativelayout: TypeFacts;
-
         // dmd's function-type accessors are mutable, even for a read-only
         // declaration query.
         auto type = function_.type.isTypeFunction;
         assert(type !is null);
 
+        return ofType(type, function_.isCtorDeclaration !is null);
+    }
+
+    // As `of`, from a bare `TypeFunction` rather than a declaration - the
+    // shape a call through a function pointer or a delegate value returns
+    // into, since there is no `FuncDeclaration` at that call site to read
+    // a result adapter from otherwise. `isVoidResult` covers a constructor,
+    // whose `TypeFunction` is `void` already, and any other callee dmd's
+    // own semantics already treat as returning nothing regardless of its
+    // declared return type.
+    public static CallAdapter ofType(
+        imported!"dmd.mtype".TypeFunction type,
+        in bool isVoidResult = false,
+    ) {
+        import dmd.astenums: Tvoid;
+        import dmd.typesem: nextOf;
+
         CallAdapter adapter;
         adapter._referenceResult = type.isRef;
 
+        auto returnType = type.nextOf;
+        adapter._isVoid = isVoidResult
+            || returnType is null || returnType.ty == Tvoid;
+
         if (adapter._referenceResult) {
-            auto returnType = type.nextOf;
             assert(returnType !is null);
             adapter._resultSize = TypeFacts.of(returnType).size;
+            adapter._returnFacts = TypeFacts.pointer;
+        } else if (!adapter._isVoid) {
+            adapter._returnFacts = TypeFacts.of(returnType);
         }
 
         return adapter;
+    }
+
+    // Whether the callee returns nothing a caller can read back - `void`,
+    // or a constructor, whose own "return" is the receiver it was handed
+    // rather than a value in the return place at all.
+    public bool isVoid() const {
+        return _isVoid;
+    }
+
+    // Whether the return place holds the result's own bytes or the address
+    // of storage holding them.
+    public bool isReferenceResult() const {
+        return _referenceResult;
+    }
+
+    // The facts of whatever the return place actually holds: a pointer's,
+    // for a `ref` return; the declared return type's, for a value one; and
+    // `TypeFacts.init` for a void callee, which reserves no return place at
+    // all.
+    public TypeFacts returnFacts() const {
+        return _returnFacts;
     }
 
     // A host backend promises a value-sized return place, so it cannot accept
