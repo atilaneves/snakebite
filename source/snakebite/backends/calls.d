@@ -15,7 +15,7 @@ public bool usesGuestBody(
     lazy bool preferGuest,
     imported!"dmd.func".FuncDeclaration contextOwner = null,
 ) {
-    import snakebite.backends.delegates: outerFunctionOf;
+    import snakebite.frontend.dmd.delegates: outerFunctionOf;
 
     if (function_.fbody is null)
         return false;

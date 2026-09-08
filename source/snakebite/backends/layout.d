@@ -20,7 +20,6 @@ import snakebite.exception: SnakebiteException;
 // instance - is not this type's concern; a caller that needs those grows
 // its own frame past `size` on top of what this type already reserved.
 package struct FrameLayout {
-    import snakebite.ffi.call: CallAdapter;
     import snakebite.nativelayout: alignUp, delegateValueSize, TypeFacts;
     import dmd.declaration: VarDeclaration;
     import dmd.func: FuncDeclaration;
@@ -28,7 +27,6 @@ package struct FrameLayout {
 
     package size_t size;
     package uint alignment = 1;
-    package CallAdapter call;
 
     // One parameter's slot: its offset into the frame, the facts needed
     // to place a value there, and whether it is `ref` - decided together,
@@ -41,7 +39,6 @@ package struct FrameLayout {
         package size_t offset;
         package TypeFacts facts;
         package bool isRef;
-        package CallAdapter.Argument call;
     }
 
     // Parallel to the function's parameter list, indexed positionally.
@@ -79,13 +76,12 @@ package struct FrameLayout {
     private VariableSlot[VarDeclaration] _slotOf;
 
     package static FrameLayout of(FuncDeclaration function_) {
-        import snakebite.backends.delegates: hasHiddenThis;
+        import snakebite.frontend.dmd.delegates: hasHiddenThis;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import dmd.astenums: STC;
         import std.conv: text;
 
         FrameLayout layout;
-        layout.call = CallAdapter.of(function_);
 
         if (hasHiddenThis(function_)) {
             const isRefThis = (function_.vthis.storage_class & STC.ref_) != 0;
@@ -95,10 +91,7 @@ package struct FrameLayout {
                 : layout.reserveSlot(function_.vthis.type);
 
             layout.hiddenThis = HiddenThis(
-                Parameter(
-                    slot.offset, slot.facts, isRefThis,
-                    CallAdapter.Argument.init,
-                ),
+                Parameter(slot.offset, slot.facts, isRefThis),
                 function_.vthis,
             );
             layout._slotOf[function_.vthis] =
@@ -167,10 +160,7 @@ package struct FrameLayout {
             auto slot = layout.reserveSlot(
                 TypeFacts(size_t.sizeof, size_t.sizeof, false, false));
             layout.hiddenThis = HiddenThis(
-                Parameter(
-                    slot.offset, slot.facts, false,
-                    CallAdapter.Argument.init,
-                ),
+                Parameter(slot.offset, slot.facts, false),
                 null,
             );
         }
@@ -232,10 +222,7 @@ package struct FrameLayout {
                     size_t.sizeof, false, false))
             : reserveSlot(parameter.type);
 
-        return Parameter(
-            slot.offset, slot.facts, isRefParameter,
-            CallAdapter.Argument.of(parameter),
-        );
+        return Parameter(slot.offset, slot.facts, isRefParameter);
     }
 
     // Where `variable` lives in a frame built from this layout, as a byte

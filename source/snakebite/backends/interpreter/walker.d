@@ -97,14 +97,15 @@ import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 // `Interpreter`-side cache to hold.
 extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.backends.backend: Program;
-    import snakebite.backends.delegates: DelegateTarget;
+    import snakebite.frontend.dmd.delegates: DelegateTarget, outerFunctionOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.classinfo;
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
     import snakebite.ffi:
-        CallbackArguments, CallbackBridge, CallPlan, CallResult, PlanCache;
+        CallAdapter, CallbackArguments, CallbackBridge, CallPlan, CallResult,
+        PlanCache;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
         initializerValueOf, isIntegralSize, TypeFacts;
@@ -149,6 +150,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // function's first call (the cold path) and reused by every call
     // after it.
     private Cache!(FuncDeclaration, FrameLayout) _layouts;
+    // The FFI call adapter for a guest callee's own signature: whether it
+    // returns by `ref`, and whether each declared parameter passes an
+    // address or a value. `FrameLayout` describes storage, not the calling
+    // convention layered on top of it, so this stays its own cache beside
+    // `_layouts` rather than a field of it - the bytecode compiler never
+    // reads a `FuncDeclaration`'s call adapter at all, only this evaluator
+    // does, on every call.
+    private Cache!(FuncDeclaration, CallShape) _calls;
     // Storage for locals that dmd moves out of an activation frame when it
     // decides that the frame must survive its call. The backing bytes are
     // kept in `_allocations`, so a delegate can retain this context after
@@ -289,7 +298,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         _program = program;
         _nativeData = NativeData(&constantSymbolAddress);
-        _runtimeTypes = RuntimeTypes(program, &resolveTypeInfo,
+        _runtimeTypes = RuntimeTypes(&_program.isRootOwned, &resolveTypeInfo,
             (declaration) => classRuntimeInfo(declaration),
             (type, loc) => _nativeData.initialValue(type, loc));
         _frames = FrameStack(defaultFrameCapacity);
@@ -360,12 +369,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         withCompilerLock({
             auto layout = layoutOf(function_);
-            layout.call.rejectHostReferenceReturn(function_);
+            auto shape = callShapeOf(function_);
+            shape.adapter.rejectHostReferenceReturn(function_);
             auto frame = _frames.push(layout.size, layout.alignment);
 
             try
                 _temporaries.withCall({
-                    bindHostArguments(args, frame.base, layout);
+                    bindHostArguments(args, frame.base, layout, shape);
                     executeCall(function_, returnPlace, frame.base, layout);
                 });
             catch (GuestException exception)
@@ -377,12 +387,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void*[] args,
         ubyte* frameBase,
         const(FrameLayout)* layout,
+        const(CallShape)* shape,
     ) {
         import core.stdc.string: memcpy;
 
         foreach (i, parameter; layout.parameters) {
             auto argument = args[i];
-            parameter.call.store(
+            shape.arguments[i].store(
                 frameBase + parameter.offset,
                 () => argument,
                 (void* place) {
@@ -477,6 +488,29 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         _layouts[function_] = FrameLayout.of(function_);
         return function_ in _layouts;
+    }
+
+    // `CallAdapter` paired with one `CallAdapter.Argument` per declared
+    // parameter, parallel to `FrameLayout.parameters` - both are pure
+    // functions of the same `FuncDeclaration`'s type, so both are worked
+    // out from it together and kept in this evaluator's own cache.
+    private static struct CallShape {
+        private CallAdapter adapter;
+        private CallAdapter.Argument[] arguments;
+    }
+
+    private const(CallShape)* callShapeOf(FuncDeclaration function_) {
+        if (auto cached = function_ in _calls)
+            return cached;
+
+        auto parameterList = typeFunctionOf(function_).parameterList;
+        CallAdapter.Argument[] arguments;
+        arguments.length = parameterList.length;
+        foreach (i; 0 .. parameterList.length)
+            arguments[i] = CallAdapter.Argument.of(parameterList[i]);
+
+        _calls[function_] = CallShape(CallAdapter.of(function_), arguments);
+        return function_ in _calls;
     }
 
     private const(ClosureLayout)* closureLayoutOf(
@@ -574,7 +608,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
         }
 
-        auto result = layout.call.invoke(
+        auto result = callShapeOf(function_).adapter.invoke(
             returnPlace,
             argumentSlots(slots, frameBase, layout),
             &executeCallee,
@@ -1111,7 +1145,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 evaluate(statement.exp, _type, _facts, frame.base);
             }
 
-            _layout.call.returnFromCall(
+            callShapeOf(_function).adapter.returnFromCall(
                 _place, &referenceAddress, &evaluateValue,
             );
         });
@@ -1542,7 +1576,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // enclosing frame or closure as its context, and that storage remains
     // reachable through `_allocations` when the enclosing call returns.
     override void visit(FuncExp expression) {
-        import snakebite.backends.delegates: delegateTargetOf;
+        import snakebite.frontend.dmd.delegates: delegateTargetOf;
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, storeIntegral;
         import std.conv: text;
@@ -1577,14 +1611,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // closure, just as for a delegate literal. The function declaration is
     // retained in the function word for the interpreter to resolve later.
     override void visit(DelegateExp expression) {
-        import snakebite.backends.delegates: delegateTargetOf;
+        import snakebite.frontend.dmd.delegates: delegateTargetOf;
 
         storeDelegateValue(
             delegateTargetOf(expression.func, _type), expression, _place);
     }
 
     // Shared tail of `visit(FuncExp)`/`visit(DelegateExp)`: once
-    // `snakebite.backends.delegates.delegateTargetOf` has decided what the
+    // `snakebite.frontend.dmd.delegates.delegateTargetOf` has decided what the
     // delegate value needs (see its own doc), this resolves that decision
     // to actual bytes - the interpreter's own context representation
     // (`tryContextOf`, a native pointer) and its own function-word
@@ -1661,11 +1695,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     override void visit(VarExp expression) {
         import core.stdc.string: memcpy;
-        import snakebite.backends.delegates: isCtfeVariable;
+        import snakebite.frontend.dmd.delegates: isCtfeVariable;
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
-        // See `snakebite.backends.delegates.isCtfeVariable`: shared with
+        // See `snakebite.frontend.dmd.delegates.isCtfeVariable`: shared with
         // the bytecode backend.
         if (isCtfeVariable(expression.var)) {
             storeIntegral(_place, 0, _facts.size);
@@ -1745,22 +1779,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         memcpy(_place, slot, _facts.size);
     }
 
-    // The function `variable` is a parameter or local of - shared with the
-    // bytecode compiler (`snakebite.backends.delegates.outerFunctionOf`)
-    // since both walk `toParent2` the same way, past any block or `Catch`
-    // scope in between, straight to the nearest enclosing function or
-    // aggregate. `null` for anything else it could be a member of (an
-    // aggregate's field, reached through `this` rather than a static
-    // chain, or a module-scope symbol) - `frameOf`'s caller is the one
-    // that turns that into a refusal, since only it knows whether "not a
-    // frame variable at all" or "not on the chain from here" is the
-    // right thing to say.
-    private FuncDeclaration outerFunctionOf(VarDeclaration variable) {
-        import snakebite.backends.delegates: sharedOuterFunctionOf = outerFunctionOf;
-
-        return sharedOuterFunctionOf(variable);
-    }
-
     // Where `owner`'s own context is: `owner` itself if it is the function
     // currently executing, otherwise found by following the static chain
     // up from there - one context hop per level of nesting. A context is
@@ -1830,7 +1848,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     // Shared with the bytecode compiler
-    // (`snakebite.backends.delegates.functionNeedsClosure`): both backends
+    // (`snakebite.frontend.dmd.delegates.functionNeedsClosure`): both backends
     // ask dmd's own escape analysis the same question before deciding
     // whether a captured variable lives in a frame slot or a heap block.
     private bool functionNeedsClosure(FuncDeclaration function_) {
@@ -1838,7 +1856,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return *cached;
 
         import dmd.funcsem: functionSemantic3;
-        import snakebite.backends.delegates:
+        import snakebite.frontend.dmd.delegates:
             sharedFunctionNeedsClosure = functionNeedsClosure;
 
         functionSemantic3(function_);
@@ -4241,6 +4259,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     parameterList.length, " argument(s), got ", argumentCount),
             );
 
+        auto shape = callShapeOf(function_);
+
         foreach (i; 0 .. parameterList.length) {
             auto argument = (*arguments)[i];
             auto parameter = layout.parameters[i];
@@ -4266,7 +4286,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 );
             }
 
-            parameter.call.store(
+            shape.arguments[i].store(
                 slot,
                 &argumentAddress,
                 &evaluateArgument,

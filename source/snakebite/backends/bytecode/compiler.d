@@ -74,7 +74,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     public this(const Program program) {
         super(program);
         _nativeData = NativeData(&constantSymbolAddress);
-        _runtimeTypes = RuntimeTypes(program,
+        _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
         _vm = Vm(defaultFrameCapacity);
@@ -416,7 +416,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf;
-    import snakebite.backends.delegates: DelegateTarget, delegateTargetOf;
+    import snakebite.frontend.dmd.delegates:
+        DelegateTarget, delegateTargetOf, functionNeedsClosure,
+        outerFunctionOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout:
@@ -2017,28 +2019,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             && _closureLayout.hasSlot(variable);
     }
 
-    // Shared with the interpreter
-    // (`snakebite.backends.delegates.outerFunctionOf`): both walk
-    // `toParent2` the same way to find the function a captured variable
-    // belongs to.
-    private FuncDeclaration outerFunctionOf(VarDeclaration variable) const {
-        import snakebite.backends.delegates:
-            sharedOuterFunctionOf = outerFunctionOf;
-
-        return sharedOuterFunctionOf(variable);
-    }
-
-    // Shared with the interpreter
-    // (`snakebite.backends.delegates.functionNeedsClosure`): both ask
-    // dmd's own escape analysis the same question before deciding whether
-    // a captured variable lives in a frame slot or a heap block.
-    private bool functionNeedsClosure(FuncDeclaration function_) const {
-        import snakebite.backends.delegates:
-            sharedFunctionNeedsClosure = functionNeedsClosure;
-
-        return sharedFunctionNeedsClosure(function_);
-    }
-
     private size_t addPointerOffset(
         in size_t pointerOffset,
         in size_t byteOffset,
@@ -3169,10 +3149,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         requireDestination(expression);
 
-        // See `snakebite.backends.delegates.isCtfeVariable`: shared with
+        // See `snakebite.frontend.dmd.delegates.isCtfeVariable`: shared with
         // the interpreter, which folds the same read to a constant.
         {
-            import snakebite.backends.delegates: isCtfeVariable;
+            import snakebite.frontend.dmd.delegates: isCtfeVariable;
 
             if (isCtfeVariable(expression.var)) {
                 emit(&opConstant, _destination, addConstant(0L), _width);
@@ -3334,7 +3314,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // `&nested` (`&obj.method` and a bound `this`-capturing literal are
     // out of scope, matching the interpreter's own `visit(DelegateExp)`/
-    // `visit(FuncExp)` - see `snakebite.backends.delegates.
+    // `visit(FuncExp)` - see `snakebite.frontend.dmd.delegates.
     // delegateTargetOf`'s own doc for why): dmd lowers a nested function's
     // address-of to this node, naming the function directly in
     // `expression.func`.
@@ -3346,7 +3326,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     // Shared tail of `visit(FuncExp)`/`visit(DelegateExp)`: once
-    // `snakebite.backends.delegates.delegateTargetOf` has decided what the
+    // `snakebite.frontend.dmd.delegates.delegateTargetOf` has decided what the
     // delegate value needs (frame-independent, dmd-only facts - see its
     // own doc), this resolves that decision to instructions in this
     // compiler's own representation - `contextAddressOf` walks the same
@@ -5256,7 +5236,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // declaration this compiler never walks the body of - `Exception.
         // this` is one, reached through `super(...)` delegation from a
         // guest exception constructor.
-        import snakebite.backends.delegates: hasHiddenThis;
+        import snakebite.frontend.dmd.delegates: hasHiddenThis;
 
         const hasThis = hasHiddenThis(callee);
         compileResolvedCall(

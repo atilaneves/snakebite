@@ -1,4 +1,4 @@
-module snakebite.backends.delegates;
+module snakebite.frontend.dmd.delegates;
 
 
 private:

@@ -471,7 +471,7 @@ private CallPlan prepare(
     imported!"dmd.func".FuncDeclaration function_,
     ref Resolver resolver,
 ) {
-    import snakebite.backends.delegates: hasHiddenThis;
+    import snakebite.frontend.dmd.delegates: hasHiddenThis;
     import snakebite.druntime.constructoratomic: nativeTarget;
     import snakebite.ffi.abi:
         ArgumentPlan, Register, contextPrecedesHiddenReturnPointer,
