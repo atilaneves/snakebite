@@ -2045,23 +2045,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     // The context of `owner`, as a pointer value in a temporary frame slot.
-    // A closure's first word links to its parent context. A non-closure
-    // nested frame stores that link in its hidden `vthis` slot.
-    //
-    // `_function.toParent2()` does not skip over an enclosing aggregate the
-    // way it skips a block or `Catch` scope: a nested struct's method has
-    // that struct as its immediate `toParent2()`, not the function the
-    // struct itself is nested in. Crossing that hop reads the struct's own
-    // `vthis` field (`sd.isNested()`) out of the receiver - `_function`'s
-    // own hidden `this` is that receiver's address, the same as for an
-    // ordinary member method - at the field's own native offset
-    // (`sd.vthis.offset`), the same way any other field is reached by its
-    // `field.offset`. What that field holds is the context this struct's
-    // instance captured when it was built (`visit(StructLiteralExp)`'s own
-    // `isNested()` branch), which may itself be another nested struct's
-    // receiver, so the walk below alternates between a struct hop and a
-    // function hop for as many levels as the guest source actually nests.
+    // `staticChainPath` decides which hops that takes; this only folds them
+    // into loads. The first hop is a plain copy out of the current frame -
+    // that frame's own hidden `this` slot is already addressable by offset
+    // at compile time - every later hop indirects through a pointer value
+    // already sitting in `result`.
     private size_t contextAddressOf(FuncDeclaration owner) {
+        import snakebite.backends.staticchain: staticChainPath;
+
         if (owner is _function) {
             if (_closureOffset != size_t.max)
                 return _closureOffset;
@@ -2071,50 +2062,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return result;
         }
 
-        if (_layout.hiddenThis.variable is null)
+        const path = staticChainPath(_function, owner);
+        if (path is null)
             throw rejection(_function, _function.loc, "a static chain");
 
         const result = reserveTemp(pointerFacts);
-        emit(&opCopy, result,
-            _layout.hiddenThis.parameter.offset, size_t.sizeof);
+        emit(&opCopy, result, path[0].offset, size_t.sizeof);
 
-        auto parent = _function.toParent2();
-        auto currentFunction = parent is null ? null : parent.isFuncDeclaration;
-        auto currentStruct = parent is null ? null : parent.isStructDeclaration;
-
-        while (currentFunction !is owner) {
-            if (currentStruct !is null) {
-                if (!currentStruct.isNested() || currentStruct.vthis is null)
-                    throw rejection(_function, _function.loc,
-                        "a static chain");
-
-                addPointerOffset(result, currentStruct.vthis.offset);
-                emit(&opLoadIndirect, result, result, size_t.sizeof);
-
-                auto next = currentStruct.toParent2();
-                currentFunction = next is null ? null : next.isFuncDeclaration;
-                currentStruct = next is null ? null : next.isStructDeclaration;
-                continue;
-            }
-
-            if (currentFunction is null)
-                throw rejection(_function, _function.loc, "a static chain");
-
-            if (functionNeedsClosure(currentFunction)) {
-                emit(&opLoadIndirect, result, result, size_t.sizeof);
-            } else {
-                const layout = FrameLayout.of(currentFunction);
-                if (layout.hiddenThis.variable is null)
-                    throw rejection(_function, _function.loc,
-                        "a static chain");
-
-                addPointerOffset(result, layout.hiddenThis.parameter.offset);
-                emit(&opLoadIndirect, result, result, size_t.sizeof);
-            }
-
-            auto next = currentFunction.toParent2();
-            currentFunction = next is null ? null : next.isFuncDeclaration;
-            currentStruct = next is null ? null : next.isStructDeclaration;
+        foreach (const hop; path[1 .. $]) {
+            addPointerOffset(result, hop.offset);
+            emit(&opLoadIndirect, result, result, size_t.sizeof);
         }
 
         return result;

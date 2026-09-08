@@ -1851,48 +1851,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // `owner`'s context is not reachable from here. The null result is
     // useful for a non-capturing delegate, whose context is never read.
     private ubyte* tryContextOf(FuncDeclaration owner) {
+        import snakebite.backends.staticchain: staticChainPath;
         import snakebite.nativelayout: loadIntegral;
 
-        auto fn = _function;
-        auto base = functionNeedsClosure(fn)
-            ? _closureBase : _frameBase;
-        while (fn !is owner) {
+        if (owner is _function)
+            return functionNeedsClosure(_function) ? _closureBase : _frameBase;
+
+        const path = staticChainPath(_function, owner);
+        if (path is null)
+            return null;
+
+        auto base = _frameBase;
+        foreach (const hop; path) {
             if (base is null)
                 return null;
-
-            if (functionNeedsClosure(fn))
-                base = cast(ubyte*) loadIntegral(
-                    base, size_t.sizeof, false);
-            else {
-                auto layout = layoutOf(fn);
-                if (layout.hiddenThis.variable is null)
-                    return null;
-                base = cast(ubyte*) loadIntegral(
-                    base + layout.hiddenThis.parameter.offset,
-                    size_t.sizeof, false);
-            }
-            auto parent = fn.toParent2();
-            auto parentFunction = parent is null
-                ? null : parent.isFuncDeclaration;
-            if (parentFunction is null) {
-                auto struct_ = parent is null
-                    ? null : parent.isStructDeclaration;
-                if (struct_ is null || base is null)
-                    return null;
-
-                // A nested struct stores its enclosing context in the
-                // receiver's first word before the method's own context
-                // chain continues through the enclosing function.
-                base = cast(ubyte*) loadIntegral(
-                    base, size_t.sizeof, false);
-                parent = struct_.toParent2();
-                parentFunction = parent is null
-                    ? null : parent.isFuncDeclaration;
-            }
-
-            fn = parentFunction;
-            if (fn is null)
-                return null;
+            base = cast(ubyte*) loadIntegral(
+                base + hop.offset, size_t.sizeof, false);
         }
 
         return base;

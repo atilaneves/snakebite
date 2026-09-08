@@ -179,11 +179,7 @@ static foreach (backend; Matrix!()) {
 // must not land where the struct's own first field lives. Calling a
 // method that reads the captured local proves the context reached the
 // right place.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter crashes building a non-static nested struct "
-            ~ "that has its own declared field"),
-)) {
+static foreach (backend; Matrix!()) {
     @("nested.staticChain.nestedStructOwnFieldKeepsContext." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -337,11 +333,7 @@ static foreach (backend; Matrix!(
 // to `a` followed by `a.__ctor(2)`, so the struct literal is what supplies
 // the outer-context field, and the constructor runs on storage that
 // already has it.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter fails a user-constructor call on a non-static "
-            ~ "nested struct"),
-)) {
+static foreach (backend; Matrix!()) {
     @("nested.staticChain.ctorCallOnVariableKeepsContext." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -363,11 +355,7 @@ static foreach (backend; Matrix!(
 // The constructor body itself reads the enclosing local, so the context
 // has to be in place before the constructor runs, not only before a
 // later method call.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter crashes running a non-static nested struct's "
-            ~ "constructor that reads an enclosing local"),
-)) {
+static foreach (backend; Matrix!()) {
     @("nested.staticChain.ctorBodyReadsEnclosingLocal." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -390,11 +378,7 @@ static foreach (backend; Matrix!(
 // whose receiver is a struct literal - rather than splitting it into a
 // variable initialisation and a separate constructor call. The receiver
 // literal is where dmd expects the outer context to be filled in.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter fails a user-constructor call on a non-static "
-            ~ "nested struct"),
-)) {
+static foreach (backend; Matrix!()) {
     @("nested.staticChain.ctorCallTemporaryKeepsContext." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -415,10 +399,7 @@ static foreach (backend; Matrix!(
 // `new S(args)` with no constructor fills the declared fields positionally
 // from the arguments; the outer-context field has no argument of its own
 // and dmd expects whoever allocates the object to fill it in.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter crashes on `new` of a non-static nested struct"),
-)) {
+static foreach (backend; Matrix!()) {
     @("nested.staticChain.newPositionalKeepsContext." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -439,10 +420,7 @@ static foreach (backend; Matrix!(
 // `new S` with no arguments at all: the allocation copies `S.init`, whose
 // outer-context field is null, so the context still has to be written
 // after the allocation.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter fails `new` of a non-static nested struct"),
-)) {
+static foreach (backend; Matrix!()) {
     @("nested.staticChain.newNoArgsKeepsContext." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -461,10 +439,7 @@ static foreach (backend; Matrix!(
 
 // `new S(args)` with a user constructor: the constructor runs on the
 // allocation, so the context must already be there when it does.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter crashes on `new` of a non-static nested struct"),
-)) {
+static foreach (backend; Matrix!()) {
     @("nested.staticChain.newCtorKeepsContext." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -531,8 +506,10 @@ static foreach (backend; Matrix!()) {
 // struct, function, struct, function all the way out.
 static foreach (backend; Matrix!(
     Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter fails a struct nested inside a nested struct's "
-            ~ "method"),
+        "the interpreter's closure allocation only stores an outer link "
+            ~ "when its own immediate parent is a function; a method of a "
+            ~ "nested struct has a struct as its immediate parent, so the "
+            ~ "closure it allocates links to nothing"),
 )) {
     @("nested.staticChain.structInsideNestedStructMethod." ~ backend.stringof)
     @Tags(backend.stringof)
