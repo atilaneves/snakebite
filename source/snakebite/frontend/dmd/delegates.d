@@ -36,9 +36,17 @@ public bool isCtfeVariable(Declaration variable) {
 // question before deciding whether a captured variable's storage is a
 // frame slot or a slot in a heap block, so it is asked here once rather
 // than reimplemented per backend.
+//
+// `closureVars`, the variables the analysis walks, are collected by
+// `functionSemantic3` (body semantic), so the answer is only trustworthy
+// after that pass - forced here for the same reason `hasHiddenThis` below
+// forces it: a function dmd never analysed eagerly (one in a non-root
+// module, reached through a delegate) would otherwise answer `false` to
+// one backend and, once analysed, `true` to the other.
 public bool functionNeedsClosure(FuncDeclaration function_) {
-    import dmd.funcsem: needsClosure;
+    import dmd.funcsem: functionSemantic3, needsClosure;
 
+    functionSemantic3(function_);
     return function_.needsClosure();
 }
 

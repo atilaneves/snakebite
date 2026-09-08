@@ -59,6 +59,16 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         return _evaluator.symbolLookups();
     }
 
+    // Frame layouts built on this thread - by this evaluator or by any
+    // shared code it reaches - since the thread started. Global, so only a
+    // difference between two readings on the same thread means anything.
+    version(unittest)
+    public size_t layoutBuilds() @safe @nogc nothrow const scope {
+        import snakebite.backends.layout: FrameLayout;
+
+        return FrameLayout.builds;
+    }
+
 }
 
 import snakebite.exception: SnakebiteException;
@@ -94,6 +104,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.backends.backend: Program;
     import snakebite.frontend.dmd.delegates: DelegateTarget, outerFunctionOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
+    import snakebite.backends.staticchain: Hop;
     import snakebite.backends.classinfo;
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
@@ -163,6 +174,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // answers so execution does not repeat the same AST walk for functions
     // that stay in this evaluator's program.
     private Cache!(FuncDeclaration, bool) _needsClosure;
+    // The static-chain hops from one function's frame to an enclosing
+    // function's context, keyed by that pair. Working the hops out builds
+    // the frame layout of every function on the way, so it is done once
+    // per pair and read back on every reach of a captured variable.
+    private Cache!(StaticChainKey, Hop[]) _staticChains;
     // Whether a callee's own body is preferred does not change while an
     // evaluator runs. Keep it apart from call-site decisions: delegate
     // arguments and the active nesting context still need to be checked
@@ -415,7 +431,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     version(unittest)
     extern(D) final size_t nameLookups() @safe @nogc nothrow pure const scope {
         return _foreignNameLookups + _layouts.lookups + _staticLookups
-            + _plans.nativeSymbolLookups;
+            + _staticChains.lookups + _plans.nativeSymbolLookups;
     }
 
     // Every hash lookup this evaluator has made to find out what a `Type`
@@ -1851,13 +1867,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // `owner`'s context is not reachable from here. The null result is
     // useful for a non-capturing delegate, whose context is never read.
     private ubyte* tryContextOf(FuncDeclaration owner) {
-        import snakebite.backends.staticchain: staticChainPath;
         import snakebite.nativelayout: loadIntegral;
 
         if (owner is _function)
             return functionNeedsClosure(_function) ? _closureBase : _frameBase;
 
-        const path = staticChainPath(_function, owner);
+        const path = staticChainOf(owner);
         if (path is null)
             return null;
 
@@ -1872,19 +1887,34 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return base;
     }
 
-    // Shared with the bytecode compiler
-    // (`snakebite.frontend.dmd.delegates.functionNeedsClosure`): both backends
-    // ask dmd's own escape analysis the same question before deciding
-    // whether a captured variable lives in a frame slot or a heap block.
+    // The hops from `_function`'s own frame to `owner`'s context, as
+    // `staticChainPath` decides them; `null` when `owner` is not on the
+    // chain at all.
+    extern(D) private const(Hop)[] staticChainOf(FuncDeclaration owner) {
+        import snakebite.backends.staticchain: staticChainPath;
+
+        const key = StaticChainKey(
+            cast(const(void)*) _function, cast(const(void)*) owner);
+        if (auto cached = key in _staticChains)
+            return *cached;
+
+        auto path = staticChainPath(_function, owner);
+        _staticChains[key] = path;
+        return path;
+    }
+
+    // The answer shared with the bytecode compiler
+    // (`snakebite.frontend.dmd.delegates.functionNeedsClosure`), kept: dmd
+    // works it out by walking every captured variable's references each
+    // time it is asked, and this evaluator asks on every reach of a
+    // variable.
     private bool functionNeedsClosure(FuncDeclaration function_) {
         if (auto cached = function_ in _needsClosure)
             return *cached;
 
-        import dmd.funcsem: functionSemantic3;
         import snakebite.frontend.dmd.delegates:
             sharedFunctionNeedsClosure = functionNeedsClosure;
 
-        functionSemantic3(function_);
         const result = sharedFunctionNeedsClosure(function_);
         _needsClosure[function_] = result;
         return result;
@@ -5044,6 +5074,14 @@ private ulong shifted(string op)(
         return bits >> b;
     }
 }
+// A (nested function, enclosing function) pair, by address: which chain of
+// hops leads from the one's frame to the other's context is fixed for
+// the pair.
+private struct StaticChainKey {
+    const(void)* from;
+    const(void)* to;
+}
+
 // One of the evaluator's caches: an answer worked out on a cold path,
 // kept for the life of the evaluator, and read back by key on a hot one.
 // A plain associative array, and the number of times it has been probed.

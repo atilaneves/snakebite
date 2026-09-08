@@ -47,7 +47,9 @@ private enum guest = q{
             sum += abs(i);
         return sum;
     }
-} ~ loopFunction("few", fewTrips) ~ loopFunction("many", manyTrips);
+} ~ loopFunction("few", fewTrips) ~ loopFunction("many", manyTrips)
+  ~ nestedLoopFunction("fewNested", fewTrips)
+  ~ nestedLoopFunction("manyNested", manyTrips);
 
 // The two functions the lookup budget is measured across, written by one
 // function so that they can differ in nothing but their trip count.
@@ -72,12 +74,42 @@ unittest {
 }
 
 
+// As `loopFunction`, but the loop body calls a nested function that reads
+// a local of the enclosing function: every trip reaches one variable
+// through the static chain rather than the current frame.
+private string nestedLoopFunction(in string name, in int trips) {
+    return text("
+        long ", name, "() {
+            long sum = 0;
+            long step = 1;
+            long add(long i) {
+                return i * step;
+            }
+            for (long i = 0; i < ", trips, "; ++i)
+                sum += add(i);
+            return sum;
+        }
+    ");
+}
+
+
 // A guest function calling a guest function in a loop, which is what
 // pushes and pops a frame and fills a parameter slot on every trip.
 @("steadyState.guestCall.allocatesNothing")
 @Tags(Interpreter.stringof)
 unittest {
     shouldNotAllocate("calls");
+}
+
+
+// A nested function reaching an enclosing local in a loop: the static
+// chain is walked on every read, and how to walk it is fixed for the life
+// of the program, so the walk is worked out once and kept rather than
+// rebuilt per read.
+@("steadyState.nestedRead.allocatesNothing")
+@Tags(Interpreter.stringof)
+unittest {
+    shouldNotAllocate("manyNested");
 }
 
 
@@ -183,8 +215,19 @@ private enum typeLookupsPerIteration = 2;
 @("steadyState.lookupsPerIteration")
 @Tags(Interpreter.stringof)
 unittest {
-    shouldCostPerIteration!"name"(nameLookupsPerIteration);
-    shouldCostPerIteration!"type"(typeLookupsPerIteration);
+    shouldCostPerIteration!"nameLookups"("few", "many", nameLookupsPerIteration);
+    shouldCostPerIteration!"typeLookups"("few", "many", typeLookupsPerIteration);
+}
+
+
+// A function's frame layout is computed once and kept, so an iteration
+// that reaches an enclosing function's local through the static chain
+// builds none: the walk knows which slots to read from layouts already
+// kept, not from ones rebuilt for the read.
+@("steadyState.nestedRead.buildsNoLayout")
+@Tags(Interpreter.stringof)
+unittest {
+    shouldCostPerIteration!"layoutBuilds"("fewNested", "manyNested", 0);
 }
 
 
@@ -195,7 +238,7 @@ unittest {
 private enum perIterationCalls = 10;
 
 // Runs the two functions that differ only in trip count and checks what
-// the extra iterations cost in lookups of one kind against `budget` per
+// the extra iterations cost in `counter`'s units against `budget` per
 // iteration.
 //
 // A ceiling and not an equality. Every reason to touch these paths is a
@@ -203,7 +246,9 @@ private enum perIterationCalls = 10;
 // two only because a single-entry cache alternates and misses both ways -
 // and a guard that went red when the count fell would be a guard against
 // the improvement it exists to protect.
-private void shouldCostPerIteration(string kind)(
+private void shouldCostPerIteration(string counter)(
+    in string fewName,
+    in string manyName,
     in size_t budget,
     in string file = __FILE__,
     in size_t line = __LINE__,
@@ -212,8 +257,8 @@ private void shouldCostPerIteration(string kind)(
     auto backend = new Interpreter(Program([guestModule]));
     long result;
 
-    auto few = guestFunction(guestModule, "few");
-    auto many = guestFunction(guestModule, "many");
+    auto few = guestFunction(guestModule, fewName);
+    auto many = guestFunction(guestModule, manyName);
 
     // The first call to each is the cold one: it computes a frame layout
     // and asks about every type in the function for the first time.
@@ -221,11 +266,11 @@ private void shouldCostPerIteration(string kind)(
     backend.call(many, &result, []);
 
     size_t spent(FuncDeclaration function_) {
-        const before = mixin("backend." ~ kind ~ "Lookups");
+        const before = mixin("backend." ~ counter);
         foreach (_; 0 .. perIterationCalls)
             backend.call(function_, &result, []);
 
-        return mixin("backend." ~ kind ~ "Lookups") - before;
+        return mixin("backend." ~ counter) - before;
     }
 
     const iterations = perIterationCalls * (manyTrips - fewTrips);
@@ -234,7 +279,7 @@ private void shouldCostPerIteration(string kind)(
     if (spentTotal > iterations * budget)
         throw new UnitTestException(
             text(iterations, " extra loop iterations cost ", spentTotal,
-                " ", kind, " lookup(s); the budget is ", budget,
+                " ", counter, "; the budget is ", budget,
                 " per iteration, ", iterations * budget, " at most"),
             file, line,
         );

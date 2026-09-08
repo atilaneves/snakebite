@@ -75,11 +75,18 @@ package struct FrameLayout {
     }
     private VariableSlot[VarDeclaration] _slotOf;
 
+    // How many layouts `of` has built on this thread. A build walks the
+    // whole function body, so a backend that is meant to build each
+    // function's layout once and keep it can be held to that here.
+    version(unittest) package static size_t builds;
+
     package static FrameLayout of(FuncDeclaration function_) {
         import snakebite.frontend.dmd.delegates: hasHiddenThis;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import dmd.astenums: STC;
         import std.conv: text;
+
+        version(unittest) ++builds;
 
         FrameLayout layout;
 
