@@ -2358,11 +2358,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emitBitfieldStore(field, addressOffset, valueOffset, valueWidth);
     }
 
+    // `valueWidth` is the width of the slot the value comes from, which a
+    // compound assignment promotes to `int` while the field's own storage
+    // stays as wide as its declared type. `opStoreBitfield` reads and
+    // writes the storage at the width the metadata carries, so that
+    // width is always the field's own.
     private void emitBitfieldStore(
         VarDeclaration field, in size_t addressOffset, in size_t valueOffset,
         in size_t valueWidth,
     ) {
-        const metadata = bitfieldMetadata(field, valueWidth);
+        const metadata = bitfieldMetadata(
+            field, TypeFacts.of(field.type).size);
         emit(&opStoreBitfield, addressOffset, valueOffset, valueWidth,
             metadata);
     }
@@ -5359,11 +5365,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: STC, Tvoid;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        import snakebite.backends.calls: usesGuestBody;
+        import snakebite.backends.calls: prefersGuestBody, usesGuestBody;
 
         const guest = usesGuestBody(
             callee, arguments, &_bytecode.isGuestFunction,
-            !_bytecode.hasNativeSymbol(callee),
+            prefersGuestBody(
+                callee, _bytecode.isGuestFunction(callee),
+                _bytecode.hasNativeSymbol(callee)),
         );
         if (!guest) {
             auto type = typeFunctionOf(callee);

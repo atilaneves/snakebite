@@ -42,7 +42,8 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Bytecode, Because.unconfirmed,
-        "Bytecode compiler cannot compile typeid(Value)"),
+        "Bytecode compiler cannot take the address of a `typeid` receiver "
+        ~ "for its `name` call"),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read guest typeid metadata"),
 )) {
@@ -241,6 +242,43 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A compound assignment to a bitfield promotes the operation to `int`,
+// but the load and the store back must read and write only the field's
+// own storage width. The struct sits in the last byte before a page with
+// no access, so a wider read-modify-write of the storage faults instead
+// of passing unnoticed. Only the neighbour field is asserted: dmd's own
+// native codegen drops a compound assignment to a `ubyte` bitfield, so
+// `first` has no value every backend agrees on.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call native functions"),
+)) {
+    @("bitfieldCompoundAssignStoresStorageWidth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.sys.posix.sys.mman:
+                MAP_ANON, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE,
+                mmap, mprotect, munmap;
+
+            struct Pair { ubyte first : 4; ubyte second : 4; }
+
+            void main() {
+                enum pageSize = 4096;
+                auto base = cast(ubyte*) mmap(
+                    null, 2 * pageSize, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANON, -1, 0);
+                assert(mprotect(base + pageSize, pageSize, PROT_NONE) == 0);
+                auto pair = cast(Pair*) &base[0 .. pageSize][pageSize - 1];
+                pair.first = 2;
+                pair.second = 3;
+                pair.first += 1;
+                assert(pair.second == 3);
+                munmap(base, 2 * pageSize);
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed,
         "CTFE cannot execute full-width ulong bitfield assignment"),
@@ -276,11 +314,11 @@ static foreach (backend; Matrix!()) {
                 }
             }
 
-            int answer() {
+            int main() {
                 auto value = new Value(42);
                 return value.value;
             }
-        }, "answer");
+        }, "main");
     }
 }
 
@@ -298,12 +336,12 @@ static foreach (backend; Matrix!()) {
                 }
             }
 
-            int answer() {
+            int main() {
                 int source = 42;
                 auto value = new Value(source);
                 return value.value;
             }
-        }, "answer");
+        }, "main");
     }
 }
 
@@ -650,11 +688,11 @@ static foreach (backend; Matrix!(
                 string text;
             }
 
-            int answer() {
+            int main() {
                 auto value = new Value("hello");
                 return cast(int) value.text.length;
             }
-        }, "answer");
+        }, "main");
     }
 }
 

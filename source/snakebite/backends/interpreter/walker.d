@@ -158,16 +158,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // answers so execution does not repeat the same AST walk for functions
     // that stay in this evaluator's program.
     private Cache!(FuncDeclaration, bool) _needsClosure;
-    // These properties of a callee do not change while an evaluator runs.
-    // Keep them apart from call-site decisions: delegate arguments and the
-    // active nesting context still need to be checked for every call.
-    private struct DispatchFacts {
-        bool _isGuest;
-        bool _isTemplate;
-        bool _hasNativeSymbol;
-    }
-
-    private Cache!(FuncDeclaration, DispatchFacts) _dispatchFacts;
+    // Whether a callee's own body is preferred does not change while an
+    // evaluator runs. Keep it apart from call-site decisions: delegate
+    // arguments and the active nesting context still need to be checked
+    // for every call.
+    private Cache!(FuncDeclaration, bool) _prefersGuestBody;
     version(unittest) private size_t _staticLookups;
     // A guest pointer can live in an unscanned frame, so the evaluator keeps
     // each backing allocation reachable for as long as guest state can be.
@@ -430,19 +425,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return _plans.hasNativeSymbol(function_);
     }
 
-    private DispatchFacts dispatchFactsOf(FuncDeclaration function_) {
-        if (auto cached = function_ in _dispatchFacts)
+    private bool prefersGuestBodyOf(FuncDeclaration function_) {
+        import snakebite.backends.calls: prefersGuestBody;
+
+        if (auto cached = function_ in _prefersGuestBody)
             return *cached;
 
-        const hasBody = function_.fbody !is null;
-        const isTemplate = function_.isInstantiated() !is null && hasBody;
-        const facts = DispatchFacts(
-            _program.isInterpreted(function_),
-            isTemplate,
-            isTemplate && hasNativeSymbol(function_),
-        );
-        _dispatchFacts[function_] = facts;
-        return facts;
+        const prefers = prefersGuestBody(
+            function_, _program.isInterpreted(function_),
+            hasNativeSymbol(function_));
+        _prefersGuestBody[function_] = prefers;
+        return prefers;
     }
 
     // `function_`'s frame layout, from the cache; computed on its first
@@ -628,14 +621,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // A declaration without a body can only describe a host call,
         // regardless of which module owns it.
         auto body_ = function_.fbody;
-        const dispatchFacts = dispatchFactsOf(function_);
         import snakebite.backends.calls: usesGuestBody;
 
         const interprets = usesGuestBody(
             function_, callSite is null ? null : callSite.arguments,
             (callee) => _program.isInterpreted(callee),
-            dispatchFacts._isGuest && !dispatchFacts._isTemplate
-                || dispatchFacts._isTemplate && !dispatchFacts._hasNativeSymbol,
+            prefersGuestBodyOf(function_),
             _function,
         );
         if (!interprets) {
@@ -2571,13 +2562,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`"),
             );
 
-        if (auto dot = expression.e1.isDotVarExp) {
+        // A narrow target (`ubyte`, `short`, ...) arrives wrapped in the
+        // `CastExp` dmd's `integralPromotions` adds for the operation
+        // itself; the field behind it is what is stored to.
+        auto promotion = expression.e1.isCastExp;
+        auto target_ = promotion is null ? expression.e1 : promotion.e1;
+        if (auto dot = target_.isDotVarExp) {
             auto field = dot.var.isVarDeclaration;
             if (field !is null && field.isBitFieldDeclaration !is null) {
                 const stepFacts = factsOf(expression.e2.type);
                 const step = asIntegral(expression.e2, stepFacts);
                 auto base = fieldBaseAddress(dot.e1);
-                const current = bitfieldValueAt(base, field, targetFacts);
+                const current = bitfieldValueAt(base, field);
                 const result = combine!op(
                     current, step, targetFacts, stepFacts, expression);
                 storeBitfieldAt(field,
@@ -2628,7 +2624,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             auto field = dot.var.isVarDeclaration;
             if (field !is null && field.isBitFieldDeclaration !is null) {
                 auto base = fieldBaseAddress(dot.e1);
-                const current = bitfieldValueAt(base, field, facts);
+                const current = bitfieldValueAt(base, field);
                 const step = asIntegral(expression.e2);
                 const changed = expression.op == EXP.plusPlus
                     ? current + step : current - step;
@@ -3557,7 +3553,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         if (field.isBitFieldDeclaration !is null) {
             storeIntegral(_place,
-                bitfieldValue(expression, field, factsOf(field.type)),
+                bitfieldValue(expression, field),
                 _facts.size);
             return;
         }
@@ -3578,17 +3574,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return object;
     }
 
-    private long bitfieldValue(
-        DotVarExp expression, VarDeclaration field, in TypeFacts facts,
-    ) {
-        return bitfieldValueAt(fieldBaseAddress(expression.e1), field, facts);
+    private long bitfieldValue(DotVarExp expression, VarDeclaration field) {
+        return bitfieldValueAt(fieldBaseAddress(expression.e1), field);
     }
 
-    private long bitfieldValueAt(
-        void* base, VarDeclaration field, in TypeFacts facts,
-    ) {
+    // The storage is read at the field's own width, not at the width of
+    // the expression reading it: a compound assignment promotes the
+    // operation to `int` while a `ubyte` field still has one byte of
+    // storage.
+    private long bitfieldValueAt(void* base, VarDeclaration field) {
         import snakebite.nativelayout: loadIntegral;
         const bits = field.isBitFieldDeclaration;
+        const facts = factsOf(field.type);
         const raw = loadIntegral(
             cast(ubyte*) base + field.offset,
             facts.size, false);

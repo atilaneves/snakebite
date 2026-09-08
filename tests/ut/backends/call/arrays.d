@@ -712,10 +712,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("arrays.new.nestedStruct.zeroInitialises." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

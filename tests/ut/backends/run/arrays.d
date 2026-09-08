@@ -557,10 +557,7 @@ static foreach (backend; Matrix!(
 // A struct with a postblit: dmd lowers `a[] = v` to `_d_arraysetassign`,
 // which runs the postblit once per element and the destructor on each
 // overwritten element.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("dynamicSliceScalarFill.postblit." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -703,10 +700,7 @@ static foreach (backend; Matrix!(
 
 // A static-array element (`int[2]`) fill: the right side is a static
 // array with the element's own size, broadcast whole into each element.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("dynamicSliceScalarFill.staticArrayElement." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -741,10 +735,7 @@ static foreach (backend; Matrix!(
 }
 
 // A class reference element fill.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("dynamicSliceScalarFill.classRef." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -764,10 +755,7 @@ static foreach (backend; Matrix!(
 
 // A 3-byte struct element fill: an element size that is not a native
 // integral width, so the value must be copied as bytes, not as a word.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("dynamicSliceScalarFill.threeByteStruct." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

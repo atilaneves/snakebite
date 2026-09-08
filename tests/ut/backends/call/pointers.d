@@ -158,10 +158,7 @@ static foreach (backend; Matrix!()) {
 // `&b` is dmd's `SymOffExp`, not a general `&expression`: taking a local's
 // address and reading back through it is the simplest lvalue-to-pointer
 // round trip there is.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot convert `&ubyte` to a packed struct pointer"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.addressOf.read." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

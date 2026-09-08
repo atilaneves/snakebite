@@ -35,30 +35,6 @@ static foreach (name; __traits(allMembers, imported!"dmd.expression")) {
             name ~ " needs a final shared lowering policy");
 }
 
-private template hasSharedLoweringPolicy(alias Node) {
-    static if (is(Node : Expression) && __traits(hasMember, Node, "lowering")) {
-        import std.meta: staticIndexOf;
-        enum hasSharedLoweringPolicy =
-            staticIndexOf!(Node, LoweredExpressionTypes) >= 0
-            && hasFinalVisit!Node;
-    } else
-        enum hasSharedLoweringPolicy = true;
-}
-
-private bool hasFinalVisit(Node)() {
-    import std.traits: Parameters;
-
-    static foreach (method; __traits(getOverloads, LoweringVisitor, "visit")) {
-        static if (Parameters!method.length == 1) {
-            static if (is(Parameters!method[0] == Node)
-                    && __traits(isFinalFunction, method))
-                return true;
-        }
-    }
-    return false;
-}
-
-
 // Allocation lowering produces storage; constructor execution remains on
 // NewExp. Destination hooks keep that result alive across nested evaluation.
 // Array literals share one exception: their AA-temporary lowering currently
@@ -195,4 +171,28 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     }
 
     protected abstract void visitUnloweredCat(CatExp expression);
+}
+
+
+private template hasSharedLoweringPolicy(alias Node) {
+    static if (is(Node : Expression) && __traits(hasMember, Node, "lowering")) {
+        import std.meta: staticIndexOf;
+        enum hasSharedLoweringPolicy =
+            staticIndexOf!(Node, LoweredExpressionTypes) >= 0
+            && hasFinalVisit!Node;
+    } else
+        enum hasSharedLoweringPolicy = true;
+}
+
+private bool hasFinalVisit(Node)() {
+    import std.traits: Parameters;
+
+    static foreach (method; __traits(getOverloads, LoweringVisitor, "visit")) {
+        static if (Parameters!method.length == 1) {
+            static if (is(Parameters!method[0] == Node)
+                    && __traits(isFinalFunction, method))
+                return true;
+        }
+    }
+    return false;
 }
