@@ -79,11 +79,15 @@ public AggregateInitPlan planStructLiteral(
 // read: `arguments` pairs positionally with `sd.fields`, one entry per
 // field actually given - unlike a `StructLiteralExp`, dmd never pads this
 // list, so a field left out keeps whatever the allocation's own `.init`
-// blit already wrote there.
+// blit already wrote there. More arguments than fields is a shape dmd's
+// own semantic pass already rejected, so it is asserted rather than
+// checked again by each backend.
 public AggregateInitPlan planPositionalFields(
     imported!"dmd.dstruct".StructDeclaration sd,
     imported!"dmd.expression".Expressions* arguments,
-) {
+)
+in (arguments is null || arguments.length <= sd.fields.length)
+{
     InitStep[] steps;
 
     InitStep vthisStep;

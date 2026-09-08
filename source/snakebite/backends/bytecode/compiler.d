@@ -3897,13 +3897,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // stores further down, so both a `new Adder(2)` with a
         // constructor and a bare `new Reader` (no arguments at all) get
         // a real context rather than `.init`'s zero.
-        import snakebite.backends.aggregateinit: planPositionalFields, StepKind;
+        import snakebite.backends.aggregateinit:
+            AggregateInitPlan, planPositionalFields, StepKind;
 
-        if (structType !is null) {
-            auto vthisPlan = planPositionalFields(structType.sym, null);
-            foreach (step; vthisPlan.steps)
+        auto plan = structType is null
+            ? AggregateInitPlan.init
+            : planPositionalFields(structType.sym,
+                expression.member is null ? expression.arguments : null);
+
+        foreach (step; plan.steps)
+            if (step.kind == StepKind.vthis)
                 applyStep(step, expression.loc, objectOffset, true);
-        }
 
         if (expression.member !is null) {
             compileResolvedCall(
@@ -3913,19 +3917,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        if (structType is null || expression.arguments is null)
-            return;
-
-        if (expression.arguments.length > structType.sym.fields.length)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        auto plan = planPositionalFields(structType.sym, expression.arguments);
-        foreach (step; plan.steps) {
-            if (step.kind == StepKind.vthis)
-                continue; // Already filled above.
-            applyStep(step, expression.loc, objectOffset, true);
-        }
+        foreach (step; plan.steps)
+            if (step.kind != StepKind.vthis)
+                applyStep(step, expression.loc, objectOffset, true);
     }
 
     // `null` is all-zero bytes whatever it means - a pointer, a class

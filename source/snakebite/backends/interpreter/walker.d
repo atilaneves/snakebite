@@ -4090,15 +4090,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        if (expression.arguments is null)
-            return;
-
-        if (expression.arguments.length > declaration.fields.length)
-            throw new SnakebiteException(
-                text("interpreter cannot initialize `", expression.toString,
-                    "`: too many constructor arguments"),
-            );
-
         foreach (step; plan.steps)
             if (step.kind != StepKind.vthis)
                 applyStep(step, object);
