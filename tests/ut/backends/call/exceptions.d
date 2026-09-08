@@ -186,7 +186,6 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns a failing assertion into a compile-time error, so " ~
         "it cannot be expressed the same way as a runtime throw"),
-    Omit!(Interpreter, Because.unconfirmed, "guest try/catch not implemented"),
 )) {
     @("assert.fails.reports.the.line.of.the.assertion." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -349,7 +348,6 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns a failing assertion into a compile-time error, so " ~
         "it cannot be expressed the same way as a runtime throw"),
-    Omit!(Interpreter, Because.unconfirmed, "guest try/catch not implemented"),
 )) {
     @("assert.fails.is.not.caught.by.catching.Exception." ~ backend.stringof)
     @Tags(backend.stringof)

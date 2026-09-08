@@ -344,10 +344,12 @@ private const(ExceptionHandler)* findHandler(
     const(Instruction)* pc,
     TypeInfo_Class actual,
 ) @nogc nothrow {
+    import snakebite.backends.exceptions: catchMatches;
+
     foreach (ref handler; handlers) {
         if (pc < handler.bodyStart || pc >= handler.bodyEnd)
             continue;
-        if (handler.type !is null && handler.type.isBaseOf(actual))
+        if (catchMatches(handler.type, actual))
             return &handler;
     }
     return null;
@@ -496,10 +498,10 @@ package const(Instruction)* opAssert(
         return advance(pc, frame, returnPlace, constants, callSites,
             assertSites, frames);
 
-    import core.exception: AssertError;
+    import snakebite.backends.exceptions: assertFailure;
 
     const site = assertSites[pc.source];
-    throw new AssertError(site.message, site.file, site.line);
+    throw assertFailure(site.message, site.file, site.line);
 }
 
 

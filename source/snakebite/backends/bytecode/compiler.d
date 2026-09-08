@@ -1401,14 +1401,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     //
     private void compileAssert(AssertExp expression) {
         import dmd.astenums: Tnoreturn;
-        import std.conv: text;
+        import snakebite.backends.exceptions: assertMessage;
         import std.string: fromStringz;
 
         const conditionOffset = compileCondition(expression.e1);
         const width = conditionWidth(expression.e1);
 
         const site = AssertSite(
-            text("bytecode: assertion failed: `", expression.e1.toString, "`"),
+            assertMessage("bytecode", expression.e1.toString),
             expression.loc.filename.fromStringz.idup,
             expression.loc.linnum,
         );

@@ -69,15 +69,10 @@ import snakebite.exception: SnakebiteException;
 // unchanged.
 private final class GuestException: Exception {
     private Throwable _guest;
-    private imported!"dmd.dclass".ClassDeclaration _class;
 
-    public this(
-        Throwable guest,
-        imported!"dmd.dclass".ClassDeclaration class_ = null,
-    ) {
+    public this(Throwable guest) {
         super(guest.msg);
         _guest = guest;
-        _class = class_;
     }
 }
 
@@ -177,11 +172,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // A guest pointer can live in an unscanned frame, so the evaluator keeps
     // each backing allocation reachable for as long as guest state can be.
     private ubyte[][] _allocations;
-    // Guest class references point into these allocations. Keep the
-    // declaration beside each object so a catch can match the actual
-    // derived class after the reference has been widened.
-    private ClassDeclaration[void*] _classes;
     private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
+    // The reverse of `_classRuntime`: which declaration a generated
+    // `TypeInfo_Class` stands for. An object's own dynamic type is read
+    // straight out of its native layout (word 0's vtable, slot 0 - the
+    // same place a real compiled object keeps its `classinfo`), the same
+    // way the bytecode VM reads it; this is the one place that answer
+    // needs to travel back to the `ClassDeclaration` this backend still
+    // dispatches virtual calls and `DeleteExp`'s destructor through. A
+    // native object's own dynamic type is never a key here, since only
+    // `classRuntimeInfo` below ever inserts one - that absence is how a
+    // native receiver is told apart from a guest one.
+    private ClassDeclaration[TypeInfo_Class] _declarationOf;
+    // Each catch clause's own runtime type, resolved once the first time
+    // `visit(TryCatchStatement)` reaches it and reused by every throw that
+    // later unwinds through it.
+    private Cache!(Catch, TypeInfo_Class) _catchTypes;
     private RuntimeTypes _runtimeTypes;
     // dmd gives every `arr[... $ ...]` a `lengthVar` declaration for its
     // `$`, which no statement declares and which therefore has no frame
@@ -1000,32 +1006,39 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
     }
 
-    // Match the actual guest class against the catch class and its base
-    // chain. A native assertion has no guest declaration, but it is still
-    // a Throwable and keeps the existing catch(Throwable) behavior.
-    private bool matchesThrowable(
-        Catch catch_,
-        GuestException exception,
-    ) {
+    // Whether `catch_`'s own declared type accepts `exception`'s actual
+    // thrown object. A guest throwable's actual declaration is already
+    // known (`_declarationOf`, the reverse of `classRuntimeInfo`'s own
+    // cache), so this stays the AST-level comparison it always was for
+    // that case - no runtime metadata to build while unwinding a guest
+    // `throw`, the hot path every guest exception takes. A native
+    // throwable has no such declaration; matching it reads the same
+    // native `TypeInfo_Class` the bytecode VM's `findHandler` already
+    // compares by identity, in place of the name string this used to
+    // compare instead.
+    private bool matchesThrowable(Catch catch_, GuestException exception) {
         auto typeClass = catch_.type.isTypeClass;
         if (typeClass is null)
             return false;
 
-        if (exception._class is null) {
-            if (typeClass.sym is ClassDeclaration.throwable)
-                return true;
+        auto actual = exception._guest.classinfo;
+        auto declaration = actual in _declarationOf;
+        if (declaration !is null)
+            return typeClass.sym is *declaration
+                || typeClass.sym.isBaseOf(*declaration, null);
 
-            auto expected = classRuntimeInfo(typeClass.sym);
-            for (auto actual = exception._guest.classinfo;
-                    actual !is null; actual = actual.base)
-                if (actual.name == expected.name)
-                    return true;
+        import snakebite.backends.exceptions: catchMatches;
 
-            return false;
-        }
+        return catchMatches(catchRuntimeInfo(catch_), actual);
+    }
 
-        return typeClass.sym is exception._class
-            || typeClass.sym.isBaseOf(exception._class, null);
+    private TypeInfo_Class catchRuntimeInfo(Catch catch_) {
+        if (auto cached = catch_ in _catchTypes)
+            return *cached;
+
+        auto info = cast(TypeInfo_Class) _runtimeTypes.get(catch_.type);
+        _catchTypes[catch_] = info;
+        return info;
     }
 
     private void bindCatchVariable(Catch catch_, Throwable guest) {
@@ -3299,12 +3312,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return;
             }
 
-            auto actual = value in _classes;
+            // The object's own dynamic type, read straight out of its
+            // native layout (word 0's vtable, slot 0), answered back into
+            // a declaration through `_declarationOf` - the reverse of
+            // `classRuntimeInfo`'s own cache - for a guest object; a
+            // native object never reaches that cache, so this keeps the
+            // static source class dmd already proved this cast safe for.
+            auto actual = *cast(TypeInfo_Class*) (*cast(void**) value);
+            auto declaration = actual in _declarationOf;
             auto target = plan.targetClass;
-            const matches = actual is null
+            const matches = declaration is null
                 ? target is plan.sourceClass
-                : target is *actual
-                    || target.isBaseOf(*actual, null);
+                : target is *declaration || target.isBaseOf(*declaration, null);
             storeIntegral(
                 _place,
                 matches ? cast(size_t) value : 0,
@@ -3534,14 +3553,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return;
             }
 
-            auto declaration = object in _classes;
-            if (declaration !is null) {
-                auto info = classRuntimeInfo(*declaration);
-                storeIntegral(
-                    _place, cast(size_t) cast(void*) info, _facts.size);
-                return;
-            }
-
+            // `object.classinfo`: word 0 is the vtable, whose own slot 0
+            // is the classinfo pointer - real native layout, so this
+            // reads the object's own dynamic `TypeInfo_Class` the same
+            // way for a guest object (`finishNew` already left one there)
+            // and a native one.
             auto vtable = cast(void*) loadIntegral(
                 object, size_t.sizeof, false);
             storeIntegral(
@@ -3706,16 +3722,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (truthOf(expression.e1))
             return;
 
-        import core.exception: AssertError;
+        import snakebite.backends.exceptions: assertFailure, assertMessage;
+        import std.string: fromStringz;
 
         // What D does here is throw an `AssertError` the guest can catch.
         // Keep it inside an interpreter-owned wrapper so a guest catch does
         // not also catch the interpreter's own unsupported-node failures.
-        auto guest = new AssertError(
-            text("interpreter: assertion failed: `", expression.toString,
-                "`"),
-            __FILE__,
-            __LINE__,
+        // `expression.loc` is the guest source location of the assertion
+        // itself, the same one the bytecode compiler builds its own
+        // `AssertSite` from, so a guest catch sees the same file/line
+        // regardless of which backend ran it.
+        auto guest = assertFailure(
+            assertMessage("interpreter", expression.toString),
+            expression.loc.filename.fromStringz.idup,
+            expression.loc.linnum,
         );
         throw new GuestException(guest);
     }
@@ -3747,11 +3767,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: it is null"),
             );
 
-        auto classDeclaration = cast(void*) guest in _classes;
-        throw new GuestException(
-            guest,
-            classDeclaration is null ? null : *classDeclaration,
-        );
+        throw new GuestException(guest);
     }
 
     override void visit(ArrayLengthExp expression) {
@@ -4076,7 +4092,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto classType = expression.newtype.isTypeClass;
         if (classType !is null) {
-            _classes[object] = classType.sym;
             if (expression.member !is null)
                 constructClass(expression, object);
             return;
@@ -4113,11 +4128,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (object is null)
             return;
 
-        auto classDeclaration = object in _classes;
-        if (classDeclaration is null)
+        auto info = *cast(TypeInfo_Class*) (*cast(void**) object);
+        auto declaration = info in _declarationOf;
+        if (declaration is null)
             return;
 
-        auto destructor = (*classDeclaration).dtor;
+        auto destructor = (*declaration).dtor;
         if (destructor !is null) {
             auto layout = layoutOf(destructor);
             auto frame = _frames.push(layout.size, layout.alignment);
@@ -4135,20 +4151,25 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 true,
             );
         }
-
-        _classes.remove(object);
     }
 
     // Parsed guest classes have no emitted native ClassInfo. Build the
     // native TypeInfo_Class metadata druntime needs for allocation and
-    // classinfo; guest virtual calls still use dmd declarations below,
-    // never this vtable, so a guest override's own slot is left however
-    // `snakebite.backends.classinfo.classRuntimeInfo` already leaves it.
+    // classinfo. This vtable is real native layout that native code
+    // reaching a guest object can call through directly (an unoverridden
+    // base method, a template instantiated natively over a guest type,
+    // ...), so every slot stays whatever `classRuntimeInfo_` already
+    // copies down from the base - a real address, never a
+    // `FuncDeclaration` this evaluator alone knows how to walk. Guest
+    // virtual dispatch instead resolves through `_declarationOf`
+    // (`virtualFunction`), the object's own dynamic type answered back
+    // into the `ClassDeclaration` whose own `vtbl` this backend already
+    // walks for an ordinary call.
     private TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
         import snakebite.backends.classinfo:
             classRuntimeInfo_ = classRuntimeInfo, Hooks;
 
-        return classRuntimeInfo_(
+        auto result = classRuntimeInfo_(
             declaration,
             _classRuntime,
             Hooks(
@@ -4157,6 +4178,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 (decl, base) => fillFieldInits(decl, base),
             ),
         );
+        _declarationOf[result] = declaration;
+        return result;
     }
 
     // Every field's own default value, written once into `classRuntimeInfo`'s
@@ -4564,11 +4587,29 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         );
     }
 
+    // `receiver`'s own dynamic `TypeInfo_Class`, read the same way `visit
+    // (PtrExp)`'s `.classinfo` read does - word 0 is the vtable, whose own
+    // slot 0 is the classinfo pointer, real native layout for a guest
+    // object and a native one alike. Looking it up in `_declarationOf`
+    // tells the two apart: only a generated one, built by this backend's
+    // own `classRuntimeInfo`, is ever a key there.
+    private TypeInfo_Class dynamicClassInfo(void* receiver) {
+        import snakebite.nativelayout: loadIntegral;
+
+        return *cast(TypeInfo_Class*) cast(void*) loadIntegral(
+            receiver, size_t.sizeof, false);
+    }
+
+    // A genuinely native receiver's own vtable already holds real,
+    // directly callable addresses - the only slots `classRuntimeInfo`'s
+    // hooks never touch (see its own doc) - so this is the one shape a
+    // guest virtual call can hand straight to the FFI seam instead of
+    // walking a `FuncDeclaration`.
     private void* nativeVirtualAddress(
         FuncDeclaration staticFunction,
         void* receiver,
     ) {
-        if (receiver is null || receiver in _classes
+        if (receiver is null || dynamicClassInfo(receiver) in _declarationOf
                 || !staticFunction.isVirtualMethod)
             return null;
 
@@ -4580,6 +4621,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return vtable[index];
     }
 
+    // `staticFunction`'s own override, for whichever class `receiver`
+    // turns out to hold at run time - dmd's own `ClassDeclaration.vtbl`
+    // already resolves this correctly for any declaration, guest or
+    // native, so once `receiver`'s actual declaration is known (its own
+    // dynamic `TypeInfo_Class`, looked back up in `_declarationOf` - the
+    // reverse of `classRuntimeInfo`'s own cache) this walks that
+    // declaration's own AST vtable rather than this backend's generated
+    // one: `classRuntimeInfo`'s vtable stays real native layout end to
+    // end (see its own doc), so it never holds a `FuncDeclaration` this
+    // evaluator could read back out of it.
     private FuncDeclaration virtualFunction(
         FuncDeclaration staticFunction,
         void* receiver,
@@ -4587,7 +4638,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (!staticFunction.isVirtualMethod)
             return staticFunction;
 
-        auto actual = receiver in _classes;
+        auto actual = dynamicClassInfo(receiver) in _declarationOf;
         if (actual is null)
             return staticFunction;
 
