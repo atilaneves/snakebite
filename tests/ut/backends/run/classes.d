@@ -511,3 +511,161 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// `Type.classinfo` names the same `TypeInfo_Class` an instance of that
+// type carries in its vtable, so `is` between the two agrees with native D.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot dereference a class reference's classinfo"),
+)) {
+    @("staticClassInfoIsInstanceClassInfo." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class B {}
+            class D: B {}
+
+            void main() {
+                Object o = new D;
+                assert(o.classinfo is D.classinfo);
+                assert(typeid(D) is D.classinfo);
+                assert(const(D).classinfo is D.classinfo);
+                assert(o.classinfo !is B.classinfo);
+                B b = new B;
+                assert(b.classinfo is B.classinfo);
+            }
+        });
+    }
+}
+
+// `super.classinfo` is the instance's own dynamic classinfo (dmd lowers it
+// to `**super`), not the base type's static one.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot dereference a class reference's classinfo"),
+)) {
+    @("superClassInfoIsDynamic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class B {}
+            class D: B {
+                string viaSuper() { return super.classinfo.name; }
+                string viaThis() { return this.classinfo.name; }
+                string viaCast() { return (cast(B) this).classinfo.name; }
+                bool isD() { return super.classinfo is D.classinfo; }
+            }
+
+            void main() {
+                auto d = new D;
+                assert(d.viaThis[$ - 2 .. $] == ".D");
+                assert(d.viaCast[$ - 2 .. $] == ".D");
+                assert(d.viaSuper[$ - 2 .. $] == ".D");
+                assert(d.isD);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot dereference classinfo"),
+)) {
+    @("staticNestedClassClassInfo." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Outer {
+                static class Inner {}
+            }
+
+            void main() {
+                assert(Outer.Inner.classinfo.name[$ - 11 .. $] == "Outer.Inner");
+                Object o = new Outer.Inner;
+                assert(o.classinfo is Outer.Inner.classinfo);
+                assert(o.classinfo !is Outer.classinfo);
+            }
+        });
+    }
+}
+
+// `Exception.classinfo` on a native class is the real linked
+// `TypeInfo_Class`: the one a native instance's vtable names, the one
+// `typeid(Exception)` yields, and the one whose `base` is `Throwable`'s.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot dereference classinfo"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "`Exception.classinfo.name == \"object.Exception\"` fails"),
+)) {
+    @("nativeClassStaticClassInfo." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                auto e = new Exception("x");
+                assert(Exception.classinfo.name == "object.Exception");
+                assert(e.classinfo is Exception.classinfo);
+                assert(typeid(Exception) is Exception.classinfo);
+                assert(Exception.classinfo.base is Throwable.classinfo);
+                Throwable t = e;
+                assert(t.classinfo is Exception.classinfo);
+            }
+        });
+    }
+}
+
+// A guest subclass of a native class has the native class's real linked
+// `TypeInfo_Class` as `base`, both from the static type and from an
+// instance.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot dereference classinfo"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "`MyException.classinfo.base is Exception.classinfo` fails"),
+)) {
+    @("guestSubclassOfNativeClassStaticClassInfo." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class MyException: Exception {
+                this() { super("x"); }
+            }
+
+            void main() {
+                Throwable t = new MyException;
+                assert(t.classinfo is MyException.classinfo);
+                assert(MyException.classinfo.base is Exception.classinfo);
+                assert(t.classinfo.base is Exception.classinfo);
+            }
+        });
+    }
+}
+
+// A native `Exception` that went through `throw`/`catch` still carries the
+// real linked `TypeInfo_Class` that `Exception.classinfo`, `typeid` and a
+// dynamic cast all agree on.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot dereference classinfo"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "`caught.classinfo is typeid(Exception)` fails"),
+)) {
+    @("caughtNativeExceptionClassInfoIdentity." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                Throwable caught;
+                try {
+                    throw new Exception("x");
+                } catch (Throwable t) {
+                    caught = t;
+                }
+                assert(caught.classinfo is Exception.classinfo);
+                assert(caught.classinfo is typeid(Exception));
+                assert(cast(Exception) caught !is null);
+            }
+        });
+    }
+}
