@@ -3758,20 +3758,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // larger-lower-than-upper failure from an out-of-range one apart
         // (`ArraySliceError.msg`) - so this calls it twice, once per
         // condition, rather than building one combined flag first.
-        const sliceRegisters = [
-            Register(Register.Kind.pointer, 8),
-            Register(Register.Kind.unsigned, 4),
-            Register(Register.Kind.unsigned, 8),
-            Register(Register.Kind.unsigned, 8),
-            Register(Register.Kind.unsigned, 8),
-        ];
+        import snakebite.backends.elementaddress:
+            sliceBoundsHook, sliceBoundsRegisters;
+
         const orderOffset = reserveTemp(pointerFacts);
         emit(&opCopy, orderOffset, lowOffset, size_t.sizeof);
         emit(&opLessOrEqualUnsigned, orderOffset, highOffset, size_t.sizeof);
         compileBoundsHook(
             orderOffset,
-            "_d_arraybounds_slicep",
-            sliceRegisters,
+            sliceBoundsHook,
+            sliceBoundsRegisters,
             [
                 Arg(lowOffset, 0, size_t.sizeof),
                 Arg(highOffset, 0, size_t.sizeof),
@@ -3785,8 +3781,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             arrayOffset + arrayLengthOffset, size_t.sizeof);
         compileBoundsHook(
             orderOffset,
-            "_d_arraybounds_slicep",
-            sliceRegisters,
+            sliceBoundsHook,
+            sliceBoundsRegisters,
             [
                 Arg(lowOffset, 0, size_t.sizeof),
                 Arg(highOffset, 0, size_t.sizeof),
@@ -5745,6 +5741,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t compileElementAddress(
         IndexExp expression, in TypeFacts arrayFacts,
     ) {
+        import snakebite.backends.elementaddress:
+            indexBoundsHook, indexBoundsRegisters;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
         const arrayOffset = reserveTemp(arrayFacts);
@@ -5771,13 +5769,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         compileBoundsHook(
             boundsOffset,
-            "_d_arraybounds_indexp",
-            [
-                Register(Register.Kind.pointer, 8),
-                Register(Register.Kind.unsigned, 4),
-                Register(Register.Kind.unsigned, 8),
-                Register(Register.Kind.unsigned, 8),
-            ],
+            indexBoundsHook,
+            indexBoundsRegisters,
             [
                 Arg(indexOffset, 0, size_t.sizeof),
                 Arg(arrayOffset + arrayLengthOffset, 0, size_t.sizeof),
@@ -5851,9 +5844,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `expression.e1`'s reproduces exactly that order, since each nested
     // call does the same in turn.
     private size_t compileStaticElementAddress(IndexExp expression) {
-        auto sarrayType = expression.e1.type.isTypeSArray;
-        const elementFacts = TypeFacts.of(sarrayType.next);
-        const dim = cast(size_t) sarrayType.dim.toInteger;
+        import snakebite.backends.elementaddress:
+            classify, indexBoundsHook, indexBoundsRegisters;
+
+        const plan = classify(expression.e1.type);
+        const elementFacts = plan.elementFacts;
+        const dim = plan.staticLength;
 
         const dimOffset = reserveTemp(pointerFacts);
         emit(&opConstant, dimOffset, addConstant(cast(long) dim),
@@ -5882,13 +5878,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // hook instead of `opAssert`.
         compileBoundsHook(
             boundsOffset,
-            "_d_arraybounds_indexp",
-            [
-                Register(Register.Kind.pointer, 8),
-                Register(Register.Kind.unsigned, 4),
-                Register(Register.Kind.unsigned, 8),
-                Register(Register.Kind.unsigned, 8),
-            ],
+            indexBoundsHook,
+            indexBoundsRegisters,
             [
                 Arg(indexOffset, 0, size_t.sizeof),
                 Arg(dimOffset, 0, size_t.sizeof),

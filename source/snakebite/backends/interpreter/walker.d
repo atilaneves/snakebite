@@ -106,6 +106,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.ffi:
         CallAdapter, CallbackArguments, CallbackBridge, CallPlan, CallResult,
         PlanCache;
+    import snakebite.ffi.abi: Register;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
         initializerValueOf, isIntegralSize, TypeFacts;
@@ -748,6 +749,43 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // as a guest-catchable exception.
         try
             plan.call(returnPlace, adapted.values);
+        catch (SnakebiteException exception)
+            throw exception;
+        catch (GuestException exception)
+            throw exception;
+        catch (Throwable guest)
+            throw new GuestException(guest);
+    }
+
+    // Calls druntime's own bounds-failure hook - `_d_arraybounds_indexp`
+    // or `_d_arraybounds_slicep`, see `snakebite.backends.elementaddress`
+    // - the same one the bytecode compiler emits a call to. It never
+    // returns, so every caller here only reaches this once its own bounds
+    // check already failed; wrapping its throw the same way `callHost`
+    // wraps any other native call lets a guest `catch (RangeError)` see
+    // it, instead of the interpreter's own refusal or a hand-built guest
+    // exception.
+    extern(D) private void throwArrayBounds(
+        string hookName,
+        scope const(Register)[] parameterRegisters,
+        in Loc loc,
+        scope const(void*)[] extraArguments,
+    ) {
+        auto plan = _plans.rawPlanOf(hookName, parameterRegisters);
+        if (plan is null)
+            throw new SnakebiteException(
+                text("interpreter cannot resolve the symbol `", hookName,
+                    "`: it is not in this process"),
+            );
+
+        const file = cast(const(char)*) loc.filename;
+        const line = cast(uint) loc.linnum;
+        const(void*)[] arguments =
+            [cast(const(void)*) &file, cast(const(void)*) &line]
+            ~ extraArguments;
+
+        try
+            plan.call(null, arguments);
         catch (SnakebiteException exception)
             throw exception;
         catch (GuestException exception)
@@ -2450,7 +2488,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private ElementAddress indexAddressOf(IndexExp expression) {
-        import core.exception: ArrayIndexError;
+        import snakebite.backends.elementaddress:
+            indexBoundsHook, indexBoundsRegisters;
         import std.conv: text;
 
         auto array = expression.e1;
@@ -2489,12 +2528,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (array.type.ty == Tsarray) {
             const length = cast(size_t) array.type.isTypeSArray.dim.toInteger;
             const index = indexOf(expression, length);
-            if (index < 0 || cast(size_t) index >= length)
-                throw new SnakebiteException(
-                    text("interpreter cannot index `", array.toString,
-                        "` at ", index, ": the array is ", length,
-                        " long"),
+            if (index < 0 || cast(size_t) index >= length) {
+                const boundedIndex = cast(size_t) index;
+                throwArrayBounds(
+                    indexBoundsHook, indexBoundsRegisters, expression.loc,
+                    [cast(const(void)*) &boundedIndex,
+                        cast(const(void)*) &length],
                 );
+            }
 
             const stride = factsOf(array.type.nextOf).size;
             auto base = cast(ubyte*) addressOf(array);
@@ -2505,13 +2546,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const value = evaluateArray(array, factsOf(array.type));
         const index = indexOf(expression, value.length);
 
-        if (index < 0 || cast(size_t) index >= value.length)
-            throw new GuestException(new ArrayIndexError(
-                cast(size_t) index,
-                value.length,
-                __FILE__,
-                __LINE__,
-            ));
+        if (index < 0 || cast(size_t) index >= value.length) {
+            const boundedIndex = cast(size_t) index;
+            const length = value.length;
+            throwArrayBounds(
+                indexBoundsHook, indexBoundsRegisters, expression.loc,
+                [cast(const(void)*) &boundedIndex,
+                    cast(const(void)*) &length],
+            );
+        }
 
         const stride = factsOf(array.type.nextOf).size;
         return ElementAddress(
@@ -3723,7 +3766,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // The array is evaluated before the index, the order D specifies.
     override void visit(IndexExp expression) {
         import core.stdc.string: memcpy;
-        import std.conv: text;
+        import snakebite.backends.elementaddress:
+            indexBoundsHook, indexBoundsRegisters;
 
         auto array = expression.e1;
 
@@ -3736,12 +3780,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (array.type.ty == Tsarray) {
             const length = cast(size_t) array.type.isTypeSArray.dim.toInteger;
             const index = indexOf(expression, length);
-            if (index < 0 || cast(size_t) index >= length)
-                throw new SnakebiteException(
-                    text("interpreter cannot index `", array.toString,
-                        "` at ", index, ": the array is ", length,
-                        " long"),
+            if (index < 0 || cast(size_t) index >= length) {
+                const boundedIndex = cast(size_t) index;
+                throwArrayBounds(
+                    indexBoundsHook, indexBoundsRegisters, expression.loc,
+                    [cast(const(void)*) &boundedIndex,
+                        cast(const(void)*) &length],
                 );
+            }
 
             const stride = factsOf(array.type.nextOf).size;
             assert(stride == _facts.size, "an index changed width");
@@ -3844,8 +3890,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const hi = expression.upr is null
             ? cast(long) sourceLength : asIntegral(expression.upr);
 
-        if (lo < 0 || hi < lo
-                || (knownLength && cast(size_t) hi > sourceLength))
+        if (knownLength) {
+            if (lo < 0 || hi < lo || cast(size_t) hi > sourceLength) {
+                import snakebite.backends.elementaddress:
+                    sliceBoundsHook, sliceBoundsRegisters;
+
+                const lower = cast(size_t) lo;
+                const upper = cast(size_t) hi;
+                throwArrayBounds(
+                    sliceBoundsHook, sliceBoundsRegisters, expression.loc,
+                    [cast(const(void)*) &lower, cast(const(void)*) &upper,
+                        cast(const(void)*) &sourceLength],
+                );
+            }
+        } else if (lo < 0 || hi < lo)
             throw new SnakebiteException(
                 text("interpreter cannot slice `", array.toString, "` [",
                     lo, " .. ", hi, "]"),

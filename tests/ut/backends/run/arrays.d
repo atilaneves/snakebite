@@ -625,9 +625,6 @@ static foreach (backend; Matrix!(
 // past the end.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter reports an out-of-bounds slice as its own " ~
-            "error, not as a guest-catchable `RangeError`"),
 )) {
     @("dynamicSliceScalarFill.upperOutOfBounds." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -653,9 +650,6 @@ static foreach (backend; Matrix!(
 // Reversed bounds are a `RangeError` too.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter reports an out-of-bounds slice as its own " ~
-            "error, not as a guest-catchable `RangeError`"),
 )) {
     @("dynamicSliceScalarFill.reversedBounds." ~ backend.stringof)
     @Tags(backend.stringof)
