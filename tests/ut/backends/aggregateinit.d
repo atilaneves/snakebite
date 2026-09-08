@@ -4,7 +4,7 @@ module ut.backends.aggregateinit;
 import ut;
 import dmd.expression: Expression, NewExp, StructLiteralExp;
 import snakebite.backends.aggregateinit:
-    planPositionalFields, planStructLiteral, StepKind;
+    InitStep, planPositionalFields, planStructLiteral;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 
@@ -47,10 +47,10 @@ unittest {
 
     plan.zeroFill.should == true;
     plan.steps.length.should == 2;
-    plan.steps[0].kind.should == StepKind.value;
+    plan.steps[0].kind.should == InitStep.Kind.value;
     plan.steps[0].offset.should == 0;
     plan.steps[0].facts.size.should == int.sizeof;
-    plan.steps[1].kind.should == StepKind.value;
+    plan.steps[1].kind.should == InitStep.Kind.value;
     plan.steps[1].offset.should == int.sizeof;
 }
 
@@ -65,9 +65,9 @@ unittest {
     const plan = planStructLiteral(literal);
 
     plan.steps.length.should == 2;
-    plan.steps[0].kind.should == StepKind.bitfield;
+    plan.steps[0].kind.should == InitStep.Kind.bitfield;
     (plan.steps[0].field !is null).should == true;
-    plan.steps[1].kind.should == StepKind.bitfield;
+    plan.steps[1].kind.should == InitStep.Kind.bitfield;
 }
 
 
@@ -82,8 +82,8 @@ unittest {
     const plan = planStructLiteral(literal);
 
     plan.steps.length.should == 2;
-    plan.steps[0].kind.should == StepKind.value;
-    plan.steps[1].kind.should == StepKind.broadcast;
+    plan.steps[0].kind.should == InitStep.Kind.value;
+    plan.steps[1].kind.should == InitStep.Kind.broadcast;
     plan.steps[1].count.should == 3;
     plan.steps[1].facts.size.should == int.sizeof;
 }
@@ -109,10 +109,10 @@ unittest {
     const plan = planStructLiteral(literal);
 
     plan.steps.length.should == 3;
-    plan.steps[0].kind.should == StepKind.vthis;
+    plan.steps[0].kind.should == InitStep.Kind.vthis;
     (plan.steps[0].parentFunction !is null).should == true;
-    plan.steps[1].kind.should == StepKind.value;
-    plan.steps[2].kind.should == StepKind.value;
+    plan.steps[1].kind.should == InitStep.Kind.value;
+    plan.steps[2].kind.should == InitStep.Kind.value;
 }
 
 
@@ -130,6 +130,6 @@ unittest {
 
     plan.zeroFill.should == false;
     plan.steps.length.should == 2;
-    plan.steps[0].kind.should == StepKind.value;
-    plan.steps[1].kind.should == StepKind.value;
+    plan.steps[0].kind.should == InitStep.Kind.value;
+    plan.steps[1].kind.should == InitStep.Kind.value;
 }

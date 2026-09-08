@@ -4,7 +4,7 @@ module ut.backends.casts;
 import ut;
 import dmd.expression: CastExp;
 import dmd.func: FuncDeclaration;
-import snakebite.backends.casts: classify, Kind;
+import snakebite.backends.casts: classify, CastPlan;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction, typeFunctionOf;
 
@@ -41,7 +41,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == Kind.narrow;
+    plan.kind.should == CastPlan.Kind.narrow;
     plan.sourceFacts.size.should == long.sizeof;
     plan.destFacts.size.should == int.sizeof;
 }
@@ -56,7 +56,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == Kind.widenUnsigned;
+    plan.kind.should == CastPlan.Kind.widenUnsigned;
 }
 
 
@@ -69,7 +69,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == Kind.widenSigned;
+    plan.kind.should == CastPlan.Kind.widenSigned;
 }
 
 
@@ -82,7 +82,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == Kind.toBool;
+    plan.kind.should == CastPlan.Kind.toBool;
 }
 
 
@@ -95,7 +95,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == Kind.copy;
+    plan.kind.should == CastPlan.Kind.copy;
 }
 
 
@@ -108,7 +108,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == Kind.pointerToIntegral;
+    plan.kind.should == CastPlan.Kind.pointerToIntegral;
 }
 
 
@@ -129,7 +129,7 @@ unittest {
 
     const plan = classify(parameters[0].type, parameters[1].type);
 
-    plan.kind.should == Kind.sarrayToPointer;
+    plan.kind.should == CastPlan.Kind.sarrayToPointer;
 }
 
 
@@ -142,7 +142,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == Kind.sliceToPointer;
+    plan.kind.should == CastPlan.Kind.sliceToPointer;
 }
 
 
@@ -155,7 +155,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == Kind.reinterpretSlice;
+    plan.kind.should == CastPlan.Kind.reinterpretSlice;
     plan.sourceFacts.elementSize.should == int.sizeof;
     plan.destFacts.elementSize.should == 1;
 }
@@ -170,7 +170,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == Kind.floatWidth;
+    plan.kind.should == CastPlan.Kind.floatWidth;
 }
 
 
@@ -183,7 +183,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == Kind.integralToFloat;
+    plan.kind.should == CastPlan.Kind.integralToFloat;
 }
 
 
@@ -196,7 +196,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == Kind.floatToIntegral;
+    plan.kind.should == CastPlan.Kind.floatToIntegral;
 }
 
 
@@ -218,5 +218,5 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == Kind.classReference;
+    plan.kind.should == CastPlan.Kind.classReference;
 }

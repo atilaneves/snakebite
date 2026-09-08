@@ -7,23 +7,23 @@ private:
 import snakebite.backends.layout: FrameLayout;
 
 
-// One step in walking a static chain outward from a nested function's own
-// frame toward an owner further out: which pointer word holds the next
-// context, and where to read it from.
-public enum HopKind {
-    // A closure's first word always links to the context it was built
-    // from - `allocateClosure`'s own convention, shared by both backends.
-    closureWord,
-    // A non-closure function's hidden `this`/context parameter, at its
-    // own frame offset.
-    frameSlot,
-    // A nested struct's own hidden context field (`vthis`), at its own
-    // offset among that struct's declared fields.
-    structField,
-}
-
 public struct Hop {
-    public HopKind kind;
+    // One step in walking a static chain outward from a nested function's own
+    // frame toward an owner further out: which pointer word holds the next
+    // context, and where to read it from.
+    public enum Kind {
+        // A closure's first word always links to the context it was built
+        // from - `allocateClosure`'s own convention, shared by both backends.
+        closureWord,
+        // A non-closure function's hidden `this`/context parameter, at its
+        // own frame offset.
+        frameSlot,
+        // A nested struct's own hidden context field (`vthis`), at its own
+        // offset among that struct's declared fields.
+        structField,
+    }
+
+    public Kind kind;
     // Meaningful for `frameSlot` and `structField`; always zero for
     // `closureWord`.
     public size_t offset;
@@ -53,7 +53,7 @@ public Hop[] staticChainPath(
     if (layout.hiddenThis.variable is null)
         return null;
 
-    Hop[] hops = [Hop(HopKind.frameSlot, layout.hiddenThis.parameter.offset)];
+    Hop[] hops = [Hop(Hop.Kind.frameSlot, layout.hiddenThis.parameter.offset)];
 
     auto parent = from.toParent2();
     auto currentFunction = parent is null ? null : parent.isFuncDeclaration;
@@ -64,7 +64,7 @@ public Hop[] staticChainPath(
             if (!currentStruct.isNested() || currentStruct.vthis is null)
                 return null;
 
-            hops ~= Hop(HopKind.structField, currentStruct.vthis.offset);
+            hops ~= Hop(Hop.Kind.structField, currentStruct.vthis.offset);
 
             auto next = currentStruct.toParent2();
             currentFunction = next is null ? null : next.isFuncDeclaration;
@@ -76,14 +76,14 @@ public Hop[] staticChainPath(
             return null;
 
         if (functionNeedsClosure(currentFunction))
-            hops ~= Hop(HopKind.closureWord, 0);
+            hops ~= Hop(Hop.Kind.closureWord, 0);
         else {
             const currentLayout = FrameLayout.of(currentFunction);
             if (currentLayout.hiddenThis.variable is null)
                 return null;
 
             hops ~= Hop(
-                HopKind.frameSlot,
+                Hop.Kind.frameSlot,
                 currentLayout.hiddenThis.parameter.offset,
             );
         }

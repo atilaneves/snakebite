@@ -5,7 +5,7 @@ import ut;
 import dmd.dsymbol: Dsymbol;
 import dmd.func: FuncDeclaration;
 import dmd.statement: Statement;
-import snakebite.backends.staticchain: Hop, HopKind, staticChainPath;
+import snakebite.backends.staticchain: Hop, staticChainPath;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 
@@ -97,7 +97,7 @@ unittest {
     const path = staticChainPath(nesting.target, nesting.outer);
 
     path.length.should == 1;
-    path[0].kind.should == HopKind.frameSlot;
+    path[0].kind.should == Hop.Kind.frameSlot;
 }
 
 
@@ -120,8 +120,8 @@ unittest {
     const path = staticChainPath(nesting.target, nesting.outer);
 
     path.length.should == 2;
-    path[0].kind.should == HopKind.frameSlot;
-    path[1].kind.should == HopKind.structField;
+    path[0].kind.should == Hop.Kind.frameSlot;
+    path[1].kind.should == Hop.Kind.structField;
 }
 
 
@@ -150,8 +150,8 @@ unittest {
     const path = staticChainPath(nesting.target, nesting.outer);
 
     path.length.should == 2;
-    path[0].kind.should == HopKind.frameSlot;
-    path[1].kind.should == HopKind.closureWord;
+    path[0].kind.should == Hop.Kind.frameSlot;
+    path[1].kind.should == Hop.Kind.closureWord;
 }
 
 

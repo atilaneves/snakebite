@@ -3488,9 +3488,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         size_t base,
         bool isPointer,
     ) {
-        import snakebite.backends.aggregateinit: StepKind;
+        import snakebite.backends.aggregateinit: InitStep;
 
-        final switch (step.kind) with (StepKind) {
+        final switch (step.kind) with (InitStep.Kind) {
         case vthis:
             if (step.parentFunction is null)
                 throw rejection(_function, loc, "a nested struct's static chain");
@@ -3898,7 +3898,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // constructor and a bare `new Reader` (no arguments at all) get
         // a real context rather than `.init`'s zero.
         import snakebite.backends.aggregateinit:
-            AggregateInitPlan, planPositionalFields, StepKind;
+            AggregateInitPlan, InitStep, planPositionalFields;
 
         auto plan = structType is null
             ? AggregateInitPlan.init
@@ -3906,7 +3906,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 expression.member is null ? expression.arguments : null);
 
         foreach (step; plan.steps)
-            if (step.kind == StepKind.vthis)
+            if (step.kind == InitStep.Kind.vthis)
                 applyStep(step, expression.loc, objectOffset, true);
 
         if (expression.member !is null) {
@@ -3918,7 +3918,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         foreach (step; plan.steps)
-            if (step.kind != StepKind.vthis)
+            if (step.kind != InitStep.Kind.vthis)
                 applyStep(step, expression.loc, objectOffset, true);
     }
 
@@ -4779,7 +4779,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileCast(
         CastExp expression, in size_t destOffset, in size_t width,
     ) {
-        import snakebite.backends.casts: classify, Kind;
+        import snakebite.backends.casts: classify, CastPlan;
         import std.conv: text;
 
         auto sourceType = expression.e1.type;
@@ -4792,7 +4792,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const plan = classify(sourceType, destType);
 
-        final switch (plan.kind) with (Kind) {
+        final switch (plan.kind) with (CastPlan.Kind) {
         case copy:
             return evalInto(expression.e1, destOffset, width);
 

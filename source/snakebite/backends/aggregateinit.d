@@ -17,15 +17,15 @@ import snakebite.nativelayout: TypeFacts;
 // decides these once; each backend keeps only "evaluate into place" and
 // "store bitfield at address" for the field steps, plus its own way of
 // reading a function's context for the `vthis` step.
-public enum StepKind {
-    vthis,
-    value,
-    bitfield,
-    broadcast,
-}
-
 public struct InitStep {
-    public StepKind kind;
+    public enum Kind {
+        vthis,
+        value,
+        bitfield,
+        broadcast,
+    }
+
+    public Kind kind;
     public size_t offset;
     // Meaningful for `value`, `bitfield` and `broadcast`.
     public TypeFacts facts;
@@ -111,7 +111,7 @@ private bool tryVthisStep(
         return false;
 
     auto parent = sd.toParent2();
-    step = InitStep(StepKind.vthis, sd.vthis.offset);
+    step = InitStep(InitStep.Kind.vthis, sd.vthis.offset);
     step.parentFunction = parent is null ? null : parent.isFuncDeclaration;
     return true;
 }
@@ -125,7 +125,7 @@ private InitStep fieldStep(
         const elementFacts = TypeFacts.of(source.type);
         const fieldFacts = TypeFacts.of(sarrayType);
         auto step = InitStep(
-            StepKind.broadcast, field.offset, elementFacts, source.type,
+            InitStep.Kind.broadcast, field.offset, elementFacts, source.type,
         );
         step.count = fieldFacts.size / elementFacts.size;
         step.source = source;
@@ -134,13 +134,14 @@ private InitStep fieldStep(
 
     const facts = TypeFacts.of(field.type);
     if (field.isBitFieldDeclaration !is null) {
-        auto step = InitStep(StepKind.bitfield, field.offset, facts, field.type);
+        auto step = InitStep(
+            InitStep.Kind.bitfield, field.offset, facts, field.type);
         step.source = source;
         step.field = field;
         return step;
     }
 
-    auto step = InitStep(StepKind.value, field.offset, facts, field.type);
+    auto step = InitStep(InitStep.Kind.value, field.offset, facts, field.type);
     step.source = source;
     return step;
 }

@@ -3276,7 +3276,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // meaning is "keep `e`'s effects, produce no value", and a `null`-to-AA
     // cast, whose destination write does not depend on the source's type.
     protected override void visitUnloweredCast(CastExp expression) {
-        import snakebite.backends.casts: classify, Kind;
+        import snakebite.backends.casts: classify, CastPlan;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
         import std.conv: text;
@@ -3309,7 +3309,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto plan = classify(sourceType, _type);
 
-        final switch (plan.kind) with (Kind) {
+        final switch (plan.kind) with (CastPlan.Kind) {
         case copy:
             evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
             return;
@@ -4075,14 +4075,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         import snakebite.backends.aggregateinit:
-            planPositionalFields, StepKind;
+            InitStep, planPositionalFields;
 
         auto declaration = expression.newtype.isTypeStruct.sym;
         auto plan = planPositionalFields(declaration,
             expression.member is null ? expression.arguments : null);
 
         foreach (step; plan.steps)
-            if (step.kind == StepKind.vthis)
+            if (step.kind == InitStep.Kind.vthis)
                 applyStep(step, object);
 
         if (expression.member !is null) {
@@ -4091,7 +4091,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         foreach (step; plan.steps)
-            if (step.kind != StepKind.vthis)
+            if (step.kind != InitStep.Kind.vthis)
                 applyStep(step, object);
     }
 
@@ -4302,10 +4302,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         ubyte* base,
     ) {
         import core.stdc.string: memcpy;
-        import snakebite.backends.aggregateinit: StepKind;
+        import snakebite.backends.aggregateinit: InitStep;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
 
-        final switch (step.kind) with (StepKind) {
+        final switch (step.kind) with (InitStep.Kind) {
         case vthis:
             // `parentFunction` is `null` when the struct's lexical parent
             // is not a function - dmd fact, not itself an error: leaving
