@@ -559,23 +559,23 @@ public const(Instruction)* opCall(
 ) {
     const site = callSites[pc.source];
     final switch (site.kind) with (CallSite.Kind) {
-        case guest:
-            return callFunction(pc, frame, site, site.callee, frames);
-        case indirect:
-            auto callee =
-                *cast(const(Function)**) (frame + site.calleeSlotOffset);
-            return callFunction(pc, frame, site, callee, frames);
-        case native:
-            const(void)*[maxArguments] arguments;
-            foreach (i, arg; site.args)
-                arguments[i] = frame + arg.callerOffset;
-            auto result = pc.destination == discardResult
-                ? null
-                : frame + pc.destination;
-            executeCallPlan(
-                site.nativePlan, result, arguments.ptr, site.args.length,
-            );
-            return pc + 1;
+    case guest:
+        return callFunction(pc, frame, site, site.callee, frames);
+    case indirect:
+        auto callee =
+            *cast(const(Function)**) (frame + site.calleeSlotOffset);
+        return callFunction(pc, frame, site, callee, frames);
+    case native:
+        const(void)*[maxArguments] arguments;
+        foreach (i, arg; site.args)
+            arguments[i] = frame + arg.callerOffset;
+        auto result = pc.destination == discardResult
+            ? null
+            : frame + pc.destination;
+        executeCallPlan(
+            site.nativePlan, result, arguments.ptr, site.args.length,
+        );
+        return pc + 1;
     }
 }
 
