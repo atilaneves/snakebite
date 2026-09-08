@@ -317,13 +317,9 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns an out-of-range index into a compile-time error, so " ~
         "it cannot be expressed the same way as a runtime throw"),
-    Omit!(Interpreter, Because.diverges,
-        "the interpreter refuses an out-of-range index instead, since it " ~
-        "has no guest try/catch to throw into"),
 )) {
     @("arrays.index.outOfRange.throws.RangeError." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -400,16 +396,15 @@ unittest {
         .shouldThrow!RangeError;
 }
 
-// Bytecode does not yet have guest try/catch (see the `RangeError` test
-// above, omitted for Bytecode), so an out-of-range index still escapes as
-// the host-level `AssertError` a bounds check throws. That escape must
-// carry its own site - the index expression's own message and source
-// location - not a VM-internal array bounds violation and not some other
-// assert site's message.
-@("arrays.index.outOfRange.throws.attributedAssertError.Bytecode")
+// An out-of-range index that no guest `catch` handles (see the
+// `RangeError` test above, which does) escapes to the host as a
+// `RangeError` - the same exception type and site compiled D throws, not
+// a VM-internal array bounds violation and not some other assert site's
+// location.
+@("arrays.index.outOfRange.throws.attributedRangeError.Bytecode")
 @Tags("Bytecode")
 unittest {
-    import core.exception: AssertError;
+    import core.exception: RangeError;
     import snakebite.backends.backend: Program;
     import snakebite.backends.bytecode: Bytecode;
     import snakebite.frontend.compiler: parseSnippet;
@@ -425,25 +420,26 @@ unittest {
     auto function_ = findFunction(module_, "oob");
     auto instance = new Bytecode(Program([module_]));
 
-    AssertError caught;
+    RangeError caught;
     int result;
     try
         instance.call(function_, &result, []);
-    catch (AssertError error)
+    catch (RangeError error)
         caught = error;
 
     (caught !is null).should == true;
-    caught.msg.should == "bytecode: index out of bounds: `cast(ulong)i`";
+    caught.line.should == 5;
+    caught.msg.should == "index [5] is out of bounds for array of length 3";
 }
 
 // The same bounds check, but with an unrelated assertion earlier in the
 // same function - one that passes, so it never itself throws. The failure
-// must still name the index expression, not the passing assertion's own
-// message and line.
+// must still name the index expression's own line, not the passing
+// assertion's.
 @("arrays.index.outOfRange.attributesToTheIndexNotAnUnrelatedAssert.Bytecode")
 @Tags("Bytecode")
 unittest {
-    import core.exception: AssertError;
+    import core.exception: RangeError;
     import snakebite.backends.backend: Program;
     import snakebite.backends.bytecode: Bytecode;
     import snakebite.frontend.compiler: parseSnippet;
@@ -461,15 +457,16 @@ unittest {
     auto function_ = findFunction(module_, "misattributed");
     auto instance = new Bytecode(Program([module_]));
 
-    AssertError caught;
+    RangeError caught;
     int result;
     try
         instance.call(function_, &result, []);
-    catch (AssertError error)
+    catch (RangeError error)
         caught = error;
 
     (caught !is null).should == true;
-    caught.msg.should == "bytecode: index out of bounds: `cast(ulong)i`";
+    caught.line.should == 7;
+    caught.msg.should == "index [9] is out of bounds for array of length 1";
 }
 
 static foreach (backend; Matrix!()) {

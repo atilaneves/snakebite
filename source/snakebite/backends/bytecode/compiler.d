@@ -9,6 +9,7 @@ import object: TypeInfo_Class;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.ffi:
     CallbackBridge, maxArguments, PlanCache, supportsBoolFunction;
+import snakebite.ffi.abi: Register;
 
 
 // Whether this compiler can lay `facts` out in a frame slot at all: an
@@ -468,7 +469,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opIntegralToFloatSigned, opIntegralToFloatUnsigned,
         opJump, opLessOrEqualSigned, opLessOrEqualUnsigned, opLessThanSigned,
         opLessThanUnsigned, opLoadIndirect, opLogicalNot, opModuloSigned,
-        opModuloUnsigned, opMultiply, opNegate, opNotEqual, opRangeError,
+        opModuloUnsigned, opMultiply, opNegate, opNotEqual,
         opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
         opSliceCopy, opSliceFill,
@@ -2618,7 +2619,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // (`compileSliceAssign` above) does, so this reads both sides'
     // lengths at run time, checks them equal the same way a run-time
     // slice's own bounds are already checked (`visit(SliceExp)`'s
-    // `opRangeError` use), and copies through `opSliceCopy` - the one
+    // `compileBoundsHook` use), and copies through `opSliceCopy` - the one
     // opcode this VM has for a byte count that is not known until the
     // program runs.
     //
@@ -2645,7 +2646,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import dmd.astenums: Tarray, Tpointer, Tvoid;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
-        import std.string: fromStringz;
 
         if (target.e1.type.ty != Tarray && target.e1.type.ty != Tpointer)
             throw rejection(_function, expression.loc,
@@ -2702,19 +2702,26 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // D requires both sides of a dynamic slice assignment to
             // share one length; a compiled program never proves that at
             // compile time, so this is the run-time counterpart to
-            // `_d_arraycopy`'s own `RangeError` on a mismatch.
+            // `_d_arraycopy`'s own `RangeError` on a mismatch. Native
+            // `_d_arraycopy` reports no index or length of its own, so the
+            // plain `_d_arrayboundsp` hook (`RangeError`, not one of its
+            // subclasses) is the closest match - see `compileBoundsHook`'s
+            // own doc.
             const orderOffset = reserveTemp(pointerFacts);
             emit(&opCopy, orderOffset, destSliceOffset + arrayLengthOffset,
                 size_t.sizeof);
             emit(&opEqual, orderOffset,
                 sourceSliceOffset + arrayLengthOffset, size_t.sizeof);
-            const site = AssertSite(
-                null,
-                expression.loc.filename.fromStringz.idup,
-                expression.loc.linnum,
+            compileBoundsHook(
+                orderOffset,
+                "_d_arrayboundsp",
+                [
+                    Register(Register.Kind.pointer, 8),
+                    Register(Register.Kind.unsigned, 4),
+                ],
+                [],
+                expression.loc,
             );
-            _assertSites ~= site;
-            emit(&opRangeError, orderOffset, _assertSites.length - 1, 1);
 
             emit(&opSliceCopy, destSliceOffset, sourceSliceOffset,
                 elementSize);
@@ -3679,7 +3686,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tpointer, Tsarray;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset;
-        import std.string: fromStringz;
 
         requireDestination(expression);
 
@@ -3770,23 +3776,48 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         // D requires both bounds to be within the source array and the
         // lower bound to come first. Check before pointer arithmetic so a
-        // bad slice cannot form an address outside the guest array.
+        // bad slice cannot form an address outside the guest array. Both
+        // checks report through the same hook with the same three
+        // operands - `_d_arraybounds_slicep` itself tells a
+        // larger-lower-than-upper failure from an out-of-range one apart
+        // (`ArraySliceError.msg`) - so this calls it twice, once per
+        // condition, rather than building one combined flag first.
+        const sliceRegisters = [
+            Register(Register.Kind.pointer, 8),
+            Register(Register.Kind.unsigned, 4),
+            Register(Register.Kind.unsigned, 8),
+            Register(Register.Kind.unsigned, 8),
+            Register(Register.Kind.unsigned, 8),
+        ];
         const orderOffset = reserveTemp(pointerFacts);
         emit(&opCopy, orderOffset, lowOffset, size_t.sizeof);
         emit(&opLessOrEqualUnsigned, orderOffset, highOffset, size_t.sizeof);
-        const site = AssertSite(
-            null,
-            expression.loc.filename.fromStringz.idup,
-            expression.loc.linnum,
+        compileBoundsHook(
+            orderOffset,
+            "_d_arraybounds_slicep",
+            sliceRegisters,
+            [
+                Arg(lowOffset, 0, size_t.sizeof),
+                Arg(highOffset, 0, size_t.sizeof),
+                Arg(arrayOffset + arrayLengthOffset, 0, size_t.sizeof),
+            ],
+            expression.loc,
         );
-        _assertSites ~= site;
-        const siteIndex = _assertSites.length - 1;
-        emit(&opRangeError, orderOffset, siteIndex, 1);
 
         emit(&opCopy, orderOffset, highOffset, size_t.sizeof);
         emit(&opLessOrEqualUnsigned, orderOffset,
             arrayOffset + arrayLengthOffset, size_t.sizeof);
-        emit(&opRangeError, orderOffset, siteIndex, 1);
+        compileBoundsHook(
+            orderOffset,
+            "_d_arraybounds_slicep",
+            sliceRegisters,
+            [
+                Arg(lowOffset, 0, size_t.sizeof),
+                Arg(highOffset, 0, size_t.sizeof),
+                Arg(arrayOffset + arrayLengthOffset, 0, size_t.sizeof),
+            ],
+            expression.loc,
+        );
 
         emit(&opCopy, _destination + arrayLengthOffset,
             highOffset, size_t.sizeof);
@@ -5714,6 +5745,56 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return TypeFacts(delegateValueSize, size_t.sizeof, false, false);
     }
 
+    // Emits the conditional call to one of druntime's own bounds-failure
+    // hooks (`core/exception.d`'s `_d_arraybounds_indexp`/
+    // `_d_arraybounds_slicep`/`_d_arrayboundsp`) that a failed index or
+    // slice check must reach. dmd's own glue layer (`e2ir.d`) has no
+    // frontend lowering for a bounds check either - it emits exactly this
+    // shape at codegen time, a branch around a call, not a distinct
+    // "range error" operation, so this compiler does the same instead of
+    // keeping one. The hook builds and throws the real
+    // `ArrayIndexError`/`ArraySliceError`/`RangeError` itself and never
+    // returns, so nothing after the call needs a result slot.
+    //
+    // `inBoundsOffset` is the frame slot already holding the flag this
+    // shares `opBranchTrue`'s own convention with: nonzero means in
+    // bounds, and the call is skipped. `extraArgs` are the hook's
+    // parameters after `(file, line)`, already evaluated into frame slots
+    // by the caller - `index`/`length` for an index check, `lower`/
+    // `upper`/`length` for a slice.
+    private void compileBoundsHook(
+        in size_t inBoundsOffset,
+        string hookName,
+        scope const(Register)[] parameterRegisters,
+        Arg[] extraArgs,
+        in imported!"dmd.location".Loc loc,
+    ) {
+        auto plan = _bytecode._plans.rawPlanOf(hookName, parameterRegisters);
+        if (plan is null)
+            throw rejection(_function, loc, hookName);
+
+        const branchIndex = _instructions.length;
+        emit(&opBranchTrue, inBoundsOffset, 0, 1);
+
+        const fileOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, fileOffset,
+            addConstant(cast(long) cast(size_t) loc.filename),
+            size_t.sizeof);
+
+        const lineOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, lineOffset, addConstant(cast(long) loc.linnum),
+            uint.sizeof);
+
+        Arg[] args = [
+            Arg(fileOffset, 0, size_t.sizeof),
+            Arg(lineOffset, 0, uint.sizeof),
+        ] ~ extraArgs;
+        _callSites ~= CallSite(null, args, 0, cast(const(void)*) plan);
+        emit(&opCall, discardResult, _callSites.length - 1, 0);
+
+        *branchTargetField(_instructions[branchIndex]) = _instructions.length;
+    }
+
     // Where `expression`'s element actually lives: `expression.e1`'s own
     // pointer word, offset by its index times the element's own size.
     // Shared by a load (`visit(IndexExp)`) and a store
@@ -5723,14 +5804,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // An index outside the array would otherwise read or write through
     // whatever raw address the arithmetic below happens to land on -
     // corrupting host memory, not failing the guest - so this checks
-    // before computing that address, reusing `opAssert` rather than a
-    // second throwing opcode for the same "fail loudly, now" job.
+    // before computing that address. Compiled D specifies a
+    // `core.exception.ArrayIndexError` for an out-of-bounds index, so a
+    // guest `catch (ArrayIndexError)` or `catch (RangeError)` around an
+    // index must see one here too, not the different type `opAssert`'s
+    // `AssertError` would be - see `compileBoundsHook`'s own doc for why
+    // this calls druntime's own hook instead of a backend assertion.
     private size_t compileElementAddress(
         IndexExp expression, in TypeFacts arrayFacts,
     ) {
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
-        import std.conv: text;
-        import std.string: fromStringz;
 
         const arrayOffset = reserveTemp(arrayFacts);
         evalInto(expression.e1, arrayOffset, arrayFacts.size);
@@ -5754,14 +5837,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opLessThanUnsigned, boundsOffset,
             arrayOffset + arrayLengthOffset, size_t.sizeof);
 
-        const site = AssertSite(
-            text("bytecode: index out of bounds: `", expression.e2.toString,
-                "`"),
-            expression.loc.filename.fromStringz.idup,
-            expression.loc.linnum,
+        compileBoundsHook(
+            boundsOffset,
+            "_d_arraybounds_indexp",
+            [
+                Register(Register.Kind.pointer, 8),
+                Register(Register.Kind.unsigned, 4),
+                Register(Register.Kind.unsigned, 8),
+                Register(Register.Kind.unsigned, 8),
+            ],
+            [
+                Arg(indexOffset, 0, size_t.sizeof),
+                Arg(arrayOffset + arrayLengthOffset, 0, size_t.sizeof),
+            ],
+            expression.loc,
         );
-        _assertSites ~= site;
-        emit(&opAssert, boundsOffset, _assertSites.length - 1, 1);
 
         const elementSizeOffset = reserveTemp(pointerFacts);
         emit(&opConstant, elementSizeOffset,
@@ -5829,9 +5919,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `expression.e1`'s reproduces exactly that order, since each nested
     // call does the same in turn.
     private size_t compileStaticElementAddress(IndexExp expression) {
-        import std.conv: text;
-        import std.string: fromStringz;
-
         auto sarrayType = expression.e1.type.isTypeSArray;
         const elementFacts = TypeFacts.of(sarrayType.next);
         const dim = cast(size_t) sarrayType.dim.toInteger;
@@ -5858,14 +5945,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, boundsOffset, indexOffset, size_t.sizeof);
         emit(&opLessThanUnsigned, boundsOffset, dimOffset, size_t.sizeof);
 
-        const site = AssertSite(
-            text("bytecode: index out of bounds: `", expression.e2.toString,
-                "`"),
-            expression.loc.filename.fromStringz.idup,
-            expression.loc.linnum,
+        // Compiled D specifies an `ArrayIndexError` here too - see
+        // `compileBoundsHook`'s own doc for why this calls druntime's own
+        // hook instead of `opAssert`.
+        compileBoundsHook(
+            boundsOffset,
+            "_d_arraybounds_indexp",
+            [
+                Register(Register.Kind.pointer, 8),
+                Register(Register.Kind.unsigned, 4),
+                Register(Register.Kind.unsigned, 8),
+                Register(Register.Kind.unsigned, 8),
+            ],
+            [
+                Arg(indexOffset, 0, size_t.sizeof),
+                Arg(dimOffset, 0, size_t.sizeof),
+            ],
+            expression.loc,
         );
-        _assertSites ~= site;
-        emit(&opAssert, boundsOffset, _assertSites.length - 1, 1);
 
         const baseOffset = compileAddress(expression.e1);
 
