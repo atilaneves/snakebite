@@ -262,11 +262,29 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // shared with the interpreter's own version of this same question;
     // only how a vtable slot gets its callable value is this backend's
     // own.
+    //
+    // `declaration` is not always a guest class: `_d_newclassT!T`'s own
+    // body (compiled as guest bytecode when the process never linked a
+    // native instantiation for this particular `T` - see `usesGuestBody`)
+    // reaches `__traits(initSymbol, T)` for whichever `T` the guest `new`
+    // expression names, including a real native class like `Exception`.
+    // Fabricating metadata for a native class would hand back a `TypeInfo_
+    // Class` this process never uses anywhere else - a distinct object
+    // from the one a guest `catch` clause naming the same class resolves
+    // to, so `TypeInfo_Class.isBaseOf` would never consider a thrown
+    // instance of it a match. `RuntimeTypes.linkedClassInfo` hands back
+    // the host's own linked singleton for a native class and `null`
+    // otherwise, never fabricating on its own, so this stays a one-way
+    // lookup: it cannot loop back into this function the way
+    // `RuntimeTypes.get` would for a class with no linked metadata at all.
     package TypeInfo_Class classRuntimeInfo(
         imported!"dmd.dclass".ClassDeclaration declaration,
     ) {
         import snakebite.backends.classinfo:
             classRuntimeInfo_ = classRuntimeInfo, Hooks;
+
+        if (auto linked = _runtimeTypes.linkedClassInfo(declaration))
+            return linked;
 
         return classRuntimeInfo_(
             declaration,
