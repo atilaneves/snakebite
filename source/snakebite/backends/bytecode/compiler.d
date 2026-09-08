@@ -3346,7 +3346,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileDelegateWord(Expression expression, in size_t offset) {
         import snakebite.nativelayout: delegateValueSize;
 
-        const delegateOffset = reserveTemp(TypeFacts.lazyArgument);
+        const delegateOffset = reserveTemp(TypeFacts.delegateValue);
         evalInto(expression, delegateOffset, delegateValueSize);
         emit(&opCopy, _destination, delegateOffset + offset, _width);
     }
@@ -5475,7 +5475,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (isDelegateCall) {
             functionType = expression.e1.type.nextOf.isTypeFunction;
 
-            const delegateOffset = reserveTemp(TypeFacts.lazyArgument);
+            const delegateOffset = reserveTemp(TypeFacts.delegateValue);
             evalInto(expression.e1, delegateOffset, delegateValueSize);
             contextOffset = delegateOffset + delegateContextOffset;
             calleeOffset = delegateOffset + delegateFunctionOffset;

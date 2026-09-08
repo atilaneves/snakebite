@@ -109,12 +109,16 @@ public struct TypeFacts {
         return TypeFacts(size_t.sizeof, size_t.sizeof, false, false);
     }
 
-    // A `lazy` parameter's own slot: dmd's own implicit delegate, the
-    // fixed two-word shape every `lazy` parameter gets regardless of the
-    // type it wraps - never the wrapped type's own facts.
-    public static TypeFacts lazyArgument() {
+    // A delegate value's own slot: the fixed two-word `{context,
+    // function}` pair, whatever the delegate's own signature.
+    public static TypeFacts delegateValue() {
         return TypeFacts(delegateValueSize, size_t.sizeof, false, false);
     }
+
+    // A `lazy` parameter's own slot: dmd's own implicit delegate, the
+    // same two words regardless of the type it wraps - never the wrapped
+    // type's own facts.
+    public alias lazyArgument = delegateValue;
 
     // The facts for `type`, read from dmd exactly once by the caller
     // that builds this.
