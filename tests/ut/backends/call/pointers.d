@@ -128,10 +128,7 @@ private enum boolCallbackExceptionCode = q{
 // `new T` allocates storage with `T.init` before the program writes through
 // the returned pointer. The integer checks its default state; a long uses a
 // scalar initial value and the floating-point write proves no struct is needed.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "bytecode does not initialize a scalar `new` argument"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.new.scalar." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -161,7 +158,10 @@ static foreach (backend; Matrix!(
 // `&b` is dmd's `SymOffExp`, not a general `&expression`: taking a local's
 // address and reading back through it is the simplest lvalue-to-pointer
 // round trip there is.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot convert `&ubyte` to a packed struct pointer"),
+)) {
     @("pointers.addressOf.read." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -833,37 +833,31 @@ static foreach (backend; Matrix!(
 // slice of that byte - a plain `memcpy` from it reads the whole packed
 // byte instead of masking and shifting out just the bitfield, so a
 // memcpy-based read of `b` below would answer the packed byte `0x53`
-// truncated to `ubyte` rather than `b`'s own 4-bit value, 5. Refused
-// rather than run to that wrong answer. Field assignment through a
-// struct variable is not an lvalue `addressOf` handles yet, so the
+// truncated to `ubyte` rather than `b`'s own 4-bit value, 5. Field access
+// through a struct variable is not an lvalue `addressOf` handles yet, so the
 // packed byte is built by hand - `a` (3) in the low nibble, `b` (5) in
 // the high one, the same layout `S` itself packs `a`/`b` into - and read
 // back through a `S*` a pointer cast produces.
-@("pointers.dotVar.bitfield.refused.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot convert `&ubyte` to a packed struct pointer"),
+)) {
+    @("pointers.dotVar.bitfield." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        ubyte(5).shouldBeRetOf!(backend, q{
+            struct S {
+                ubyte a : 4;
+                ubyte b : 4;
+            }
 
-    auto module_ = parseSnippet(q{
-        struct S {
-            ubyte a : 4;
-            ubyte b : 4;
-        }
-
-        ubyte readB() {
-            ubyte raw = 0x53;
-            S* p = cast(S*) &raw;
-            return p.b;
-        }
-    });
-    auto function_ = findFunction(module_, "readB");
-
-    ubyte result;
-    interpreter(module_).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "interpreter cannot evaluate `(*p).b`: reading a bitfield is " ~
-                "not supported");
+            ubyte readB() {
+                ubyte raw = 0x53;
+                S* p = cast(S*) &raw;
+                return p.b;
+            }
+        }, "readB");
+    }
 }
 
 // `&factorial` on a module-level function is dmd's `SymOffExp` too, the

@@ -58,14 +58,15 @@ compiled, or called via FFI.
 
 ### DMD lowerings
 
-When a frontend node has a `lowering`, the backend compiles it;
-`LoweringVisitor` enforces this with final overrides. Never add backend
-code for a lowered construct; put residue for null-lowering cases in the
-`visitUnlowered*` hooks. A node stays out of `LoweringVisitor`'s final
-set only when compiling its `lowering` is confirmed unsafe for a given
-backend (see `snakebite.backends.loweringvisitor` for the current
-exceptions and why) or when the field itself does not exist across the
-dmd frontend versions this project supports.
+All runtime AST visitors, including those for new backends, must inherit
+`LoweringVisitor`. Its final overrides own lowering dispatch. Put backend
+operations for null-lowering cases in the `visitUnlowered*` hooks.
+Allocation result handling and constructor execution use the shared
+visitor's allocation hooks.
+
+Any exception to executing a lowering belongs in `LoweringVisitor` and
+applies to all backends. Its compile-time check requires a final shared
+policy for each frontend expression type with a `lowering` field.
 
 All backends use native layout in memory as normal compiled D would.
 For instance, a dynamic array is `struct { size_t length; T* ptr; }`:

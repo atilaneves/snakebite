@@ -408,7 +408,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opJump, opLessOrEqualSigned, opLessOrEqualUnsigned, opLessThanSigned,
         opLessThanUnsigned, opLoadBitfield, opLoadIndirect, opLogicalNot,
         opModuloSigned,
-        opModuloUnsigned, opMultiply, opNegate, opNotEqual, opRangeError,
+        opModuloUnsigned, opMultiply, opNegate, opNotEqual,
         opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
         opSliceCopy, opSliceFill,
@@ -3876,15 +3876,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // all, so one that does reach here may have an element like `x + 1`
     // that only evaluating can produce.
     //
-    // A key or value array literal nested inside an `AssocArrayLiteralExp`
-    // also reaches here despite carrying a non-null `lowering` of its own.
-    // No test here exercises that path through the bytecode backend yet,
-    // but the interpreter's own `visit(ArrayLiteralExp)`
-    // (`snakebite.backends.interpreter.walker`) hits a confirmed assertion
-    // failure compiling the equivalent lowering, so this keeps the same,
-    // already-correct hand-written array build rather than risk the same
-    // failure here untested.
-    override void visit(ArrayLiteralExp expression) {
+    // The shared LoweringVisitor routes array literals to this residual
+    // implementation. Keep this policy common to all runtime backends.
+    protected override void visitUnloweredArrayLiteral(
+            ArrayLiteralExp expression) {
         requireDestination(expression);
         import snakebite.nativelayout: isStoredLiteral;
 
@@ -3907,83 +3902,70 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         visit(cast(Expression) expression);
     }
 
-    // Not one of `LoweringVisitor`'s final overrides - see the comment on
-    // that class (`snakebite.backends.loweringvisitor`) for why `NewExp` is
-    // excluded there.
-    override void visit(NewExp expression) {
-        import dmd.astenums: Tclass, Tpointer;
-
-        // `expression.lowering` for a class is the allocation alone
-        // (`core.lifetime._d_newclassT!T()`, no constructor arguments -
-        // see that function's own doc in `core/lifetime.d`); the
-        // constructor call dmd leaves outside it, on `expression.member`
-        // itself, is never virtual, so `compileNew` always binds `this`
-        // to the compiled callee directly rather than reading it back out
-        // of a vtable slot.
-        if (expression.type.ty == Tclass
-                || (expression.type.ty == Tpointer
-                    && expression.newtype.isTypeStruct !is null)) {
-            compileNew(expression);
-            return;
-        }
-
-        if (expression.lowering is null)
-            return visit(cast(Expression) expression);
-
-        expression.lowering.accept(this);
+    private struct NewDestination {
+        size_t offset;
+        size_t width;
+        Type type;
     }
 
-    // `new C(args)` and `new S(args)` share one shape: neither a class's
-    // nor a struct's `this` is ever virtual, so both allocate through
-    // `expression.lowering` (`_d_newclassT!C()` or `_d_newitemT!S()`,
-    // compiled as an ordinary guest call the same way
-    // `visit(AssocArrayLiteralExp)` compiles its own lowering rather than
-    // building the object by hand - that reaches `GC.malloc`, an FFI call
-    // resolved by `Bytecode.allocatorAddress`'s native-symbol lookup, and
-    // `__traits(initSymbol, T)`, served by `visit(VarExp)`'s
-    // `SymbolDeclaration` case) and then, when `expression.member` is set,
-    // run the constructor dmd left outside the lowering directly on the
-    // allocation through `compileResolvedCall` - the same call-emission
-    // code `compileCall` uses for every other call, with the receiver
-    // pre-bound to the object just allocated rather than read off a
-    // `CallExp`'s own `e1`.
-    //
-    // A struct with no constructor still accepts `args` positionally, one
-    // per field in declaration order - dmd leaves `expression.member` null
-    // then, the same as `StructLiteralExp` does for `Point(3, 4)`, so this
-    // writes each argument through the allocation's own address at that
-    // field's offset, the pointer version of what `visit(StructLiteralExp)`
-    // already does directly into a value destination. Skipping this would
-    // leave a field at its `.init` value, which druntime's own
-    // associative-array implementation relies on not happening: its
-    // `Impl!(K, V)` allocates its bucket array in exactly such a
-    // constructor, and its `Entry!(K, V)` copies the key positionally the
-    // same way. A class has no positional-field form - dmd rejects
-    // `new C(args)` at semantic time unless `C` declares a constructor
-    // that accepts `args`, so `expression.member is null` for a class
-    // means `expression.arguments` is empty too, and there is nothing
-    // left to do.
-    private void compileNew(NewExp expression) {
+    private NewDestination[] _newDestinations;
+
+    protected override void prepareNew(NewExp expression) {
         if (expression.placement !is null || expression.thisexp !is null
-                || expression.onstack || expression.lowering is null)
+                || expression.onstack)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
+        // Type must stay mutable for destination restoration.
+        auto destination = NewDestination(
+            _destination, _width, _valueType);
+        const facts = TypeFacts.of(expression.type);
+        const temporary = reserveTemp(facts);
+        _newDestinations ~= destination;
+        _destination = temporary;
+        _width = facts.size;
+        _valueType = expression.type;
+    }
+
+    protected override void restoreNew() {
+        auto destination = _newDestinations[$ - 1]; // Keeps Type mutable.
+        _newDestinations.length--;
+        _destination = destination.offset;
+        _width = destination.width;
+        _valueType = destination.type;
+    }
+
+    protected override void visitUnloweredNew(NewExp expression) {
+        visit(cast(Expression) expression);
+    }
+
+    protected override void visitLoweredNew(NewExp expression) {
+        import dmd.astenums: Tpointer;
+        if (expression.newtype.isTypeClass !is null
+                || expression.newtype.isTypeStruct !is null)
+            compileNew(expression);
+        else if (expression.type.ty == Tpointer
+                && expression.arguments !is null
+                && expression.arguments.length != 0) {
+            if (expression.arguments.length != 1)
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+            const facts = TypeFacts.of(expression.newtype);
+            const valueOffset = reserveTemp(facts);
+            evalInto((*expression.arguments)[0], valueOffset, facts.size);
+            emit(&opStoreIndirect, _destination, valueOffset, facts.size);
+        }
+
+        const destination = _newDestinations[$ - 1];
+        if (destination.offset != discardResult)
+            emit(&opCopy, destination.offset, _destination, _width);
+    }
+
+    // DMD leaves constructor and positional field initialization outside
+    // the allocation lowering. Its result already occupies _destination.
+    private void compileNew(NewExp expression) {
         auto structType = expression.newtype.isTypeStruct;
-        if (expression.newtype.isTypeClass is null && structType is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        // A `new Foo();` run for its side effects alone still has to
-        // allocate and construct - unlike a value this compiler would
-        // otherwise refuse to compute for nowhere to put
-        // (`requireDestination`'s own rejection) - so a discarded result
-        // still gets a real slot, just this compiler's own temporary
-        // rather than the caller's.
-        const objectOffset = _destination == discardResult
-            ? reserveTemp(pointerFacts) : _destination;
-
-        evalInto(expression.lowering, objectOffset, pointerFacts.size);
+        const objectOffset = _destination;
 
         // A nested struct's `vthis` sits inside the allocation the
         // lowering just returned, at the same native offset a value of
@@ -4139,12 +4121,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileAssign(expression, _destination);
     }
 
-    override void visit(ConstructExp expression) {
-        if (expression.lowering !is null) {
-            expression.lowering.accept(this);
-            return;
-        }
-
+    protected override void visitUnloweredConstruct(ConstructExp expression) {
         compileAssign(expression, _destination);
     }
 
@@ -4162,7 +4139,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // through the ordinary native-call path. This resolves and calls that
     // same hook directly (see `CallSite.isAppendDchar`), the same symbol a
     // real build's glue layer would call.
-    override void visit(CatDcharAssignExp expression) {
+    override void visitUnloweredCatDcharAssign(CatDcharAssignExp expression) {
         import dmd.astenums: Tchar, Twchar;
         import snakebite.nativelayout: arrayValueSize;
 

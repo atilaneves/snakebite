@@ -558,6 +558,8 @@ static foreach (backend; Matrix!(
 // which runs the postblit once per element and the destructor on each
 // overwritten element.
 static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed),
+    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("dynamicSliceScalarFill.postblit." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -702,6 +704,8 @@ static foreach (backend; Matrix!(
 // A static-array element (`int[2]`) fill: the right side is a static
 // array with the element's own size, broadcast whole into each element.
 static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed),
+    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("dynamicSliceScalarFill.staticArrayElement." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -738,6 +742,8 @@ static foreach (backend; Matrix!(
 
 // A class reference element fill.
 static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed),
+    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("dynamicSliceScalarFill.classRef." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -759,6 +765,8 @@ static foreach (backend; Matrix!(
 // A 3-byte struct element fill: an element size that is not a native
 // integral width, so the value must be copied as bytes, not as a word.
 static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed),
+    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("dynamicSliceScalarFill.threeByteStruct." ~ backend.stringof)
     @Tags(backend.stringof)

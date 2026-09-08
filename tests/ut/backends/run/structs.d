@@ -658,6 +658,59 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A discarded allocation still runs its constructor exactly once.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot observe mutable constructor state"),
+)) {
+    @("newStructDiscardedRunsConstructorOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int constructions;
+
+            struct Value {
+                this(int value) { ++constructions; }
+            }
+
+            void main() {
+                new Value(42);
+                assert(constructions == 1);
+            }
+        });
+    }
+}
+
+// An argument containing another allocation is evaluated once before the
+// outer constructor runs.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot observe mutable constructor state"),
+)) {
+    @("nestedNewArgumentEvaluatedOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int innerConstructions;
+            int outerConstructions;
+
+            class Inner {
+                this() { ++innerConstructions; }
+            }
+
+            struct Outer {
+                this(Inner inner) { ++outerConstructions; }
+            }
+
+            void main() {
+                new Outer(new Inner);
+                assert(innerConstructions == 1);
+                assert(outerConstructions == 1);
+            }
+        });
+    }
+}
+
 // A whole struct element is stored and loaded through the array's own
 // indirection - `opStoreIndirect`/`opLoadIndirect` moving `struct.sizeof`
 // bytes at once, the same as a scalar element's own single word - and
