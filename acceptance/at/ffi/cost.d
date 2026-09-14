@@ -11,6 +11,14 @@ extern(C) int abs(int);
 
 private alias Native = extern(C) int function(int);
 
+// Resolved at run time through `dlsym`, the same route the barrier itself
+// uses to find a symbol. `__gshared` and filled once, so no optimiser can
+// see `&abs` at compile time and turn the "indirect" baseline call into a
+// direct one - which is what LDC's `-release -O` build did with
+// `cast(Native) &abs` as a compile-time constant, making the baseline loop
+// measure nothing at all.
+private __gshared Native directAbs;
+
 
 // What crossing the barrier costs, against the cheapest thing that could
 // possibly cross it: a bare indirect call through a function pointer to the
@@ -53,7 +61,20 @@ unittest {
     // prepared before the loops, so only the barrier's execution differs.
     int argument = -42;
     int result;
-    auto direct = cast(Native) &abs;
+
+    if (directAbs is null) {
+        import core.sys.posix.dlfcn: dlsym;
+
+        version (linux)
+            import core.sys.linux.dlfcn: RTLD_DEFAULT;
+        else
+            import core.sys.posix.dlfcn: RTLD_DEFAULT;
+
+        auto address = dlsym(RTLD_DEFAULT, "abs");
+        assert(address !is null, "dlsym could not find `abs`");
+        directAbs = cast(Native) address;
+    }
+    auto direct = directAbs;
 
     // The slot array is built once, outside both loops: a `[&argument]`
     // literal per iteration would allocate, and that allocation would be
