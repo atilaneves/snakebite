@@ -195,26 +195,34 @@ private extern(C) long snakebite_ut_mixed_both_files_full(
         + value.integer * 1000 + cast(long) value.floating;
 }
 
+private long _mixedScalarSpillLeadingSeen;
 private long _mixedScalarSpillIntegerSeen;
 private double _mixedScalarSpillFloatingSeen;
 private long _mixedScalarSpillTrailingSeen;
 
-// Six `long`s fill the integer register file; `value` - a mixed
-// INTEGER/SSE pair whose SSE lane still has room but whose INTEGER lane
-// does not - spills whole, and `j`, declared after it, spills too for
-// lack of any integer register left. dmd's reversed `extern(D)`
-// convention (`_reversedArguments`'s own doc) places every spilled
-// argument on the stack in descending declaration order, `value` before
-// `j` in program order but after it on the reversed stack, exercising
-// that reversal for a mixed aggregate, not just plain scalars.
+// dmd applies the C ABI to the fully reversed parameter list (see
+// `_reversedArguments`'s own doc), so the six trailing `long`s below
+// (`j0` .. `j5`) claim the six integer registers first, in reverse -
+// `j5` in the first integer register, down to `j0` in the sixth and
+// last. `value`'s INTEGER lane then has no register left (its SSE lane
+// would still fit, but the SysV ABI never splits a multi-eightbyte
+// argument across the register/stack boundary - psABI 3.2.3
+// classification step 5c), so it spills whole, and `a`, declared before
+// it but reached after it in the reversed order, spills too. Verified
+// with `objdump --disassemble` on the compiled callee: `mov
+// 0x20(%rsp),%ebx` reads `value.integer` from stack word 0, `movsd
+// 0x28(%rsp),%xmm0` reads `value.floating` from word 1, and `mov
+// 0x30(%rsp),%rax` reads `a` from word 2 - the descending-index spilled
+// order `buildMoves` produces, not declaration order.
 pragma(mangle, "snakebite_ut_extern_d_mixed_scalar_spill")
 private extern(D) void snakebite_ut_externDMixedScalarSpill(
-    long i0, long i1, long i2, long i3, long i4, long i5,
-    MixedPair value, long j,
+    long a, MixedPair value,
+    long j0, long j1, long j2, long j3, long j4, long j5,
 ) {
-    _mixedScalarSpillIntegerSeen = i0;
+    _mixedScalarSpillLeadingSeen = a;
+    _mixedScalarSpillIntegerSeen = value.integer;
     _mixedScalarSpillFloatingSeen = value.floating;
-    _mixedScalarSpillTrailingSeen = j;
+    _mixedScalarSpillTrailingSeen = j0;
 }
 
 private struct MixedPairReversed {
@@ -1442,14 +1450,19 @@ unittest {
 }
 
 
-// Six `long`s fill the integer register file; `value` - a mixed
-// INTEGER/SSE pair - spills whole because its INTEGER lane has no
-// register left, even though its SSE lane still would fit, and `j`,
-// declared after it, spills too. dmd's reversed `extern(D)` convention
+// The six trailing `long`s (`j0` .. `j5`) claim the integer register
+// file first, in dmd's fully reversed `extern(D)` order (see
+// `snakebite_ut_externDMixedScalarSpill`'s own doc above): `j5` claims
+// the first integer register, down to `j0` claiming the sixth and last.
+// `value` - a mixed INTEGER/SSE pair - then spills whole because its
+// INTEGER lane has no register left, even though its SSE lane still
+// would fit, and `a`, declared before it but reached after it in the
+// reversed order, spills too. dmd's reversed `extern(D)` convention
 // places every spilled argument on the stack in descending declaration
-// order, so this exercises that reversal for a mixed aggregate spill
-// alongside a scalar spill, not just plain scalars
-// (`called.externD.mixedSpillsOneLongOneDouble` above).
+// order, so this exercises that reversal for a mixed aggregate spilled
+// under six *trailing* register-claiming scalars, the opposite
+// declaration order from `called.externD.mixedSpillsOneLongOneDouble`
+// above.
 @("called.externD.mixedStructWithScalarSpill")
 unittest {
     auto guestModule = parseSnippet(q{
@@ -1460,8 +1473,8 @@ unittest {
 
         pragma(mangle, "snakebite_ut_extern_d_mixed_scalar_spill")
         extern(D) void snakebite_ut_externDMixedScalarSpill(
-            long i0, long i1, long i2, long i3, long i4, long i5,
-            MixedPair value, long j,
+            long a, MixedPair value,
+            long j0, long j1, long j2, long j3, long j4, long j5,
         );
     });
     auto function_ = findFunction(guestModule,
@@ -1470,19 +1483,20 @@ unittest {
         "No `snakebite_ut_externDMixedScalarSpill` in the guest program");
 
     PlanCache cache;
-    long i0 = 10, i1 = 20, i2 = 30, i3 = 40, i4 = 50, i5 = 60;
+    long a = 1;
     MixedPair value = MixedPair(7, 1.5);
-    long j = 99;
+    long j0 = 10, j1 = 20, j2 = 30, j3 = 40, j4 = 50, j5 = 60;
     cache.of(function_).call(null, [
-        cast(const void*) &i0, cast(const void*) &i1,
-        cast(const void*) &i2, cast(const void*) &i3,
-        cast(const void*) &i4, cast(const void*) &i5,
-        cast(const void*) &value, cast(const void*) &j,
+        cast(const void*) &a, cast(const void*) &value,
+        cast(const void*) &j0, cast(const void*) &j1,
+        cast(const void*) &j2, cast(const void*) &j3,
+        cast(const void*) &j4, cast(const void*) &j5,
     ]);
 
-    _mixedScalarSpillIntegerSeen.should == 10;
+    _mixedScalarSpillLeadingSeen.should == 1;
+    _mixedScalarSpillIntegerSeen.should == 7;
     _mixedScalarSpillFloatingSeen.should == 1.5;
-    _mixedScalarSpillTrailingSeen.should == 99;
+    _mixedScalarSpillTrailingSeen.should == 10;
 }
 
 

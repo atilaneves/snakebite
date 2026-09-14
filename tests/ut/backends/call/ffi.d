@@ -259,12 +259,12 @@ public extern(C) long snakebite_ut_mixed_both_files_full_backend(
 
 pragma(mangle, "snakebite_ut_extern_d_mixed_struct_scalar_spill")
 private extern(D) long snakebite_ut_externDMixedStructScalarSpill(
-    long i0, long i1, long i2, long i3, long i4, long i5,
-    MixedPair value, long j,
+    long a, MixedPair value,
+    long j0, long j1, long j2, long j3, long j4, long j5,
 ) {
-    return i0 + i1 + i2 + i3 + i4 + i5
+    return a * 1_000_000
         + value.integer * 1000 + cast(long) value.floating
-        + j * 1_000_000L;
+        + j0;
 }
 
 
@@ -1336,21 +1336,26 @@ static foreach (backend; Matrix!(
 }
 
 
-// Six `long`s fill the integer register file on the real `extern(D)`
-// function below, compiled with dmd's own reversed-parameter convention
-// (the same real native `extern(D)` setup `signatures.externD.
-// nineWordsTwoStringsSpill` above uses, for the same oracle-quirk reason -
-// see its own comment). `value` - a mixed INTEGER/SSE pair whose INTEGER
-// lane has no register left - spills whole, and `j`, declared after it,
-// spills too; both must land correctly under dmd's reversed spill order
-// (issue #334 step 4).
+// dmd applies the C ABI to the fully reversed parameter list (see
+// `signatures.externD.nineWordsTwoStringsSpill`'s own comment, and the
+// same real native `extern(D)` setup here for the same oracle-quirk
+// reason), so the six trailing `long`s below (`j0` .. `j5`) claim the
+// integer register file first, in reverse. `value` - a mixed
+// INTEGER/SSE pair whose INTEGER lane then has no register left - spills
+// whole, and `a`, declared before it but reached after it in the
+// reversed order, spills too; both must land correctly under dmd's
+// reversed spill order (issue #334 step 4). Verified with `objdump
+// --disassemble` on the compiled callee: `mov 0x20(%rsp),%ebx` reads
+// `value.integer` from stack word 0, `movsd 0x28(%rsp),%xmm0` reads
+// `value.floating` from word 1, and `mov 0x30(%rsp),%rax` reads `a`
+// from word 2.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {
     @("mixedStruct.externD.scalarSpill." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        99_007_211L.shouldBeRetOf!(
+        99_007_011L.shouldBeRetOf!(
             backend,
             q{
                 struct MixedPair {
@@ -1363,8 +1368,9 @@ static foreach (backend; Matrix!(
                     pragma(mangle,
                         "snakebite_ut_extern_d_mixed_struct_scalar_spill")
                     extern(D) long externDMixedStructScalarSpill(
-                        long i0, long i1, long i2, long i3, long i4,
-                        long i5, MixedPair value, long j,
+                        long a, MixedPair value,
+                        long j0, long j1, long j2, long j3, long j4,
+                        long j5,
                     );
                 }
 
@@ -1373,7 +1379,7 @@ static foreach (backend; Matrix!(
                     value.integer = 7;
                     value.floating = 1.5;
                     return Ffi.externDMixedStructScalarSpill(
-                        10, 20, 30, 40, 50, 60, value, 99);
+                        99, value, 10, 20, 30, 40, 50, 60);
                 }
             },
             "answer",
