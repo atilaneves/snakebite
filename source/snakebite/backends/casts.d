@@ -44,6 +44,7 @@ public struct CastPlan {
         widenSigned,
         widenUnsigned,
         toBool,
+        zero,
         // No kind above applies; `reason` names the source and destination
         // types for the backend's own rejection.
         unsupported,
@@ -58,9 +59,9 @@ public struct CastPlan {
 
 // The single decision both backends' cast adapters read: `sourceType` and
 // `destType` are `CastExp.e1.type` and `CastExp.type`, both already typed
-// by dmd. Callers still special-case whatever is not a type-pair decision
-// on their own - `cast(void) e`'s effect-only meaning, and `null`'s own
-// destination-clearing write - before reaching here.
+// by dmd. The expression overload below owns the source-shape exception for
+// `null`; callers still special-case `cast(void) e`'s effect-only meaning
+// before reaching here.
 public CastPlan classify(
     imported!"dmd.mtype".Type sourceType, imported!"dmd.mtype".Type destType,
 ) {
@@ -170,6 +171,19 @@ public CastPlan classify(
             ? CastPlan.Kind.widenUnsigned : CastPlan.Kind.widenSigned,
         sourceFacts, destFacts,
     );
+}
+
+// A null expression has no source representation to classify. Its cast
+// fills the destination with zeros across its native width instead.
+public CastPlan classify(
+    imported!"dmd.expression".Expression expression,
+    imported!"dmd.mtype".Type destType,
+) {
+    if (expression.isNullExp !is null)
+        return CastPlan(
+            CastPlan.Kind.zero, TypeFacts.init, TypeFacts.of(destType));
+
+    return classify(expression.type, destType);
 }
 
 // Whether `type` is `float`/`double`/`real` - `TypeFacts` has no notion of

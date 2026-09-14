@@ -3269,9 +3269,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // `snakebite.backends.casts.classify` has already turned the source
     // and destination types into a `Kind`; this is the adapter that
     // executes each one, with no type inspection of its own beyond the
-    // pre-checks below that classify does not see: `cast(void) e`, whose
-    // meaning is "keep `e`'s effects, produce no value", and a `null`-to-AA
-    // cast, whose destination write does not depend on the source's type.
+    // pre-check below that classify does not see: `cast(void) e`, whose
+    // meaning is "keep `e`'s effects, produce no value".
     protected override void visitUnloweredCast(CastExp expression) {
         import snakebite.backends.casts: classify, CastPlan;
         import snakebite.nativelayout:
@@ -3288,23 +3287,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        // An associative-array value is a single native pointer, so a cast
-        // between equivalent AA types copies that pointer. A null AA cast
-        // must clear the complete destination slot.
-        if (_type.ty == Taarray) {
-            if (sourceType.ty == Taarray) {
-                evaluate(
-                    expression.e1, sourceType, factsOf(sourceType), _place);
-                return;
-            }
-
-            if (expression.e1.isNullExp) {
-                _nativeData.write(_type, _facts, expression.e1, _place);
-                return;
-            }
-        }
-
-        auto plan = classify(sourceType, _type);
+        const plan = classify(expression.e1, _type);
 
         final switch (plan.kind) with (CastPlan.Kind) {
         case copy:
@@ -3313,6 +3296,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         case classReference:
             evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
+            return;
+
+        case zero:
+            _nativeData.write(_type, _facts, expression.e1, _place);
             return;
 
         // An explicit pointer-to-integral cast preserves the native
