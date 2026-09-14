@@ -11,6 +11,14 @@ extern(C) int abs(int);
 
 private alias Native = extern(C) int function(int);
 
+// Resolved at run time through `dlsym`, the same route the barrier itself
+// uses to find a symbol. `__gshared` and filled once, so no optimiser can
+// see `&abs` at compile time and turn the "indirect" baseline call into a
+// direct one - which is what LDC's `-release -O` build did with
+// `cast(Native) &abs` as a compile-time constant, making the baseline loop
+// measure nothing at all.
+private __gshared Native directAbs;
+
 
 // What crossing the barrier costs, against the cheapest thing that could
 // possibly cross it: a bare indirect call through a function pointer to the
@@ -26,8 +34,13 @@ private alias Native = extern(C) int function(int);
 // The plan is prepared before the measured loops. This keeps the timing
 // gate focused on the steady-state call and removes the cold-path lookup.
 //
-// `bin/at` is built unoptimised, so neither number is a release figure.
-// The ratio is what this asserts on, and it is meaningful either way.
+// `bin/at` is built with LDC's `-release -O -flto=thin`, the same flags
+// as `bin/sb`. This test's own ratio depends on that: an unoptimised
+// build cannot inline or fold either loop, so the gap between a generic
+// replay and a direct call is only meaningful with the optimiser on.
+// An unoptimised build would show noise instead of the barrier's own
+// cost, and the gate below would reject good builds for the wrong
+// reason.
 @("barrier.overhead")
 @Flaky(5)
 @Tags("timing")
@@ -53,7 +66,20 @@ unittest {
     // prepared before the loops, so only the barrier's execution differs.
     int argument = -42;
     int result;
-    auto direct = cast(Native) &abs;
+
+    if (directAbs is null) {
+        import core.sys.posix.dlfcn: dlsym;
+
+        version (linux)
+            import core.sys.linux.dlfcn: RTLD_DEFAULT;
+        else
+            import core.sys.posix.dlfcn: RTLD_DEFAULT;
+
+        auto address = dlsym(RTLD_DEFAULT, "abs");
+        assert(address !is null, "dlsym could not find `abs`");
+        directAbs = cast(Native) address;
+    }
+    auto direct = directAbs;
 
     // The slot array is built once, outside both loops: a `[&argument]`
     // literal per iteration would allocate, and that allocation would be
@@ -102,12 +128,21 @@ unittest {
         baselines[2], barriers[2], ratios[2]);
 
     result.should == 42;
-    assert(sink != 0, "the baseline loop was optimised away");
+    // `-release` strips `assert`, so this stays a `should` check: without
+    // it, an optimiser that folds the baseline loop away would pass silently.
+    sink.should.not == 0;
 
     // Fixed from independent runs of a known-good revision: mean + 3 sample
     // standard deviations, rounded up. Do not let a candidate's own noise
     // raise its limit.
     enum maxRatio = 2.40;
-    assert(ratios[2] < maxRatio,
-        "the barrier costs more than 2.40 times a direct call");
+    // `-release` strips `assert`, so the gate is a `should` check, not an
+    // `assert`. `bin/at` is always built with `-O`, so the ratio measures
+    // the barrier itself rather than the cost of an unoptimised build.
+    //
+    // `shouldBeSmallerThan`, not a `<` operator, because unit-threaded's
+    // `should` proxy has no `<`: `double.should < x` does not compile
+    // (relational operators route through `opCmp`, which `Should` does
+    // not define), so this stays the free-function form.
+    ratios[2].shouldBeSmallerThan(maxRatio);
 }

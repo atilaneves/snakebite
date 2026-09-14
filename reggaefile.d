@@ -19,6 +19,33 @@ string ldcPath() {
     return result.output.chomp;
 }
 
+// The call stub (ADR-0001): the only place a forward call across the FFI
+// barrier is made, so every dub target below links it in. Assembled by
+// the system C compiler, not dmd/ldc: nothing in `sysv_amd64.S` touches
+// the D frontend, and `cc` is what already understands `.cfi_` directives
+// and `.note.GNU-stack`. `$project` keeps this target's own output text
+// identical to the reference `dubTarget` adds to each dub package's file
+// list below, so reggae's ninja backend resolves both to the same path
+// and links the one object it actually builds.
+//
+// The object lands in the project root, not under `$builddir`
+// (`.reggae/objs`, already covered by that directory's own `.gitignore`
+// entry) or a `.reggae/objs`-rooted path directly: tried, and it broke
+// the build. `$builddir/...` here expands correctly in this `Target`'s
+// own name (reggae's `expandOutput`, `build.d`), but the identical
+// string in `info.packages[0].files` below - which a dub `DubPackage`'s
+// file list does not run through that same expansion - reaches the
+// generated `build.ninja` as a literal, unexpanded `$builddir` token
+// glued onto an absolute path, which ninja then cannot resolve to the
+// object this `Target` actually builds. `*.o` stays in `.gitignore`.
+Target sysvAmd64Object() {
+    return Target(
+        "$project/sysv_amd64.o",
+        "cc -c $in -o $out",
+        Target("source/snakebite/ffi/sysv_amd64.S"),
+    );
+}
+
 Target dubTarget(string compiler, string config, string objectSet,
                  string output, CompilerFlags flags = CompilerFlags()) {
     auto buildOptions = options.dup;
@@ -86,6 +113,10 @@ Target dubTarget(string compiler, string config, string objectSet,
             .array ~ ["tests", "acceptance"];
     info.packages[0].targetPath = "bin";
     info.packages[0].targetFileName = objectSet;
+    // Links the call stub's object into this target - see
+    // `sysvAmd64Object`. Reggae sweeps a dub package's own `.o` files
+    // into the same link line as the D-compiled ones.
+    info.packages[0].files ~= "$project/sysv_amd64.o";
 
     auto target = dubBuild(buildOptions, info, CompilationMode.options, flags);
     target.rawOutputs[0] = "bin/" ~ output;
@@ -94,8 +125,9 @@ Target dubTarget(string compiler, string config, string objectSet,
 
 Build reggaeBuild() {
     auto build = Build(
+        sysvAmd64Object(),
         dubTarget("dmd", "unittest", "unittest", "ut"),
-        dubTarget("dmd", "acceptance-test", "acceptance", "at"),
+        dubTarget("ldc2", "acceptance-test", "release", "at", CompilerFlags("-release", "-O", "-flto=thin")),
         dubTarget("ldc2", "sb", "release", "sb", CompilerFlags("-release", "-O", "-flto=thin")),
         dubTarget("ldc2", "sb-repl", "release", "sb-repl", CompilerFlags("-release", "-O", "-flto=thin")),
         dubTarget("ldc2", "bench", "release", "bench", CompilerFlags("-release", "-O", "-flto=thin")),

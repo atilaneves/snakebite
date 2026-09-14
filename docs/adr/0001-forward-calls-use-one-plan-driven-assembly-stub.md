@@ -39,7 +39,8 @@ it (see ADR-0004).
 The acceptance test `barrier.overhead`, in `acceptance/at/ffi/cost.d`,
 checks the barrier cost against a direct call. The ratio must stay
 under 2.40. The stub must meet this bound before it replaces the
-dispatcher.
+dispatcher. The acceptance build `bin/at` is optimised, so the gate
+runs on every build.
 
 The seam stays ABI-agnostic. Any other platform fails loudly.
 

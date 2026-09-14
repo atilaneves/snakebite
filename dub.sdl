@@ -16,6 +16,12 @@ subPackage {
 }
 
 
+// A plain `dub build`/`dub test` fails to link: every configuration
+// below needs the FFI call stub's assembled object
+// (`snakebite_ffi_call_sysv_amd64`), which only `build/reggae.sh`'s
+// ninja build produces, from `source/snakebite/ffi/sysv_amd64.S` -
+// build through reggae (`build/*.sh`), not dub directly. A system C
+// compiler (`cc`) is required to assemble that file.
 configuration "unittest" {
     targetType "executable"
     targetName "ut"
