@@ -1854,7 +1854,13 @@ unittest {
 // call site that always passes exactly nine, for `called.variadic.
 // tenIntsFourSpillToTheStack` below. Ten INTEGER-class words in total:
 // six fill the integer register file, and the last four spill to the
-// stack.
+// stack. Each extra is weighted by its own position (`i + 1`) before
+// being added: a plain sum reads the same total back whether the
+// extras arrive in order or two of them are swapped - a reversed
+// stack spill or two swapped registers - so a plain sum cannot tell a
+// correct call from a misordered one (issue #334 step 5 review
+// finding 4). A weighted sum can, since swapping two extras' values
+// then changes which weight each one is multiplied by.
 private extern(C) int snakebite_ut_variadic_sum_ints(int first, ...) {
     import core.stdc.stdarg;
 
@@ -1862,7 +1868,7 @@ private extern(C) int snakebite_ut_variadic_sum_ints(int first, ...) {
     va_start(args, first);
     int total = first;
     foreach (i; 0 .. 9)
-        total += va_arg!int(args);
+        total += (i + 1) * va_arg!int(args);
     va_end(args);
     return total;
 }
@@ -1871,7 +1877,8 @@ private extern(C) int snakebite_ut_variadic_sum_ints(int first, ...) {
 // As `snakebite_ut_variadic_sum_ints`, but reads its own count of extra
 // arguments instead of a fixed nine, so two call sites can pass it a
 // different number of extra arguments safely (`called.variadic.
-// sameCalleeTwoCallSitesDifferentArgumentCounts` below).
+// sameCalleeTwoCallSitesDifferentArgumentCounts` below). Weighted by
+// position, the same reason as `snakebite_ut_variadic_sum_ints`.
 private extern(C) int snakebite_ut_variadic_count_sum(int count, ...) {
     import core.stdc.stdarg;
 
@@ -1879,7 +1886,7 @@ private extern(C) int snakebite_ut_variadic_count_sum(int count, ...) {
     va_start(args, count);
     int total;
     foreach (i; 0 .. count)
-        total += va_arg!int(args);
+        total += (i + 1) * va_arg!int(args);
     va_end(args);
     return total;
 }
@@ -1887,7 +1894,8 @@ private extern(C) int snakebite_ut_variadic_count_sum(int count, ...) {
 
 // Always reads exactly eight `double`s past `first` - nine SSE-class
 // words in total: eight fill the SSE register file (`%al` reports 8),
-// and the last one spills to the stack.
+// and the last one spills to the stack. Weighted by position, the same
+// reason as `snakebite_ut_variadic_sum_ints`.
 private extern(C) double snakebite_ut_variadic_sum_doubles(
     double first, ...
 ) {
@@ -1897,7 +1905,7 @@ private extern(C) double snakebite_ut_variadic_sum_doubles(
     va_start(args, first);
     double total = first;
     foreach (i; 0 .. 8)
-        total += va_arg!double(args);
+        total += (i + 1) * va_arg!double(args);
     va_end(args);
     return total;
 }
@@ -2004,7 +2012,10 @@ unittest {
     cache.variadicOf(site.function_, site.extraArgumentTypes)
         .call(&result, arguments[]);
 
-    result.should == 55;
+    // 1 (`first`, unweighted) + sum((i + 1) * (i + 2)) for i in 0 .. 9,
+    // the values 2 .. 10 at positions 0 .. 8 of the weighted sum
+    // `snakebite_ut_variadic_sum_ints` computes.
+    result.should == 331;
 }
 
 
@@ -2029,7 +2040,10 @@ unittest {
     cache.variadicOf(site.function_, site.extraArgumentTypes)
         .call(&result, arguments[]);
 
-    result.should == 45.0;
+    // 1.0 (`first`, unweighted) + sum((i + 1) * (i + 2)) for i in 0 .. 8,
+    // the values 2.0 .. 9.0 at positions 0 .. 7 of the weighted sum
+    // `snakebite_ut_variadic_sum_doubles` computes.
+    result.should == 241.0;
 }
 
 
@@ -2064,7 +2078,9 @@ unittest {
     cache.variadicOf(site.function_, site.extraArgumentTypes)
         .call(&result, arguments[]);
 
-    result.should == 45.0;
+    // Same weighted total as `called.variadic.nineDoublesOneSpills`: the
+    // promoted `float` carries the same value, at the same position.
+    result.should == 241.0;
 }
 
 
@@ -2106,8 +2122,16 @@ unittest {
 // sites that pass a different number of extra arguments - one plan per
 // call site (`VariadicCallSite`'s own doc), never one plan shared by
 // declaration the way `PlanCache._plans` shares an ordinary plan.
-// `cache.preparations` proves both plans were actually built, not one
-// reused for the other's shape.
+// `cache.preparations` only counts calls to `variadicOf` - `PlanCache`
+// itself never caches a variadic call site's plan (that is a backend's
+// own call-site cache, exercised by `ut.backends.call.ffi`'s matrix
+// test of the same name), so `== 2` is true simply because this test
+// calls `variadicOf` twice, not proof the two plans differ. What
+// actually proves each call site got its own, correctly shaped plan is
+// `resultOne`/`resultThree` below: a plan built for the wrong extra
+// argument count would misclassify `valuesThree`'s three extras against
+// the other site's one-extra shape and read back the wrong weighted
+// sum.
 @("called.variadic.sameCalleeTwoCallSitesDifferentArgumentCounts")
 unittest {
     auto guestModule = parseSnippet(q{
@@ -2155,7 +2179,9 @@ unittest {
     );
 
     resultOne.should == 41;
-    resultThree.should == 6;
+    // 1 * 1 + 2 * 2 + 3 * 3, the weighted sum `snakebite_ut_variadic_
+    // count_sum` computes.
+    resultThree.should == 14;
     cache.preparations.should == 2;
 }
 
