@@ -2073,75 +2073,423 @@ static foreach (backend; Matrix!(
 }
 
 
-// D's own variadic kinds - untyped `_arguments` here, always
-// `extern(D)` - stay refused (issue #334 step 6 is untyped D variadics;
-// typesafe D variadics remain unimplemented). `ut.ffi.plan`'s own
-// `called.variadic.externDRefused` checks `CallPlan.prepare`'s own
-// message directly. On Bytecode this reaches a guest caller unchanged
-// (`Native` never reaches `CallPlan.prepare` at all - compiled D would
-// fail to *link* rather than raise this refusal - and `Ctfe` has no FFI
-// plan machinery of its own): `compileResolvedCall`'s own guest/native
-// split (`usesGuestBody`) already routes a body-less declaration like
-// this one to `compileNativeCall` regardless of linkage, and
-// `compileNativeCall`'s own variadic handling reaches `CallPlan.prepare`
-// the same way for any `VarArg.variadic` type.
-@("variadic.externDRefused.Bytecode")
-@Tags("Bytecode")
-unittest {
-    auto module_ = parseSnippet(q{
-        extern(D) int snakebite_ut_extern_d_variadic_ffi_backend(
-            int x, ...
-        );
+// D's own untyped variadic kind (issue #334 step 6): `extern(D)`
+// linkage, `...`. The frontend inserts the call's own `_arguments` - a
+// `TypeInfo_Tuple` reference - as a leading argument ahead of every
+// declared parameter (`dmd.mtype.TypeFunction.isDstyleVariadic`'s own
+// doc; ADR-0010's D variadic paragraph). Every callee below uses
+// `core.vararg` - `public import core.stdc.stdarg;` plus one `TypeInfo`-
+// driven `va_arg` overload (verified in druntime's own source) - the
+// same mechanism `ut.ffi.plan`'s own `called.variadic.externD.*` use
+// through `core.stdc.stdarg` directly; only the mixed-type callee here
+// actually needs the `TypeInfo`-driven half, to read `_arguments[i]`
+// itself rather than a single, compile-time-known type. `_backend`
+// distinguishes each native symbol's own linker name from its plan-level
+// counterpart in `ut.ffi.plan`, since both are `extern(D)` and so share
+// one flat, global symbol namespace in this test binary.
 
-        int answer() {
-            return snakebite_ut_extern_d_variadic_ffi_backend(1, 2);
-        }
-    });
-    auto function_ = findFunction(module_, "answer");
+// Sums every extra argument, `int` or `double` alike, reading each
+// one's real type from `_arguments[i]` rather than assuming one - the
+// same `_arguments`-driven dispatch a real `extern(D)` variadic function
+// needs when it cannot know its caller's argument types ahead of time.
+pragma(mangle, "snakebite_ut_dvariadic_mixed_sum_backend")
+private extern(D) double snakebite_ut_dvariadic_mixed_sum_backend(...) {
+    import core.vararg;
 
-    int result;
-    new Bytecode(Program([module_])).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "ffi cannot call `" ~
-                "snakebite_ut_extern_d_variadic_ffi_backend" ~
-                "` as a variadic function: only an `extern(C)` " ~
-                "C-style variadic callee is supported");
+    double total = 0;
+    foreach (i; 0 .. _arguments.length) {
+        if (_arguments[i] == typeid(int))
+            total += va_arg!int(_argptr);
+        else if (_arguments[i] == typeid(double))
+            total += va_arg!double(_argptr);
+    }
+    return total;
 }
 
 
-// The interpreter's own `visit(CallExp)` routes a call to
-// `callVariadicNative` only when the callee's own linkage is `LINK.c`
-// (issue #334 step 5 review finding 6): without that check, a
-// guest-bodied `extern(D)` variadic function (D's own untyped
-// variadics, step 6's own scope) would also reach `callVariadicNative`,
-// whose "ffi cannot call ... as a variadic function" message would
-// misname a guest function as an FFI failure. This declaration has no
-// body either, so it cannot run as a guest function at all; falling
-// through to the ordinary call path (`bindFrame`) reaches its own,
-// honest arity-mismatch message instead - `arguments.length` counts 3,
-// not the 2 written at the call site, because dmd's own semantic
-// lowering of an `extern(D)` variadic call site inserts its own extra
-// argument ahead of the declared `TypeInfo[]`/typeid handling that step
-// 6 will read (`snakebite.backends.calls.arityMismatches`'s own doc).
-@("variadic.externDRefused.Interpreter")
+// Copies its one extra argument's raw bytes into `dest`, using the
+// `TypeInfo`-driven `va_arg` overload since this callee cannot know the
+// argument's real type at compile time - a guest-declared struct's own
+// type, in the test below - and returns that type's own `tsize`, read
+// off `_arguments[0]` the same way the real `_argptr`/register-save-area
+// machinery would (`object.TypeInfo_Struct.tsize`'s own druntime
+// implementation returns its `m_init.length`, which `snakebite.backends.
+// runtimetypes.RuntimeTypes.structInfo` already sets to the guest
+// struct's own real init bytes - so this test also checks that
+// fabricated `TypeInfo_Struct` is the right size, not merely present).
+pragma(mangle, "snakebite_ut_dvariadic_struct_backend")
+private extern(D) size_t snakebite_ut_dvariadic_struct_backend(
+    ubyte* dest, ...
+) {
+    import core.vararg;
+
+    auto info = _arguments[0];
+    const size = info.tsize;
+    va_arg(_argptr, info, dest);
+    return size;
+}
+
+
+// Reads its one extra argument as a `string` - a two-word slice, not a
+// single register - through the ordinary, compile-time-typed `va_arg`.
+pragma(mangle, "snakebite_ut_dvariadic_string_backend")
+private extern(D) size_t snakebite_ut_dvariadic_string_backend(...) {
+    import core.vararg;
+
+    return va_arg!string(_argptr).length;
+}
+
+
+private struct DVariadicMethodHostBackend {
+    // A variadic method: `this`, the frontend's own `_arguments`, and
+    // `first` all have to reach this callee in the right registers
+    // together - `CallPlan.prepareCommon`'s own `hasVArguments` places
+    // `_arguments` right after any hidden `this` and before the declared
+    // parameters, matching where dmd's own (non-reversed, for a variadic
+    // callee - `plan._reversedArguments`'s own doc) register assignment
+    // puts it.
+    pragma(mangle, "snakebite_ut_dvariadic_method_backend")
+    extern(D) int sum(int first, ...) {
+        import core.vararg;
+
+        int total = first;
+        foreach (i; 0 .. _arguments.length)
+            if (_arguments[i] == typeid(int))
+                total += va_arg!int(_argptr);
+        return total;
+    }
+}
+
+
+// D's typesafe variadic kind (`T t...`, `VarArg.typesafe`): the frontend
+// packs a call site's trailing arguments into one array-typed argument
+// before any backend ever sees them, so it is a plain slice parameter,
+// never refused, and needs no `_arguments` of its own.
+pragma(mangle, "snakebite_ut_dvariadic_typesafe_backend")
+private extern(D) int snakebite_ut_dvariadic_typesafe_backend(
+    int[] a...
+) {
+    int total;
+    foreach (value; a)
+        total += value;
+    return total;
+}
+
+
+// These six tests cannot use `Matrix!`/`shouldBeRetOf`, unlike every
+// other variadic test above: `shouldBeRetOf`'s `Native` branch mixes a
+// test's whole guest snippet - the `pragma(mangle)` prototype included -
+// into a nested delegate (`ut.backends.shouldBeRetOf`'s own `mixin
+// (code); return mixin(call);`, itself inside `() { ... }()`), and a
+// *nested* `extern(D)` variadic prototype declaration - untyped or
+// typesafe alike - crashes dmd's own code generator on this exact
+// compiler (verified: a from-scratch repro, `pragma(mangle, "x") extern
+// (D) int f(...);` declared inside a nested delegate and called from
+// there, segfaults `dmd -run` outright; the identical prototype at
+// module scope, called from the very same nested delegate, runs fine -
+// so the fault is specifically dmd's own handling of a *nested*
+// `extern(D)` variadic declaration, not anything about nesting the call
+// site, and not anything this backend does). `Omit!(Native, ...)` cannot
+// name this: the native oracle is never omitted (`Omit`'s own static
+// assert). These six tests build their own guest module and call it
+// through `Interpreter`/`Bytecode` directly instead, exactly as `variadic
+// .externDRefused` did above before this step - `Ctfe` is not attempted,
+// matching every other variadic test in this file (`Because.
+// inexpressible`: it has no FFI plan machinery of its own).
+
+@("variadic.externD.twoCallSitesIntsAndDoublesSpill.Interpreter")
 @Tags("Interpreter")
 unittest {
     auto module_ = parseSnippet(q{
-        extern(D) int snakebite_ut_extern_d_variadic_ffi_backend(
-            int x, ...
-        );
+        pragma(mangle, "snakebite_ut_dvariadic_mixed_sum_backend")
+        extern(D) double nativeSum(...);
 
-        int answer() {
-            return snakebite_ut_extern_d_variadic_ffi_backend(1, 2);
+        double answer() {
+            return nativeSum(1, 2, 3, 4, 5, 6, 7)
+                + nativeSum(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0);
         }
     });
     auto function_ = findFunction(module_, "answer");
+    assert(function_ !is null, "No `answer` in the guest program");
+
+    double result;
+    interpreter(module_).call(function_, &result, []);
+
+    result.should == 73.0;
+}
+
+
+// The same callee at two call sites in one guest function, one passing
+// seven `int`s (more than `abi.maxIntegerArguments` once `_arguments`
+// itself claims a register too, so the integer file spills) and the
+// other nine `double`s (more than `abi.maxFloatingArguments`, so the SSE
+// file spills) - `ut.ffi.plan`'s own `called.variadic.externD.
+// sevenIntsSpillTheIntegerFile` checks the first shape at the plan
+// level; this exercises the bytecode compiler's own one-time-per-
+// `CallExp` compilation on both spills together, the same way `variadic.
+// sameCalleeTwoCallSitesDifferentArgumentCounts` does for the `extern
+// (C)` kind above.
+@("variadic.externD.twoCallSitesIntsAndDoublesSpill.Bytecode")
+@Tags("Bytecode")
+unittest {
+    import snakebite.backends.backend: Program;
+    import snakebite.backends.bytecode: Bytecode;
+
+    auto module_ = parseSnippet(q{
+        pragma(mangle, "snakebite_ut_dvariadic_mixed_sum_backend")
+        extern(D) double nativeSum(...);
+
+        double answer() {
+            return nativeSum(1, 2, 3, 4, 5, 6, 7)
+                + nativeSum(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0);
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+    assert(function_ !is null, "No `answer` in the guest program");
+
+    double result;
+    new Bytecode(Program([module_])).call(function_, &result, []);
+
+    result.should == 73.0;
+}
+
+
+// A guest-declared struct as the sole extra argument: the callee reads
+// its `tsize` and its raw bytes back through `_arguments[0]` alone,
+// never a compile-time-known guest type - `object.TypeInfo_Struct.
+// tsize`'s own druntime implementation returns its `m_init.length`,
+// which `snakebite.backends.runtimetypes.RuntimeTypes.structInfo`
+// already sets to the guest struct's own real init bytes, so this also
+// checks that fabricated `TypeInfo_Struct` is the right size, not merely
+// present.
+@("variadic.externD.guestStructTsizeAndBytes.Interpreter")
+@Tags("Interpreter")
+unittest {
+    auto module_ = parseSnippet(q{
+        struct GuestPoint {
+            int x;
+            int y;
+        }
+
+        pragma(mangle, "snakebite_ut_dvariadic_struct_backend")
+        extern(D) size_t copyStruct(ubyte* dest, ...);
+
+        size_t answer() {
+            ubyte[16] buffer;
+            GuestPoint point;
+            point.x = 3;
+            point.y = 4;
+            const size = copyStruct(buffer.ptr, point);
+            int* asInts = cast(int*) buffer.ptr;
+            return size * 1_000_000 + asInts[0] * 1000 + asInts[1];
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+    assert(function_ !is null, "No `answer` in the guest program");
+
+    size_t result;
+    interpreter(module_).call(function_, &result, []);
+
+    result.should == 8_003_004;
+}
+
+
+@("variadic.externD.guestStructTsizeAndBytes.Bytecode")
+@Tags("Bytecode")
+unittest {
+    import snakebite.backends.backend: Program;
+    import snakebite.backends.bytecode: Bytecode;
+
+    auto module_ = parseSnippet(q{
+        struct GuestPoint {
+            int x;
+            int y;
+        }
+
+        pragma(mangle, "snakebite_ut_dvariadic_struct_backend")
+        extern(D) size_t copyStruct(ubyte* dest, ...);
+
+        size_t answer() {
+            ubyte[16] buffer;
+            GuestPoint point;
+            point.x = 3;
+            point.y = 4;
+            const size = copyStruct(buffer.ptr, point);
+            int* asInts = cast(int*) buffer.ptr;
+            return size * 1_000_000 + asInts[0] * 1000 + asInts[1];
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+    assert(function_ !is null, "No `answer` in the guest program");
+
+    size_t result;
+    new Bytecode(Program([module_])).call(function_, &result, []);
+
+    result.should == 8_003_004;
+}
+
+
+@("variadic.externD.stringArgument.Interpreter")
+@Tags("Interpreter")
+unittest {
+    auto module_ = parseSnippet(q{
+        pragma(mangle, "snakebite_ut_dvariadic_string_backend")
+        extern(D) size_t stringLength(...);
+
+        size_t answer() {
+            return stringLength("hello");
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+    assert(function_ !is null, "No `answer` in the guest program");
+
+    size_t result;
+    interpreter(module_).call(function_, &result, []);
+
+    result.should == 5;
+}
+
+
+@("variadic.externD.stringArgument.Bytecode")
+@Tags("Bytecode")
+unittest {
+    import snakebite.backends.backend: Program;
+    import snakebite.backends.bytecode: Bytecode;
+
+    auto module_ = parseSnippet(q{
+        pragma(mangle, "snakebite_ut_dvariadic_string_backend")
+        extern(D) size_t stringLength(...);
+
+        size_t answer() {
+            return stringLength("hello");
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+    assert(function_ !is null, "No `answer` in the guest program");
+
+    size_t result;
+    new Bytecode(Program([module_])).call(function_, &result, []);
+
+    result.should == 5;
+}
+
+
+// A method (hidden `this`) that is also variadic: `this`, `_arguments`
+// and the extra arguments all have to order correctly.
+@("variadic.externD.method.Interpreter")
+@Tags("Interpreter")
+unittest {
+    auto module_ = parseSnippet(q{
+        // A variadic function's own body - trivial as this one is -
+        // still needs `core.stdc.stdarg`'s `__va_list_tag` visible at
+        // module scope: dmd's `semantic3` declares this method's own
+        // hidden `_argptr` unconditionally for any `VarArg.variadic`
+        // body, whether or not the body itself ever names it (`dmd.
+        // semantic3`'s own doc, `snakebite.ffi.plan`'s own `prepareCommon`
+        // doc cites the same fact for a call site's `_arguments`) - a
+        // body-less prototype, like every other guest declaration in this
+        // file's variadic tests, never runs `semantic3` at all and so
+        // never needs this.
+        import core.stdc.stdarg;
+
+        struct DVariadicMethodHost {
+            pragma(mangle, "snakebite_ut_dvariadic_method_backend")
+            extern(D) int sum(int first, ...) { assert(0); }
+        }
+
+        int answer() {
+            DVariadicMethodHost instance;
+            return instance.sum(1, 2, 3);
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+    assert(function_ !is null, "No `answer` in the guest program");
 
     int result;
-    interpreter(module_).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "interpreter: `snakebite_ut_extern_d_variadic_ffi_backend` " ~
-                "expects 1 argument(s), got 3");
+    interpreter(module_).call(function_, &result, []);
+
+    result.should == 6;
+}
+
+
+@("variadic.externD.method.Bytecode")
+@Tags("Bytecode")
+unittest {
+    auto module_ = parseSnippet(q{
+        // A variadic function's own body - trivial as this one is -
+        // still needs `core.stdc.stdarg`'s `__va_list_tag` visible at
+        // module scope: dmd's `semantic3` declares this method's own
+        // hidden `_argptr` unconditionally for any `VarArg.variadic`
+        // body, whether or not the body itself ever names it (`dmd.
+        // semantic3`'s own doc, `snakebite.ffi.plan`'s own `prepareCommon`
+        // doc cites the same fact for a call site's `_arguments`) - a
+        // body-less prototype, like every other guest declaration in this
+        // file's variadic tests, never runs `semantic3` at all and so
+        // never needs this.
+        import core.stdc.stdarg;
+
+        struct DVariadicMethodHost {
+            pragma(mangle, "snakebite_ut_dvariadic_method_backend")
+            extern(D) int sum(int first, ...) { assert(0); }
+        }
+
+        int answer() {
+            DVariadicMethodHost instance;
+            return instance.sum(1, 2, 3);
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+    assert(function_ !is null, "No `answer` in the guest program");
+
+    int result;
+    new Bytecode(Program([module_])).call(function_, &result, []);
+
+    result.should == 6;
+}
+
+
+@("variadic.externD.typesafeSlice.Interpreter")
+@Tags("Interpreter")
+unittest {
+    auto module_ = parseSnippet(q{
+        pragma(mangle, "snakebite_ut_dvariadic_typesafe_backend")
+        extern(D) int nativeSum(int[] a...);
+
+        int answer() {
+            return nativeSum(3, 4, 5);
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+    assert(function_ !is null, "No `answer` in the guest program");
+
+    int result;
+    interpreter(module_).call(function_, &result, []);
+
+    result.should == 12;
+}
+
+
+@("variadic.externD.typesafeSlice.Bytecode")
+@Tags("Bytecode")
+unittest {
+    import snakebite.backends.backend: Program;
+    import snakebite.backends.bytecode: Bytecode;
+
+    auto module_ = parseSnippet(q{
+        pragma(mangle, "snakebite_ut_dvariadic_typesafe_backend")
+        extern(D) int nativeSum(int[] a...);
+
+        int answer() {
+            return nativeSum(3, 4, 5);
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+    assert(function_ !is null, "No `answer` in the guest program");
+
+    int result;
+    new Bytecode(Program([module_])).call(function_, &result, []);
+
+    result.should == 12;
 }
 
 
