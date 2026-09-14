@@ -886,15 +886,16 @@ private extern(D) void snakebite_ut_memoryTwoSpill(
 }
 
 
-// Six `long`s (`a0` .. `a5`) fill the integer register file; `value` - a
-// MEMORY-class argument - always spills, whatever room is left
-// (`abi.ArgumentPlan`'s own doc), and the two `long`s declared after it
-// (`b0`, `b1`) spill too, for lack of any integer register left. dmd's
-// reversed `extern(D)` convention (`_reversedArguments`'s own doc) places
-// spilled arguments on the stack in descending declaration order, so
-// `value`'s three eightbytes land first, then `b0`, then `a1`, then `a0`
-// - not merely declaration order among the scalars, and not the order
-// `spilled[]` first collects them in.
+// `value` - a MEMORY-class argument - never reaches an integer register,
+// whatever room is left (`abi.ArgumentPlan`'s own doc), so dmd's reversed
+// `extern(D)` convention (`_reversedArguments`'s own doc) assigns the six
+// integer registers to the eight scalars alone, in reversed declaration
+// order: `b1`, `b0`, `a5`, `a4`, `a3`, `a2` take them, leaving `a1` and
+// `a0` - the last two reached - with no register free. `b0` does not
+// spill on dmd; only `a1` and `a0` do. Spilled arguments land on the
+// stack in descending declaration order, so the stack is `value`, `a1`,
+// `a0` - not merely declaration order among the scalars, and not the
+// order `spilled[]` first collects them in.
 @("called.externD.memoryClassParameterTwoScalarSpills")
 unittest {
     auto guestModule = parseSnippet(q{
