@@ -3892,8 +3892,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // elements need to survive at least as long as whatever slice they
     // are assigned to, `static` or not.
     //
-    // The shared LoweringVisitor routes array literals to this residual
-    // implementation. Keep this policy common to all runtime backends.
+    // The shared LoweringVisitor routes array literals without a lowering
+    // here. Lowered literals use the allocation result as their element
+    // storage and are completed below.
     protected override void visitUnloweredArrayLiteral(
             ArrayLiteralExp expression) {
         import snakebite.nativelayout: isStoredLiteral;
@@ -3954,6 +3955,64 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto bytes = cast(ubyte*) _place;
         storeIntegral(bytes + arrayLengthOffset, length, size_t.sizeof);
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
+    }
+
+    private struct ArrayLiteralDestination {
+        void* place;
+        Type type;
+        TypeFacts facts;
+        size_t mark;
+    }
+
+    private ArrayLiteralDestination[] _arrayLiteralDestinations;
+
+    protected override void prepareArrayLiteral(ArrayLiteralExp expression) {
+        auto destination = ArrayLiteralDestination(
+            _place, _type, _facts, _frames.mark);
+        const facts = factsOf(expression.lowering.type);
+        auto place = _frames.reserve(facts.size, facts.alignment);
+        _arrayLiteralDestinations ~= destination;
+        _place = place;
+        _type = expression.lowering.type;
+        _facts = facts;
+    }
+
+    protected override void restoreArrayLiteral() {
+        auto destination = _arrayLiteralDestinations[$ - 1];
+        _arrayLiteralDestinations.length--;
+        _place = destination.place;
+        _type = destination.type;
+        _facts = destination.facts;
+        _frames.release(destination.mark);
+    }
+
+    protected override void visitLoweredArrayLiteral(
+            ArrayLiteralExp expression) {
+        import dmd.astenums: Tarray;
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset, loadIntegral,
+            storeIntegral;
+
+        auto destination = _arrayLiteralDestinations[$ - 1];
+        auto elements = cast(ubyte*) loadIntegral(
+            _place, size_t.sizeof, false);
+        auto elementType = cast(Type) expression.type.nextOf;
+        const elementFacts = factsOf(elementType);
+        const count = expression.elements is null
+            ? 0 : expression.elements.length;
+        foreach (i; 0 .. count)
+            evaluate(
+                expression[i], elementType, elementFacts,
+                elements + i * elementFacts.size);
+
+        auto bytes = cast(ubyte*) destination.place;
+        if (expression.type.ty == Tarray) {
+            storeIntegral(bytes + arrayLengthOffset, count, size_t.sizeof);
+            *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
+        } else {
+            import core.stdc.string: memcpy;
+            memcpy(bytes, elements, destination.facts.size);
+        }
     }
 
     private struct NewDestination {

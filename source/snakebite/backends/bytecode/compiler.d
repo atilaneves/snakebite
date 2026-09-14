@@ -3569,8 +3569,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // all, so one that does reach here may have an element like `x + 1`
     // that only evaluating can produce.
     //
-    // The shared LoweringVisitor routes array literals to this residual
-    // implementation. Keep this policy common to all runtime backends.
+    // The shared LoweringVisitor routes array literals without a lowering
+    // here. Lowered literals use the allocation result as their element
+    // storage and are completed below.
     protected override void visitUnloweredArrayLiteral(
             ArrayLiteralExp expression) {
         requireDestination(expression);
@@ -3579,6 +3580,69 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (isStoredLiteral(expression))
             return compileConstant(expression);
         compileArrayLiteral(expression, _destination);
+    }
+
+    private struct ArrayLiteralDestination {
+        size_t offset;
+        size_t width;
+        Type type;
+    }
+
+    private ArrayLiteralDestination[] _arrayLiteralDestinations;
+
+    protected override void prepareArrayLiteral(ArrayLiteralExp expression) {
+        auto destination = ArrayLiteralDestination(
+            _destination, _width, _valueType);
+        const facts = TypeFacts.of(expression.lowering.type);
+        _arrayLiteralDestinations ~= destination;
+        _destination = reserveTemp(facts);
+        _width = facts.size;
+        _valueType = expression.lowering.type;
+    }
+
+    protected override void restoreArrayLiteral() {
+        auto destination = _arrayLiteralDestinations[$ - 1];
+        _arrayLiteralDestinations.length--;
+        _destination = destination.offset;
+        _width = destination.width;
+        _valueType = destination.type;
+    }
+
+    protected override void visitLoweredArrayLiteral(
+            ArrayLiteralExp expression) {
+        import dmd.astenums: Tarray;
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset;
+
+        const destination = _arrayLiteralDestinations[$ - 1];
+        const count = expression.elements is null
+            ? 0 : expression.elements.length;
+        const elementFacts = TypeFacts.of(expression.type.nextOf);
+        foreach (i; 0 .. count) {
+            const elementOffset = reserveTemp(elementFacts);
+            evalInto(expression[i], elementOffset, elementFacts.size);
+            const addressOffset = reserveTemp(pointerFacts);
+            emit(&opCopy, addressOffset, _destination, size_t.sizeof);
+            if (i != 0) {
+                const byteOffsetOffset = reserveTemp(pointerFacts);
+                emit(&opConstant, byteOffsetOffset,
+                    addConstant(cast(long) (i * elementFacts.size)),
+                    size_t.sizeof);
+                emit(&opAdd, addressOffset, byteOffsetOffset,
+                    size_t.sizeof);
+            }
+            emit(&opStoreIndirect, addressOffset, elementOffset,
+                elementFacts.size);
+        }
+
+        if (expression.type.ty == Tarray) {
+            emit(&opConstant, destination.offset + arrayLengthOffset,
+                addConstant(cast(long) count), size_t.sizeof);
+            emit(&opCopy, destination.offset + arrayPointerOffset,
+                _destination, size_t.sizeof);
+        } else
+            emit(&opLoadIndirect, destination.offset, _destination,
+                TypeFacts.of(expression.type).size);
     }
 
     // An associative-array literal has no glue-layer codegen of its own:

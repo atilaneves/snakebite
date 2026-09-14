@@ -37,9 +37,6 @@ static foreach (name; __traits(allMembers, imported!"dmd.expression")) {
 
 // Allocation lowering produces storage; constructor execution remains on
 // NewExp. Destination hooks keep that result alive across nested evaluation.
-// Array literals share one exception: their AA-temporary lowering currently
-// produces data that druntime rejects, so every backend uses the residual
-// literal operation until that lowering can be executed correctly.
 extern(C++) package abstract class LoweringVisitor: Visitor {
     alias visit = Visitor.visit;
 
@@ -152,10 +149,23 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     protected abstract void visitLoweredNew(NewExp expression);
 
     final override void visit(ArrayLiteralExp expression) {
+        if (expression.lowering !is null) {
+            prepareArrayLiteral(expression);
+            scope (exit) restoreArrayLiteral;
+            expression.lowering.accept(this);
+            visitLoweredArrayLiteral(expression);
+            return;
+        }
+
         visitUnloweredArrayLiteral(expression);
     }
 
     protected abstract void visitUnloweredArrayLiteral(
+        ArrayLiteralExp expression);
+
+    protected abstract void prepareArrayLiteral(ArrayLiteralExp expression);
+    protected abstract void restoreArrayLiteral();
+    protected abstract void visitLoweredArrayLiteral(
         ArrayLiteralExp expression);
 
     // `~` concatenation is always `_d_arraycatnTX`; the one shape without a
