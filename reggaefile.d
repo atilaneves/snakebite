@@ -24,7 +24,6 @@ Target dubTarget(string compiler, string config, string objectSet,
     auto buildOptions = options.dup;
     buildOptions.dubObjsDir = "$builddir/.reggae/objs/bin/"
         ~ objectSet ~ ".objs";
-    buildOptions.allAtOnce = compiler == "dmd";
     buildOptions.dCompiler = compiler == "dmd"
         ? options.dCompiler
         : environment.get("LDC", ldcPath());
