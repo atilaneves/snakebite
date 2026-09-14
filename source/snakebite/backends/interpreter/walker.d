@@ -1021,8 +1021,34 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (statement._body !is null)
                 statement._body.accept(this);
         } finally {
+            auto returned = _returned;
+            auto continued = _continued;
+            auto continueLabel = _continueLabel;
+            auto broken = _break;
+            auto breakLabel = _breakLabel;
+            auto gotoTarget = _gotoTarget;
+
+            // A control transfer exits the try body before its finally body,
+            // but it must not stop the finally body itself. A transfer from
+            // finally replaces the one that was already pending.
+            _returned = false;
+            _continued = false;
+            _continueLabel = null;
+            _break = false;
+            _breakLabel = null;
+            _gotoTarget = null;
+
             if (statement.finalbody !is null)
                 statement.finalbody.accept(this);
+
+            if (!_returned && !_continued && !_break && _gotoTarget is null) {
+                _returned = returned;
+                _continued = continued;
+                _continueLabel = continueLabel;
+                _break = broken;
+                _breakLabel = breakLabel;
+                _gotoTarget = gotoTarget;
+            }
         }
     }
 

@@ -340,14 +340,7 @@ static foreach (backend; Matrix!()) {
 // Nested: try/finally F0 { try/catch C1 { try/finally F1 { try/catch C2
 // { return } } } }. A throw from F1 is caught by C1 (F1 sits inside C1's
 // body), never by C2. A throw from F0 escapes both.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "once an earlier `return` has already fixed the value this " ~
-        "function hands back, statements after the first one in " ~
-        "whatever block runs next - here, the catch reached while " ~
-        "unwinding through a `finally` - are skipped, so this catch's " ~
-        "own `return` never overwrites that value"),
-)) {
+static foreach (backend; Matrix!()) {
     @("tryFinally.nestedFinallyCaughtByMiddleCatchOnly." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -390,13 +383,7 @@ static foreach (backend; Matrix!(
 // A `finally` body compiled twice (inlined at the `return`, and again
 // for the fall-through exit) declares its own local: the fall-through
 // copy must still run its own assignment to it.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "once a `return` inside the `try` has already fixed the value " ~
-        "this function hands back, the `finally` that then runs stops " ~
-        "after its first statement, so this local's own assignment " ~
-        "never runs"),
-)) {
+static foreach (backend; Matrix!()) {
     @("tryFinally.localInFinallyIsSetWhenCompiledTwice." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -423,12 +410,7 @@ static foreach (backend; Matrix!(
 
 
 // As above, with a loop in the `finally` instead of a local declaration.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "once a `return` inside the `try` has already fixed the value " ~
-        "this function hands back, the `finally` that then runs stops " ~
-        "after its first statement, so this loop never iterates"),
-)) {
+static foreach (backend; Matrix!()) {
     @("tryFinally.loopInFinallyRunsWhenCompiledTwice." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
