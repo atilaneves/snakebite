@@ -275,6 +275,22 @@ private extern(C) long snakebite_ut_mixed_reversed_after_six(
         + cast(long) value.floating * 100 + value.integer;
 }
 
+// Eight `double`s fill the SSE register file, and the integer register
+// file is free - `value`'s SSE lane (`floating`, declared first) has no
+// register left, so the whole aggregate spills, the mirror image of
+// `snakebite_ut_mixed_reversed_after_six` above, where the *integer*
+// file was the full one. This is the shape where a per-lane
+// implementation would split the aggregate, since its INTEGER lane
+// (`integer`) would still fit a free integer register.
+private extern(C) long snakebite_ut_mixed_reversed_after_eight_doubles(
+    double x0, double x1, double x2, double x3,
+    double x4, double x5, double x6, double x7,
+    MixedPairReversed value,
+) {
+    return cast(long) (x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7)
+        + cast(long) value.floating * 100 + value.integer;
+}
+
 private extern(C) double snakebite_ut_scale(double value) {
     return value * 2.5;
 }
@@ -1637,4 +1653,47 @@ unittest {
     ]);
 
     result.should == 258;
+}
+
+
+// Eight `double`s fill the SSE register file, and the integer register
+// file is free - `value`'s SSE lane (`floating`, `MixedPairReversed`'s
+// first field) has no register left, so the whole aggregate spills, the
+// mirror image of `called.mixedStructDoubleFirstSpills` above, where the
+// *integer* file was the full one. This is the shape where a per-lane
+// implementation would split the aggregate, since its INTEGER lane
+// (`integer`) would still fit a free integer register.
+@("called.mixedStructReversedAfterEightDoubles")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct MixedPairReversed {
+            double floating;
+            int integer;
+        }
+
+        extern(C) long snakebite_ut_mixed_reversed_after_eight_doubles(
+            double x0, double x1, double x2, double x3,
+            double x4, double x5, double x6, double x7,
+            MixedPairReversed value,
+        );
+    });
+    auto function_ = findFunction(guestModule,
+        "snakebite_ut_mixed_reversed_after_eight_doubles");
+    assert(function_ !is null,
+        "No `snakebite_ut_mixed_reversed_after_eight_doubles` in the " ~
+            "guest program");
+
+    PlanCache cache;
+    double[8] x = [1, 1, 1, 1, 1, 1, 1, 1];
+    MixedPairReversed value = MixedPairReversed(2.0, 37);
+    long result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &x[0], cast(const void*) &x[1],
+        cast(const void*) &x[2], cast(const void*) &x[3],
+        cast(const void*) &x[4], cast(const void*) &x[5],
+        cast(const void*) &x[6], cast(const void*) &x[7],
+        cast(const void*) &value,
+    ]);
+
+    result.should == 245;
 }
