@@ -5307,7 +5307,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 extraArgumentTypes ~= (*arguments)[i].type;
 
         auto plan = type.parameterList.varargs == VarArg.none
-            ? &_bytecode._plans.of(callee)
+            ? _bytecode._plans.of(callee)
             : _bytecode._plans.variadicOf(callee, extraArgumentTypes);
 
         if (type.parameterList.varargs == VarArg.variadic)

@@ -122,9 +122,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         Error, Exception, Throwable, TypeInfo_Class;
     import dmd.root.string: toDString;
     import dmd.astenums:
-        Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32, Tfloat64,
-        Tfloat80, Tnoreturn, Tint64, Tpointer, Tsarray, Ttuple, Tuns32,
-        Tuns8, Tvoid, Twchar, VarArg;
+        LINK, Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32,
+        Tfloat64, Tfloat80, Tnoreturn, Tint64, Tpointer, Tsarray, Ttuple,
+        Tuns32, Tuns8, Tvoid, Twchar, VarArg;
     import dmd.arraytypes: Expressions;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
@@ -697,7 +697,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         );
         if (!interprets) {
             const plan = callSite is null
-                ? &_plans.of(function_)
+                ? _plans.of(function_)
                 : callPlanOf(callSite, function_);
             callHost(
                 function_, plan, returnPlace, arguments, argumentCount,
@@ -873,7 +873,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         FuncDeclaration function_,
     ) {
         return cachedCallPlan(
-            callSite, function_, () => &_plans.of(function_));
+            callSite, function_, () => _plans.of(function_));
     }
 
     // As `callPlanOf`, for one call site of an `extern(C)` C-style
@@ -4595,9 +4595,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // A C-style variadic callee (issue #334 step 5) always reaches a
         // native symbol - see `callVariadicNative`'s own doc - so this
         // never joins the class-receiver/virtual-dispatch machinery
-        // below, which exists for guest method calls only.
+        // below, which exists for guest method calls only. `linkage ==
+        // LINK.c` keeps this routing to only what step 5 actually
+        // supports: without it, a guest-bodied `extern(D)` variadic
+        // function (D's own untyped variadics, issue #334 step 6) would
+        // also reach `callVariadicNative`, and its own FFI refusal
+        // ("ffi cannot call ... as a variadic function") would misname a
+        // guest function as an FFI failure. Falling through instead
+        // reaches the ordinary call path below, whose own arity check
+        // gives an honest message until step 6 adds real support.
         auto funcType = typeFunctionOf(function_);
-        if (funcType.parameterList.varargs == VarArg.variadic) {
+        if (funcType.parameterList.varargs == VarArg.variadic
+                && function_.resolvedLinkage == LINK.c) {
             callVariadicNative(expression, function_, funcType);
             return;
         }

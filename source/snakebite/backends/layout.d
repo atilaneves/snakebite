@@ -255,7 +255,7 @@ package struct FrameLayout {
         auto slot = slotOf(variable);
         if (slot is null)
             throw new SnakebiteException(
-                text("interpreter cannot reach `", variable.toString,
+                text("cannot reach `", variable.toString,
                     "`: not a parameter or local in the current frame"),
             );
 

@@ -2077,34 +2077,71 @@ static foreach (backend; Matrix!(
 // `extern(D)` - stay refused (issue #334 step 6 is untyped D variadics;
 // typesafe D variadics remain unimplemented). `ut.ffi.plan`'s own
 // `called.variadic.externDRefused` checks `CallPlan.prepare`'s own
-// message directly; these check it reaches a guest caller unchanged
-// through each backend that resolves a call to a plan (`Native` and
-// `Ctfe` never reach `CallPlan.prepare` at all: `Native` is compiled D,
-// which would fail to *link* rather than raise this refusal, and `Ctfe`
-// has no FFI plan machinery of its own).
-static foreach (Backend; AliasSeq!(Interpreter, Bytecode)) {
-    @("variadic.externDRefused." ~ Backend.stringof)
-    @Tags(Backend.stringof)
-    unittest {
-        auto module_ = parseSnippet(q{
-            extern(D) int snakebite_ut_extern_d_variadic_ffi_backend(
-                int x, ...
-            );
+// message directly. On Bytecode this reaches a guest caller unchanged
+// (`Native` never reaches `CallPlan.prepare` at all - compiled D would
+// fail to *link* rather than raise this refusal - and `Ctfe` has no FFI
+// plan machinery of its own): `compileResolvedCall`'s own guest/native
+// split (`usesGuestBody`) already routes a body-less declaration like
+// this one to `compileNativeCall` regardless of linkage, and
+// `compileNativeCall`'s own variadic handling reaches `CallPlan.prepare`
+// the same way for any `VarArg.variadic` type.
+@("variadic.externDRefused.Bytecode")
+@Tags("Bytecode")
+unittest {
+    auto module_ = parseSnippet(q{
+        extern(D) int snakebite_ut_extern_d_variadic_ffi_backend(
+            int x, ...
+        );
 
-            int answer() {
-                return snakebite_ut_extern_d_variadic_ffi_backend(1, 2);
-            }
-        });
-        auto function_ = findFunction(module_, "answer");
+        int answer() {
+            return snakebite_ut_extern_d_variadic_ffi_backend(1, 2);
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
 
-        int result;
-        new Backend(Program([module_])).call(function_, &result, [])
-            .shouldThrowWithMessage(
-                "ffi cannot call `" ~
-                    "snakebite_ut_extern_d_variadic_ffi_backend" ~
-                    "` as a variadic function: only an `extern(C)` " ~
-                    "C-style variadic callee is supported");
-    }
+    int result;
+    new Bytecode(Program([module_])).call(function_, &result, [])
+        .shouldThrowWithMessage(
+            "ffi cannot call `" ~
+                "snakebite_ut_extern_d_variadic_ffi_backend" ~
+                "` as a variadic function: only an `extern(C)` " ~
+                "C-style variadic callee is supported");
+}
+
+
+// The interpreter's own `visit(CallExp)` routes a call to
+// `callVariadicNative` only when the callee's own linkage is `LINK.c`
+// (issue #334 step 5 review finding 6): without that check, a
+// guest-bodied `extern(D)` variadic function (D's own untyped
+// variadics, step 6's own scope) would also reach `callVariadicNative`,
+// whose "ffi cannot call ... as a variadic function" message would
+// misname a guest function as an FFI failure. This declaration has no
+// body either, so it cannot run as a guest function at all; falling
+// through to the ordinary call path (`bindFrame`) reaches its own,
+// honest arity-mismatch message instead - `arguments.length` counts 3,
+// not the 2 written at the call site, because dmd's own semantic
+// lowering of an `extern(D)` variadic call site inserts its own extra
+// argument ahead of the declared `TypeInfo[]`/typeid handling that step
+// 6 will read (`snakebite.backends.calls.arityMismatches`'s own doc).
+@("variadic.externDRefused.Interpreter")
+@Tags("Interpreter")
+unittest {
+    auto module_ = parseSnippet(q{
+        extern(D) int snakebite_ut_extern_d_variadic_ffi_backend(
+            int x, ...
+        );
+
+        int answer() {
+            return snakebite_ut_extern_d_variadic_ffi_backend(1, 2);
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+
+    int result;
+    interpreter(module_).call(function_, &result, [])
+        .shouldThrowWithMessage(
+            "interpreter: `snakebite_ut_extern_d_variadic_ffi_backend` " ~
+                "expects 1 argument(s), got 3");
 }
 
 

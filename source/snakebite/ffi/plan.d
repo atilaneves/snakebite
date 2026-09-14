@@ -795,20 +795,21 @@ public struct PlanCache {
 
     // `function_`'s plan, prepared on its first call and reused after.
     //
-    // Returned by reference: the plan stays in the cache, and a caller
-    // only ever calls through it.
-    public ref const(CallPlan) of(
+    // Returned by pointer, the same kind `variadicOf`/`rawPlanOf` return:
+    // the plan stays in the cache, and a caller only ever calls through
+    // it.
+    public const(CallPlan)* of(
         imported!"dmd.func".FuncDeclaration function_,
     ) {
         if (auto cached = function_ in _plans)
-            return **cached;
+            return *cached;
 
         ++_preparations;
         auto plan = new CallPlan;
         *plan = prepare(function_, _resolver);
         plan._guestDelegates = guestDelegates;
         _plans[function_] = plan;
-        return *plan;
+        return plan;
     }
 
     // As `.of`, but for one call site of an `extern(C)` C-style variadic
