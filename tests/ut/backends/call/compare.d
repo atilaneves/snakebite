@@ -1129,7 +1129,6 @@ static foreach (backend; Matrix!()) {
 // true, so `bump` never runs here and `calls` stays at zero. An
 // implementation that evaluates both sides answers one instead.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read or write mutable module-level state"),
 )) {
@@ -1163,7 +1162,6 @@ static foreach (backend; Matrix!(
 // The other half of the pair: with the left side true the right side does
 // run, so a backend that never evaluates it fails this one.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read or write mutable module-level state"),
 )) {
@@ -1196,7 +1194,6 @@ static foreach (backend; Matrix!(
 
 // `||` evaluates its right side only when the left side is false.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read or write mutable module-level state"),
 )) {
@@ -1228,7 +1225,6 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read or write mutable module-level state"),
 )) {

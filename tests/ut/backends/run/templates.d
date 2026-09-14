@@ -11,11 +11,7 @@ import ut.backends;
 
 // `__traits(allMembers)` with a recursive template walks a struct's fields
 // in declaration order, choosing a branch per field type.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("traitsDrivenStructTraversal." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -74,11 +70,7 @@ static foreach (backend; Matrix!(
 
 // A mixin template's member is a member of the class that mixes it in, so
 // it can override a base method and see the derived class's fields.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("mixinTemplateOverridesInDerived." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -119,11 +111,7 @@ static foreach (backend; Matrix!(
 
 // `opOpAssign` selected by a template value parameter runs on the element
 // a pointer names, so the array element itself changes.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("opOpAssignThroughPointerToElement." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -149,11 +137,7 @@ static foreach (backend; Matrix!(
 
 // A nested function used as a template's alias predicate carries the
 // enclosing frame, so the predicate sees the locals it closes over.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("localPredicateInstantiatesAlgorithm." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

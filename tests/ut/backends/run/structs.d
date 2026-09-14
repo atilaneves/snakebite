@@ -404,7 +404,6 @@ static foreach (backend; Matrix!(
 // though they share no other relationship.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("tupleofAssignsFieldwise." ~ backend.stringof)
@@ -655,9 +654,7 @@ static foreach (backend; Matrix!(
 // compares that field's own type on its own - a float field follows IEEE
 // 754, where `-0.0` equals `0.0` and `double.nan` never equals itself,
 // unlike a raw byte compare.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("structEqualityComparesFloatFieldByIeeeRules." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -677,9 +674,7 @@ static foreach (backend; Matrix!(
 // `new S(args)` with no declared constructor initializes the fields
 // positionally, in declaration order, from the constructor arguments -
 // the same as a struct literal `S(args)` would.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("newStructWithStringField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1055,7 +1050,7 @@ static foreach (backend; Matrix!()) {
 // where that leaked slot would have been, and the same construction is
 // then repeated to check its zero-initialization was not skipped by a
 // stale cache entry from the failed attempt.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("structCtorCallThrowDoesNotLeakItsSlot." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1123,13 +1118,6 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // that, without changing what the interpreter is being asked to do -
 // call back into the same construction site while it is still running.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "the guest crashes the host process (SIGSEGV) instead of " ~
-            "returning or throwing - `make`'s recursive call reenters " ~
-            "`Whole(2, Part(n))`'s own construction site while the outer " ~
-            "activation is still live, and something about that "
-            ~ "re-entrant frame layout is unsound here, not merely "
-            ~ "unimplemented"),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE refuses to read a mutable static variable - `make` is " ~
         "exactly that in the guest, where this snippet is a module and " ~
@@ -1178,7 +1166,7 @@ static foreach (backend; Matrix!(
 // until the end of the full expression, so `this` must still hold the
 // constructor's writes when the method reads `payload` - even though the
 // helper call in between reserves and fills a frame of its own.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("structCtorRvalueMethodBodyCallsHelper." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1215,7 +1203,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // throws, and the whole expression is abandoned. The temporary must be
 // released cleanly on that unwinding path, and a later construction must
 // then work as if the failed one never happened.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("structCtorArgumentThrowDuringOuterArgumentBinding." ~
         backend.stringof)
     @Tags(backend.stringof)
@@ -1283,12 +1271,7 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 // full expression. A temporary that instead survives the statement leaks
 // its reservation every iteration and exhausts the frame stack well
 // before the loop is done.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed,
-        "not run: 300000 CTFE iterations, each copying a 4KiB struct, " ~
-        "take longer than a unit test can afford"),
-)) {
+static foreach (backend; Matrix!()) {
     @HiddenTest
     @("structValueCallFieldReadsDoNotExhaustFrameStack." ~
         backend.stringof)
@@ -1515,9 +1498,7 @@ static foreach (backend; Matrix!(
 // is the whole statement, not a fragment of a larger one, and its
 // destructor is already called explicitly by the `finally`. Registering
 // it a second time from the declaration would destroy the range twice.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("foreachRangeTemporaryDestroyedOnceByItsOwnFinally." ~
         backend.stringof)
     @Tags(backend.stringof)
@@ -1565,9 +1546,7 @@ static foreach (backend; Matrix!(
 // native D does not run its destructor for it - registering the
 // destructor at the declaration, before the constructor call that can
 // still fail, would run it anyway.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("temporaryWithThrowingConstructorRunsNoDestructor." ~
         backend.stringof)
     @Tags(backend.stringof)
@@ -1804,9 +1783,7 @@ static foreach (backend; Matrix!(
 // wraps the loop in. The constructor call returning must not commit a
 // second destructor run for a variable whose destruction that
 // `finally` already owns.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("foreachRangeWithUserCtorDestroyedOnceByItsOwnFinally." ~
         backend.stringof)
     @Tags(backend.stringof)

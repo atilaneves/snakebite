@@ -12,9 +12,7 @@ import ut.backends;
 // A module-level array is initialised before anything runs, so a callee
 // that touches it first still sees its contents.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("moduleArrayInitialisedBeforeFirstUse." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -50,9 +48,7 @@ static foreach (backend; Matrix!(
 // `~` allocates and copies. Neither operand's storage is reused, so
 // writing through the result does not change either operand, and writing
 // through an operand afterwards does not change the result.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("concatenationCopiesBothSides." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -85,10 +81,7 @@ static foreach (backend; Matrix!(
 // `.dup` and `.idup` give storage of their own. Writing through the copy
 // leaves the original alone, which a backend returning the same
 // (ptr, length) pair would not.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("dupAndIdupCopyStorage." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -132,9 +125,7 @@ static foreach (backend; Matrix!(
 
 // Appending a `dchar` to a `char[]` encodes it as UTF-8, so one append
 // adds as many elements as the code point needs, not one.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("appendingDcharEncodesUtf8." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -159,9 +150,7 @@ static foreach (backend; Matrix!(
 // Appending a `dchar` to a `wchar[]` encodes it as UTF-16, so a code
 // point outside the Basic Multilingual Plane becomes a surrogate pair
 // (two elements), not one.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("appendingDcharEncodesUtf16." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -251,7 +240,6 @@ static foreach (backend; Matrix!(
 // Reserving empty storage before the first append grows through the same
 // element and slice paths without relying on variadic slice assignment.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("manualReallocationFromReservedCapacityKeepsContents."

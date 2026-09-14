@@ -85,7 +85,6 @@ static foreach (backend; Matrix!()) {
 // so they have no effect.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
     Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("gotoSkipsToLabelInCatch." ~ backend.stringof)

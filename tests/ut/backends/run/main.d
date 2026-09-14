@@ -120,10 +120,7 @@ static foreach (backend; Matrix!()) {
 
 // A failed assertion leaves `main` as a `Throwable` and the process fails,
 // which is the contract `run` reports as a status.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("failedAssertExitsNonZero." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

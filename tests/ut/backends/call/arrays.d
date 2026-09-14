@@ -5,7 +5,6 @@ import ut.backends;
 
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot hold mutable static state across calls"),
 )) {
