@@ -5,6 +5,13 @@ private:
 
 import snakebite.ffi.limits: maxArguments;
 
+// This module classifies one value's System V AMD64 ABI shape -
+// `ArgumentPlan` and `Register` - and the two host-compiler switches
+// below (`reversedDParameters`, `contextPrecedesHiddenReturnPointer`) a
+// plan reads to interpret that shape. It no longer dispatches a call
+// itself: that moved to the assembly stub in `snakebite.ffi.sysv`,
+// replayed by `snakebite.ffi.plan` (ADR-0001, issue #334).
+//
 // The integer register limit is separate: values after the first six
 // integer words go on the stack, but they still belong to the function's
 // parameter list.
@@ -59,24 +66,6 @@ public struct Register {
     public Kind kind;
     // In bytes, and always 1, 2, 4 or 8 for anything but `none`.
     public ubyte size;
-
-    public static Register of(imported!"dmd.mtype".Type type) {
-        import dmd.astenums: Tvoid;
-
-        if (type.ty == Tvoid)
-            return Register(Kind.none, 0);
-
-        const plan = aggregatePlan(type);
-        if (plan.memory || plan.count == 0) {
-            import std.conv: text;
-
-            throw new Exception(
-                text("ffi cannot pass a value of type `", type.toString,
-                    "` in one register"),
-            );
-        }
-        return plan.registers[0];
-    }
 }
 
 // How a value travels. A regular value has at most two eightbytes after
@@ -306,63 +295,4 @@ private void merge(
         else if (classes[i] != incoming)
             classes[i] = ArgumentPlan.ValueClass.integer;
     }
-}
-
-// Reads one eightbyte's native bytes and applies the scalar widening rule
-// when the value is a scalar. Aggregate eightbytes are copied unchanged.
-pragma(inline, true) public size_t word(in Register register, in void* slot) {
-    final switch (register.kind) with (Register.Kind) {
-        case pointer:
-            return cast(size_t) *cast(void**) slot;
-
-        case unsigned:
-            switch (register.size) {
-                case 1: return *cast(ubyte*) slot;
-                case 2: return *cast(ushort*) slot;
-                case 4: return *cast(uint*) slot;
-                case 8: return *cast(size_t*) slot;
-                default: assert(false, "unsupported unsigned size");
-            }
-
-        case signed:
-            switch (register.size) {
-                case 1: return cast(size_t) cast(long) *cast(byte*) slot;
-                case 2: return cast(size_t) cast(long) *cast(short*) slot;
-                case 4: return cast(size_t) cast(long) *cast(int*) slot;
-                case 8: return *cast(size_t*) slot;
-                default: assert(false, "unsupported signed size");
-            }
-
-        case integer:
-        case sse: {
-            size_t result;
-            import core.stdc.string: memcpy;
-            memcpy(&result, slot, register.size);
-            return result;
-        }
-
-        case none:
-            assert(false, "a `void` argument has nothing to pass");
-    }
-}
-
-// Writes one raw return eightbyte back into native storage.
-pragma(inline, true) public void writeWord(
-    in Register register,
-    in size_t result,
-    void* place,
-) {
-    if (register.kind == Register.Kind.none)
-        return;
-
-    if (register.kind == Register.Kind.signed
-            || register.kind == Register.Kind.unsigned
-            || register.kind == Register.Kind.pointer) {
-        import snakebite.nativelayout: storeIntegral;
-        storeIntegral(place, result, register.size);
-        return;
-    }
-
-    import core.stdc.string: memcpy;
-    memcpy(place, &result, register.size);
 }

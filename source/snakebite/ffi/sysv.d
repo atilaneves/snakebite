@@ -10,9 +10,11 @@ private:
 // below keep this layout in sync with that file. Change a field here and
 // update the matching constant there.
 //
-// A plan (`snakebite.ffi.plan`) fills `integer`, `sse`, `sseCount`,
-// `stack` and `stackWords` before a call, and reads `integerResult` and
-// `sseResult` after one; that wiring is step 2 of issue #334; this
+// `snakebite.ffi.plan.CallPlan`'s `callAt` fills `integer` and `sse`
+// before a call, at the byte offsets `buildMoves` precomputed once at
+// prepare time, along with `sseCount`, `stack` and `stackWords` - skipped
+// for a plan that chose the integer-only entry below, which never reads
+// them - and reads `integerResult`/`sseResult` back after one; this
 // struct only defines the shape the stub itself reads and writes.
 public struct CallFrame {
     // The first six integer/pointer-class argument words, in the order

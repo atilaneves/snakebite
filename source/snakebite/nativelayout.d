@@ -22,6 +22,11 @@ public alias delegateContextOffset = nativeDelegateContextOffset;
 public alias delegateFunctionOffset = nativeDelegateFunctionOffset;
 public alias delegateValueSize = nativeDelegateValueSize;
 
+// `snakebite.backends.interpreter.walker` calls this on every integral
+// assignment it interprets, so it collapses into that caller instead of
+// staying a real call boundary on that hot path - not, any more, for an
+// FFI return-value write (issue #334 deleted that caller, `abi.
+// writeWord`).
 pragma(inline, true) public bool isIntegralSize(in size_t size) {
     return nativeIsIntegralSize(size);
 }
@@ -43,6 +48,11 @@ public bool isNativeBytes(imported!"dmd.mtype".Type type) {
 // Keep the DMD-facing module's historical error behavior while the actual
 // byte operations live in the DMD-free native-value module. Backend code
 // that already validated its widths can call that module directly.
+// `snakebite.backends.interpreter.walker` is this wrapper's own hot
+// caller - one of these on nearly every assignment it interprets - so
+// this still collapses into it instead of staying a real call boundary;
+// not, any more, for an FFI return-value write (issue #334 deleted that
+// caller, `abi.writeWord`).
 pragma(inline, true) public void storeIntegral(
     void* place, in ulong value, in size_t size,
 ) {

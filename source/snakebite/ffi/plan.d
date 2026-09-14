@@ -147,7 +147,7 @@ public struct CallPlan {
     // `arguments` are the addresses of each argument's native bytes, in
     // declaration order, and the result is written to `returnPlace` in
     // native layout - the same convention `Backend.call` uses, so a caller
-    // hands over slots it already has rather than marshalling anything.
+    // hands over slots it already has rather than copying anything.
     //
     // `returnPlace` may be `null` to discard the result, and must
     // otherwise be exactly the return type's size.

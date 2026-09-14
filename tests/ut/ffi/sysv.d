@@ -137,11 +137,13 @@ unittest {
 
 // One integer and one SSE argument both spill: `g` is the 7th integer
 // argument, declared before the 9th SSE argument `x8`, so the stub must
-// place `g` at stack word 0 and `x8` at stack word 1 - declaration order,
-// not grouped by class. A stub that grouped them (as the class-grouped
-// path in `snakebite.ffi.abi.invoke` currently must refuse to, since it
-// cannot recover the interleaving) would hand the callee `x8`'s bits
-// where it expects `g`'s, and vice versa.
+// place `g` at stack word 0 and `x8` at stack word 1 - declaration
+// order, not grouped by class. The System V AMD64 ABI lays a callee's
+// stack-spilled words out in declaration order regardless of which
+// register file each one classified to; a stub that instead grouped
+// spilled words by class (all INTEGER, then all SSE, or vice versa)
+// would hand the callee `x8`'s bits where it expects `g`'s, and vice
+// versa.
 private extern(C) double snakebite_ut_sysv_mixedStack(
     int a, int b, int c, int d, int e, int f,
     double x0, double x1, double x2, double x3, double x4, double x5,
