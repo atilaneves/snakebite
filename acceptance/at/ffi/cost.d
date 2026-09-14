@@ -128,7 +128,7 @@ unittest {
     result.should == 42;
     // `-release` strips `assert`, so this stays a `should` check: without
     // it, an optimiser that folds the baseline loop away would pass silently.
-    sink.shouldNotEqual(0);
+    sink.should.not == 0;
 
     // Fixed from independent runs of a known-good revision: mean + 3 sample
     // standard deviations, rounded up. Do not let a candidate's own noise
@@ -138,6 +138,11 @@ unittest {
     // `assert`. It only runs where `-O` gives the barrier a chance to meet
     // it: `bin/at` is unoptimised and would fail this gate on the generic
     // call path alone, telling nothing about the barrier itself.
+    //
+    // `shouldBeSmallerThan`, not a `<` operator, because unit-threaded's
+    // `should` proxy has no `<`: `double.should < x` does not compile
+    // (relational operators route through `opCmp`, which `Should` does
+    // not define), so this stays the free-function form.
     version (D_Optimized)
         ratios[2].shouldBeSmallerThan(maxRatio);
 }
