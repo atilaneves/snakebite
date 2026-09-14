@@ -542,7 +542,7 @@ unittest {
         "No `snakebite_ut_mixed_after_six` in the program");
 
     PlanCache cache;
-    int[6] integers = [1, 2, 3, 4, 5, 6];
+    int[6] integers = [10, 20, 30, 40, 50, 60];
     MixedPair value = MixedPair(7, 1.5);
     MixedPair result;
     cache.of(function_).call(&result, [
@@ -552,7 +552,7 @@ unittest {
         cast(const void*) &value,
     ]);
 
-    result.should == MixedPair(28, 7.5);
+    result.should == MixedPair(217, 7.5);
 }
 
 
@@ -576,7 +576,7 @@ unittest {
         "No `snakebite_ut_mixed_after_eight` in the program");
 
     PlanCache cache;
-    double[8] floating = [1, 1, 1, 1, 1, 1, 1, 1];
+    double[8] floating = [1, 2, 3, 4, 5, 6, 7, 8];
     MixedPair value = MixedPair(7, 1.5);
     MixedPair result;
     cache.of(function_).call(&result, [
@@ -587,7 +587,7 @@ unittest {
         cast(const void*) &value,
     ]);
 
-    result.should == MixedPair(15, 7.5);
+    result.should == MixedPair(43, 7.5);
 }
 
 
@@ -946,6 +946,81 @@ unittest {
     cache.of(function_).call(&result, [cast(const void*) &receiver]);
 
     result.should == ThreeWords(17, 31, 47);
+}
+
+
+private struct ContextThenMixedSpill {
+    pragma(mangle, "snakebite_ut_context_then_mixed_spill")
+    long sumFiveLongsThenMixed(
+        long a0, long a1, long a2, long a3, long a4, MixedPair value,
+    ) {
+        return a0 + a1 * 10 + a2 * 100 + a3 * 1000 + a4 * 10_000
+            + value.integer * 100_000
+            + cast(long) (value.floating * 1_000_000);
+    }
+}
+
+
+// A method's hidden `this` claims one integer register before its
+// explicit parameters (`called.contextPrecedesHiddenReturnPointer`
+// above). Five plain `long`s then fill the remaining five integer
+// registers, so `value`'s INTEGER lane has no register left and the
+// whole aggregate spills - the free-function signature `abi.
+// contextPrecedesHiddenReturnPointer` tests elsewhere (`this` plus five
+// `long`s, six total) would still fit six integer registers and keep
+// `value` in registers instead; only the method's hidden context tips it
+// over. Backend level (a guest struct method actually executed through
+// `shouldBeRetOf`) cannot exercise this: a guest declaration needs a
+// body for `hasHiddenThis` to see its `vthis` (`called.
+// contextPrecedesHiddenReturnPointer`'s own doc), but any guest
+// declaration with a body always runs as guest code
+// (`snakebite.backends.calls.prefersGuestBody`'s own doc - "a guest
+// function's body is the one being tested, so it runs as guest even when
+// its linker name is also in this process"), never as an FFI call -
+// verified by trying it: a bodyless guest method left `hasHiddenThis`
+// false and both interpreting backends read garbage, and giving it a
+// body made every backend, Native included, run `assert(0)` instead of
+// calling the real native method. `PlanCache.of` sidesteps this by
+// reading the declaration's dmd facts directly and never interpreting
+// `fbody` at all, the same way `called.
+// contextPrecedesHiddenReturnPointer` above does.
+@("called.mixedStructAfterHiddenContext")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct MixedPair {
+            int integer;
+            double floating;
+        }
+
+        struct ContextThenMixedSpill {
+            pragma(mangle, "snakebite_ut_context_then_mixed_spill")
+            extern(D) long sumFiveLongsThenMixed(
+                long a0, long a1, long a2, long a3, long a4,
+                MixedPair value,
+            ) { assert(0); }
+        }
+    });
+    auto struct_ = findStruct(guestModule, "ContextThenMixedSpill");
+    assert(struct_ !is null,
+        "No struct `ContextThenMixedSpill` in the guest program");
+    auto function_ = findFunction(struct_, "sumFiveLongsThenMixed");
+    assert(function_ !is null,
+        "No `sumFiveLongsThenMixed` method in the guest program");
+
+    PlanCache cache;
+    ContextThenMixedSpill instance;
+    ContextThenMixedSpill* receiver = &instance;
+    long a0 = 1, a1 = 2, a2 = 3, a3 = 4, a4 = 5;
+    MixedPair value = MixedPair(7, 1.5);
+    long result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &receiver,
+        cast(const void*) &a0, cast(const void*) &a1,
+        cast(const void*) &a2, cast(const void*) &a3,
+        cast(const void*) &a4, cast(const void*) &value,
+    ]);
+
+    result.should == 2_254_321;
 }
 
 
@@ -1696,4 +1771,68 @@ unittest {
     ]);
 
     result.should == 245;
+}
+
+
+private struct MemoryTriple {
+    size_t first;
+    size_t second;
+    size_t third;
+}
+
+// Six plain `int`s fill the integer register file. `m` - a MEMORY-class
+// argument - always spills, whatever room is left (`abi.ArgumentPlan`'s
+// own doc), and `value` - a mixed INTEGER/SSE pair whose INTEGER lane
+// has no register left either - spills too. Step 3 (MEMORY) and step 4
+// (mixed) both route through the same `addSpilled`/`spilled[]`
+// machinery, ordered by parameter index: `m`'s three eightbytes land at
+// stack words 0-2, then `value`'s two eightbytes at words 3-4. This is
+// the only test that puts both on the same stack.
+private extern(C) long snakebite_ut_memory_and_mixed(
+    int a, int b, int c, int d, int e, int f,
+    MemoryTriple m, MixedPair value,
+) {
+    return a + b + c + d + e + f
+        + cast(long) (m.first * 10 + m.second * 100 + m.third * 1000)
+        + value.integer * 10_000
+        + cast(long) (value.floating * 100_000);
+}
+
+@("called.mixedStructAfterMemoryOnStack")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct MemoryTriple {
+            size_t first;
+            size_t second;
+            size_t third;
+        }
+
+        struct MixedPair {
+            int integer;
+            double floating;
+        }
+
+        extern(C) long snakebite_ut_memory_and_mixed(
+            int a, int b, int c, int d, int e, int f,
+            MemoryTriple m, MixedPair value,
+        );
+    });
+    auto function_ = findFunction(guestModule,
+        "snakebite_ut_memory_and_mixed");
+    assert(function_ !is null,
+        "No `snakebite_ut_memory_and_mixed` in the guest program");
+
+    PlanCache cache;
+    int[6] integers = [1, 2, 3, 4, 5, 6];
+    MemoryTriple m = MemoryTriple(1, 2, 3);
+    MixedPair value = MixedPair(7, 1.5);
+    long result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &integers[0], cast(const void*) &integers[1],
+        cast(const void*) &integers[2], cast(const void*) &integers[3],
+        cast(const void*) &integers[4], cast(const void*) &integers[5],
+        cast(const void*) &m, cast(const void*) &value,
+    ]);
+
+    result.should == 223_231;
 }

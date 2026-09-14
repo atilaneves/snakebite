@@ -1260,7 +1260,7 @@ static foreach (backend; Matrix!(
     @("mixedStruct.onStackAfterSixIntegersThenScalar." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        9_007_022L.shouldBeRetOf!(
+        9_007_211L.shouldBeRetOf!(
             backend,
             q{
                 struct MixedPair {
@@ -1279,7 +1279,7 @@ static foreach (backend; Matrix!(
                     value.integer = 7;
                     value.floating = 1.5;
                     return nativeMixedAfterSixThenScalar(
-                        1, 2, 3, 4, 5, 6, value, 9.0);
+                        10, 20, 30, 40, 50, 60, value, 9.0);
                 }
             },
             "answer",
@@ -1301,7 +1301,7 @@ static foreach (backend; Matrix!(
         ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        9_007_022L.shouldBeRetOf!(
+        9_007_211L.shouldBeRetOf!(
             backend,
             q{
                 struct MixedPair {
@@ -1321,7 +1321,7 @@ static foreach (backend; Matrix!(
                     value.integer = 7;
                     value.floating = 1.5;
                     return nativeMixedAfterSixThenIntScalar(
-                        1, 2, 3, 4, 5, 6, value, 9);
+                        10, 20, 30, 40, 50, 60, value, 9);
                 }
             },
             "answer",
@@ -1344,7 +1344,7 @@ static foreach (backend; Matrix!(
     @("mixedStruct.onStackAfterEightDoubles." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        3_007_009L.shouldBeRetOf!(
+        3_007_037L.shouldBeRetOf!(
             backend,
             q{
                 struct MixedPair {
@@ -1364,7 +1364,7 @@ static foreach (backend; Matrix!(
                     value.integer = 7;
                     value.floating = 1.5;
                     return nativeMixedAfterEightDoubles(
-                        1, 1, 1, 1, 1, 1, 1, 1, value, 3);
+                        1, 2, 3, 4, 5, 6, 7, 8, value, 3);
                 }
             },
             "answer",
