@@ -406,7 +406,17 @@ public struct CallPlan {
         size_t floatingCount;
         size_t stackCount;
         size_t moveCount;
-        _moves.length = _parameterCount * 2;
+        // A register-class argument becomes at most two moves (`count`),
+        // but a MEMORY-class one (issue #334 step 3) never reaches a
+        // register at all and instead becomes one move per whole eightbyte
+        // of its own size (`memoryWords`) - `_parameterCount * 2` alone
+        // would undercount a plan with such an argument and overrun
+        // `_moves` below.
+        size_t totalMoves;
+        foreach (argument; _arguments)
+            totalMoves +=
+                argument.memory ? argument.memoryWords : argument.count;
+        _moves.length = totalMoves;
 
         void addRegisterMove(
             in Register register,
@@ -487,6 +497,17 @@ public struct CallPlan {
         // the stack together.
         void visit(in size_t i) {
             const plan = _arguments[i];
+
+            // A MEMORY-class argument never reaches a register - the
+            // SysV ABI classifies it onto the stack outright, skipping
+            // register classification entirely (`abi.ArgumentPlan`'s own
+            // doc) - so it always defers to the spilled pass below,
+            // whatever room either register file has left.
+            if (plan.memory) {
+                spilled[spilledCount++] = i;
+                return;
+            }
+
             size_t integerLanes;
             size_t floatingLanes;
             foreach (register; plan.registers[0 .. plan.count])
@@ -522,6 +543,31 @@ public struct CallPlan {
 
         void addSpilled(in size_t i) {
             const plan = _arguments[i];
+
+            // A MEMORY-class argument's eightbytes were never classified
+            // into `plan.registers` (there is no register shape to read -
+            // see `abi.ArgumentPlan`'s own doc), so each one is built here
+            // instead, straight from its byte size: a whole `word64` load
+            // for every full eightbyte, and for a size that does not end
+            // on an eightbyte boundary, one final `copy` load - `loadOf`/
+            // `copyBytesOf` below already give a narrower-than-8 INTEGER
+            // register exactly that load - sized to only the bytes still
+            // left, so it never reads past the argument's own storage.
+            if (plan.memory) {
+                const words = plan.memoryWords;
+                foreach (j; 0 .. words) {
+                    const offset = j * size_t.sizeof;
+                    const remaining = plan.memoryBytes - offset;
+                    const size = remaining < size_t.sizeof
+                        ? remaining : size_t.sizeof;
+                    addStackMove(
+                        Register(Register.Kind.integer, cast(ubyte) size),
+                        i, offset,
+                    );
+                }
+                return;
+            }
+
             foreach (j; 0 .. plan.count)
                 addStackMove(plan.registers[j], i, j * size_t.sizeof);
         }

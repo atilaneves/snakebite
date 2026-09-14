@@ -68,9 +68,12 @@ public struct Register {
 }
 
 // How a value travels. A regular value has at most two eightbytes after
-// the SysV cleanup rule. A MEMORY value is handled by a hidden pointer for
-// returns and is refused for explicit parameters until stack memory values
-// have a separate call path.
+// the SysV cleanup rule. A MEMORY value - larger than two eightbytes, or
+// with an unaligned field - travels as `memoryWords` whole eightbytes on
+// the stack, in declaration position, a plain "copy bytes" load each
+// (issue #334 step 3): `registers`/`count` above are meaningless for it.
+// A hidden-pointer return (`needsHiddenReturnPointer`) still bypasses this
+// entirely and never builds a MEMORY `ArgumentPlan` for the return value.
 public struct ArgumentPlan {
     private enum ValueClass {
         none,
@@ -82,24 +85,76 @@ public struct ArgumentPlan {
     public Register[2] registers;
     public ubyte count;
     public bool memory;
+    // MEMORY-class only: this value's own byte size, never truncated -
+    // `memoryWords` below is how many whole eightbytes that rounds up to,
+    // the count `snakebite.ffi.plan.CallPlan.buildMoves` places on the
+    // stack. Stays `0` unless `memory` is `true`.
+    public size_t memoryBytes;
+
+    public size_t memoryWords() const {
+        return (memoryBytes + 7) / 8;
+    }
+
+    // The largest MEMORY-class argument this plans for, in bytes: 16
+    // whole eightbytes, the same as `snakebite.ffi.limits.maxArguments` -
+    // a single MEMORY argument that size already claims this plan's
+    // entire ABI word budget (`prepare`'s own `words > maxArguments`
+    // check), so nothing above this bound could ever share a plan with
+    // another parameter anyway. No druntime or phobos function passes a
+    // by-value aggregate remotely this large - a 4x4 `double` matrix, a
+    // plausible real-world shape, is exactly this size - so refusing here
+    // gives a clearer message than waiting for that later, generic one.
+    private enum size_t maxMemoryBytes = 16 * 8;
 
     public static ArgumentPlan of(imported!"dmd.mtype".Type type) {
         auto plan = aggregatePlan(type);
-        if (plan.memory) {
-            import std.conv: text;
-
-            throw new Exception(
-                text("ffi cannot pass a value of type `", type.toString,
-                    "`: its ABI class is MEMORY"),
-            );
-        }
+        if (plan.memory)
+            validateMemoryParameter(type, plan);
         return plan;
     }
 }
 
+// The two ways a MEMORY-class parameter can be unsupported for now - see
+// `ArgumentPlan.maxMemoryBytes` and the alignment note below. Only called
+// for an explicit parameter (`ArgumentPlan.of`); a MEMORY-class *return*
+// still travels through a hidden pointer regardless of either limit (see
+// `needsHiddenReturnPointer`), so this never runs for one.
+private void validateMemoryParameter(
+    imported!"dmd.mtype".Type type, in ArgumentPlan plan,
+) {
+    import dmd.typesem: alignsize;
+    import std.conv: text;
+
+    // The stack area `buildMoves` places a MEMORY argument's eightbytes
+    // into is only 8-byte aligned, not 16 - a value whose own alignment
+    // is 16 (for example a struct containing `real`, whose x86-64 System
+    // V alignment is 16) needs padding this plan does not yet insert.
+    // Refused for now, with a clear message, rather than silently
+    // misaligning it.
+    if (type.alignsize > 8)
+        throw new Exception(
+            text("ffi cannot pass a value of type `", type.toString,
+                "`: its ABI alignment is ", type.alignsize, " bytes, and " ~
+                "only 8-byte-aligned MEMORY-class arguments are " ~
+                "supported"),
+        );
+
+    if (plan.memoryBytes > ArgumentPlan.maxMemoryBytes)
+        throw new Exception(
+            text("ffi cannot pass a value of type `", type.toString,
+                "`: its ", plan.memoryBytes, " bytes exceed the ",
+                ArgumentPlan.maxMemoryBytes,
+                "-byte limit for a MEMORY-class argument"),
+        );
+}
+
 // The SysV ABI classifies a MEMORY result as a hidden return pointer. This
 // also catches an unaligned aggregate, which the ABI classifies as MEMORY
-// even when its size is at most two eightbytes.
+// even when its size is at most two eightbytes. A MEMORY-class return
+// always takes this path, whatever its size or alignment - unlike a
+// MEMORY-class explicit parameter, it never becomes an `ArgumentPlan`
+// `buildMoves` places on the stack, so neither of `ArgumentPlan.of`'s own
+// limits applies to it.
 public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type type) {
     return aggregatePlan(type).memory;
 }
@@ -151,6 +206,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
     const count = (bytes + 7) / 8;
     if (count > 2) {
         plan.memory = true;
+        plan.memoryBytes = bytes;
         return plan;
     }
 
@@ -161,6 +217,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
     classify(type, 0, classes, memory);
     if (memory) {
         plan.memory = true;
+        plan.memoryBytes = bytes;
         return plan;
     }
 
