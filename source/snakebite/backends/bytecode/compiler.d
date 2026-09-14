@@ -424,6 +424,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opResolveInterfaceMethod,
         opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
+        opTemporaryArm, opTemporaryArmAddress, opTemporaryBegin,
+        opTemporaryEnd,
+        opTemporaryRegister, opTemporarySuspend,
         opSliceCopy, opSliceFill,
         opStaticAddress, opStaticArrayEqual, opStaticLoad, opStaticStore,
         opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero;
@@ -433,6 +436,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         DelegateTarget, delegateTargetOf, functionNeedsClosure,
         outerFunctionOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
+    import snakebite.backends.temporary: ownsTemporaryDestructor;
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout:
         alignUp, initializerValueOf, isIntegralSize, TypeFacts;
@@ -461,6 +465,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
+    private struct Temporary {
+        size_t base;
+        size_t site;
+        imported!"dmd.expression".Expression destructor;
+    }
+    private Temporary[] _temporaries;
+    private size_t _lifetimeDepth;
+    private Expression _expressionRoot;
+    private bool _emittingCleanup;
     private size_t _closureOffset = size_t.max;
     // Set once nothing after the statement just compiled can run: a
     // `return`, a `continue`, or an `if`/loop whose every path already
@@ -686,6 +699,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         optimizeStaticLoads;
+
+        foreach (ref site; _callSites)
+            if (site.cleanupStartIndex != size_t.max) {
+                site.cleanupStart = cast(void*) instructionAt(
+                    site.cleanupStartIndex);
+                site.cleanupEnd = cast(void*) instructionAt(
+                    site.cleanupEndIndex);
+            }
 
         ClosureSlot[] closureSlots;
         if (_closureOffset != size_t.max)
@@ -1748,7 +1769,44 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         _destination = discardResult;
         _width = 0;
+
+        if (_lifetimeDepth != 0 || _emittingCleanup) {
+            expression.accept(this);
+            _destination = destination;
+            _width = width;
+            return;
+        }
+
+        const marker = reserveTemp(pointerFacts);
+        emit(&opTemporaryBegin, marker, 0, 0);
+        const firstTemporary = _temporaries.length;
+        _expressionRoot = expression;
+        _lifetimeDepth = 1;
         expression.accept(this);
+        _destination = destination;
+        _width = width;
+        _lifetimeDepth = 0;
+        _expressionRoot = null;
+
+        finishLifetime(marker, firstTemporary);
+    }
+
+    private void finishLifetime(
+        in size_t marker,
+        in size_t firstTemporary,
+    ) {
+        const jump = _instructions.length;
+        emit(&opJump, 0, 0, 0);
+        foreach_reverse (temporary; _temporaries[firstTemporary .. $]) {
+            _callSites[temporary.site].cleanupStartIndex = _instructions.length;
+            _emittingCleanup = true;
+            compileEffect(temporary.destructor);
+            _emittingCleanup = false;
+            _callSites[temporary.site].cleanupEndIndex = _instructions.length;
+        }
+        _temporaries.length = firstTemporary;
+        _instructions[jump].destination = _instructions.length;
+        emit(&opTemporaryEnd, marker, 0, 0);
     }
 
     protected extern(C++) override void visitTupleElement(
@@ -1791,6 +1849,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return false;
     }
 
+    private size_t registerTemporary(
+        VarDeclaration variable,
+        DeclarationExp declaration,
+    ) {
+        if (_lifetimeDepth == 0 || _emittingCleanup
+                || !ownsTemporaryDestructor(
+                    variable, declaration, _expressionRoot))
+            return size_t.max;
+
+        const base = _layout.offsetOf(variable);
+        const site = _callSites.length;
+        _callSites ~= CallSite.temporary;
+        _temporaries ~= Temporary(base, site, variable.edtor);
+        emit(&opTemporaryRegister, base, site, 0);
+        return base;
+    }
+
     // Runs a local's initialiser into the frame slot `_layout` already
     // gave it - `int sum = 0;` is a `DeclarationExp` here, the same as in
     // the interpreter.
@@ -1830,8 +1905,29 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (variable._init.isVoidInitializer !is null)
             return;
 
+        const ownLifetime = _lifetimeDepth == 0;
+        size_t marker;
+        size_t firstTemporary;
+        if (ownLifetime) {
+            marker = reserveTemp(pointerFacts);
+            emit(&opTemporaryBegin, marker, 0, 0);
+            firstTemporary = _temporaries.length;
+            _lifetimeDepth = 1;
+            _expressionRoot = expression;
+        }
+
+        const temporary = registerTemporary(variable, expression);
+
         compileVariableInitializer(variable, expression.loc,
             expressionText(expression));
+        if (temporary != size_t.max)
+            emit(&opTemporaryArmAddress, 0, temporary, 0);
+
+        if (ownLifetime) {
+            _lifetimeDepth = 0;
+            _expressionRoot = null;
+            finishLifetime(marker, firstTemporary);
+        }
     }
 
     // Runs `variable`'s own initialiser into whichever storage its layout
@@ -5018,6 +5114,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.backends.calls:
             arityMismatches, prefersGuestBody, usesGuestBody;
 
+        const isConstructor = callee.isCtorDeclaration !is null;
+        size_t receiverOffset = size_t.max;
+        if (hasThis)
+            receiverOffset = thisOffsetOf();
+        if (isConstructor && hasThis)
+            emit(&opTemporarySuspend, 0, receiverOffset, 0);
+
         const guest = usesGuestBody(
             callee, arguments, &_bytecode.isGuestFunction,
             prefersGuestBody(
@@ -5029,11 +5132,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             Arg[] initialArgs;
             if (hasThis)
-                initialArgs ~= Arg(thisOffsetOf(), 0, size_t.sizeof);
+                initialArgs ~= Arg(receiverOffset, 0, size_t.sizeof);
 
             compileNativeCall(
                 callee, type, arguments, loc, exprText, initialArgs,
                 destOffset);
+            if (isConstructor && hasThis)
+                emit(&opTemporaryArm, 0, receiverOffset, 0);
             return;
         }
         auto calleeFunction = _bytecode.compileFunction(callee);
@@ -5045,7 +5150,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, loc, exprText);
 
         Arg[] args;
-        const isConstructor = callee.isCtorDeclaration !is null;
         // `calleeLayout.hiddenThis.variable`, not `hasThis`: a
         // `FuncLiteralDeclaration` bound through `auto` can keep a dead
         // `vthis` semantic proved nothing reads (see `FrameLayout.of`'s
@@ -5056,7 +5160,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 throw rejection(_function, loc, exprText);
 
             args ~= Arg(
-                thisOffsetOf(),
+                receiverOffset,
                 calleeLayout.hiddenThis.parameter.offset,
                 size_t.sizeof,
             );
@@ -5099,6 +5203,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             isVoidCallee ? 0 : returnShape.returnFacts.size,
         );
         emit(&opCall, destOffset, siteIndex, 0);
+        if (isConstructor && hasThis)
+            emit(&opTemporaryArm, 0, receiverOffset, 0);
     }
 
     // Builds the FFI call plan for a native callee - one druntime already

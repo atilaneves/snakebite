@@ -3,6 +3,8 @@ module snakebite.framestack;
 
 private:
 
+import snakebite.backends.temporarystack: TemporaryStack;
+
 
 public enum defaultFrameCapacity = 1024 * 1024;
 private enum defaultFrameReservation = 1024 * 1024 * 1024;
@@ -40,6 +42,7 @@ public struct FrameStack {
     private size_t _reservation;
     private size_t _used;
     private ubyte[][] _allocations;
+    private TemporaryStack _cleanups;
 
     @disable this(this);
 
@@ -107,6 +110,37 @@ public struct FrameStack {
 
     public Mark mark() const {
         return _used;
+    }
+
+    public size_t cleanupMark() const {
+        return _cleanups.mark;
+    }
+
+    public void registerCleanup(
+        size_t site,
+        ubyte* address,
+    ) {
+        _cleanups.registerTemporary(address, site);
+    }
+
+    public void armCleanup(ubyte* address) {
+        _cleanups.arm(address);
+    }
+
+    public void suspendCleanup(ubyte* address) {
+        _cleanups.suspend(address);
+    }
+
+    public const(TemporaryStack.Entry) cleanupBack() const {
+        return _cleanups.back;
+    }
+
+    public void popCleanup() {
+        _cleanups.pop;
+    }
+
+    public void discardCleanups(in size_t mark) {
+        _cleanups.discard(mark);
     }
 
     // One `push` reservation: `base` is where its bytes start, `null` for

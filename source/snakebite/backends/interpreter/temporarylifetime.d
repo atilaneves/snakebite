@@ -3,9 +3,10 @@ module snakebite.backends.interpreter.temporarylifetime;
 
 private:
 
-import dmd.astenums: STC;
 import dmd.declaration: VarDeclaration;
 import dmd.expression: DeclarationExp, Expression, StructLiteralExp;
+import snakebite.backends.temporary: ownsTemporaryDestructor;
+import snakebite.backends.temporarystack: TemporaryStack;
 import snakebite.framestack: FrameStack, defaultFrameCapacity;
 import snakebite.nativelayout: TypeFacts;
 
@@ -28,10 +29,10 @@ public final class TemporaryLifetime {
         FrameStack.Mark mark;
         ubyte* base;
         Expression edtor;
-        bool armed;
     }
 
     private Temporary[] _temporaries;
+    private TemporaryStack _stack;
     private FrameStack _frames;
     private size_t _floor;
     private Expression _root;
@@ -73,22 +74,17 @@ public final class TemporaryLifetime {
         DeclarationExp declaration,
         ubyte* base,
     ) {
-        if (!(variable.storage_class & STC.temp) || variable.edtor is null)
-            return;
-        // DMD marks a moved value nodtor: its new owner destroys it, so
-        // recording it here would destroy the same value twice.
-        if (variable.storage_class & STC.nodtor)
-            return;
-        if (declaration is _root)
+        if (!ownsTemporaryDestructor(variable, declaration, _root))
             return;
 
+        const payload = _temporaries.length;
         _temporaries ~= Temporary(
             null,
             _frames.mark,
             base,
             variable.edtor,
-            true,
         );
+        _stack.registerTemporary(base, payload, true);
     }
 
     // Reserves a value-returning temporary. Its address remains valid until
@@ -119,21 +115,12 @@ public final class TemporaryLifetime {
     // Suspends destruction while a constructor is writing its destination.
     // A failed constructor therefore leaves no completed value to destroy.
     public void suspendConstructor(in void* address) {
-        foreach_reverse (ref temporary; _temporaries[_floor .. $])
-            if (temporary.armed && temporary.base is address) {
-                temporary.armed = false;
-                return;
-            }
+        _stack.suspend(cast(void*) address);
     }
 
     // Arms the matching declaration after its constructor returns.
     public void armConstructor(in void* address) {
-        foreach_reverse (ref temporary; _temporaries[_floor .. $])
-            if (!temporary.armed && temporary.edtor !is null
-                    && temporary.base is address) {
-                temporary.armed = true;
-                return;
-            }
+        _stack.arm(cast(void*) address);
     }
 
     private ubyte* reserve(
@@ -143,7 +130,7 @@ public final class TemporaryLifetime {
     ) {
         const mark = _frames.mark;
         auto base = _frames.reserve(size, alignment);
-        _temporaries ~= Temporary(node, mark, base, null, false);
+        _temporaries ~= Temporary(node, mark, base, null);
         return base;
     }
 
@@ -152,28 +139,28 @@ public final class TemporaryLifetime {
         scope Action action,
     ) {
         const previousFloor = _floor;
+        const stackMark = _stack.mark;
         _floor = mark;
         scope(exit) {
-            releaseSince(mark);
+            releaseSince(mark, stackMark);
             _floor = previousFloor;
         }
         action();
     }
 
-    private void releaseSince(in size_t mark) {
-        if (_temporaries.length <= mark)
-            return;
-
+    private void releaseSince(in size_t mark, in size_t stackMark) {
         // The storage must be released even if a DMD-provided destructor
         // expression throws while unwinding this full expression.
         scope(exit) {
-            _frames.release(_temporaries[mark].mark);
+            if (_temporaries.length > mark)
+                _frames.release(_temporaries[mark].mark);
             _temporaries.length = mark;
             _temporaries.assumeSafeAppend;
+            _stack.discard(stackMark);
         }
 
-        foreach_reverse (ref temporary; _temporaries[mark .. $])
-            if (temporary.armed)
-                _destroy(temporary.edtor);
+        foreach_reverse (entry; _stack.entries[stackMark .. $])
+            if (entry.armed)
+                _destroy(_temporaries[entry.payload].edtor);
     }
 }

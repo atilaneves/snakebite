@@ -1424,7 +1424,6 @@ static foreach (backend; Matrix!()) {
 // only use is `.get()`, called on the constructor-call rvalue itself, and
 // its destructor still runs once the statement using it is done.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE evaluates the call but never runs the " ~
         "destructor of a struct-typed rvalue temporary that is only " ~
@@ -1534,7 +1533,6 @@ static foreach (backend; Matrix!()) {
 // once as the whole expression unwinds - the temporary is not silently
 // leaked just because nothing ever consumed its value.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE catches the throw but never runs the " ~
         "destructor of the already-constructed first-argument temporary " ~
@@ -1681,7 +1679,6 @@ static foreach (backend; Matrix!()) {
 // returns normally - so its destructor runs exactly once at the end of
 // the full expression, the same as when the result is discarded.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right value but never runs " ~
         "the destructor of the user-constructor temporary once its " ~
@@ -1726,7 +1723,6 @@ static foreach (backend; Matrix!(
 // exactly once - construction finishing, not the expression finishing,
 // is what commits the destructor.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE catches the throw but never runs the " ~
         "destructor of the user-constructor temporary whose `__ctor` " ~
@@ -1776,7 +1772,6 @@ static foreach (backend; Matrix!(
 // the full expression that created it - three destructor runs in
 // total, never a shared or clobbered slot.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of any of the three reentrant " ~
@@ -1825,7 +1820,6 @@ static foreach (backend; Matrix!(
 // destroyed when the outer full expression ends. Two temporaries, two
 // destructor runs, each owned by its own full expression.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of either user-constructor " ~
@@ -1929,7 +1923,6 @@ static foreach (backend; Matrix!()) {
 // declaration, and its destructor runs once at the end of the full
 // expression.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of the temporary initialized from " ~
@@ -1981,7 +1974,6 @@ static foreach (backend; Matrix!(
 // while the condition temporary's frame slot is still live - never
 // later, against a frame that is already gone.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of the taken ternary branch's " ~
@@ -2030,7 +2022,6 @@ static foreach (backend; Matrix!(
 // the whole value. The destructor still runs once: a constructor call
 // that never arrives must not be what the destructor waits for.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "confirmed: dmd's CTFE refuses `gdtors` with \"static variable " ~
         "`gdtors` cannot be read at compile time\" - the enum's " ~
@@ -2082,7 +2073,6 @@ static foreach (backend; Matrix!(
 // temporary's constructor never returns, so its destructor never runs
 // at all.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
 )) {
     @("temporaryMovedIntoThrowingOuterCtorDestroyedOnceByCallee." ~
         backend.stringof)
