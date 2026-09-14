@@ -1902,3 +1902,28 @@ static foreach (Backend; AliasSeq!(Interpreter, Bytecode)) {
                     "callback pool entry (ADR-0003)");
     }
 }
+
+
+// Twenty-one argument words (one declared plus twenty extras) - more
+// than `CallPlan.Frame`'s own sixteen-word inline stack area - reaches
+// the heap fallback instead of any fixed-word refusal: master dropped
+// the argument-count limit this step used to hit here (`CallPlan.
+// _arguments`/`_moves` are dynamic arrays, `Frame`'s stack area falls
+// back to the heap past its own sixteen inline words), so a call this
+// wide just works, on every backend that reaches a plan.
+static foreach (Backend; AliasSeq!(Interpreter, Bytecode)) {
+    @("variadic.moreThanSixteenArgumentWords." ~ Backend.stringof)
+    @Tags(Backend.stringof)
+    unittest {
+        210.shouldBeRetOf!(Backend, q{
+            pragma(mangle, "snakebite_ut_variadic_count_sum_backend")
+            extern(C) int nativeCountSum(int count, ...);
+
+            int answer() {
+                return nativeCountSum(
+                    20, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+                    16, 17, 18, 19, 20);
+            }
+        }, "answer");
+    }
+}

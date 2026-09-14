@@ -5287,30 +5287,37 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // A C-style variadic callee's extra arguments (issue #334 step
         // 5) sit past `parameterCount` in `arguments` - `arityMismatches`
         // above already let them through for a variadic `type`. Each
-        // gets its own temp slot, filled the same way as a named
-        // argument above, and its own dmd `Type` - the frontend's
+        // extra argument's own dmd `Type` - the frontend's
         // default-promoted call-site type (`float` to `double`, a
-        // narrower-than-`int` integral to `int`) - which is what
-        // `PlanCache.variadicOf` classifies it by. This compiler visits
-        // one `CallExp` exactly once, so this is already that call
-        // site's own, one-time plan preparation - no further call-site
-        // cache is needed the way the interpreter keeps one (issue #96).
+        // narrower-than-`int` integral to `int`) - is collected first,
+        // types only, and handed to `PlanCache.variadicOf` before any of
+        // them is compiled into a temp: the plan's own argument-count
+        // check is then what decides whether this call is refused, ahead
+        // of spending any temps or emitted code on it (issue #334 step 5
+        // review finding 2 - the interpreter's own `callVariadicNative`
+        // orders its two matching steps the same way). This compiler
+        // visits one `CallExp` exactly once, so this is already that
+        // call site's own, one-time plan preparation - no further
+        // call-site cache is needed the way the interpreter keeps one
+        // (issue #96).
+        const totalCount = arguments is null ? 0 : arguments.length;
         Type[] extraArgumentTypes;
-        if (type.parameterList.varargs == VarArg.variadic) {
-            const totalCount = arguments is null ? 0 : arguments.length;
+        if (type.parameterList.varargs == VarArg.variadic)
+            foreach (i; parameterCount .. totalCount)
+                extraArgumentTypes ~= (*arguments)[i].type;
+
+        auto plan = type.parameterList.varargs == VarArg.none
+            ? &_bytecode._plans.of(callee)
+            : _bytecode._plans.variadicOf(callee, extraArgumentTypes);
+
+        if (type.parameterList.varargs == VarArg.variadic)
             foreach (i; parameterCount .. totalCount) {
                 auto argument = (*arguments)[i];
                 const facts = TypeFacts.of(argument.type);
                 const argumentOffset = reserveTemp(facts);
                 evalInto(argument, argumentOffset, facts.size);
                 args ~= Arg(argumentOffset, 0, facts.size);
-                extraArgumentTypes ~= argument.type;
             }
-        }
-
-        auto plan = type.parameterList.varargs == VarArg.none
-            ? &_bytecode._plans.of(callee)
-            : _bytecode._plans.variadicOf(callee, extraArgumentTypes);
         _callSites ~= CallSite.native(
             cast(const(void)*) plan, args,
             returnShape.returnFacts.size,

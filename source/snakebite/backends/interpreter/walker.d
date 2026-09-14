@@ -4662,17 +4662,32 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // its own dmd `Type` - the frontend's own default-promoted call-site
     // type (`float` to `double`, a narrower-than-`int` integral to
     // `int`) - is what `variadicCallPlanOf` classifies it by.
+    //
+    // The plan is built first, from types alone, before anything is
+    // evaluated or bound: a refusal `variadicCallPlanOf` raises - a
+    // function pointer or delegate extra argument has no callback pool
+    // entry (`CallPlan.prepareCommon`'s own doc, issue #9) - then happens
+    // before this binds a frame or evaluates a single argument
+    // expression, so a call about to be refused never runs any of the
+    // guest code its own extra arguments would have evaluated (issue
+    // #334 step 5 review finding 2).
     private void callVariadicNative(
         CallExp expression,
         FuncDeclaration function_,
         TypeFunction funcType,
     ) {
-        auto layout = layoutOf(function_);
-        auto frame = bindFrame(expression, function_, layout);
-
         const declaredCount = funcType.parameterList.length;
         auto arguments = expression.arguments;
         const totalCount = arguments is null ? 0 : arguments.length;
+
+        Type[] extraTypes;
+        foreach (i; declaredCount .. totalCount)
+            extraTypes ~= (*arguments)[i].type;
+
+        auto plan = variadicCallPlanOf(expression, function_, extraTypes);
+
+        auto layout = layoutOf(function_);
+        auto frame = bindFrame(expression, function_, layout);
 
         // `slots` holds the hidden context, the declared parameters, and
         // every extra argument, in that order - `CallArguments` keeps
@@ -4689,8 +4704,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         foreach (parameter; layout.parameters)
             values[count++] = frame.base + parameter.offset;
 
-        Type[] extraTypes;
-
         // One mark for every extra argument's own scratch storage: they
         // are read by `plan.call` below and done with before this method
         // returns, so LIFO release here, rather than each argument
@@ -4704,10 +4717,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             auto storage = _frames.reserve(facts.size, facts.alignment);
             evaluate(argument, argument.type, facts, storage);
             values[count++] = storage;
-            extraTypes ~= argument.type;
         }
-
-        auto plan = variadicCallPlanOf(expression, function_, extraTypes);
 
         try
             plan.call(_place, values);
