@@ -761,7 +761,8 @@ static foreach (backend; Matrix!(
 
                 struct Ffi {
                     static:
-                    pragma(mangle, "snakebite_ut_extern_d_memory_two_spill_backend")
+                    pragma(mangle,
+                        "snakebite_ut_extern_d_memory_two_spill_backend")
                     extern(D) long externDMemoryTwoSpill(
                         long a0, long a1, long a2, long a3, long a4,
                         long a5, MemoryTriple value, long b0, long b1,

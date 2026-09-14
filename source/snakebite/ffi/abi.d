@@ -62,7 +62,10 @@ public struct Register {
     }
 
     public Kind kind;
-    // In bytes, and always 1, 2, 4 or 8 for anything but `none`.
+    // In bytes, 1..8 for anything but `none` - not just 1, 2, 4 or 8: a
+    // partial register-class eightbyte (a struct field straddling one)
+    // can be any width in between, and so can a MEMORY-class argument's
+    // last eightbyte (issue #334 step 3).
     public ubyte size;
 }
 
@@ -90,7 +93,7 @@ public struct ArgumentPlan {
     // stack. Stays `0` unless `memory` is `true`.
     public size_t memoryBytes;
 
-    public size_t memoryWords() const {
+    public size_t memoryWords() const @safe @nogc nothrow pure scope {
         return (memoryBytes + 7) / 8;
     }
 
