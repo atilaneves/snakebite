@@ -5,24 +5,46 @@ status: accepted
 # The barrier supports every linkage compiled D supports
 
 A dub project can depend on arbitrary D, C, and C++ code. Today the
-barrier refuses `extern(C++)`, several parameter shapes, and D-style
-variadics. Guest code must behave like compiled D. The barrier may
-refuse a call only when a native link would also refuse it. The
-platform scope is Linux x86-64 System V for now. The plan that computes
-a call's shape is ABI-agnostic, so any other platform fails loudly
-instead of guessing.
+barrier refuses `extern(C++)` and several parameter shapes. Guest code
+must behave like compiled D. The barrier may refuse a call only when a
+native link would also refuse it. The platform scope is Linux x86-64
+System V for now. The plan that computes a call's shape is ABI-agnostic,
+so any other platform fails loudly instead of guessing.
 
 **`extern(C)`**: every shape, including C variadics. The call stub
 sets `AL` to the count of SSE registers used, as the System V ABI
 requires.
 
 **`extern(D)`**: every shape, including all three D variadic kinds.
-Typesafe variadics are a slice. Untyped variadics pass `_arguments` as
-an ordinary slice parameter in first position, pass the variadic
-arguments in registers first like C, and set `AL` like C. For a
-guest-declared function the backend builds the `TypeInfo[]` from its
-own runtime types. For a host-declared function it uses host
-`TypeInfo`. dmd reverses parameter order and places `this` before the
+Typesafe variadics are a slice, classified and passed exactly like any
+other declared parameter - the frontend has already packed the call
+site's trailing arguments into it. Untyped variadics pass `_arguments`
+as one hidden pointer argument, ahead of the declared parameters: the
+frontend inserts a `typeid` of the call's own extra-argument types as
+the literal first element of the call's argument list, whose value at
+run time is a `TypeInfo_Tuple` reference, not a `TypeInfo[]` slice
+itself - the callee's own prologue builds that slice, by reading the
+tuple's `elements` field, before its body ever runs (verified against
+dmd's `expressionsem.functionParameters` and `semantic3`). For a
+guest-declared function the backend builds that `TypeInfo_Tuple`, and
+the `TypeInfo` of each of its own extra arguments, from its own runtime
+types; a guest-declared struct's own fabricated `TypeInfo_Struct` also
+carries the SysV eightbyte classification (`m_arg1`/`m_arg2`) druntime's
+own `core.vararg` needs to read such a struct back out of the register
+save area, the same classification this plan already uses to place it
+into a register when it is the caller. For a host-declared function it
+uses host `TypeInfo`. The variadic arguments themselves classify and
+place like C's, in declaration order - unlike an ordinary `extern(D)`
+call, a variadic one is never reversed on dmd, on either the declared
+parameters or `_arguments` itself, whichever host compiler built this
+process (verified: disassembling a real `extern(D) int f(int a, int b,
+int c, ...)` call built by dmd shows `_arguments`, `a`, `b` and `c` in
+plain declaration order, not reversed) - because the callee's own
+`_argptr`/register-save-area machinery has to walk every parameter in
+one consistent forward order to find where the register save area and
+the stack overflow area begin. `this` still precedes the hidden return
+pointer on dmd, and follows it on LDC, exactly as for a non-variadic
+call: dmd reverses parameter order and places `this` before the
 hidden return pointer. LDC keeps parameter order and places `this`
 after the hidden return pointer. The plan computation switches on the
 host compiler to pick the layout, which is correct because the host
@@ -45,8 +67,8 @@ libraries. A refusal is not how compiled D behaves, so it breaks the
 requirement above.
 
 **Refuse D untyped variadics.** Rejected, for the same reason. The
-shape also turned out to be simple: the C variadic ABI plus one slice
-parameter.
+shape also turned out to be simple: the C variadic ABI plus one hidden
+pointer argument, never reversed even on dmd.
 
 ## Consequences
 
