@@ -45,6 +45,24 @@ private extern(C) int snakebite_ut_non_copyable_aggregate_call_count() {
 }
 
 
+// A real `extern(D)` function, not `extern(C)`: on dmd, the host compiler
+// that builds `bin/ut`, its parameters reach the registers and the stack
+// in reversed declaration order (`snakebite.ffi.abi.reversedDParameters`).
+// Nine ABI words (four two-eightbyte `string`s plus one `int`) spill two
+// of the four strings to the stack, exercising the same stack-order rule
+// `ut.ffi.plan`'s `called.externD.*` tests check at the plan level -
+// here through a guest call on every backend instead of `PlanCache`
+// directly. `pragma(mangle)` pins a C-style linker name so the guest
+// declaration below and this native definition agree on a symbol without
+// depending on dmd's own name mangling of a guest-parsed module.
+pragma(mangle, "snakebite_ut_extern_d_nine_words")
+private extern(D) int snakebite_ut_nineWords(
+    string a, string b, string c, string d, int e,
+) {
+    return cast(int) (a.length + b.length + c.length + d.length) + e;
+}
+
+
 private int remembered;
 
 
@@ -220,6 +238,42 @@ static foreach (backend; Matrix!(
                 }
             },
             "repeat",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("signatures.externD.nineWordsTwoStringsSpill." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // The declaration is a `static` struct member, not a free
+        // function: dmd's own `Native` oracle here mixes `code` in
+        // through a nested lambda (`shouldBeRetOf`), and a *free*
+        // extern(D) forward declaration nested that deeply loses dmd's
+        // reversed-parameter calling convention (it stops matching the
+        // real, module-scope-compiled callee's own ABI). A `static`
+        // struct member keeps it, at any nesting depth - this sidesteps
+        // an oracle quirk, not a snakebite one; every backend under test
+        // still receives an ordinary `extern(D)` free-function call.
+        20.shouldBeRetOf!(
+            backend,
+            q{
+                struct Ffi {
+                    static:
+                    pragma(mangle, "snakebite_ut_extern_d_nine_words")
+                    extern(D) int nineWords(
+                        string a, string b, string c, string d, int e,
+                    );
+                }
+
+                int answer() {
+                    return Ffi.nineWords("aa", "bbb", "cccc", "d", 10);
+                }
+            },
+            "answer",
         );
     }
 }

@@ -381,12 +381,14 @@ public struct CallPlan {
             registerArgument(0);
 
         // dmd's reversed register assignment (see `_reversedArguments`)
-        // only ever reorders which parameter reaches the register file
-        // first - the stack is a fixed extension of that same file, read
-        // by the callee in ordinary declaration order regardless. A
-        // parameter that does not fit is deferred to a second pass, in
-        // ascending order, once every parameter that does fit has claimed
-        // its register.
+        // reverses the stack order too: dmd compiles `extern(D)` on
+        // x86-64 as the C convention applied to the fully reversed
+        // parameter list, stack words included, so a spilled parameter's
+        // place in that stack extension follows the same reversal, not
+        // ordinary declaration order. A parameter that does not fit is
+        // deferred to a second pass, in descending parameter index when
+        // `_reversedArguments`, ascending otherwise, once every parameter
+        // that does fit has claimed its register.
         size_t[maxArguments] spilled;
         size_t spilledCount;
 
@@ -433,12 +435,19 @@ public struct CallPlan {
             foreach (i; firstExplicit .. _parameterCount)
                 visit(i);
 
-        sort(spilled[0 .. spilledCount]);
-        foreach (i; spilled[0 .. spilledCount]) {
+        void addSpilled(in size_t i) {
             const plan = _arguments[i];
             foreach (j; 0 .. plan.count)
                 addStackMove(plan.registers[j], i, j * size_t.sizeof);
         }
+
+        sort(spilled[0 .. spilledCount]);
+        if (_reversedArguments)
+            foreach_reverse (i; spilled[0 .. spilledCount])
+                addSpilled(i);
+        else
+            foreach (i; spilled[0 .. spilledCount])
+                addSpilled(i);
 
         _moveCount = moveCount;
         _sseCount = floatingCount;

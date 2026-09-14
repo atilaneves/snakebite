@@ -510,3 +510,104 @@ unittest {
 
     result.should == TwoWords(115, 200);
 }
+
+
+// dmd compiles `extern(D)` on x86-64 as the C convention applied to the
+// fully reversed parameter list, stack words included (see
+// `_reversedArguments`'s own doc) - not merely reversed register
+// assignment with declaration-order stack words. `bin/ut` is itself built
+// with dmd (reggaefile.d), so a real `extern(D)` function defined in this
+// module is compiled with that reversed convention, and calling it
+// through a plan exercises the real ABI, not a simulated one.
+// `pragma(mangle)` pins a C-style linker name on an otherwise ordinary
+// `extern(D)` function so the guest declaration below and this native
+// definition agree on a symbol without depending on dmd's own name
+// mangling of a `parseSnippet`-parsed module.
+pragma(mangle, "snakebite_ut_extern_d_eight_longs")
+private extern(D) long snakebite_ut_eightLongs(
+    long a, long b, long c, long d, long e, long f, long g, long h,
+) {
+    return a * 10_000_000 + b * 1_000_000 + c * 100_000 + d * 10_000
+        + e * 1_000 + f * 100 + g * 10 + h;
+}
+
+
+// Six of the eight `long`s fill the integer register file; the other two
+// (`a`, `b` - the first two declared, since dmd assigns registers in
+// reversed declaration order) spill to the stack. A plan that spilled
+// them in ascending parameter index, as `master` did, hands the callee
+// `a`'s bits where it expects `b`'s and vice versa.
+@("called.externD.eightLongsTwoSpill")
+unittest {
+    auto guestModule = parseSnippet(q{
+        pragma(mangle, "snakebite_ut_extern_d_eight_longs")
+        extern(D) long snakebite_ut_eightLongs(
+            long a, long b, long c, long d, long e, long f, long g, long h,
+        );
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_eightLongs");
+    assert(function_ !is null,
+        "No `snakebite_ut_eightLongs` in the guest program");
+
+    PlanCache cache;
+    long a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8;
+    long result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &a, cast(const void*) &b, cast(const void*) &c,
+        cast(const void*) &d, cast(const void*) &e, cast(const void*) &f,
+        cast(const void*) &g, cast(const void*) &h,
+    ]);
+
+    result.should == 12_345_678;
+}
+
+
+private long _mixedSpillLongSeen;
+private double _mixedSpillDoubleSeen;
+
+
+pragma(mangle, "snakebite_ut_extern_d_mixed_spill")
+private extern(D) void snakebite_ut_mixedSpill(
+    long i0, long i1, long i2, long i3, long i4, long i5, long i6,
+    double d0, double d1, double d2, double d3, double d4, double d5,
+    double d6, double d7, double d8,
+) {
+    _mixedSpillLongSeen = i0;
+    _mixedSpillDoubleSeen = d0;
+}
+
+
+// Seven `long`s fill six integer registers and spill the seventh (`i0`,
+// the first declared); nine `double`s fill eight SSE registers and spill
+// the ninth (`d0`, the first declared) - one spilled eightbyte from each
+// register file, landing next to each other on the stack in descending
+// declaration order (`d0` at word 0, `i0` at word 1) regardless of which
+// register file each came from.
+@("called.externD.mixedSpillsOneLongOneDouble")
+unittest {
+    auto guestModule = parseSnippet(q{
+        pragma(mangle, "snakebite_ut_extern_d_mixed_spill")
+        extern(D) void snakebite_ut_mixedSpill(
+            long i0, long i1, long i2, long i3, long i4, long i5, long i6,
+            double d0, double d1, double d2, double d3, double d4,
+            double d5, double d6, double d7, double d8,
+        );
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_mixedSpill");
+    assert(function_ !is null,
+        "No `snakebite_ut_mixedSpill` in the guest program");
+
+    PlanCache cache;
+    long[7] integers = [10, 20, 30, 40, 50, 60, 70];
+    double[9] floatings = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5];
+    void*[16] arguments;
+    foreach (i, ref value; integers)
+        arguments[i] = &value;
+    foreach (i, ref value; floatings)
+        arguments[7 + i] = &value;
+
+    cache.of(function_).call(null, arguments[]);
+
+    _mixedSpillLongSeen.should == 10;
+    _mixedSpillDoubleSeen.should == 1.5;
+}
