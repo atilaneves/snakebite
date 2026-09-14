@@ -13,7 +13,7 @@ gcc and clang emit `.eh_frame` unwind tables by default, so a D
 exception unwinds through C frames such as `qsort`. A C++ exception
 cannot be caught by compiled D either.
 
-A `Throwable` raised in guest code, and called back from the host,
+A `Throwable` raised in guest code that the host called back
 propagates through the host frames untouched. This matches a compiled
 D callback exactly. Nothing catches it and rethrows it. Nothing
 translates it. A C++ exception that reaches guest code propagates

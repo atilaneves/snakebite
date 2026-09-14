@@ -38,7 +38,8 @@ it (see ADR-0004).
 
 The acceptance test `barrier.overhead`, in `acceptance/at/ffi/cost.d`,
 checks the barrier cost against a direct call. The ratio must stay
-under 2.40. The stub meets this bound.
+under 2.40. The stub must meet this bound before it replaces the
+dispatcher.
 
 The seam stays ABI-agnostic. Any other platform fails loudly.
 
@@ -47,17 +48,18 @@ The seam stays ABI-agnostic. Any other platform fails loudly.
 - **Keep the template tables for register-only shapes, add the stub
   only for the long tail.** Rejected: two code paths to test, two
   places to hold unwind info, for no measured gain.
-- **libffi call plans.** Rejected: 18 times slower than a direct call,
-  even with the 2026 plan API in the measured configuration. It also
-  adds an external dependency.
+- **libffi.** Rejected: 18 times slower than a direct call in the #97
+  race. Its 2026 call plan API reports 2.7x in its maintainer's own
+  measurement, still behind the dispatcher's 1.6x, and it adds an
+  external dependency.
 - **dyncall.** Rejected: dyncall has no reusable plan. It pushes
   arguments on every call.
 
 ## Consequences
 
 The D compiler no longer generates call code for the barrier. The
-build gains an assembler step. The team adds per-shape special cases
-only when profiling on real projects shows a need (ADR-0011).
+build gains an assembler step. Per-shape special cases are added only
+when profiling on real projects shows a need (ADR-0011).
 
 ## Supersedes
 

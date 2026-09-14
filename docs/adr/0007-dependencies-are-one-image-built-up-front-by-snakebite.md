@@ -41,8 +41,8 @@ second set of `TypeInfo`. Two of each break identity checks across
 the barrier.
 
 **Require the user's dub compiler to match the host compiler.**
-Rejected. Compiled D works with any compiler that built it. snakebite
-must match that behaviour.
+Rejected. A compiled test binary runs without the user configuring
+anything. snakebite must do the same.
 
 **Compile the project's own modules into the image.** Rejected. This
 reintroduces the compile step snakebite exists to remove.
