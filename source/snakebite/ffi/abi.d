@@ -109,25 +109,6 @@ public struct ArgumentPlan {
     }
 }
 
-// The return words from an indirect call. This is output storage for the
-// invocation helper, not a type used as the native function's return type:
-// the native return type must itself have the right INTEGER/SSE ABI class.
-public struct ReturnWords {
-    private enum ReturnKind {
-        void_,
-        integer,
-        integerPair,
-        sse,
-        ssePair,
-        mixed,
-    }
-
-    public size_t first;
-    public size_t second;
-    public size_t floatingFirst;
-    public size_t floatingSecond;
-}
-
 // The SysV ABI classifies a MEMORY result as a hidden return pointer. This
 // also catches an unaligned aggregate, which the ABI classifies as MEMORY
 // even when its size is at most two eightbytes.
@@ -329,7 +310,7 @@ private void merge(
 
 // Reads one eightbyte's native bytes and applies the scalar widening rule
 // when the value is a scalar. Aggregate eightbytes are copied unchanged.
-public size_t word(in Register register, in void* slot) {
+pragma(inline, true) public size_t word(in Register register, in void* slot) {
     final switch (register.kind) with (Register.Kind) {
         case pointer:
             return cast(size_t) *cast(void**) slot;
@@ -366,7 +347,7 @@ public size_t word(in Register register, in void* slot) {
 }
 
 // Writes one raw return eightbyte back into native storage.
-public void writeWord(
+pragma(inline, true) public void writeWord(
     in Register register,
     in size_t result,
     void* place,
@@ -384,206 +365,4 @@ public void writeWord(
 
     import core.stdc.string: memcpy;
     memcpy(place, &result, register.size);
-}
-
-private struct IntegerReturn {
-    size_t first;
-    size_t second;
-}
-
-private struct FloatingReturn {
-    double first;
-    double second;
-}
-
-private struct MixedReturn {
-    size_t integer;
-    double floating;
-}
-
-// Calls `address` with raw argument words. The class sequence is in the
-// callee's declaration order. With no stack words, integer and SSE words
-// can be grouped because SysV allocates the two register files separately.
-// The caller converts a mixed aggregate to one class when one register file
-// is full, so its two stack words stay together. A call where both register
-// files need stack words is still rejected because grouping would reorder it.
-public ReturnWords invoke(
-    void* address,
-    scope const size_t[] words,
-    scope const Register.Kind[] kinds,
-    in ArgumentPlan returnPlan,
-) {
-    assert(words.length == kinds.length);
-
-    size_t[maxArguments] integerWords;
-    size_t[maxArguments] floatingWords;
-    size_t integerCount;
-    size_t floatingCount;
-    bool hasInteger;
-    bool hasFloating;
-    foreach (i, kind; kinds) {
-        final switch (kind) with (Register.Kind) {
-            case signed:
-            case unsigned:
-            case pointer:
-            case integer:
-                integerWords[integerCount++] = words[i];
-                hasInteger = true;
-                break;
-            case sse:
-                floatingWords[floatingCount++] = words[i];
-                hasFloating = true;
-                break;
-            case none:
-                assert(false, "a `void` argument has no ABI class");
-        }
-    }
-
-    if (hasInteger && hasFloating
-            && integerCount > maxIntegerArguments
-            && floatingCount > maxFloatingArguments)
-        throw new Exception(
-            "ffi cannot call a mixed INTEGER/SSE shape with stack arguments",
-        );
-
-    const kind = returnKind(returnPlan);
-    switch (kind) {
-        static foreach (returnKind_; [
-            ReturnWords.ReturnKind.void_, ReturnWords.ReturnKind.integer,
-            ReturnWords.ReturnKind.integerPair, ReturnWords.ReturnKind.sse,
-            ReturnWords.ReturnKind.ssePair, ReturnWords.ReturnKind.mixed,
-        ]) {
-            case returnKind_:
-                return dispatch!(returnKind_)(address,
-                    integerWords[0 .. integerCount],
-                    floatingWords[0 .. floatingCount]);
-        }
-        default:
-            assert(false);
-    }
-}
-
-private ReturnWords.ReturnKind returnKind(in ArgumentPlan plan) {
-    size_t integers;
-    size_t floating;
-    foreach (register; plan.registers[0 .. plan.count]) {
-        if (register.kind == Register.Kind.sse)
-            ++floating;
-        else
-            ++integers;
-    }
-
-    if (integers == 0 && floating == 0)
-        return ReturnWords.ReturnKind.void_;
-    if (integers == 1 && floating == 0)
-        return ReturnWords.ReturnKind.integer;
-    if (integers == 2 && floating == 0)
-        return ReturnWords.ReturnKind.integerPair;
-    if (integers == 0 && floating == 1)
-        return ReturnWords.ReturnKind.sse;
-    if (integers == 0 && floating == 2)
-        return ReturnWords.ReturnKind.ssePair;
-    if (integers == 1 && floating == 1)
-        return ReturnWords.ReturnKind.mixed;
-    assert(false, "unsupported return class shape");
-}
-
-private ReturnWords dispatch(ReturnWords.ReturnKind kind)(
-    void* address,
-    scope const size_t[] integerWords,
-    scope const size_t[] floatingWords,
-) {
-    static foreach (integerCount; 0 .. maxArguments + 1) {
-        if (integerWords.length == integerCount) {
-            static foreach (floatingCount; 0 .. maxArguments + 1) {
-                if (floatingWords.length == floatingCount)
-                    return call!(kind, integerCount, floatingCount)(
-                        address, integerWords, floatingWords,
-                    );
-            }
-        }
-    }
-    assert(false, "arity is checked before dispatch");
-    return ReturnWords.init;
-}
-
-private ReturnWords call(ReturnWords.ReturnKind kind, size_t integerCount,
-    size_t floatingCount)(
-    void* address,
-    scope const size_t[] integerWords,
-    scope const size_t[] floatingWords,
-) {
-    double[maxArguments] floatingArguments;
-    foreach (i; 0 .. floatingCount)
-        *cast(size_t*) &floatingArguments[i] = floatingWords[i];
-
-    alias Native = NativeFunction!(kind, integerCount, floatingCount).Native;
-    ReturnWords result;
-    static if (kind == ReturnWords.ReturnKind.void_) {
-        mixin("(cast(Native) address)(" ~
-            argumentList(integerCount, floatingCount) ~ ");");
-    } else {
-        mixin("const nativeResult = (cast(Native) address)(" ~
-            argumentList(integerCount, floatingCount) ~ ");");
-        static if (kind == ReturnWords.ReturnKind.integer)
-            result.first = nativeResult;
-        else static if (kind == ReturnWords.ReturnKind.integerPair) {
-            result.first = nativeResult.first;
-            result.second = nativeResult.second;
-        } else static if (kind == ReturnWords.ReturnKind.sse)
-            result.floatingFirst = bits(nativeResult);
-        else static if (kind == ReturnWords.ReturnKind.ssePair) {
-            result.floatingFirst = bits(nativeResult.first);
-            result.floatingSecond = bits(nativeResult.second);
-        } else static if (kind == ReturnWords.ReturnKind.mixed) {
-            result.first = nativeResult.integer;
-            result.floatingFirst = bits(nativeResult.floating);
-        }
-    }
-    return result;
-}
-
-private template NativeFunction(ReturnWords.ReturnKind kind,
-    size_t integerCount,
-    size_t floatingCount) {
-    import std.meta: Repeat;
-
-    static if (kind == ReturnWords.ReturnKind.void_)
-        alias Return = void;
-    else static if (kind == ReturnWords.ReturnKind.integer)
-        alias Return = size_t;
-    else static if (kind == ReturnWords.ReturnKind.integerPair)
-        alias Return = IntegerReturn;
-    else static if (kind == ReturnWords.ReturnKind.sse)
-        alias Return = double;
-    else static if (kind == ReturnWords.ReturnKind.ssePair)
-        alias Return = FloatingReturn;
-    else
-        alias Return = MixedReturn;
-
-    alias Native = extern(C) Return function(
-        Repeat!(integerCount, size_t),
-        Repeat!(floatingCount, double),
-    );
-}
-
-private size_t bits(in double value) {
-    return *cast(const size_t*) &value;
-}
-
-private string argumentList(in size_t integerCount, in size_t floatingCount) {
-    import std.conv: text;
-
-    string list;
-    foreach (i; 0 .. integerCount) {
-        if (list.length != 0)
-            list ~= ", ";
-        list ~= text("integerWords[", i, "]");
-    }
-    foreach (i; 0 .. floatingCount) {
-        if (list.length != 0)
-            list ~= ", ";
-        list ~= text("floatingArguments[", i, "]");
-    }
-    return list;
 }

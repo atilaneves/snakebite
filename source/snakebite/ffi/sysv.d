@@ -63,6 +63,8 @@ public extern(C) void snakebite_ffi_call_sysv_amd64(
 // the offsets the `static assert`s above pin down, and calls `address`
 // exactly as an ordinary indirect call would - nothing about crossing
 // into assembly here needs auditing beyond that struct's layout.
-public void call(const(void)* address, ref CallFrame frame) @trusted {
+pragma(inline, true) public void call(
+    const(void)* address, ref CallFrame frame,
+) @trusted {
     snakebite_ffi_call_sysv_amd64(address, &frame);
 }
