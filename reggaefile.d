@@ -48,7 +48,11 @@ Target dubTarget(string compiler, string config, string objectSet,
         runtime.importPaths = ["druntime/src"];
         runtime.targetType = TargetType.staticLibrary;
         if (compiler != "dmd")
-            runtime.dflags = ["-fno-moduleinfo"];
+            runtime.dflags = [
+                "-fno-moduleinfo",
+                "-enable-asserts=true",
+                "-checkaction=context",
+            ];
         info.packages ~= runtime;
         break;
     }

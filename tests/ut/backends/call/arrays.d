@@ -1033,16 +1033,16 @@ static foreach (backend; Matrix!(
     unittest {
         0.shouldBeStatusOf!(backend, q{
             void main() {
-                int[3] storage = [1, 2, 3];
-                int* p = storage.ptr;
-                int[] source = p[0 .. 2];
-                int[] destination = p[0 .. 3];
+                int[2] sourceStorage = [1, 2];
+                int[3] storage = [3, 4, 5];
+                int[] source = sourceStorage[];
+                int[] destination = storage[];
                 bool caught;
                 try
                     destination[] = source[];
                 catch (Throwable) {
                     caught = true;
-                    assert(storage == [1, 2, 3]);
+                    assert(storage == [3, 4, 5]);
                 }
                 assert(caught);
             }
