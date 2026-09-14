@@ -34,8 +34,11 @@ private __gshared Native directAbs;
 // The plan is prepared before the measured loops. This keeps the timing
 // gate focused on the steady-state call and removes the cold-path lookup.
 //
-// `bin/at` is built unoptimised, so neither number is a release figure.
-// The ratio is what this asserts on, and it is meaningful either way.
+// `bin/at` is built unoptimised; `bin/at-release` adds LDC's
+// `-release -O -flto=thin`. Both binaries print the same three numbers.
+// Only `bin/at-release` gates on the ratio: an unoptimised build cannot
+// inline or fold either loop, so its ratio cannot show what the barrier
+// itself costs.
 @("barrier.overhead")
 @Flaky(5)
 @Tags("timing")
@@ -123,12 +126,18 @@ unittest {
         baselines[2], barriers[2], ratios[2]);
 
     result.should == 42;
-    assert(sink != 0, "the baseline loop was optimised away");
+    // `-release` strips `assert`, so this stays a `should` check: without
+    // it, an optimiser that folds the baseline loop away would pass silently.
+    sink.shouldNotEqual(0);
 
     // Fixed from independent runs of a known-good revision: mean + 3 sample
     // standard deviations, rounded up. Do not let a candidate's own noise
     // raise its limit.
     enum maxRatio = 2.40;
-    assert(ratios[2] < maxRatio,
-        "the barrier costs more than 2.40 times a direct call");
+    // `-release` strips `assert`, so the gate is a `should` check, not an
+    // `assert`. It only runs where `-O` gives the barrier a chance to meet
+    // it: `bin/at` is unoptimised and would fail this gate on the generic
+    // call path alone, telling nothing about the barrier itself.
+    version (D_Optimized)
+        ratios[2].shouldBeSmallerThan(maxRatio);
 }
