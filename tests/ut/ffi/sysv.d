@@ -300,6 +300,38 @@ unittest {
 }
 
 
+// `g` is the 7th integer argument, so it spills to stack word 0: this
+// callee only throws once the stub has taken the stack-words branch
+// (issue #334's `subq`/copy path), not the zero-stack-words one
+// `exceptionUnwindsThroughTheStub` above exercises. The CFA the stub's
+// CFI directives describe is relative to %rbp, not %rsp, so unwinding
+// must work the same way whether or not %rsp moved for a stack area -
+// this is the check that it does.
+private extern(C) void snakebite_ut_sysv_throwsWithStackWords(
+    int a, int b, int c, int d, int e, int f, int g,
+) {
+    throw new Exception("thrown across the barrier with stack words");
+}
+
+
+private void callThrowsWithStackWords() @system {
+    CallFrame frame;
+    frame.integer = [1, 2, 3, 4, 5, 6];
+    size_t[1] stack = [7];
+    frame.stack = stack.ptr;
+    frame.stackWords = 1;
+
+    call(cast(const void*) &snakebite_ut_sysv_throwsWithStackWords, frame);
+}
+
+
+@("exceptionUnwindsThroughTheStub.stackWordsPresent")
+unittest {
+    callThrowsWithStackWords.shouldThrowWithMessage(
+        "thrown across the barrier with stack words");
+}
+
+
 // `snprintf` is C's own variadic callee: its declared parameters are
 // `char*, size_t, const char*`, all INTEGER class, so they fill
 // `%rdi, %rsi, %rdx`. The format string's own `%d` and `%.1f` are read

@@ -49,6 +49,16 @@
 snakebite_ffi_call_sysv_amd64:
     .cfi_startproc
 
+    /* %rbp stays pushed on every call, even when stackWords == 0 and
+     * %rsp would otherwise need no frame pointer to unwind through
+     * this function. The stack-word branch below is a runtime test on
+     * the same code path, not two copies of this function's prologue,
+     * so the `.cfi_` directives below it are static and must describe
+     * one CFA rule that holds on both sides of that branch. Splitting
+     * the prologue in two to drop this one push on the zero-stack-word
+     * path would mean two different CFA descriptions live at the same
+     * merged address after the branch, which unwinding (ADR-0004)
+     * cannot express - not worth risking for one push. */
     pushq   %rbp
     .cfi_def_cfa_offset 16
     .cfi_offset rbp, -16
@@ -63,25 +73,33 @@ snakebite_ffi_call_sysv_amd64:
     movq    %rdi, %rbx      /* rbx = address */
     movq    %rsi, %r12      /* r12 = frame */
 
+    /* Copy the stack words in order, word 0 at the lowest address.
+     * Almost every call has zero stack words; `rep movsq` still pays a
+     * fixed microcode startup cost even when %rcx == 0, which dominated
+     * the barrier cost measured for issue #334. A plain test-and-skip
+     * plus a movq loop avoids that cost in the common case. The
+     * alignment arithmetic and the `subq` against %rsp are dead work
+     * for the same common case, so both live under this one test now:
+     * with zero stack words, %rsp needs no adjustment at all, since the
+     * three pushes above already leave it 16-byte aligned (see the
+     * allocation comment below). This also reads `stackWords` once,
+     * into %rcx, instead of the separate %rax and %rcx reads of the
+     * same field the two computations used before. */
+    movq    CF_STACK_WORDS(%r12), %rcx
+    testq   %rcx, %rcx
+    jz      1f
+
     /* Allocate frame.stackWords words, rounded so %rsp is 16-byte
      * aligned at the `call` below. `%rsp` is already 16-byte aligned
      * here (three 8-byte pushes since entry, entry itself guaranteed
      * 8 mod 16 by the SysV ABI), so rounding the byte count up to a
      * multiple of 16 keeps it aligned after the subtraction. */
-    movq    CF_STACK_WORDS(%r12), %rax
+    movq    %rcx, %rax
     shlq    $3, %rax
     addq    $15, %rax
     andq    $-16, %rax
     subq    %rax, %rsp
 
-    /* Copy the stack words in order, word 0 at the lowest address.
-     * Almost every call has zero stack words; `rep movsq` still pays a
-     * fixed microcode startup cost even when %rcx == 0, which dominated
-     * the barrier cost measured for issue #334. A plain test-and-skip
-     * plus a movq loop avoids that cost in the common case. */
-    movq    CF_STACK_WORDS(%r12), %rcx
-    testq   %rcx, %rcx
-    jz      1f
     movq    CF_STACK(%r12), %rsi
     movq    %rsp, %rdi
 0:  movq    (%rsi), %rax
@@ -102,7 +120,21 @@ snakebite_ffi_call_sysv_amd64:
     movq    CF_INTEGER+40(%r12), %r9
 
     /* Load the SSE argument registers. Always all eight, for the same
-     * reason as the integer registers above. */
+     * reason as the integer registers above.
+     *
+     * A test-and-skip guarding these eight loads (mirroring the
+     * stack-word one above) was tried for issue #334: `sseCount`
+     * (`buildMoves`' `_sseCount` in `plan.d`) is exactly the number of
+     * SSE registers the plan filled, so skipping is safe whenever it is
+     * zero. Measured on `at.ffi.cost` (LDC -release -O), it made the
+     * call slower, not faster: this branch lands right before the
+     * `call *%rbx` below, and the two adjacent branches cost more in
+     * front-end/predictor overhead around the indirect call than the
+     * eight independent `movsd` loads ever cost - those are cheap for
+     * the CPU to execute out-of-order while the call itself is still
+     * resolving. Unlike the stack-word copy, an all-zero-register
+     * `movsd` here is not paying a fixed microcode startup cost the way
+     * `rep movsq` did, so there was nothing expensive here to skip. */
     movsd   CF_SSE+0(%r12), %xmm0
     movsd   CF_SSE+8(%r12), %xmm1
     movsd   CF_SSE+16(%r12), %xmm2
@@ -112,9 +144,11 @@ snakebite_ffi_call_sysv_amd64:
     movsd   CF_SSE+48(%r12), %xmm6
     movsd   CF_SSE+56(%r12), %xmm7
 
-    /* A variadic callee reads %al as the number of SSE registers used
-     * for the call; a non-variadic callee ignores it. */
-    movb    CF_SSE_COUNT(%r12), %al
+    /* `%al` reports the SSE register count to a variadic callee; a
+     * non-variadic callee ignores it. A full-register load, not `movb`,
+     * so there is no partial-register merge against a stale %eax before
+     * the `call` below. */
+    movq    CF_SSE_COUNT(%r12), %rax
 
     call    *%rbx
 
