@@ -30,6 +30,7 @@ private:
 public struct CallPlan {
     import snakebite.ffi.abi: ArgumentPlan, Register;
     import snakebite.ffi.limits: maxArguments;
+    import snakebite.ffi.sysv: CallFrame;
 
     // Worst case: every one of `maxArguments` parameters is a two-eightbyte
     // aggregate, plus the hidden return pointer.
@@ -37,26 +38,59 @@ public struct CallPlan {
     // Worst case: every eightbyte above spills to the stack.
     private enum maxStackWords = maxArguments * 2;
 
-    private enum DestinationKind { integer, sse, stack }
+    // The System V `CallFrame` (ADR-0001) plus this plan's own stack word
+    // storage, laid out contiguously right after it. Every move - whether
+    // it lands in an integer register, an SSE register or a stack word -
+    // then writes through the same flat byte offset from `&frame`, with no
+    // switch on which region it is: `integerBase`, `sseBase` and
+    // `stackBase` below are where each region starts.
+    private struct Frame {
+        CallFrame callFrame;
+        size_t[maxStackWords] stackArea;
+    }
 
-    // Where one eightbyte lands in a `CallFrame` - `index` is a register
-    // number (0..5 integer, 0..7 SSE) or a stack word position.
-    private struct Destination {
-        DestinationKind kind;
-        ubyte index;
+    private enum size_t integerBase = CallFrame.integer.offsetof;
+    private enum size_t sseBase = CallFrame.sse.offsetof;
+    private enum size_t stackBase = Frame.stackArea.offsetof;
+
+    // How to read one eightbyte's source bytes at call time, precomputed
+    // once from the argument's `Register` at `buildMoves` time - a single
+    // flat tag instead of `abi.word`'s two-level switch on `Register.Kind`
+    // then size. A pointer, an 8-byte signed/unsigned integral and a full
+    // eightbyte of an INTEGER/SSE-class aggregate all read the same way,
+    // so they share `word64`; `copy` is the rare aggregate eightbyte
+    // narrower than 8 bytes, the only case that still needs a byte count.
+    private enum Load : ubyte {
+        word64, zero8, zero16, zero32, sign8, sign16, sign32, copy,
     }
 
     // One eightbyte's source and destination, fixed at prepare time. The
     // source is either the hidden return pointer itself, when
     // `isReturnPointer`, or `byteOffset` bytes into argument
-    // `parameterIndex`'s own bytes; `register` names its width and sign
-    // for the `word` read `callAt` does at call time.
+    // `parameterIndex`'s own bytes, read as `load` says; `copyBytes` is
+    // only meaningful when `load == copy`. `destinationOffset` is a byte
+    // offset into `Frame`, already resolved to its integer/SSE/stack
+    // region - `callAt` never has to ask which region a move belongs to.
     private struct Move {
-        Register register;
         bool isReturnPointer;
+        Load load;
         ubyte parameterIndex;
         ubyte byteOffset;
-        Destination destination;
+        ubyte copyBytes;
+        uint destinationOffset;
+    }
+
+    // How to write one result eightbyte back into `returnPlace`: a
+    // truncated store sized to the register's own width, precomputed once
+    // from `_return` at `buildMoves` time instead of `abi.writeWord`'s
+    // runtime dispatch (which also re-validated a width every plan here
+    // already fixed at prepare time).
+    private enum Store : ubyte { byte1, byte2, byte4, byte8 }
+
+    private struct ResultMove {
+        bool fromSse;
+        ubyte sourceIndex;
+        Store store;
     }
 
     private void* _address;
@@ -85,6 +119,10 @@ public struct CallPlan {
     // register, for a variadic callee's `%al`.
     private size_t _sseCount;
     private size_t _stackWordCount;
+    // At most two result eightbytes - one INTEGER/SSE register each, or a
+    // pair when the return classifies to two eightbytes.
+    private ResultMove[2] _resultMoves;
+    private size_t _resultCount;
 
     // Calls the function this plan was prepared for.
     //
@@ -103,59 +141,39 @@ public struct CallPlan {
     }
 
     // Calls another function with this plan's prepared ABI shape: fills a
-    // `CallFrame` by replaying the moves `prepare`/`ofRawAddress` computed,
-    // calls the System V stub once, and writes the result back.
+    // `Frame` by replaying the moves `prepare`/`ofRawAddress` computed,
+    // calls the System V stub once, and writes the result back. Every step
+    // is an argument-count check, a loop of plain loads and stores, the
+    // stub call, and at most two result stores - no `final switch` on a
+    // destination region and no throw expression inline in this body (see
+    // `throwArgumentCountMismatch`/`throwMissingReturnPlace`).
     pragma(inline, true) public void callAt(
         const(void)* address,
         void* returnPlace,
         scope const(void*)[] arguments,
     ) const {
-        import snakebite.ffi.abi: word, writeWord;
-        import snakebite.ffi.sysv: CallFrame, call;
-        import std.conv: text;
+        import snakebite.ffi.sysv: call;
 
         if (arguments.length != _parameterCount)
-            throw new Exception(
-                text("ffi: this plan takes ", _parameterCount,
-                    " argument(s), got ", arguments.length),
-            );
-
+            throwArgumentCountMismatch(_parameterCount, arguments.length);
         if (_hiddenReturnPointer && returnPlace is null)
-            throw new Exception(
-                "ffi: this plan returns a value larger than a " ~
-                    "register, and needs somewhere to write it",
-            );
+            throwMissingReturnPlace;
 
-        CallFrame frame = void;
-        size_t[maxStackWords] stackArea = void;
+        Frame frame = void;
+        auto frameBytes = cast(ubyte*) &frame;
 
         foreach (ref move; _moves[0 .. _moveCount]) {
             const value = move.isReturnPointer
                 ? cast(size_t) returnPlace
-                : word(
-                    move.register,
-                    cast(ubyte*) arguments[move.parameterIndex]
-                        + move.byteOffset,
-                );
-
-            final switch (move.destination.kind) with (DestinationKind) {
-                case integer:
-                    frame.integer[move.destination.index] = value;
-                    break;
-                case sse:
-                    frame.sse[move.destination.index] = asDouble(value);
-                    break;
-                case stack:
-                    stackArea[move.destination.index] = value;
-                    break;
-            }
+                : loadValue(move, arguments);
+            *cast(size_t*) (frameBytes + move.destinationOffset) = value;
         }
 
-        frame.sseCount = _sseCount;
-        frame.stack = stackArea.ptr;
-        frame.stackWords = _stackWordCount;
+        frame.callFrame.sseCount = _sseCount;
+        frame.callFrame.stack = frame.stackArea.ptr;
+        frame.callFrame.stackWords = _stackWordCount;
 
-        call(address, frame);
+        call(address, frame.callFrame);
 
         // A hidden-pointer return already left its bytes at `returnPlace`
         // through that pointer, not in the return registers - which the
@@ -167,15 +185,58 @@ public struct CallPlan {
             return;
 
         auto bytes = cast(ubyte*) returnPlace;
-        size_t integerIndex;
-        size_t floatingIndex;
-        foreach (i; 0 .. _return.count) {
-            const resultWord = _return.registers[i].kind == Register.Kind.sse
-                ? bitsOf(frame.sseResult[floatingIndex++])
-                : frame.integerResult[integerIndex++];
-            writeWord(
-                _return.registers[i], resultWord, bytes + i * size_t.sizeof,
-            );
+        foreach (i; 0 .. _resultCount) {
+            const move = _resultMoves[i];
+            const resultWord = move.fromSse
+                ? bitsOf(frame.callFrame.sseResult[move.sourceIndex])
+                : frame.callFrame.integerResult[move.sourceIndex];
+            storeResult(move.store, resultWord, bytes + i * size_t.sizeof);
+        }
+    }
+
+    // `move`'s source bytes, widened or truncated as `move.load` says.
+    // Never called for a return-pointer move - `callAt` reads that one
+    // directly from its own `returnPlace` argument instead.
+    pragma(inline, true)
+    private static size_t loadValue(
+        in Move move, scope const(void*)[] arguments,
+    ) {
+        auto src = cast(ubyte*) arguments[move.parameterIndex]
+            + move.byteOffset;
+        final switch (move.load) with (Load) {
+            case word64: return *cast(size_t*) src;
+            case zero8:  return *cast(ubyte*) src;
+            case zero16: return *cast(ushort*) src;
+            case zero32: return *cast(uint*) src;
+            case sign8:  return cast(size_t) cast(long) *cast(byte*) src;
+            case sign16: return cast(size_t) cast(long) *cast(short*) src;
+            case sign32: return cast(size_t) cast(long) *cast(int*) src;
+            case copy: {
+                import core.stdc.string: memcpy;
+
+                size_t result;
+                memcpy(&result, src, move.copyBytes);
+                return result;
+            }
+        }
+    }
+
+    // Writes `value`'s low bytes to `place`, truncated to `store`'s width -
+    // the same raw-truncation rule `nativevalue.storeIntegral` uses, but
+    // written directly rather than through `nativelayout.storeIntegral`'s
+    // validate-and-throw wrapper: a plan's own register widths are already
+    // known good, fixed once at prepare time, and never need re-checking -
+    // or a second switch on the width `store` has already picked - on
+    // every call.
+    pragma(inline, true)
+    private static void storeResult(
+        in Store store, in size_t value, void* place,
+    ) {
+        final switch (store) with (Store) {
+            case byte1: *cast(ubyte*) place = cast(ubyte) value; break;
+            case byte2: *cast(ushort*) place = cast(ushort) value; break;
+            case byte4: *cast(uint*) place = cast(uint) value; break;
+            case byte8: *cast(size_t*) place = value; break;
         }
     }
 
@@ -250,14 +311,16 @@ public struct CallPlan {
             in size_t byteOffset,
             in bool toFloating,
         ) {
-            const destination = toFloating
-                ? Destination(
-                    DestinationKind.sse, cast(ubyte) floatingCount++)
-                : Destination(
-                    DestinationKind.integer, cast(ubyte) integerCount++);
+            const destinationOffset = toFloating
+                ? sseBase + (floatingCount++) * size_t.sizeof
+                : integerBase + (integerCount++) * size_t.sizeof;
             _moves[moveCount++] = Move(
-                register, isReturnPointer, cast(ubyte) parameterIndex,
-                cast(ubyte) byteOffset, destination,
+                isReturnPointer,
+                isReturnPointer ? Load.init : loadOf(register),
+                cast(ubyte) parameterIndex,
+                cast(ubyte) byteOffset,
+                isReturnPointer ? cast(ubyte) 0 : copyBytesOf(register),
+                cast(uint) destinationOffset,
             );
         }
 
@@ -266,10 +329,11 @@ public struct CallPlan {
             in size_t parameterIndex,
             in size_t byteOffset,
         ) {
+            const destinationOffset = stackBase + (stackCount++) * size_t.sizeof;
             _moves[moveCount++] = Move(
-                register, false, cast(ubyte) parameterIndex,
-                cast(ubyte) byteOffset,
-                Destination(DestinationKind.stack, cast(ubyte) stackCount++),
+                false, loadOf(register), cast(ubyte) parameterIndex,
+                cast(ubyte) byteOffset, copyBytesOf(register),
+                cast(uint) destinationOffset,
             );
         }
 
@@ -366,15 +430,104 @@ public struct CallPlan {
         _moveCount = moveCount;
         _sseCount = floatingCount;
         _stackWordCount = stackCount;
+
+        // At most two result eightbytes (`_return.count`), each read from
+        // its own register file's next result slot - see `callAt`.
+        size_t integerResultIndex;
+        size_t floatingResultIndex;
+        foreach (i; 0 .. _return.count) {
+            const fromSse = _return.registers[i].kind == Register.Kind.sse;
+            _resultMoves[i] = ResultMove(
+                fromSse,
+                cast(ubyte) (
+                    fromSse ? floatingResultIndex++ : integerResultIndex++),
+                storeOf(_return.registers[i].size),
+            );
+        }
+        _resultCount = _return.count;
     }
+
+    // `register`'s source bytes, as a `Load` tag - see `Load` and
+    // `loadValue`. Called only at prepare time, from `buildMoves`.
+    private static Load loadOf(in Register register) {
+        final switch (register.kind) with (Register.Kind) {
+            case pointer:
+                return Load.word64;
+
+            case unsigned:
+                switch (register.size) {
+                    case 1: return Load.zero8;
+                    case 2: return Load.zero16;
+                    case 4: return Load.zero32;
+                    case 8: return Load.word64;
+                    default: assert(false, "unsupported unsigned size");
+                }
+
+            case signed:
+                switch (register.size) {
+                    case 1: return Load.sign8;
+                    case 2: return Load.sign16;
+                    case 4: return Load.sign32;
+                    case 8: return Load.word64;
+                    default: assert(false, "unsupported signed size");
+                }
+
+            case integer:
+            case sse:
+                return register.size == 8 ? Load.word64 : Load.copy;
+
+            case none:
+                assert(false, "a `void` argument has nothing to pass");
+        }
+    }
+
+    // How many bytes `loadValue`'s `copy` case reads - meaningless, and
+    // left `0`, for every other `Load` tag.
+    private static ubyte copyBytesOf(in Register register) {
+        const partialAggregate =
+            (register.kind == Register.Kind.integer
+                || register.kind == Register.Kind.sse)
+            && register.size != 8;
+        return partialAggregate ? register.size : 0;
+    }
+
+    // `size`'s `Store` tag - see `Store` and `storeResult`. Called only at
+    // prepare time, from `buildMoves`; a plan's `Register`s always carry
+    // one of these four widths (see `abi.Register.size`'s own doc).
+    private static Store storeOf(in ubyte size) {
+        switch (size) {
+            case 1: return Store.byte1;
+            case 2: return Store.byte2;
+            case 4: return Store.byte4;
+            case 8: return Store.byte8;
+            default: assert(false, "unsupported result register size");
+        }
+    }
+}
+
+// Split from `callAt`'s body so the hot path itself is only ever a compare
+// and a branch to here, never an inlined exception construction.
+private void throwArgumentCountMismatch(
+    in size_t expected, in size_t got,
+) {
+    import std.conv: text;
+
+    throw new Exception(
+        text("ffi: this plan takes ", expected,
+            " argument(s), got ", got),
+    );
+}
+
+// As `throwArgumentCountMismatch`, for the other `callAt` precondition.
+private void throwMissingReturnPlace() {
+    throw new Exception(
+        "ffi: this plan returns a value larger than a " ~
+            "register, and needs somewhere to write it",
+    );
 }
 
 private size_t bitsOf(in double value) @trusted pure nothrow @nogc {
     return *cast(const size_t*) &value;
-}
-
-private double asDouble(in size_t bits) @trusted pure nothrow @nogc {
-    return *cast(const double*) &bits;
 }
 
 // The DMD-free runtime entry point for a prepared call. Backends keep the
