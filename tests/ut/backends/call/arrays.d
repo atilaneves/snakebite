@@ -1006,12 +1006,6 @@ static foreach (backend; Matrix!()) {
 // corrupt the already-written overlap region. Not a pointer-element-only
 // case: an integral element must be checked the same way.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "the bytecode compiler does not check a slice assignment's source "
-            ~ "and destination for overlap"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter does not check a slice assignment's source and "
-            ~ "destination for overlap"),
 )) {
     @("arrays.slice.overlappingAssignRaises." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1025,6 +1019,47 @@ static foreach (backend; Matrix!(
                 dst[] = src[];
                 assert(storage[1] == 1);
                 assert(storage[2] == 2);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not run this runtime slice mismatch check"),
+)) {
+    @("arrays.slice.lengthMismatch.isCaught." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[2] sourceStorage = [1, 2];
+                int[3] storage = [3, 4, 5];
+                int[] source = sourceStorage[];
+                int[] destination = storage[];
+                bool caught;
+                try
+                    destination[] = source[];
+                catch (Throwable) {
+                    caught = true;
+                    assert(storage == [3, 4, 5]);
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.slice.emptyCopy.succeeds." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] source;
+                int[] destination;
+                destination[] = source[];
+                assert(destination.length == 0);
             }
         });
     }

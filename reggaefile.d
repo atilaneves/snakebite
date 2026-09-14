@@ -1,6 +1,6 @@
 import reggae;
 import reggae.config: configToDubInfo, options;
-import reggae.dub.info: DubInfo;
+import reggae.dub.info: DubInfo, DubPackage, TargetType;
 import reggae.build: Build, Target;
 import reggae.rules.dub: CompilationMode;
 import reggae.rules.dub.runtime: dubBuild;
@@ -32,6 +32,30 @@ Target dubTarget(string compiler, string config, string objectSet,
         buildOptions.dubBuildType = "release";
 
     DubInfo info = configToDubInfo[config].dup;
+    // LDC does not ship `_d_arraycopy`. Compile the upstream druntime
+    // implementation from the dmd frontend package so every executable
+    // uses druntime's own length and overlap checks.
+    foreach (const package_; info.packages) {
+        if (baseName(package_.path) != "dmd")
+            continue;
+        DubPackage runtime;
+        runtime.name = "snakebite-druntime-arraycopy";
+        runtime.path = package_.path;
+        runtime.files = [
+            "druntime/src/rt/arraycat.d",
+            "druntime/src/core/internal/util/array.d",
+        ];
+        runtime.importPaths = ["druntime/src"];
+        runtime.targetType = TargetType.staticLibrary;
+        if (compiler != "dmd")
+            runtime.dflags = [
+                "-fno-moduleinfo",
+                "-enable-asserts=true",
+                "-checkaction=context",
+            ];
+        info.packages ~= runtime;
+        break;
+    }
     if (config == "acceptance-test")
         info.packages[0].dflags ~= "-unittest";
     if (compiler != "dmd") {

@@ -2508,11 +2508,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // array's own whole slice. Neither side has a compile-time element
     // count the way a static array's own whole-slice assignment
     // (`compileSliceAssign` above) does, so this reads both sides'
-    // lengths at run time, checks them equal the same way a run-time
-    // slice's own bounds are already checked (`visit(SliceExp)`'s
-    // `compileBoundsHook` use), and copies through `opSliceCopy` - the one
-    // opcode this VM has for a byte count that is not known until the
-    // program runs.
+    // lengths at run time and copies through `opSliceCopy`. Druntime owns
+    // the equal-length and overlap checks for that copy.
     //
     // Only a plain-bytes element is supported: `void` (a class `.init`
     // image's own element type, and every element type this reaches
@@ -2582,30 +2579,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const sourceFacts = TypeFacts.of(expression.e2.type);
             const sourceSliceOffset = reserveTemp(sourceFacts);
             evalInto(expression.e2, sourceSliceOffset, sourceFacts.size);
-
-            // D requires both sides of a dynamic slice assignment to
-            // share one length; a compiled program never proves that at
-            // compile time, so this is the run-time counterpart to
-            // `_d_arraycopy`'s own `RangeError` on a mismatch. Native
-            // `_d_arraycopy` reports no index or length of its own, so the
-            // plain `_d_arrayboundsp` hook (`RangeError`, not one of its
-            // subclasses) is the closest match - see `compileBoundsHook`'s
-            // own doc.
-            const orderOffset = reserveTemp(pointerFacts);
-            emit(&opCopy, orderOffset, destSliceOffset + arrayLengthOffset,
-                size_t.sizeof);
-            emit(&opEqual, orderOffset,
-                sourceSliceOffset + arrayLengthOffset, size_t.sizeof);
-            compileBoundsHook(
-                orderOffset,
-                "_d_arrayboundsp",
-                [
-                    Register(Register.Kind.pointer, 8),
-                    Register(Register.Kind.unsigned, 4),
-                ],
-                [],
-                expression.loc,
-            );
 
             emit(&opSliceCopy, destSliceOffset, sourceSliceOffset,
                 elementSize);
