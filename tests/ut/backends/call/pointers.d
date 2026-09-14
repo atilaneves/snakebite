@@ -254,11 +254,7 @@ static foreach (backend; Matrix!()) {
 // `&arr[i]` on a static one, which is dmd's own `SymOffExp` with a
 // non-zero offset, a separate, unconfirmed gap this compiler has for
 // address-of a non-first static-array element, out of scope here.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter divides a pointer difference by the wrong "
-            ~ "stride once the pointee is wider than one byte"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.intPointer.differenceBothSigns." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -279,11 +275,7 @@ static foreach (backend; Matrix!(
 
 // The same signed difference for a struct pointer, whose element size
 // (two `int` fields, eight bytes) is neither one nor `size_t.sizeof`.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter divides a pointer difference by the wrong "
-            ~ "stride once the pointee is wider than one byte"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.structPointer.differenceBothSigns." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -311,11 +303,7 @@ static foreach (backend; Matrix!(
 // words differ only by the element offset between where each slice
 // starts - exactly what `_d_arrayshrinkfit` computes for a shrunk slice
 // against the block `gc_getArrayUsed` still remembers as full length.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter divides a pointer difference by the wrong "
-            ~ "stride once the pointee is wider than one byte"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.dynamicArray.sliceOfSameArrayDifference." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1123,11 +1111,7 @@ static foreach (backend; Matrix!(
 // A pointee whose size is not a power of two: the byte distance between
 // the two pointers (24 here) is still an exact multiple of the element
 // size (12), so the element distance is exact in both directions.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter divides a pointer difference by the wrong "
-            ~ "stride once the pointee is wider than one byte"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.structPointer.twelveByteStrideBothSigns." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1209,11 +1193,7 @@ static foreach (backend; Matrix!()) {
 // The pointer operands' qualifiers do not change the difference: two
 // `const(int)*` values (converted from mutable pointers) subtract like
 // `int*` ones.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter divides a pointer difference by the wrong "
-            ~ "stride once the pointee is wider than one byte"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.constPointer.differenceBothSigns." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1236,11 +1216,7 @@ static foreach (backend; Matrix!(
 
 // A pointer difference is a signed integer, so a negative one compares
 // below zero, and `p - p` is zero and therefore false as a condition.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter divides a pointer difference by the wrong "
-            ~ "stride once the pointee is wider than one byte"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.pointerDifference.asCondition." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1272,11 +1248,7 @@ static foreach (backend; Matrix!(
 // `long`, takes part in further arithmetic, converts to `size_t`, and
 // narrows to `int` with its sign intact. An odd distance (three `long`
 // elements) checks that the byte count divides exactly by the stride.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter divides a pointer difference by the wrong "
-            ~ "stride once the pointee is wider than one byte"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.pointerDifference.asInteger." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

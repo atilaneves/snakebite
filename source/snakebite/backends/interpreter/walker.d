@@ -3097,12 +3097,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         if (expression.e1.type.ty == Tpointer
                 && expression.e2.type.ty == Tpointer) {
-            const stride = factsOf(expression.e1.type.nextOf).size;
-            assert(stride != 0, "pointer subtraction has zero-sized elements");
-
             const left = cast(ubyte*) asPointer(expression.e1);
             const right = cast(ubyte*) asPointer(expression.e2);
-            const difference = (left - right) / cast(ptrdiff_t) stride;
+            const difference = left - right;
             storeIntegral(_place, cast(ulong) difference, _facts.size);
             return;
         }
