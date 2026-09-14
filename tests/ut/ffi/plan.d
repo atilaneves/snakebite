@@ -5,7 +5,7 @@ import ut;
 import dmd.func: FuncDeclaration;
 import snakebite.ffi: CallAdapter, PlanCache;
 import snakebite.frontend.compiler: parseSnippet;
-import snakebite.frontend.dmd.functions: findFunction;
+import snakebite.frontend.dmd.functions: findFunction, findStruct;
 import std.array: replace;
 
 
@@ -610,4 +610,120 @@ unittest {
 
     _mixedSpillLongSeen.should == 10;
     _mixedSpillDoubleSeen.should == 1.5;
+}
+
+
+// A parameter whose ABI class is MEMORY (more than two eightbytes, or an
+// unaligned aggregate the ABI classifies as MEMORY regardless of size) is
+// refused as an explicit argument until stack memory values have a
+// separate call path (`abi.ArgumentPlan.of`'s own doc). `prepare` walks
+// every parameter before it ever resolves a symbol (see `prepare`'s own
+// body), so this throws before native resolution, and no native
+// implementation of `snakebite_ut_memory_param` needs to exist for this
+// test.
+@("prepare.refusesMemoryClassParameter")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct ThreeWordStruct {
+            size_t first;
+            size_t second;
+            size_t third;
+        }
+
+        extern(C) void snakebite_ut_memory_param(ThreeWordStruct value);
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_memory_param");
+    assert(function_ !is null,
+        "No `snakebite_ut_memory_param` in the guest program");
+
+    PlanCache cache;
+    cache.of(function_).shouldThrowWithMessage(
+        "ffi cannot pass a value of type `ThreeWordStruct`: " ~
+            "its ABI class is MEMORY");
+}
+
+
+private extern(C) double snakebite_ut_double_of_long(long value) {
+    return cast(double) value * 1.5;
+}
+
+
+// `long -> double`: the plan's argument is INTEGER class (so it still
+// picks the integer-only stub entry - see `_entry`'s own doc), but its
+// *result* is SSE class. Only the raw-stub test
+// `ut.ffi.sysv`'s `integerEntry.doubleReturn.xmm0` covered this shape
+// before; this is the same shape one level up, through a plan.
+@("called.doubleOfLong")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(C) double snakebite_ut_double_of_long(long value);
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_double_of_long");
+    assert(function_ !is null,
+        "No `snakebite_ut_double_of_long` in the guest program");
+
+    PlanCache cache;
+    long value = 6;
+    double result;
+    cache.of(function_).call(&result, [cast(const void*) &value]);
+
+    result.should == 9.0;
+}
+
+
+private struct ContextHiddenPointer {
+    pragma(mangle, "snakebite_ut_context_hidden_pointer")
+    ThreeWords getThreeWords() {
+        return ThreeWords(17, 31, 47);
+    }
+}
+
+
+// A method returning a MEMORY-class struct: the hidden context (`this`)
+// and the hidden return pointer travel together, in whichever order
+// `abi.contextPrecedesHiddenReturnPointer` says this host compiler uses
+// (dmd puts `this` first). No existing test named both hidden arguments
+// together - `called.refResult`/`called.refReturn` cover a hidden
+// context alone (through `CallAdapter`, not a plan directly) and
+// `called.hiddenPointerReturn` covers a hidden return pointer alone,
+// but not the two combined.
+@("called.contextPrecedesHiddenReturnPointer")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct ThreeWords {
+            size_t first;
+            size_t second;
+            size_t third;
+        }
+
+        struct ContextHiddenPointer {
+            // A body, never walked - `PlanCache.of` builds a plan from
+            // this declaration's dmd facts alone (its parameter/return
+            // types and its `vthis`) and resolves the call by mangled
+            // symbol name; it never inspects `fbody`. dmd's own
+            // semantic3 pass only populates `vthis` for a function that
+            // has a body (or a `requires`/`ensure` contract) - see
+            // `hasHiddenThis`'s own doc - so a body-less prototype here,
+            // unlike a free function such as `abs`, would never read as
+            // having a hidden `this` at all.
+            pragma(mangle, "snakebite_ut_context_hidden_pointer")
+            extern(D) ThreeWords getThreeWords() { assert(0); }
+        }
+    });
+    auto struct_ = findStruct(guestModule, "ContextHiddenPointer");
+    assert(struct_ !is null,
+        "No struct `ContextHiddenPointer` in the guest program");
+    auto function_ = findFunction(struct_, "getThreeWords");
+    assert(function_ !is null,
+        "No `getThreeWords` method in the guest program");
+
+    PlanCache cache;
+    ContextHiddenPointer instance;
+    ContextHiddenPointer* receiver = &instance;
+    ThreeWords result;
+    cache.of(function_).call(&result, [cast(const void*) &receiver]);
+
+    result.should == ThreeWords(17, 31, 47);
 }

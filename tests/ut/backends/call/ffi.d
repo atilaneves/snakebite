@@ -86,6 +86,15 @@ public extern(C) short snakebite_ut_narrow(byte left, ushort right) {
 }
 
 
+// One INTEGER-class argument, chosen at prepare time as the leaner
+// stub entry (`CallPlan._entry`'s own doc), but an SSE-class result -
+// the integer entry still stores `%xmm0` into `frame.sseResult` even
+// though it never loaded an SSE argument register for the call itself.
+public extern(C) double snakebite_ut_double_of_long(long value) {
+    return cast(double) value * 1.5;
+}
+
+
 // `abs` is declared `extern(C)` with no body: nothing in the guest program
 // implements it, so the only way to run these is to call the real symbol
 // the host process already links against.
@@ -209,6 +218,23 @@ static foreach (backend; Matrix!(
 
                 short answer() {
                     return nativeNarrow(byte(-2), ushort(44));
+                }
+            },
+            "answer",
+        );
+    }
+
+    @("signatures.doubleOfLong." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        9.0.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_double_of_long")
+                extern(C) double doubleOfLong(long value);
+
+                double answer() {
+                    return doubleOfLong(6);
                 }
             },
             "answer",

@@ -344,6 +344,10 @@ unittest {
 // register, for `%.1f`. `%al` has to report one SSE register used, or
 // glibc's own variadic prologue skips saving `%xmm0` into its register
 // save area and `%.1f` reads garbage instead.
+//
+// Stub level only: `prepare` refuses a variadic callee outright (see its
+// own `VarArg.none` check), so a plan never reaches this shape. Calling
+// a variadic function through a plan is step 5 of issue #334 (ADR-0010).
 @("variadicCallee.snprintf")
 unittest {
     import core.stdc.stdio: snprintf;
@@ -493,16 +497,15 @@ unittest {
 }
 
 
-// `snprintf` again (see the general entry's own `variadicCallee` test
-// above), but with only integer-class fixed and variadic arguments -
-// `%d %d`, no `%f`. Proves `%al` reports 0 SSE registers used: if this
-// entry left it holding anything else, glibc's variadic prologue would
-// still behave correctly here (it only acts on `%al` to decide how many
-// `%xmm` registers to spill to its register save area), so this test
-// only guards the `xorl %eax, %eax` itself, not an observable failure
-// mode - but it is the shape ADR-0001's variadic-callee coverage exists
-// for, and this entry needs its own instance of it.
-@("integerEntry.variadicCallee.snprintf")
+// A plain integer-only-arguments call through this entry, not a
+// property check on `%al` - see the general entry's own `variadicCallee`
+// test above for that. Every argument and the format string here are
+// INTEGER class (`%d %d`, no `%f`), so `snprintf` never reads `%xmm0`
+// regardless of what this entry loads into `%al`; a wrong value there
+// could not make this assertion fail. What this test does check is that
+// a variadic callee still runs correctly through the leaner entry when
+// it needs no SSE registers at all.
+@("integerEntry.snprintf")
 unittest {
     import core.stdc.stdio: snprintf;
     import std.string: fromStringz;
