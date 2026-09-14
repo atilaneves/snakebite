@@ -397,7 +397,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         WithStatement;
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
-        Arg, AssertSite, CallSite, ClosureSlot, discardResult,
+        Arg, AssertSite, CallSite, ClosureSlot, discardResult, indirectStorage,
         ExceptionHandler, Function,
         Instruction,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
@@ -1863,12 +1863,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 emit(&opStoreIndirect, target, addressOffset,
                     size_t.sizeof);
             } else {
-                const valueOffset = reserveTemp(facts);
                 evalInto(
                     storedLiteral ? initializer : expInitializer.exp,
-                    valueOffset, facts.size, variable.type,
+                    indirectStorage(target), facts.size, variable.type,
                 );
-                emit(&opStoreIndirect, target, valueOffset, facts.size);
             }
             return;
         }
@@ -2152,28 +2150,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileAssignmentAt(expression, addressOffset, destOffset);
     }
 
-    // The resolver hands assignment adapters an address slot because that is
-    // the native representation used by indirect stores. A ConstructExp for
-    // a plain local is the one case where the RHS must see the local's value
-    // bytes directly; pass that value slot to the shared executor rather than
-    // mistaking the address slot for storage.
-    private size_t constructionDestination(AssignExp expression) {
-        if (expression.isConstructExp is null)
-            return discardResult;
-
-        auto variableExp = expression.e1.isVarExp;
-        if (variableExp is null)
-            return discardResult;
-
-        auto variable = variableExp.var.isVarDeclaration;
-        if (variable is null || variable.isDataseg
-                || isClosureVariable(variable) || _layout.isRef(variable)
-                || !_layout.hasSlot(variable))
-            return discardResult;
-
-        return _layout.offsetOf(variable);
-    }
-
     private void compileAssignmentAt(
         AssignExp expression, in size_t addressOffset,
         in size_t destOffset = discardResult,
@@ -2206,10 +2182,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         void delegate(size_t value) publish = (size_t value) {
             emit(&opStoreIndirect, addressOffset, value, facts.size);
         };
-        const constructionOffset = constructionDestination(expression);
         const valueOffset = executeAssignment!(size_t, reserve, evaluate,
-            publish)(constructionOffset != discardResult, constructionOffset,
-                facts.size, facts.alignment);
+            publish)(expression.isConstructExp !is null,
+                indirectStorage(addressOffset), facts.size, facts.alignment);
 
         if (destOffset != discardResult)
             emit(&opCopy, destOffset, valueOffset, facts.size);
@@ -2792,8 +2767,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         writeScalar(storage, valueOffset, storage.facts.size);
     }
 
-    // Compiles `expression`'s value into `frame[destOffset .. destOffset +
-    // width]` - a literal, a parameter or local read, a nested call, a
+    // Compiles a value into a storage operand, including storage reached
+    // through a runtime address: a literal, a local read, a nested call, a
     // nested assignment's own value (`return (sum = five());`), or any of
     // the operators below.
     private void evalInto(
@@ -3212,11 +3187,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, _destination, baseOffset + field.offset, _width);
     }
 
-    // Executes one step of an `AggregateInitPlan` (`aggregateinit.d`),
-    // wherever the aggregate being built lives: `base` is a frame offset
-    // holding the aggregate's own bytes directly for a value
-    // (`visit(StructLiteralExp)`), or a frame offset holding a pointer to
-    // an allocation for `new` (`compileNew`) - `isPointer` picks which.
+    // Executes an aggregate plan in its final storage. A storage operand
+    // preserves field offsets for both frame values and allocations.
     // The plan already decided which field is a plain value, a bitfield,
     // or a static-array broadcast, and whether `vthis` needs filling; this
     // is the only place that turns a step into bytecode.
@@ -3230,8 +3202,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void applyStep(
         imported!"snakebite.backends.aggregateinit".InitStep step,
         imported!"dmd.location".Loc loc,
-        size_t base,
-        bool isPointer,
+        in size_t base,
     ) {
         import snakebite.backends.aggregateinit: InitStep;
 
@@ -3241,38 +3212,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 throw rejection(_function, loc, "a nested struct's static chain");
 
             const context = contextAddressOf(step.parentFunction);
-            if (!isPointer) {
-                emit(&opCopy, base + step.offset, context, size_t.sizeof);
-                return;
-            }
-
-            const fieldAddress = addPointerOffset(base, step.offset);
-            emit(&opStoreIndirect, fieldAddress, context, size_t.sizeof);
+            emit(&opCopy, base + step.offset, context, size_t.sizeof);
             return;
 
         case value:
-            if (!isPointer) {
-                evalInto(step.source, base + step.offset, step.facts.size,
-                    step.type);
-                return;
-            }
-
-            const valueOffset = reserveTemp(step.facts);
-            evalInto(step.source, valueOffset, step.facts.size, step.type);
-            const fieldAddress = addPointerOffset(base, step.offset);
-            emit(&opStoreIndirect, fieldAddress, valueOffset, step.facts.size);
+            evalInto(step.source, base + step.offset, step.facts.size,
+                step.type);
             return;
 
         case bitfield:
             const valueOffset = reserveTemp(step.facts);
             evalInto(step.source, valueOffset, step.facts.size, step.type);
 
-            auto addressOffset = reserveTemp(pointerFacts);
-            if (isPointer) {
-                addressOffset = addPointerOffset(base, step.offset);
-            } else
-                emit(&opFrameAddress, addressOffset, base + step.offset,
-                    size_t.sizeof);
+            const addressOffset = reserveTemp(pointerFacts);
+            emit(&opFrameAddress, addressOffset, base + step.offset,
+                size_t.sizeof);
 
             emitBitfieldStore(step.field, addressOffset, valueOffset,
                 step.facts.size);
@@ -3312,7 +3266,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto plan = planStructLiteral(expression);
         foreach (step; plan.steps)
-            applyStep(step, expression.loc, _destination, false);
+            applyStep(step, expression.loc, _destination);
     }
 
     // `arr.length`: the array's own length word, read straight out of its
@@ -3689,7 +3643,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         foreach (step; plan.steps)
             if (step.kind == InitStep.Kind.vthis)
-                applyStep(step, expression.loc, objectOffset, true);
+                applyStep(step, expression.loc, indirectStorage(objectOffset));
 
         if (expression.member !is null) {
             compileResolvedCall(
@@ -3701,7 +3655,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         foreach (step; plan.steps)
             if (step.kind != InitStep.Kind.vthis)
-                applyStep(step, expression.loc, objectOffset, true);
+                applyStep(step, expression.loc, indirectStorage(objectOffset));
     }
 
     // `null` is all-zero bytes whatever it means - a pointer, a class

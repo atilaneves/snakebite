@@ -3507,3 +3507,24 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not support escaping closures"),
+)) {
+    @("capturedStructConstructionPreservesSelfAddress." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Self {
+                Self* saved;
+                this(int value) { saved = &this; }
+            }
+            auto make() {
+                Self value = Self(1);
+                return () => value.saved == &value;
+            }
+            void main() { assert(make()()); }
+        });
+    }
+}
