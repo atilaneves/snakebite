@@ -1878,8 +1878,10 @@ static foreach (Backend; AliasSeq!(Interpreter, Bytecode)) {
         int result;
         new Backend(Program([functionPointerModule]))
             .call(functionPointerAnswer, &result, [])
-            .shouldThrow
-            .msg.canFind("ADR-0003").should == true;
+            .shouldThrowWithMessage(
+                "ffi cannot pass a function pointer or delegate as a " ~
+                    "variadic argument to `nativeSum`: it has no " ~
+                    "callback pool entry (ADR-0003)");
 
         auto delegateModule = parseSnippet(q{
             pragma(mangle, "snakebite_ut_variadic_sum_ints_backend")
@@ -1894,7 +1896,9 @@ static foreach (Backend; AliasSeq!(Interpreter, Bytecode)) {
 
         new Backend(Program([delegateModule]))
             .call(delegateAnswer, &result, [])
-            .shouldThrow
-            .msg.canFind("ADR-0003").should == true;
+            .shouldThrowWithMessage(
+                "ffi cannot pass a function pointer or delegate as a " ~
+                    "variadic argument to `nativeSum`: it has no " ~
+                    "callback pool entry (ADR-0003)");
     }
 }

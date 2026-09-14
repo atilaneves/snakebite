@@ -1075,10 +1075,9 @@ private CallPlan prepareCommon(
                 pointer !is null && pointer.nextOf.isTypeFunction !is null;
             if (isFunctionPointer || extraType.ty == Tdelegate)
                 throw new Exception(
-                    text("ffi cannot pass `", extraType.toString, "` as a ",
-                        "variadic argument to `", function_.toString,
-                        "`: a function pointer or delegate extra argument ",
-                        "has no callback pool entry (ADR-0003)"),
+                    text("ffi cannot pass a function pointer or delegate ",
+                        "as a variadic argument to `", function_.toString,
+                        "`: it has no callback pool entry (ADR-0003)"),
                 );
             addArgument(ArgumentPlan.of(extraType));
         }
