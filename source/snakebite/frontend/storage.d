@@ -4,7 +4,7 @@ private:
 
 
 import dmd.expression:
-    AssignExp, BinAssignExp, CatAssignExp, Expression, IndexExp;
+    AssignExp, BinAssignExp, CatAssignExp, Expression, IndexExp, SymOffExp;
 import dmd.astenums: Tarray, Tpointer, Tsarray;
 import dmd.typesem: isIntegral;
 
@@ -185,5 +185,21 @@ public struct StorageResolver(Result, Adapter) {
         else
             _adapter.storageCompoundAssignment(expression, target);
         return target;
+    }
+}
+
+// Resolves the native address represented by a symbol-plus-offset
+// expression. The symbol's address is backend-specific, but applying dmd's
+// byte offset is the same operation for every backend.
+public struct SymbolAddressResolver(Result, Adapter) {
+    private Adapter _adapter;
+
+    public this(Adapter adapter) {
+        _adapter = adapter;
+    }
+
+    public Result resolve(SymOffExp expression) {
+        auto address = _adapter.symbolAddress(expression);
+        return _adapter.addSymbolOffset(address, expression.offset);
     }
 }

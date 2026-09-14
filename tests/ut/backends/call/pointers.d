@@ -1048,10 +1048,7 @@ static foreach (backend; Matrix!()) {
 
 // `&sarr[1]` is dmd's `SymOffExp` with a non-zero offset: the address is
 // the array's own storage plus one element's width, not the array's start.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "bytecode compiler cannot compile `(& sarr + 4)` in `deref`"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.addressOf.staticArrayElement." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

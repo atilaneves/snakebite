@@ -2617,6 +2617,32 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
     }
 
+    private struct SymbolAddressAdapter {
+        Evaluator evaluator;
+
+        public void* symbolAddress(SymOffExp expression) {
+            if (auto function_ = expression.var.isFuncDeclaration)
+                return cast(void*) function_;
+
+            if (auto typeInfo = expression.var.isTypeInfoDeclaration) {
+                auto type = typeInfo.tinfo;
+                auto classType = type.isTypeClass;
+                if (classType !is null
+                        && evaluator._runtimeTypes.isRootOwned(classType.sym))
+                    return cast(void*) evaluator._runtimeTypes.get(type);
+            }
+
+            return evaluator.slotOf(expression, expression.var);
+        }
+
+        public void* addSymbolOffset(
+            in void* address,
+            in long offset,
+        ) {
+            return cast(void*) (cast(ubyte*) address + offset);
+        }
+    }
+
     private void* addressOf(Expression target) {
         import snakebite.frontend.storage: StorageResolver;
 
@@ -3515,37 +3541,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     override void visit(SymOffExp expression) {
         import snakebite.nativelayout: storeIntegral;
 
-        if (auto function_ = expression.var.isFuncDeclaration) {
-            // A function has no fields for `offset` to select between: dmd
-            // never emits a non-zero offset alongside a `FuncDeclaration`
-            // `var`, so this stand-in scheme (see above) has nowhere to
-            // apply an offset to. Asserted rather than silently ignored,
-            // so a dmd change that starts doing so is caught here instead
-            // of producing a function pointer value that is quietly wrong.
-            assert(expression.offset == 0,
-                "SymOffExp naming a function has a non-zero offset");
-            storeIntegral(
-                _place, cast(size_t) cast(void*) function_, _facts.size);
-            return;
-        }
+        import snakebite.frontend.storage: SymbolAddressResolver;
 
-        if (auto typeInfo = expression.var.isTypeInfoDeclaration) {
-            auto type = typeInfo.tinfo;
-            auto classType = type.isTypeClass;
-            if (classType !is null && _runtimeTypes.isRootOwned(classType.sym)) {
-                auto info = _runtimeTypes.get(type);
-                storeIntegral(
-                    _place,
-                    cast(size_t) cast(void*) info,
-                    _facts.size,
-                );
-                return;
-            }
-        }
-
-        const address =
-            cast(size_t) slotOf(expression, expression.var) + expression.offset;
-        storeIntegral(_place, address, _facts.size);
+        const address = SymbolAddressResolver!(void*, SymbolAddressAdapter)(
+            SymbolAddressAdapter(this),
+        ).resolve(expression);
+        storeIntegral(_place, cast(size_t) address, _facts.size);
     }
 
     // The general `&expression` node, reached for an lvalue too complex to
