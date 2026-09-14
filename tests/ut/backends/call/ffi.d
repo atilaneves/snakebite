@@ -97,6 +97,120 @@ public extern(C) double snakebite_ut_double_of_long(long value) {
 }
 
 
+// The MEMORY-class shapes below (issue #334 step 3) mirror
+// `tests/ut/ffi/plan.d`'s own `called.memoryClassParameter*` tests at the
+// plan level - here, through a guest call on every backend instead of
+// `PlanCache` directly.
+private struct MemoryTriple {
+    size_t first;
+    size_t second;
+    size_t third;
+}
+
+
+public extern(C) size_t snakebite_ut_memory_triple(MemoryTriple value) {
+    return value.first * 100 + value.second * 10 + value.third;
+}
+
+
+private struct MemoryQuad {
+    size_t first;
+    size_t second;
+    size_t third;
+    size_t fourth;
+}
+
+
+pragma(mangle, "snakebite_ut_memory_after_six_backend")
+public extern(C) size_t snakebite_ut_memory_after_six_backend(
+    int a, int b, int c, int d, int e, int f, MemoryQuad value, int g,
+) {
+    return a + b + c + d + e + f + value.first * 10_000
+        + value.second * 1_000 + value.third * 100 + value.fourth * 10 + g;
+}
+
+
+private struct PackedPair {
+    int a;
+    align(1) long b;
+}
+
+
+pragma(mangle, "snakebite_ut_packed_pair_backend")
+public extern(C) long snakebite_ut_packed_pair_backend(PackedPair value) {
+    return value.a + value.b;
+}
+
+
+pragma(mangle, "snakebite_ut_extern_d_memory_two_spill_backend")
+private extern(D) long snakebite_ut_externDMemoryTwoSpill(
+    long a0, long a1, long a2, long a3, long a4, long a5,
+    MemoryTriple value, long b0, long b1,
+) {
+    return a0 * 1_000_000 + a1 * 100_000 + b0 * 100 + b1
+        + cast(long) (value.first * 1000 + value.second * 10
+            + value.third);
+}
+
+
+pragma(mangle, "snakebite_ut_memory_with_sse_backend")
+public extern(C) double snakebite_ut_memory_with_sse_backend(
+    double x, double y, MemoryTriple value,
+) {
+    return x + y + value.first * 100 + value.second * 10 + value.third;
+}
+
+
+private struct TwentyBytes {
+    int a;
+    int b;
+    int c;
+    int d;
+    int e;
+}
+
+
+pragma(mangle, "snakebite_ut_twenty_bytes_backend")
+public extern(C) int snakebite_ut_twenty_bytes_backend(TwentyBytes value) {
+    return value.a * 10_000 + value.b * 1_000 + value.c * 100
+        + value.d * 10 + value.e;
+}
+
+
+pragma(mangle, "snakebite_ut_memory_triple_transform_backend")
+public extern(C) MemoryTriple snakebite_ut_memoryTripleTransform_backend(
+    MemoryTriple value,
+) {
+    return MemoryTriple(
+        value.first + 1, value.second + 2, value.third + 3);
+}
+
+
+pragma(mangle, "snakebite_ut_extern_d_two_memory_backend")
+public extern(D) long snakebite_ut_twoMemoryParams_backend(
+    MemoryTriple first, MemoryQuad second,
+) {
+    return cast(long) (first.first * 1_000_000 + first.second * 100_000
+        + first.third * 10_000 + second.first * 1_000 + second.second * 100
+        + second.third * 10 + second.fourth);
+}
+
+
+private struct SixteenBytesAligned {
+    int a;
+    align(1) long b;
+    int c;
+}
+
+
+pragma(mangle, "snakebite_ut_sixteen_bytes_aligned_backend")
+public extern(C) long snakebite_ut_sixteen_bytes_aligned_backend(
+    SixteenBytesAligned value,
+) {
+    return value.a * 10_000 + value.b * 100 + value.c;
+}
+
+
 // `abs` is declared `extern(C)` with no body: nothing in the guest program
 // implements it, so the only way to run these is to call the real symbol
 // the host process already links against.
@@ -499,6 +613,399 @@ static foreach (backend; Matrix!(
                 );
             }
         }, "answer");
+    }
+}
+
+
+// A 24-byte struct (three `size_t` fields) by value, passed to a host
+// `extern(C)` function that sums its fields - the ABI class MEMORY,
+// larger than two eightbytes, used to be refused outright (issue #334
+// step 3). The callee weights each field differently, the way
+// `snakebite_ut_eightLongs` (`ut.ffi.plan`) does, so a permuted
+// eightbyte order changes the answer instead of leaving a plain sum
+// unchanged.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.threeWords." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2_057.shouldBeRetOf!(
+            backend,
+            q{
+                struct MemoryTriple {
+                    size_t first;
+                    size_t second;
+                    size_t third;
+                }
+
+                pragma(mangle, "snakebite_ut_memory_triple")
+                extern(C) size_t nativeMemoryTriple(MemoryTriple value);
+
+                int answer() {
+                    MemoryTriple value;
+                    value.first = 17;
+                    value.second = 31;
+                    value.third = 47;
+                    return cast(int) nativeMemoryTriple(value);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// A 32-byte MEMORY-class struct declared after six plain `int`s, which
+// already fill the integer register file, with one more `int` declared
+// after it - the struct and the trailing `int` both spill, and must land
+// on the stack in declaration order (issue #334 step 3). `g`'s weight
+// (`1`) differs from `value.fourth`'s (`10`), the word next to it on the
+// stack, so swapping either with the other changes the answer.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.afterSixIntegersThenOneMore." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        123_428.shouldBeRetOf!(
+            backend,
+            q{
+                struct MemoryQuad {
+                    size_t first;
+                    size_t second;
+                    size_t third;
+                    size_t fourth;
+                }
+
+                pragma(mangle, "snakebite_ut_memory_after_six_backend")
+                extern(C) size_t nativeMemoryAfterSix(
+                    int a, int b, int c, int d, int e, int f,
+                    MemoryQuad value, int g,
+                );
+
+                int answer() {
+                    MemoryQuad value;
+                    value.first = 10;
+                    value.second = 20;
+                    value.third = 30;
+                    value.fourth = 40;
+                    return cast(int) nativeMemoryAfterSix(
+                        1, 2, 3, 4, 5, 6, value, 7);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// `b`'s `align(1)` forces it to sit at offset 4, not the 8-byte boundary
+// its own type (`long`) needs - the SysV ABI classifies an aggregate with
+// an unaligned field as MEMORY regardless of its size, so this 12-byte
+// struct, under the 16-byte threshold that alone would trigger MEMORY,
+// still does (issue #334 step 3).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.unalignedField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                struct PackedPair {
+                    int a;
+                    align(1) long b;
+                }
+
+                pragma(mangle, "snakebite_ut_packed_pair_backend")
+                extern(C) long nativePackedPair(PackedPair value);
+
+                int answer() {
+                    PackedPair value;
+                    value.a = 3;
+                    value.b = 39;
+                    return cast(int) nativePackedPair(value);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// A MEMORY-class struct passed to a host `extern(D)` function on dmd,
+// where two other `long` parameters also spill - dmd's reversed
+// `extern(D)` convention places every spilled argument, `value` included,
+// on the stack in descending declaration order (issue #334 step 3). The
+// `Ffi` static struct member sidesteps a `shouldBeRetOf` oracle quirk - a
+// free `extern(D)` forward declaration nested this deeply loses dmd's own
+// reversed calling convention - the same trick
+// `signatures.externD.nineWordsTwoStringsSpill` above uses.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.externD.twoScalarSpills." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1_217_289.shouldBeRetOf!(
+            backend,
+            q{
+                struct MemoryTriple {
+                    size_t first;
+                    size_t second;
+                    size_t third;
+                }
+
+                struct Ffi {
+                    static:
+                    pragma(mangle,
+                        "snakebite_ut_extern_d_memory_two_spill_backend")
+                    extern(D) long externDMemoryTwoSpill(
+                        long a0, long a1, long a2, long a3, long a4,
+                        long a5, MemoryTriple value, long b0, long b1,
+                    );
+                }
+
+                int answer() {
+                    MemoryTriple value;
+                    value.first = 7;
+                    value.second = 8;
+                    value.third = 9;
+                    return cast(int) Ffi.externDMemoryTwoSpill(
+                        1, 2, 3, 4, 5, 6, value, 100, 200);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// A MEMORY-class struct declared after two `double`s, which stay in
+// `%xmm0`/`%xmm1` - room in the SSE register file does not change
+// `value`'s own class, and its always-on-stack placement must not
+// disturb the SSE arguments' own register assignment (issue #334 step 3).
+// `value`'s three fields carry different weights, so a permuted
+// eightbyte order changes the answer.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.withSSEArguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1_234.0.shouldBeRetOf!(
+            backend,
+            q{
+                struct MemoryTriple {
+                    size_t first;
+                    size_t second;
+                    size_t third;
+                }
+
+                pragma(mangle, "snakebite_ut_memory_with_sse_backend")
+                extern(C) double nativeMemoryWithSse(
+                    double x, double y, MemoryTriple value,
+                );
+
+                double answer() {
+                    MemoryTriple value;
+                    value.first = 10;
+                    value.second = 20;
+                    value.third = 30;
+                    return nativeMemoryWithSse(1.5, 2.5, value);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// Five plain `int` fields: 20 bytes, whose last eightbyte (`value`'s
+// bytes 16-19, field `e` alone) is only half full. The move for that
+// eightbyte must copy only those 4 remaining bytes, never reading past
+// `value`'s own 20 bytes of storage (issue #334 step 3). Each field
+// carries a different weight so a permuted word order changes the
+// answer; the plan-level `called.memoryClassParameter.
+// partialLastEightbyte` (`ut.ffi.plan`) additionally places `value` at
+// the end of a guarded page, so an over-read faults instead of just
+// reading harmless padding - an ordinary struct here is enough, since
+// this test's own job is the matrix, not the over-read.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.partialLastEightbyte." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        12_345.shouldBeRetOf!(
+            backend,
+            q{
+                struct TwentyBytes {
+                    int a;
+                    int b;
+                    int c;
+                    int d;
+                    int e;
+                }
+
+                pragma(mangle, "snakebite_ut_twenty_bytes_backend")
+                extern(C) int nativeTwentyBytes(TwentyBytes value);
+
+                int answer() {
+                    TwentyBytes value;
+                    value.a = 1;
+                    value.b = 2;
+                    value.c = 3;
+                    value.d = 4;
+                    value.e = 5;
+                    return nativeTwentyBytes(value);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// A MEMORY-class struct both passed and returned in the same call - the
+// plan-level `called.memoryClassParameter.returnedAndPassed`
+// (`ut.ffi.plan`) checks the interaction with `_returnPointerOffset`
+// directly; here through a guest call on every backend instead (issue
+// #334 step 3).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.returnedAndPassed." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2_180.shouldBeRetOf!(
+            backend,
+            q{
+                struct MemoryTriple {
+                    size_t first;
+                    size_t second;
+                    size_t third;
+                }
+
+                pragma(mangle, "snakebite_ut_memory_triple_transform_backend")
+                extern(C) MemoryTriple nativeMemoryTripleTransform(
+                    MemoryTriple value,
+                );
+
+                int answer() {
+                    MemoryTriple value;
+                    value.first = 17;
+                    value.second = 31;
+                    value.third = 47;
+                    auto result = nativeMemoryTripleTransform(value);
+                    return cast(int) (result.first * 100
+                        + result.second * 10 + result.third);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// Two MEMORY-class parameters in one call - both always spill, and dmd's
+// reversed `extern(D)` convention places every spilled argument on the
+// stack in descending declaration order, so `second`'s four eightbytes
+// land before `first`'s three. The plan-level `called.
+// memoryClassParameter.twoParameters` (`ut.ffi.plan`) checks each field
+// individually through globals; here the native callee folds both
+// structs into one weighted result instead, since a guest call only has
+// a return value to check. The `Ffi` static struct member sidesteps the
+// same oracle quirk `memoryClassParameter.externD.twoScalarSpills`
+// above does.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.twoParameters." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1_242_340.shouldBeRetOf!(
+            backend,
+            q{
+                struct MemoryTriple {
+                    size_t first;
+                    size_t second;
+                    size_t third;
+                }
+
+                struct MemoryQuad {
+                    size_t first;
+                    size_t second;
+                    size_t third;
+                    size_t fourth;
+                }
+
+                struct Ffi {
+                    static:
+                    pragma(mangle, "snakebite_ut_extern_d_two_memory_backend")
+                    extern(D) long twoMemoryParams(
+                        MemoryTriple first, MemoryQuad second,
+                    );
+                }
+
+                int answer() {
+                    MemoryTriple first;
+                    first.first = 1;
+                    first.second = 2;
+                    first.third = 3;
+                    MemoryQuad second;
+                    second.first = 10;
+                    second.second = 20;
+                    second.third = 30;
+                    second.fourth = 40;
+                    return cast(int) Ffi.twoMemoryParams(first, second);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// A 16-byte struct with an `align(1)` field - MEMORY purely by alignment
+// (`abi.classify`'s field-offset check), not by size, unlike
+// `memoryClassParameter.unalignedField`'s 12-byte `PackedPair`. Its own
+// size is a whole number of eightbytes, so both of `value`'s moves are
+// full `word64` loads - no partial-eightbyte `copy`, unlike
+// `partialLastEightbyte` (issue #334 step 3).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.sixteenBytesAlignedField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        33_905.shouldBeRetOf!(
+            backend,
+            q{
+                struct SixteenBytesAligned {
+                    int a;
+                    align(1) long b;
+                    int c;
+                }
+
+                pragma(mangle, "snakebite_ut_sixteen_bytes_aligned_backend")
+                extern(C) long nativeSixteenBytesAligned(
+                    SixteenBytesAligned value,
+                );
+
+                int answer() {
+                    SixteenBytesAligned value;
+                    value.a = 3;
+                    value.b = 39;
+                    value.c = 5;
+                    return cast(int) nativeSixteenBytesAligned(value);
+                }
+            },
+            "answer",
+        );
     }
 }
 
