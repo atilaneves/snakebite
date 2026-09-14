@@ -18,7 +18,17 @@ import std.stdio: writefln;
 import unit_threaded;
 
 
+// A lone unwarmed sample is one point of failure: a scheduler hiccup on a
+// shared CI runner can inflate or shrink it well past any sane tolerance,
+// since nothing backs it up. Five independent single-run trials, reduced
+// to their own median, absorb that the way `repeatedRuns` already does for
+// its ten warmed-up samples: an outlier needs to be the majority of the
+// five to move the median, where before one bad sample was the whole
+// answer. `@Flaky` stays a thin backstop, not a substitute for the median:
+// even five independent trials can rarely all land on the same side of a
+// contention spike.
 @("runTime.isConsistentAcrossRunCounts")
+@Flaky(3)
 @Serial
 @Tags("timing")
 unittest {
@@ -34,13 +44,17 @@ unittest {
     auto program = Program([module_]);
 
     static foreach (BackendType; Backends) {{
-        const singleRun = benchmark(
-            BackendType.stringof,
-            backendIdentity!BackendType,
-            program,
-            0,
-            1,
-        );
+        enum trials = 5;
+        Duration[trials] singleSamples;
+        foreach (trial; 0 .. trials)
+            singleSamples[trial] = benchmark(
+                BackendType.stringof,
+                backendIdentity!BackendType,
+                program,
+                0,
+                1,
+            ).runTime.median;
+
         const repeatedRuns = benchmark(
             BackendType.stringof,
             backendIdentity!BackendType,
@@ -49,7 +63,8 @@ unittest {
             10,
         );
 
-        const singleMedian = singleRun.runTime.median.total!"hnsecs";
+        const singleMedian =
+            timingStatistics(singleSamples[]).median.total!"hnsecs";
         const repeatedMedian = repeatedRuns.runTime.median.total!"hnsecs";
         enum tolerance = 5;
         singleMedian.shouldBeGreaterThan(repeatedMedian / tolerance);
