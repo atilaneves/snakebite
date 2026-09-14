@@ -65,19 +65,22 @@ public struct StorageResolver(Result, Adapter) {
             return _adapter.storageLowered(lowered);
 
         if (auto assignment = expression.isBlitExp)
-            return assignmentResult(cast() assignment, assignment.e1);
+            return assignmentResult(
+                cast(AssignExp) assignment, assignment.e1);
 
         if (auto construct = expression.isConstructExp)
-            return assignmentResult(cast() construct, construct.e1);
+            return assignmentResult(cast(AssignExp) construct, construct.e1);
 
         if (auto assignment = expression.isCatAssignExp)
-            return assignmentResult(cast() assignment, assignment.e1);
+            return assignmentResult(
+                cast(BinAssignExp) assignment, assignment.e1);
 
         if (auto assignment = expression.isBinAssignExp)
-            return assignmentResult(cast() assignment, assignment.e1);
+            return assignmentResult(
+                cast(BinAssignExp) assignment, assignment.e1);
 
         if (auto assignment = expression.isAssignExp)
-            return assignmentResult(cast() assignment, assignment.e1);
+            return assignmentResult(cast(AssignExp) assignment, assignment.e1);
 
         if (auto call = expression.isCallExp) {
             auto callee = call.f;
@@ -157,30 +160,30 @@ public struct StorageResolver(Result, Adapter) {
     }
 
     private Result assignmentResult(
-        Expression expression, Expression targetExpression,
+        AssignExp expression, Expression targetExpression,
     ) {
         // Resolve the target first. This is the only evaluation of the
         // assignment's left side; the adapter receives its location and can
         // then evaluate and store the right side exactly once.
         auto target = resolve(targetExpression);
-        if (auto compound = expression.isBinAssignExp)
-            if (auto cat = expression.isCatAssignExp)
-                _adapter.storageCatAssignment(
-                    cast(CatAssignExp) cat, target);
-            else
-                _adapter.storageCompoundAssignment(
-                    cast(BinAssignExp) compound, target);
-        else if (auto construct = expression.isConstructExp)
-            _adapter.storagePlainAssignment(
-                cast(AssignExp) construct, target);
-        else if (auto assignment = expression.isAssignExp) {
-            if (assignment.e1.isSliceExp !is null)
-                _adapter.storageSliceAssignment(
-                    cast(AssignExp) assignment, target);
-            else
-                _adapter.storagePlainAssignment(
-                    cast(AssignExp) assignment, target);
-        }
+        if (expression.e1.isSliceExp !is null)
+            _adapter.storageSliceAssignment(expression, target);
+        else
+            _adapter.storagePlainAssignment(expression, target);
+        return target;
+    }
+
+    private Result assignmentResult(
+        BinAssignExp expression, Expression targetExpression,
+    ) {
+        // CatAssignExp is a BinAssignExp in dmd's AST. The typed overload
+        // keeps that family dispatch complete without asking `isAssignExp`,
+        // whose predicate only accepts the plain `EXP.assign` opcode.
+        auto target = resolve(targetExpression);
+        if (auto cat = expression.isCatAssignExp)
+            _adapter.storageCatAssignment(cast(CatAssignExp) cat, target);
+        else
+            _adapter.storageCompoundAssignment(expression, target);
         return target;
     }
 }

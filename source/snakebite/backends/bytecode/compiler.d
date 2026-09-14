@@ -1965,11 +1965,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t pointerOffset,
         in size_t byteOffset,
     ) {
-        if (byteOffset == 0)
-            return pointerOffset;
-
         const result = reserveTemp(pointerFacts);
         emit(&opCopy, result, pointerOffset, size_t.sizeof);
+        if (byteOffset == 0)
+            return result;
+
         const offset = reserveTemp(pointerFacts);
         emit(&opConstant, offset, addConstant(cast(long) byteOffset),
             size_t.sizeof);
@@ -2152,6 +2152,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileAssignmentAt(expression, addressOffset, destOffset);
     }
 
+    // The resolver hands assignment adapters an address slot because that is
+    // the native representation used by indirect stores. A ConstructExp for
+    // a plain local is the one case where the RHS must see the local's value
+    // bytes directly; pass that value slot to the shared executor rather than
+    // mistaking the address slot for storage.
+    private size_t constructionDestination(AssignExp expression) {
+        if (expression.isConstructExp is null)
+            return discardResult;
+
+        auto variableExp = expression.e1.isVarExp;
+        if (variableExp is null)
+            return discardResult;
+
+        auto variable = variableExp.var.isVarDeclaration;
+        if (variable is null || variable.isDataseg
+                || isClosureVariable(variable) || _layout.isRef(variable)
+                || !_layout.hasSlot(variable))
+            return discardResult;
+
+        return _layout.offsetOf(variable);
+    }
+
     private void compileAssignmentAt(
         AssignExp expression, in size_t addressOffset,
         in size_t destOffset = discardResult,
@@ -2172,9 +2194,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const facts = TypeFacts.of(expression.e1.type);
-        const valueOffset = reserveTemp(facts);
-        evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
-        emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
+        import snakebite.backends.assignment: executeAssignment;
+
+        size_t delegate(size_t, size_t) reserve =
+            (size_t size, size_t alignment) {
+                return reserveTemp(facts);
+            };
+        void delegate(size_t value) evaluate = (size_t value) {
+            evalInto(expression.e2, value, facts.size, expression.e1.type);
+        };
+        void delegate(size_t value) publish = (size_t value) {
+            emit(&opStoreIndirect, addressOffset, value, facts.size);
+        };
+        const constructionOffset = constructionDestination(expression);
+        const valueOffset = executeAssignment!(size_t, reserve, evaluate,
+            publish)(constructionOffset != discardResult, constructionOffset,
+                facts.size, facts.alignment);
 
         if (destOffset != discardResult)
             emit(&opCopy, destOffset, valueOffset, facts.size);
@@ -2413,8 +2448,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const descriptor = loadSliceDescriptor(address, facts);
         const pointer = reserveTemp(pointerFacts);
-        emit(&opLoadIndirect, pointer,
-            addPointerOffset(descriptor, arrayPointerOffset),
+        emit(&opCopy, pointer,
+            descriptor + arrayPointerOffset,
             size_t.sizeof);
         return pointer;
     }
@@ -5547,7 +5582,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ArrayLengthExp expression, size_t base,
         ) {
             import snakebite.nativelayout: arrayLengthOffset;
-            return compiler.addPointerOffset(base, arrayLengthOffset);
+            return base + arrayLengthOffset;
         }
 
         public size_t storageDynamicIndexLength(

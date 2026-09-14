@@ -2170,28 +2170,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     private void* assignAt(AssignExp expression, void* target) {
         import core.stdc.string: memcpy;
+        import snakebite.backends.assignment: executeAssignment;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
-        import std.conv: text;
 
-        // `ConstructExp` and `BlitExp` arrive as this same node. DMD emits
-        // explicit lifecycle calls around these byte operations when the
-        // struct needs them, so the operation here only moves the value's
-        // native bytes.
-        auto structType = _type.isTypeStruct;
-        const isStruct = structType !is null;
-        // A scalar `ConstructExp` initializes storage that has no prior
-        // value. This includes immutable fields in a constructor, which
-        // cannot use ordinary assignment syntax but still have native bytes
-        // that can be written once.
         const isConstruct = expression.isConstructExp !is null;
-        const isArray = _type.ty == Tarray;
-        if (expression.op != EXP.assign && !_facts.isIntegral && !isConstruct
-                && !isStruct
-                && !isArray)
-            throw new SnakebiteException(
-                text("interpreter cannot run a `", expression.op,
-                    "` on `", expression.e1.toString, "`"),
-            );
 
         if (auto dot = expression.e1.isDotVarExp) {
             auto field = dot.var.isVarDeclaration;
@@ -2209,16 +2191,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             }
         }
 
-        // Naming `e1` rather than the whole expression: dmd lowers
-        // `s.length = n` into a node whose `toString` is a bare `=`.
-        if (isStruct) {
-            auto scratch = _frames.push(_facts.size, _facts.alignment);
-            evaluate(expression.e2, _type, _facts, scratch.base);
-            memcpy(target, scratch.base, _facts.size);
-        } else {
-            evaluate(expression.e2, _type, _facts, target);
-        }
-        memcpy(_place, target, _facts.size);
+        void* delegate(size_t, size_t) reserve =
+            (size_t size, size_t alignment) {
+            return _temporaries.reserveValue(
+                size, cast(uint) alignment);
+        };
+        void delegate(void*) evaluateRhs = (void* value) {
+            evaluate(expression.e2, _type, _facts, value);
+        };
+        void delegate(void*) publish = (void* value) {
+            memcpy(target, value, _facts.size);
+        };
+        executeAssignment!(void*, reserve, evaluateRhs, publish)(
+            isConstruct, target, _facts.size, _facts.alignment);
+        if (_place !is null)
+            memcpy(_place, target, _facts.size);
         return target;
     }
 
