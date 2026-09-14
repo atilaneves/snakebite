@@ -122,8 +122,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import dmd.root.string: toDString;
     import dmd.astenums:
         Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32, Tfloat64,
-        Tfloat80, Tnoreturn, Tint64, Tpointer, Tsarray, Tuns32, Tuns8,
-        Tvoid, Twchar;
+        Tfloat80, Tnoreturn, Tint64, Tpointer, Tsarray, Ttuple, Tuns32,
+        Tuns8, Tvoid, Twchar;
     import dmd.arraytypes: Expressions;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
@@ -1410,7 +1410,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // into a `null` place, the same convention `execute` already uses for
     // a discarded `void` return.
     private void runForEffect(Expression expression) {
-        if (expression.isTupleExp !is null) {
+        // A tuple result is a sequence of effects, not a native value. This
+        // also covers enclosing expressions such as `CommaExp` whose type is
+        // the tuple result of their right operand.
+        if (expression.type.ty == Ttuple) {
             expression.accept(this);
             return;
         }

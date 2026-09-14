@@ -428,6 +428,33 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A tuple-valued right operand can be enclosed by a comma expression. The
+// comma's left operand still runs before every tuple assignment element.
+static foreach (backend; Matrix!()) {
+    @("tupleofAssignsAfterComma." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Pair {
+                int x;
+                int y;
+            }
+
+            void main() {
+                Pair target;
+                auto source = Pair(7, 9);
+                int count;
+
+                (++count, target.tupleof = source.tupleof);
+
+                assert(count == 1);
+                assert(target.x == 7);
+                assert(target.y == 9);
+            }
+        });
+    }
+}
+
 // A struct literal writes each field at its own native offset, and a
 // plain field assignment overwrites only that field's own bytes, leaving
 // its siblings untouched.
