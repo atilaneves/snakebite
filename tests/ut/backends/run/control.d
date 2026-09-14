@@ -526,3 +526,251 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("reviewGotoForward." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() { int x; goto done; x = 9; done: return x + 1; }
+            void main() { assert(run() == 1); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("reviewGotoBackward." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() { int x; again: ++x; if (x < 3) goto again; return x; }
+            void main() { assert(run() == 3); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("reviewGotoFinally." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() { int x; try { goto done; } finally { x = 3; } done: return x; }
+            void main() { assert(run() == 3); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("reviewGotoOutOfSwitch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() { int x; switch (x) { case 0: goto done; default: break; } x = 9; done: return x + 1; }
+            void main() { assert(run() == 1); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("reviewGotoInsideFinallyScope." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                int x;
+                try {
+                    goto inside;
+                inside:
+                    x = 2;
+                }
+                finally {
+                    x += 1;
+                }
+                return x;
+            }
+
+            void main() { assert(run() == 3); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("reviewGotoCaseKeepsFinallyPending." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                int x;
+                try {
+                    switch (x) {
+                    case 0:
+                        goto case 1;
+                    case 1:
+                        x = 3;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+                finally {
+                    x += 1;
+                }
+                return x;
+            }
+
+            void main() { assert(run() == 4); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("reviewGotoLeavesNestedFinallyScopes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                int x;
+                try {
+                    try {
+                        goto done;
+                    }
+                    finally {
+                        x += 1;
+                    }
+                }
+                finally {
+                    x += 2;
+                }
+            done:
+                return x;
+            }
+
+            void main() { assert(run() == 3); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("reviewGotoCaseLeavesFinallyScope." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                int x;
+                switch (0) {
+                case 0:
+                    try {
+                        goto case 1;
+                    }
+                    finally {
+                        x += 1;
+                    }
+                case 1:
+                    x += 2;
+                    break;
+                default:
+                    break;
+                }
+                return x;
+            }
+
+            void main() { assert(run() == 3); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("reviewGotoDefaultLeavesFinallyScope." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                int x;
+                switch (0) {
+                case 0:
+                    try {
+                        goto default;
+                    }
+                    finally {
+                        x += 1;
+                    }
+                default:
+                    x += 2;
+                    break;
+                }
+                return x;
+            }
+
+            void main() { assert(run() == 3); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("reviewGotoLoopResumesFor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                int hits;
+                for (int i; i < 3; ++i) {
+                    if (i == 0)
+                        goto inside;
+                inside:
+                    ++hits;
+                }
+                return hits;
+            }
+
+            void main() { assert(run() == 3); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("reviewGotoLoopResumesDo." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                int hits;
+                int i;
+                do {
+                    if (i == 0)
+                        goto inside;
+                inside:
+                    ++hits;
+                    ++i;
+                } while (i < 3);
+                return hits;
+            }
+
+            void main() { assert(run() == 3); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot catch a runtime exception"),
+)) {
+    @("reviewGotoResumesTryCatch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                try {
+                    goto inside;
+                inside:
+                    throw new Exception("caught");
+                }
+                catch (Exception) {
+                    return 1;
+                }
+                return 0;
+            }
+
+            void main() { assert(run() == 1); }
+        });
+    }
+}
