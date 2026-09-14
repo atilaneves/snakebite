@@ -89,6 +89,7 @@ private final class GuestException: Exception {
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
+import snakebite.backends.fullexpression: FullExpressionKind;
 
 // The evaluation context: executes statements and evaluates expressions,
 // always into the current destination (`_type` bytes at `_place`),
@@ -631,10 +632,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             scope void* place,
             scope const(void*)[] arguments,
         ) {
-            executeRaw(
-                function_, place, frameBase, layout, callSite,
-                classConstructor, arguments.ptr, arguments.length,
-            );
+            _temporaries.withNestedCall({
+                executeRaw(
+                    function_, place, frameBase, layout, callSite,
+                    classConstructor, arguments.ptr, arguments.length,
+                );
+            });
         }
 
         auto result = callShapeOf(function_).adapter.invoke(
@@ -1219,7 +1222,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (_type.ty == Tvoid)
             return;
 
-        _temporaries.withTemporaryLifetime({
+        _temporaries.withExpression(FullExpressionKind.value, statement.exp, {
             void* referenceAddress() {
                 return addressOf(statement.exp);
             }
@@ -1261,7 +1264,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // temporary, so a guest throw from any point of the evaluation still
     // releases whatever was reserved by then.
     private void runFullExpression(Expression expression) {
-        _temporaries.withFullExpression(expression, {
+        _temporaries.withExpression(FullExpressionKind.effect, expression, {
             runForEffect(expression);
         });
     }
@@ -1271,7 +1274,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // soon as its truth is known.
     private bool conditionHolds(Expression condition) {
         bool result;
-        _temporaries.withTemporaryLifetime({
+        _temporaries.withExpression(FullExpressionKind.value, condition, {
             result = truthOf(condition);
         });
         return result;
@@ -1299,7 +1302,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     override void visit(SwitchStatement statement) {
         _pendingLoopLabel = null;
         Statement selected;
-        _temporaries.withTemporaryLifetime({
+        _temporaries.withExpression(FullExpressionKind.value,
+            statement.condition, {
             const condition = asIntegral(statement.condition);
             if (statement.cases !is null)
                 foreach (case_; *statement.cases) {
@@ -1308,7 +1312,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                         break;
                     }
                 }
-        });
+            });
 
         if (selected is null)
             selected = statement.sdefault;

@@ -13,8 +13,9 @@ public bool ownsTemporaryDestructor(
     imported!"dmd.declaration".VarDeclaration variable,
     imported!"dmd.expression".DeclarationExp declaration,
     imported!"dmd.expression".Expression root,
+    bool rootOwns = false,
 ) {
-    return declaration !is root
+    return (rootOwns || declaration !is root)
         && (variable.storage_class & STC.temp)
         && variable.edtor !is null
         && !(variable.storage_class & STC.nodtor);

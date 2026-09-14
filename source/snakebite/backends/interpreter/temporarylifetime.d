@@ -7,6 +7,8 @@ import dmd.declaration: VarDeclaration;
 import dmd.expression: DeclarationExp, Expression, StructLiteralExp;
 import snakebite.backends.temporary: ownsTemporaryDestructor;
 import snakebite.backends.temporarystack: TemporaryStack;
+import snakebite.backends.fullexpression:
+    FullExpressionKind, FullExpressionScope;
 import snakebite.framestack: FrameStack, defaultFrameCapacity;
 import snakebite.nativelayout: TypeFacts;
 
@@ -31,15 +33,27 @@ public final class TemporaryLifetime {
         Expression edtor;
     }
 
+    private struct ExpressionState {
+        size_t mark;
+        size_t stackMark;
+        size_t floor;
+    }
+
     private Temporary[] _temporaries;
     private TemporaryStack _stack;
     private FrameStack _frames;
     private size_t _floor;
-    private Expression _root;
+    private FullExpressionScope _expressions;
+    private ExpressionState[] _expressionStates;
+    private size_t _expressionDepth;
     private Destroy _destroy;
 
     public this(Destroy destroy) {
         _frames = FrameStack(defaultFrameCapacity);
+        // Reserve the usual call nesting without putting an allocation in
+        // the steady-state expression path. Recursive calls can grow this
+        // stack when they exceed the initial depth.
+        _expressionStates.length = 16;
         _destroy = destroy;
     }
 
@@ -47,20 +61,32 @@ public final class TemporaryLifetime {
     // the unwind backstop for a guest call that exits before a statement
     // visitor gets control again.
     public void withCall(scope Action action) {
+        const state = _expressions.suspendCall;
+        scope (exit) _expressions.resumeCall(state);
         withLifetime(0, action);
     }
 
-    // Runs one full expression. The root is needed because DMD uses the
-    // same temporary declaration shape both for a complete statement and
-    // for a declaration nested inside a larger expression.
-    public void withFullExpression(
+    public void withNestedCall(scope Action action) {
+        const state = _expressions.suspendCall;
+        scope (exit) _expressions.resumeCall(state);
+        action();
+    }
+
+    public void withExpression(
+        FullExpressionKind kind,
         Expression root,
         scope Action action,
     ) {
-        auto previousRoot = _root;
-        _root = root;
-        scope(exit) _root = previousRoot;
-        withLifetime(_temporaries.length, action);
+        const outer = _expressions.enter(
+            kind, cast(const(void)*) root);
+        if (outer)
+            beginExpression;
+        scope (exit) {
+            if (outer)
+                endExpression;
+            _expressions.leave;
+        }
+        action();
     }
 
     // Gives a nested evaluation its own temporary pairing and cleanup
@@ -74,7 +100,12 @@ public final class TemporaryLifetime {
         DeclarationExp declaration,
         ubyte* base,
     ) {
-        if (!ownsTemporaryDestructor(variable, declaration, _root))
+        if (!_expressions.active()
+                || !ownsTemporaryDestructor(
+                    variable, declaration,
+                    cast(Expression) _expressions.root,
+                    _expressions.rootOwnsTemporary,
+                ))
             return;
 
         const payload = _temporaries.length;
@@ -146,6 +177,24 @@ public final class TemporaryLifetime {
             _floor = previousFloor;
         }
         action();
+    }
+
+    private void beginExpression() {
+        if (_expressionDepth == _expressionStates.length)
+            _expressionStates ~= ExpressionState.init;
+
+        auto state = &_expressionStates[_expressionDepth++];
+        state.mark = _temporaries.length;
+        state.stackMark = _stack.mark;
+        state.floor = _floor;
+        _floor = _temporaries.length;
+    }
+
+    private void endExpression() {
+        assert(_expressionDepth != 0);
+        const state = _expressionStates[--_expressionDepth];
+        releaseSince(state.mark, state.stackMark);
+        _floor = state.floor;
     }
 
     private void releaseSince(in size_t mark, in size_t stackMark) {

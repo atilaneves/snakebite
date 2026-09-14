@@ -10,6 +10,57 @@ import ut.backends;
 
 
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE evaluates this runtime-only temporary but does not run its "
+        ~ "destructor before the return completes"),
+)) {
+    @("reviewTemporaryReturnCleanup." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* dtors;
+                ~this() { ++*dtors; }
+                int get() { return 42; }
+            }
+            int value(int* dtors) {
+                return Tracked(dtors).get();
+            }
+            void main() {
+                int dtors;
+                assert(value(&dtors) == 42);
+                assert(dtors == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE evaluates this runtime-only temporary but does not run its "
+        ~ "destructor before the condition body"),
+)) {
+    @("reviewTemporaryConditionCleanup." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* dtors;
+                ~this() { ++*dtors; }
+                int get() { return 42; }
+            }
+            void main() {
+                int dtors;
+                if (Tracked(&dtors).get()) {
+                    assert(dtors == 1);
+                }
+                assert(dtors == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot inspect guest TypeInfo metadata"),
 )) {

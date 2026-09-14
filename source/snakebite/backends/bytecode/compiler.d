@@ -7,6 +7,8 @@ import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
+import snakebite.backends.fullexpression:
+    FullExpressionKind, FullExpressionScope;
 import snakebite.ffi:
     CallbackBridge, PlanCache, supportsBoolFunction;
 import snakebite.ffi.abi: Register;
@@ -471,8 +473,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         imported!"dmd.expression".Expression destructor;
     }
     private Temporary[] _temporaries;
-    private size_t _lifetimeDepth;
-    private Expression _expressionRoot;
+    private size_t[] _lifetimeMarkers;
+    private size_t[] _lifetimeFirstTemporaries;
+    private FullExpressionScope _expressions;
     private bool _emittingCleanup;
     private size_t _closureOffset = size_t.max;
     // Set once nothing after the statement just compiled can run: a
@@ -1137,7 +1140,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, statement.loc, statementText(statement));
 
         const conditionOffset = reserveTemp(facts);
-        evalInto(statement.condition, conditionOffset, facts.size);
+        compileValue(statement.condition, conditionOffset, facts.size);
 
         if (statement.cases !is null) {
             foreach (case_; *statement.cases) {
@@ -1304,7 +1307,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // another `return`, without disturbing the value already on its
         // way out.
         const offset = reserveTemp(_returnFacts);
-        evalInto(statement.exp, offset, _returnFacts.size);
+        compileValue(statement.exp, offset, _returnFacts.size);
         runPendingFinallyBodies();
         emit(&opReturn, 0, offset, _returnFacts.size);
         _finished = true;
@@ -1346,7 +1349,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const facts = TypeFacts.of(condition.type);
         if (facts.isDynamicArray) {
             const arrayOffset = reserveTemp(facts);
-            evalInto(condition, arrayOffset, facts.size);
+            compileValue(condition, arrayOffset, facts.size);
             return arrayOffset + arrayPointerOffset;
         }
 
@@ -1358,7 +1361,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 expressionText(condition));
 
         const offset = reserveTemp(facts);
-        evalInto(condition, offset, facts.size);
+        compileValue(condition, offset, facts.size);
         return offset;
     }
 
@@ -1366,7 +1369,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression condition, in TypeFacts facts,
     ) {
         const offset = reserveTemp(facts);
-        evalInto(condition, offset, facts.size);
+        compileValue(condition, offset, facts.size);
         return offset;
     }
 
@@ -1466,17 +1469,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         size_t branchIndex;
-        auto comparison = statement.condition.isBinExp;
-        const comparisonIndex = comparison is null
-            ? size_t.max : compileIntegralComparisonBranch(comparison);
-        if (comparisonIndex != size_t.max) {
-            branchIndex = comparisonIndex;
-        } else {
-            const conditionOffset = compileCondition(statement.condition);
-            const width = conditionWidth(statement.condition);
-            branchIndex = _instructions.length;
-            emit(&opBranchFalse, conditionOffset, 0, width);
-        }
+        const conditionOffset = compileCondition(statement.condition);
+        const width = conditionWidth(statement.condition);
+        branchIndex = _instructions.length;
+        emit(&opBranchFalse, conditionOffset, 0, width);
 
         compileStatement(statement.ifbody);
         const ifFinished = _finished;
@@ -1561,15 +1557,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const conditionIndex = _instructions.length;
         size_t branchIndex = size_t.max;
         if (guarded) {
-            auto comparison = statement.condition.isBinExp;
-            branchIndex = comparison is null
-                ? size_t.max : compileIntegralComparisonBranch(comparison);
-            if (branchIndex == size_t.max) {
-                const conditionOffset = compileCondition(statement.condition);
-                const width = conditionWidth(statement.condition);
-                branchIndex = _instructions.length;
-                emit(&opBranchFalse, conditionOffset, 0, width);
-            }
+            const conditionOffset = compileCondition(statement.condition);
+            const width = conditionWidth(statement.condition);
+            branchIndex = _instructions.length;
+            emit(&opBranchFalse, conditionOffset, 0, width);
         }
 
         _loops ~= LoopContext(label);
@@ -1770,24 +1761,57 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _destination = discardResult;
         _width = 0;
 
-        if (_lifetimeDepth != 0 || _emittingCleanup) {
-            expression.accept(this);
-            _destination = destination;
-            _width = width;
-            return;
-        }
+        withFullExpression(FullExpressionKind.effect, expression,
+            { beginLifetime(expression); },
+            { expression.accept(this); },
+            { endLifetime; },
+        );
+    }
 
+    private void compileValue(
+        Expression expression, in size_t destination, in size_t width,
+    ) {
+        if (_emittingCleanup)
+            return evalInto(expression, destination, width);
+
+        withFullExpression(FullExpressionKind.value, expression,
+            { beginLifetime(expression); },
+            { evalInto(expression, destination, width); },
+            { endLifetime; },
+        );
+    }
+
+    private void withFullExpression(
+        FullExpressionKind kind,
+        Expression root,
+        scope void delegate() begin,
+        scope void delegate() evaluate,
+        scope void delegate() end,
+    ) {
+        const outer = _expressions.enter(
+            kind, cast(const(void)*) root);
+        if (outer)
+            begin();
+        scope (exit) {
+            if (outer)
+                end();
+            _expressions.leave;
+        }
+        evaluate();
+    }
+
+    private void beginLifetime(Expression expression) {
         const marker = reserveTemp(pointerFacts);
         emit(&opTemporaryBegin, marker, 0, 0);
-        const firstTemporary = _temporaries.length;
-        _expressionRoot = expression;
-        _lifetimeDepth = 1;
-        expression.accept(this);
-        _destination = destination;
-        _width = width;
-        _lifetimeDepth = 0;
-        _expressionRoot = null;
+        _lifetimeMarkers ~= marker;
+        _lifetimeFirstTemporaries ~= _temporaries.length;
+    }
 
+    private void endLifetime() {
+        const marker = _lifetimeMarkers[$ - 1];
+        const firstTemporary = _lifetimeFirstTemporaries[$ - 1];
+        _lifetimeMarkers.length -= 1;
+        _lifetimeFirstTemporaries.length -= 1;
         finishLifetime(marker, firstTemporary);
     }
 
@@ -1853,9 +1877,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         VarDeclaration variable,
         DeclarationExp declaration,
     ) {
-        if (_lifetimeDepth == 0 || _emittingCleanup
+        if (!_expressions.active() || _emittingCleanup
                 || !ownsTemporaryDestructor(
-                    variable, declaration, _expressionRoot))
+                    variable, declaration,
+                    cast(Expression) _expressions.root,
+                    _expressions.rootOwnsTemporary))
             return size_t.max;
 
         const base = _layout.offsetOf(variable);
@@ -1905,29 +1931,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (variable._init.isVoidInitializer !is null)
             return;
 
-        const ownLifetime = _lifetimeDepth == 0;
-        size_t marker;
-        size_t firstTemporary;
-        if (ownLifetime) {
-            marker = reserveTemp(pointerFacts);
-            emit(&opTemporaryBegin, marker, 0, 0);
-            firstTemporary = _temporaries.length;
-            _lifetimeDepth = 1;
-            _expressionRoot = expression;
-        }
+        const emitDeclaration = () {
+            const temporary = registerTemporary(variable, expression);
+            compileVariableInitializer(variable, expression.loc,
+                expressionText(expression));
+            if (temporary != size_t.max)
+                emit(&opTemporaryArmAddress, 0, temporary, 0);
+        };
 
-        const temporary = registerTemporary(variable, expression);
+        if (_emittingCleanup)
+            return emitDeclaration();
 
-        compileVariableInitializer(variable, expression.loc,
-            expressionText(expression));
-        if (temporary != size_t.max)
-            emit(&opTemporaryArmAddress, 0, temporary, 0);
-
-        if (ownLifetime) {
-            _lifetimeDepth = 0;
-            _expressionRoot = null;
-            finishLifetime(marker, firstTemporary);
-        }
+        withFullExpression(FullExpressionKind.effect, expression,
+            { beginLifetime(expression); },
+            emitDeclaration,
+            { endLifetime; },
+        );
     }
 
     // Runs `variable`'s own initialiser into whichever storage its layout
@@ -2899,6 +2918,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(DeclarationExp expression) {
+        if (_destination != discardResult && _expressions.active())
+            return compileDeclaration(expression);
         if (_destination != discardResult)
             return visit(cast(Expression) expression);
 
