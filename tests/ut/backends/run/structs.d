@@ -650,6 +650,72 @@ static foreach (backend; Matrix!(
     }
 }
 
+// DMD skips the byte comparison for a field-less struct when both operands
+// are trivial. A non-trivial operand still runs and then compares zero bytes.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot inspect raw empty-struct storage"),
+)) {
+    @("emptyStructIdentityPreservesDmdEvaluationRule." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int calls;
+
+            struct Empty {}
+
+            Empty make() {
+                ++calls;
+                return Empty();
+            }
+
+            void main() {
+                Empty a, b;
+                *cast(ubyte*) &a = 1;
+                *cast(ubyte*) &b = 2;
+                assert(a is b);
+                assert(make() is make());
+                assert(calls == 2);
+            }
+        });
+    }
+}
+
+// Floating identity compares representation bits. This keeps signed zero
+// distinct and treats identical NaN bits as identical.
+static foreach (backend; Matrix!()) {
+    @("floatingIdentityUsesRepresentationBits." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                assert(0.0 !is -0.0);
+                assert(double.nan is double.nan);
+                assert(real.nan is real.nan);
+            }
+        });
+    }
+}
+
+// DMD excludes real's target padding bytes from identity comparison.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot inspect real padding storage"),
+)) {
+    @("realIdentityIgnoresPadding." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                real a = 1;
+                real b = 1;
+                (cast(ubyte*) &b)[real.sizeof - 1] ^= 1;
+                assert(a is b);
+            }
+        });
+    }
+}
+
 // `==` on structs walks into each field and compares it the way `==`
 // compares that field's own type on its own - a float field follows IEEE
 // 754, where `-0.0` equals `0.0` and `double.nan` never equals itself,

@@ -61,6 +61,39 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// Identity on a static array first converts it to a slice and compares the
+// native length and data pointer. An lvalue keeps its storage, while a
+// literal gets one temporary allocation for the comparison.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE aliases the static-array literal storage in this identity"),
+)) {
+    @("staticArray.identityUsesStorageAndMaterializesRvalues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int calls;
+
+            int value() {
+                ++calls;
+                return calls;
+            }
+
+            void main() {
+                int[2] a = [1, 2];
+                int[] b = a[];
+
+                assert(a is b);
+                assert(b is a);
+                assert(a is a);
+                assert(a !is [1, 2]);
+                assert(a !is [value(), value()]);
+                assert(calls == 2);
+            }
+        });
+    }
+}
+
 
 // A static array is its elements in place, with no length or pointer
 // header: `int[3][2]` is six contiguous `int`s. Assigning a whole row

@@ -2,8 +2,6 @@ module snakebite.backends.identity;
 
 private:
 
-import dmd.expression: IdentityExp;
-
 // The frontend has already established that an IdentityExp is legal.  This
 // plan records the native comparison that DMD's e2ir.d emits for it.  The
 // backends consume the plan; they do not classify the operand type again.
@@ -11,11 +9,17 @@ package struct IdentityPlan {
     size_t width;
     bool staticArray;
     size_t length;
+    bool skipCompare;
+    bool leftStorage;
+    bool rightStorage;
 }
 
-package IdentityPlan identityPlan(IdentityExp expression) {
+package IdentityPlan identityPlan(
+    imported!"dmd.expression".IdentityExp expression,
+) {
     import dmd.astenums: Tfloat80, Tsarray;
-    import dmd.expressionsem: toInteger;
+    import dmd.expressionsem: isLvalue, toInteger;
+    import dmd.sideeffect: isTrivialExp;
     import dmd.target: target;
     import dmd.typesem: isFloating, size, toBasetype;
 
@@ -26,7 +30,13 @@ package IdentityPlan identityPlan(IdentityExp expression) {
     if (type.ty == Tsarray) {
         auto array = type.isTypeSArray;
         return IdentityPlan(2 * size_t.sizeof, true,
-            cast(size_t) array.dim.toInteger);
+            cast(size_t) array.dim.toInteger, false,
+            !isLvalue(expression.e1), !isLvalue(expression.e2));
     }
-    return IdentityPlan(width, false, 0);
+
+    const emptyStruct = type.isTypeStruct !is null
+        && type.isTypeStruct.sym.fields.length == 0;
+    const skipCompare = emptyStruct
+        && isTrivialExp(expression.e1) && isTrivialExp(expression.e2);
+    return IdentityPlan(width, false, 0, skipCompare, false, false);
 }

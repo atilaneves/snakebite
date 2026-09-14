@@ -292,14 +292,7 @@ static foreach (backend; Matrix!()) {
 
 // `is` on a bare AA compares it against `null` without going through any
 // struct field at all.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "the bytecode compiler has no lowering for `is`/`!is` between an " ~
-            "AA and `null`"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter's `is`/`!is` evaluation only handles operands " ~
-            "whose type is not an associative array"),
-)) {
+static foreach (backend; Matrix!()) {
     @("bareAaIsNull." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -307,6 +300,43 @@ static foreach (backend; Matrix!(
             void main() {
                 int[int] aa;
                 assert(aa is null);
+            }
+        });
+    }
+}
+
+// An AA identity comparison reads the AA handle, so an alias compares equal
+// while two separately allocated tables do not. Each operand expression is
+// evaluated once, including a call that returns an empty AA.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE cannot observe mutable state while checking AA handles"),
+)) {
+    @("bareAaIdentityHandlesAndEvaluation." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int calls;
+
+            int[int] make(bool populated) {
+                ++calls;
+                int[int] result;
+                if (populated)
+                    result[1] = 2;
+                return result;
+            }
+
+            void main() {
+                auto first = make(true);
+                auto same = first;
+                auto second = make(true);
+
+                assert(calls == 2);
+                assert(first !is null);
+                assert(first is same);
+                assert(first !is second);
+                assert(make(false) is null);
+                assert(calls == 3);
             }
         });
     }

@@ -2798,7 +2798,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // zero have different representations but compare equal in D.
     protected override void visitUnloweredEqual(EqualExp expression) {
         import core.stdc.string: memcmp;
-        import snakebite.nativelayout: arrayValueSize;
         import snakebite.nativelayout: storeIntegral;
         import dmd.typesem: toBasetype;
         import std.conv: text;
@@ -2994,29 +2993,50 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "` expression: `", expression.toString, "`"),
             );
 
+        if (plan.skipCompare) {
+            const answer = expression.op == EXP.identity;
+            storeIntegral(_place, answer ? 1 : 0, _facts.size);
+            return;
+        }
+
         const facts = factsOf(expression.e1.type);
-        auto left = _frames.push(plan.staticArray
+        const mark = _frames.mark;
+        scope (exit)
+            _frames.release(mark);
+        auto left = _frames.reserve(plan.staticArray
             ? arrayValueSize : facts.size, facts.alignment);
-        auto right = _frames.push(plan.staticArray
+        auto right = _frames.reserve(plan.staticArray
             ? arrayValueSize : facts.size, facts.alignment);
         if (plan.staticArray) {
             import snakebite.nativelayout:
                 arrayLengthOffset, arrayPointerOffset, arrayValueSize,
                 storeIntegral;
-            storeIntegral(left.base + arrayLengthOffset,
+            void* leftAddress;
+            if (plan.leftStorage) {
+                leftAddress = _frames.reserve(facts.size, facts.alignment);
+                evaluate(expression.e1, expression.e1.type, facts,
+                    leftAddress);
+            } else
+                leftAddress = addressOf(expression.e1);
+            void* rightAddress;
+            if (plan.rightStorage) {
+                rightAddress = _frames.reserve(facts.size, facts.alignment);
+                evaluate(expression.e2, expression.e2.type, facts,
+                    rightAddress);
+            } else
+                rightAddress = addressOf(expression.e2);
+            storeIntegral(left + arrayLengthOffset,
                 plan.length, size_t.sizeof);
-            storeIntegral(right.base + arrayLengthOffset,
+            storeIntegral(right + arrayLengthOffset,
                 plan.length, size_t.sizeof);
-            *cast(void**)(left.base + arrayPointerOffset) = addressOf(
-                expression.e1);
-            *cast(void**)(right.base + arrayPointerOffset) = addressOf(
-                expression.e2);
+            *cast(void**)(left + arrayPointerOffset) = leftAddress;
+            *cast(void**)(right + arrayPointerOffset) = rightAddress;
         } else {
-            evaluate(expression.e1, expression.e1.type, facts, left.base);
-            evaluate(expression.e2, expression.e2.type, facts, right.base);
+            evaluate(expression.e1, expression.e1.type, facts, left);
+            evaluate(expression.e2, expression.e2.type, facts, right);
         }
         const equal = plan.width == 0
-            || memcmp(left.base, right.base, plan.width) == 0;
+            || memcmp(left, right, plan.width) == 0;
         const answer = expression.op == EXP.identity ? equal : !equal;
         storeIntegral(_place, answer ? 1 : 0, _facts.size);
     }
