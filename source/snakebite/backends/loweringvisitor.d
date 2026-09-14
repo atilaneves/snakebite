@@ -8,6 +8,8 @@ import dmd.expression:
     CatElemAssignExp, CatDcharAssignExp,
     ConstructExp, Expression, LoweredAssignExp, NewExp;
 import dmd.visitor: Visitor;
+import dmd.mtype: Type;
+import snakebite.nativelayout: TypeFacts;
 import std.meta: AliasSeq;
 
 
@@ -149,11 +151,33 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     protected abstract void visitLoweredNew(NewExp expression);
 
     final override void visit(ArrayLiteralExp expression) {
+        import dmd.astenums: Tpointer;
+        import dmd.typesem: nextOf, toBasetype;
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset;
+
         if (expression.lowering !is null) {
             prepareArrayLiteral(expression);
             scope (exit) restoreArrayLiteral;
             expression.lowering.accept(this);
-            visitLoweredArrayLiteral(expression);
+            const count = expression.elements is null
+                ? 0 : expression.elements.length;
+            auto elementType = expression.type.nextOf;
+            const elementFacts = TypeFacts.of(elementType);
+            foreach (i; 0 .. count)
+                storeArrayLiteralElement(
+                    expression[i], elementType, elementFacts,
+                    i * elementFacts.size,
+                );
+
+            const facts = TypeFacts.of(expression.type);
+            if (facts.isDynamicArray) {
+                storeArrayLiteralCount(count, arrayLengthOffset);
+                storeArrayLiteralPointer(arrayPointerOffset);
+            } else if (expression.type.toBasetype.ty == Tpointer)
+                storeArrayLiteralPointer(0);
+            else
+                copyArrayLiteralStorage(facts.size);
             return;
         }
 
@@ -165,8 +189,15 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
 
     protected abstract void prepareArrayLiteral(ArrayLiteralExp expression);
     protected abstract void restoreArrayLiteral();
-    protected abstract void visitLoweredArrayLiteral(
-        ArrayLiteralExp expression);
+    protected abstract void storeArrayLiteralElement(
+        Expression element, Type elementType, in TypeFacts facts,
+        in size_t byteOffset,
+    );
+    protected abstract void storeArrayLiteralCount(
+        in size_t count, in size_t byteOffset,
+    );
+    protected abstract void storeArrayLiteralPointer(in size_t byteOffset);
+    protected abstract void copyArrayLiteralStorage(in size_t width);
 
     // `~` concatenation is always `_d_arraycatnTX`; the one shape without a
     // `lowering` is a node this visitor does not otherwise support, the same

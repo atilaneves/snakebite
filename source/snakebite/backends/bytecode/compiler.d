@@ -3608,41 +3608,40 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _valueType = destination.type;
     }
 
-    protected override void visitLoweredArrayLiteral(
-            ArrayLiteralExp expression) {
-        import dmd.astenums: Tarray;
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset;
-
-        const destination = _arrayLiteralDestinations[$ - 1];
-        const count = expression.elements is null
-            ? 0 : expression.elements.length;
-        const elementFacts = TypeFacts.of(expression.type.nextOf);
-        foreach (i; 0 .. count) {
-            const elementOffset = reserveTemp(elementFacts);
-            evalInto(expression[i], elementOffset, elementFacts.size);
-            const addressOffset = reserveTemp(pointerFacts);
-            emit(&opCopy, addressOffset, _destination, size_t.sizeof);
-            if (i != 0) {
-                const byteOffsetOffset = reserveTemp(pointerFacts);
-                emit(&opConstant, byteOffsetOffset,
-                    addConstant(cast(long) (i * elementFacts.size)),
-                    size_t.sizeof);
-                emit(&opAdd, addressOffset, byteOffsetOffset,
-                    size_t.sizeof);
-            }
-            emit(&opStoreIndirect, addressOffset, elementOffset,
-                elementFacts.size);
+    protected override void storeArrayLiteralElement(
+        Expression element, Type elementType, in TypeFacts facts,
+        in size_t byteOffset,
+    ) {
+        const elementOffset = reserveTemp(facts);
+        evalInto(element, elementOffset, facts.size, elementType);
+        const addressOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, addressOffset, _destination, size_t.sizeof);
+        if (byteOffset != 0) {
+            const offset = reserveTemp(pointerFacts);
+            emit(&opConstant, offset, addConstant(cast(long) byteOffset),
+                size_t.sizeof);
+            emit(&opAdd, addressOffset, offset, size_t.sizeof);
         }
+        emit(&opStoreIndirect, addressOffset, elementOffset, facts.size);
+    }
 
-        if (expression.type.ty == Tarray) {
-            emit(&opConstant, destination.offset + arrayLengthOffset,
-                addConstant(cast(long) count), size_t.sizeof);
-            emit(&opCopy, destination.offset + arrayPointerOffset,
-                _destination, size_t.sizeof);
-        } else
-            emit(&opLoadIndirect, destination.offset, _destination,
-                TypeFacts.of(expression.type).size);
+    protected override void storeArrayLiteralCount(
+        in size_t count, in size_t byteOffset,
+    ) {
+        const destination = _arrayLiteralDestinations[$ - 1];
+        emit(&opConstant, destination.offset + byteOffset,
+            addConstant(cast(long) count), size_t.sizeof);
+    }
+
+    protected override void storeArrayLiteralPointer(in size_t byteOffset) {
+        const destination = _arrayLiteralDestinations[$ - 1];
+        emit(&opCopy, destination.offset + byteOffset,
+            _destination, size_t.sizeof);
+    }
+
+    protected override void copyArrayLiteralStorage(in size_t width) {
+        const destination = _arrayLiteralDestinations[$ - 1];
+        emit(&opLoadIndirect, destination.offset, _destination, width);
     }
 
     // An associative-array literal has no glue-layer codegen of its own:
@@ -5869,17 +5868,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             size_t.sizeof);
     }
 
-    // `[a, b, c]` typed as a static array. dmd's own `lowerArrayLiteral`
-    // (`expressionsem.d`) only ever runs for an associative array
-    // literal's key/value arrays; a bare array literal's `.lowering` is
-    // otherwise left null, and `glue/e2ir.d`'s `visitArrayLiteral` shows
-    // why a `T[N]`-typed one needs none: it builds the elements straight
-    // into the destination's own stack storage (`ExpressionsToStaticArray`)
-    // and asserts if it ever sees a static array literal without a
-    // lowering reach the branch that expects one - that branch is for
-    // `Tarray` only, to call `_d_arrayliteralTX` for the heap allocation.
-    // So this compiler's job for `T[N]` is the same one dmd's own codegen
-    // does, not the reuse of a lowering that only ever exists for `T[]`.
+    // Static array literals need no heap allocation lowering. DMD's
+    // native code generator builds their elements in stack storage.
     //
     // Every element is evaluated into a temporary first, then the whole
     // temporary copied to `destOffset` in one go - the same reason

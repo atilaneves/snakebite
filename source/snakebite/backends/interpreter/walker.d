@@ -3986,33 +3986,35 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _frames.release(destination.mark);
     }
 
-    protected override void visitLoweredArrayLiteral(
-            ArrayLiteralExp expression) {
-        import dmd.astenums: Tarray;
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset, loadIntegral,
-            storeIntegral;
+    protected override void storeArrayLiteralElement(
+        Expression element, Type elementType, in TypeFacts facts,
+        in size_t byteOffset,
+    ) {
+        auto elements = *cast(ubyte**) _place;
+        evaluate(element, elementType, facts, elements + byteOffset);
+    }
+
+    protected override void storeArrayLiteralCount(
+        in size_t count, in size_t byteOffset,
+    ) {
+        import snakebite.nativelayout: storeIntegral;
 
         auto destination = _arrayLiteralDestinations[$ - 1];
-        auto elements = cast(ubyte*) loadIntegral(
-            _place, size_t.sizeof, false);
-        auto elementType = cast(Type) expression.type.nextOf;
-        const elementFacts = factsOf(elementType);
-        const count = expression.elements is null
-            ? 0 : expression.elements.length;
-        foreach (i; 0 .. count)
-            evaluate(
-                expression[i], elementType, elementFacts,
-                elements + i * elementFacts.size);
+        storeIntegral(cast(ubyte*) destination.place + byteOffset,
+            count, size_t.sizeof);
+    }
 
-        auto bytes = cast(ubyte*) destination.place;
-        if (expression.type.ty == Tarray) {
-            storeIntegral(bytes + arrayLengthOffset, count, size_t.sizeof);
-            *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
-        } else {
-            import core.stdc.string: memcpy;
-            memcpy(bytes, elements, destination.facts.size);
-        }
+    protected override void storeArrayLiteralPointer(in size_t byteOffset) {
+        auto destination = _arrayLiteralDestinations[$ - 1];
+        *cast(void**) (cast(ubyte*) destination.place + byteOffset)
+            = *cast(void**) _place;
+    }
+
+    protected override void copyArrayLiteralStorage(in size_t width) {
+        import core.stdc.string: memcpy;
+
+        auto destination = _arrayLiteralDestinations[$ - 1];
+        memcpy(destination.place, *cast(void**) _place, width);
     }
 
     private struct NewDestination {
