@@ -3,10 +3,10 @@ module snakebite.frontend.storage;
 private:
 
 
-import dmd.expression: AssignExp, Expression;
+import dmd.expression:
+    AssignExp, BinAssignExp, CatAssignExp, Expression, IndexExp;
 import dmd.astenums: Tarray, Tpointer, Tsarray;
 import dmd.typesem: isIntegral;
-
 
 // Resolves the storage named by an expression. `Result` is deliberately a
 // backend type: the interpreter returns a native pointer, while the bytecode
@@ -65,13 +65,19 @@ public struct StorageResolver(Result, Adapter) {
             return _adapter.storageLowered(lowered);
 
         if (auto assignment = expression.isBlitExp)
-            return assignmentResult(cast() assignment);
+            return assignmentResult(cast() assignment, assignment.e1);
 
         if (auto construct = expression.isConstructExp)
-            return assignmentResult(cast() construct);
+            return assignmentResult(cast() construct, construct.e1);
+
+        if (auto assignment = expression.isCatAssignExp)
+            return assignmentResult(cast() assignment, assignment.e1);
+
+        if (auto assignment = expression.isBinAssignExp)
+            return assignmentResult(cast() assignment, assignment.e1);
 
         if (auto assignment = expression.isAssignExp)
-            return assignmentResult(cast() assignment);
+            return assignmentResult(cast() assignment, assignment.e1);
 
         if (auto call = expression.isCallExp) {
             auto callee = call.f;
@@ -101,12 +107,46 @@ public struct StorageResolver(Result, Adapter) {
         }
 
         if (auto index = expression.isIndexExp) {
-            if (index.e1.type.ty == Tarray)
-                return _adapter.storageDynamicIndex(index);
-            if (index.e1.type.ty == Tsarray)
-                return _adapter.storageStaticIndex(index);
-            if (index.e1.type.ty == Tpointer)
-                return _adapter.storagePointerIndex(index);
+            // Static-array code generation evaluates the rightmost index
+            // before recursing into the outer array expression. Keep that
+            // language-defined order in the shared resolver; all other
+            // index kinds evaluate the base before the index.
+            if (index.e1.type.ty == Tsarray) {
+                auto length = _adapter.storageStaticIndexLength(index);
+                auto indexValue = _adapter.storageIndexValue(index, length);
+                _adapter.storageIndexBounds(index, indexValue, length);
+                auto base = resolve(index.e1);
+                return _adapter.storageStaticIndex(
+                    index, base, indexValue);
+            }
+
+            if (index.e1.type.ty == Tarray) {
+                // A normal dynamic-array index evaluates its index before
+                // the array expression. `$` needs the descriptor captured
+                // first, so that special form keeps the extra early step.
+                Result base;
+                size_t capturedLength;
+                if (index.lengthVar !is null) {
+                    base = resolve(index.e1);
+                    capturedLength = _adapter.storageDynamicIndexLength(
+                        index, base);
+                }
+                auto indexValue = _adapter.storageIndexValue(
+                    index, capturedLength);
+                if (index.lengthVar is null)
+                    base = resolve(index.e1);
+                auto length = _adapter.storageDynamicIndexLength(index, base);
+                _adapter.storageIndexBounds(index, indexValue, length);
+                return _adapter.storageDynamicIndex(
+                    index, base, indexValue);
+            }
+            if (index.e1.type.ty == Tpointer) {
+                auto base = resolve(index.e1);
+                auto pointer = _adapter.storagePointerIndexBase(index, base);
+                auto indexValue = _adapter.storagePointerIndexValue(index);
+                return _adapter.storagePointerIndex(
+                    index, pointer, indexValue);
+            }
             return _adapter.storageValue(index);
         }
 
@@ -116,12 +156,31 @@ public struct StorageResolver(Result, Adapter) {
         return _adapter.storageValue(expression);
     }
 
-    private Result assignmentResult(AssignExp assignment) {
+    private Result assignmentResult(
+        Expression expression, Expression targetExpression,
+    ) {
         // Resolve the target first. This is the only evaluation of the
         // assignment's left side; the adapter receives its location and can
         // then evaluate and store the right side exactly once.
-        auto target = resolve(assignment.e1);
-        _adapter.storageAssignment(assignment, target);
+        auto target = resolve(targetExpression);
+        if (auto compound = expression.isBinAssignExp)
+            if (auto cat = expression.isCatAssignExp)
+                _adapter.storageCatAssignment(
+                    cast(CatAssignExp) cat, target);
+            else
+                _adapter.storageCompoundAssignment(
+                    cast(BinAssignExp) compound, target);
+        else if (auto construct = expression.isConstructExp)
+            _adapter.storagePlainAssignment(
+                cast(AssignExp) construct, target);
+        else if (auto assignment = expression.isAssignExp) {
+            if (assignment.e1.isSliceExp !is null)
+                _adapter.storageSliceAssignment(
+                    cast(AssignExp) assignment, target);
+            else
+                _adapter.storagePlainAssignment(
+                    cast(AssignExp) assignment, target);
+        }
         return target;
     }
 }

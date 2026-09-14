@@ -18,7 +18,7 @@ static foreach (backend; Matrix!(
     @("assign.resultIsLvalue." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-    117.shouldBeRetOf!(
+    119.shouldBeRetOf!(
         backend,
         q{
             int calls;
@@ -37,12 +37,95 @@ static foreach (backend; Matrix!(
 
             int result() {
                 int* address = &(target() = assigned());
-                *address = 7;
+                // Writing a different value through the returned pointer
+                // proves it names `value`, not a temporary.
+                *address = 9;
                 return targetCalls * 100 + calls * 10 + value;
             }
         },
         "result",
     );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.compoundResultKeepsStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        9.shouldBeRetOf!(
+            backend,
+            q{
+                int four() {
+                    return 4;
+                }
+
+                int nine() {
+                    return 9;
+                }
+
+                int result() {
+                    int value = 3;
+                    (value += four()) = nine();
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.nestedResultUsesSharedStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        9.shouldBeRetOf!(
+            backend,
+            q{
+                int seven() {
+                    return 7;
+                }
+
+                int nine() {
+                    return 9;
+                }
+
+                int result() {
+                    int value = 0;
+                    (value = seven()) = nine();
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("assign.bitfieldResultKeepsPackedSiblings." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        535.shouldBeRetOf!(
+            backend,
+            q{
+                struct Pair {
+                    ubyte first : 4;
+                    ubyte second : 4;
+                }
+
+                int result() {
+                    Pair pair;
+                    pair.first = 3;
+                    auto value = (pair.second = 5);
+                    return cast(int) value * 100
+                        + cast(int) pair.first * 10
+                        + cast(int) pair.second;
+                }
+            },
+            "result",
+        );
     }
 }
 

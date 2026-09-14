@@ -2165,28 +2165,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private void* assign(AssignExp expression) {
-        return assignAt(expression, addressOf(expression.e1));
+        return addressOf(expression);
     }
 
     private void* assignAt(AssignExp expression, void* target) {
         import core.stdc.string: memcpy;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
         import std.conv: text;
-
-        // DMD records the two meanings of a slice assignment on the node:
-        // `blockAssign` is `a[] = v`, which evaluates `v` as one element
-        // before copying its bytes to every slot; all other supported slice
-        // assignments here are `a[] = b[]`, which copy one element from the
-        // source per destination slot. The distinction cannot come from the
-        // right-side type alone: `int[][3] a; int[] b; a[] = b;` fills each
-        // outer element with the one dynamic-array value `b`.
-        if (_type.ty == Tarray && expression.e1.isSliceExp !is null) {
-            if (expression.memset == MemorySet.blockAssign)
-                return assignSliceScalar(expression, target);
-
-            if (expression.e2.type.ty == Tarray)
-                return assignSlice(expression, target);
-        }
 
         // `ConstructExp` and `BlitExp` arrive as this same node. DMD emits
         // explicit lifecycle calls around these byte operations when the
@@ -2218,7 +2203,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     valueFacts, scratch.base);
                 const result = loadIntegral(
                     scratch.base, valueFacts.size, !valueFacts.isUnsigned);
-                storeBitfield(dot, field, result);
+                storeBitfieldAt(field, target, result);
                 storeIntegral(_place, result, _facts.size);
                 return _place;
             }
@@ -2235,6 +2220,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
         memcpy(_place, target, _facts.size);
         return target;
+    }
+
+    // The shared resolver has already selected the slice-assignment primitive
+    // before this hook runs. The DMD node metadata selects the primitive's
+    // native scalar-fill or array-copy operation; no lvalue classification is
+    // repeated here.
+    private void* assignSliceAt(AssignExp expression, void* target) {
+        if (expression.memset == MemorySet.blockAssign)
+            return assignSliceScalar(expression, target);
+        if (expression.e2.type.ty == Tarray)
+            return assignSlice(expression, target);
+        return assignSliceScalar(expression, target);
     }
 
     // A scalar slice assignment evaluates the right side once before any
@@ -2390,7 +2387,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return temporary;
         }
 
-        public void storageAssignment(AssignExp expression, void* target) {
+        public void storagePlainAssignment(
+            AssignExp expression, void* target,
+        ) {
             auto savedType = evaluator._type;
             auto savedFacts = evaluator._facts;
             auto savedPlace = evaluator._place;
@@ -2402,8 +2401,47 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
             evaluator._type = expression.type;
             evaluator._facts = evaluator.factsOf(expression.type);
-            evaluator._place = target;
             evaluator.assignAt(expression, target);
+        }
+
+        public void storageSliceAssignment(
+            AssignExp expression, void* target,
+        ) {
+            auto savedType = evaluator._type;
+            auto savedFacts = evaluator._facts;
+            auto savedPlace = evaluator._place;
+            scope(exit) {
+                evaluator._type = savedType;
+                evaluator._facts = savedFacts;
+                evaluator._place = savedPlace;
+            }
+
+            evaluator._type = expression.type;
+            evaluator._facts = evaluator.factsOf(expression.type);
+            evaluator.assignSliceAt(expression, target);
+        }
+
+        public void storageCompoundAssignment(
+            BinAssignExp expression, void* target,
+        ) {
+            auto savedType = evaluator._type;
+            auto savedFacts = evaluator._facts;
+            auto savedPlace = evaluator._place;
+            scope(exit) {
+                evaluator._type = savedType;
+                evaluator._facts = savedFacts;
+                evaluator._place = savedPlace;
+            }
+
+            evaluator._type = expression.type;
+            evaluator._facts = evaluator.factsOf(expression.type);
+            evaluator.storeCompoundAt(expression, target);
+        }
+
+        public void storageCatAssignment(
+            CatAssignExp expression, void* target,
+        ) {
+            evaluator.runForEffect(expression);
         }
 
         public void* storageConstructorCall(CallExp expression) {
@@ -2430,16 +2468,105 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return cast(ubyte*) base + arrayLengthOffset;
         }
 
-        public void* storageDynamicIndex(IndexExp expression) {
-            return evaluator.indexAddressOf(expression).ptr;
+        public size_t storageDynamicIndexLength(
+            IndexExp expression, void* base,
+        ) {
+            import snakebite.nativelayout: arrayLengthOffset, loadIntegral;
+
+            return loadIntegral(
+                cast(ubyte*) base + arrayLengthOffset,
+                size_t.sizeof,
+                false,
+            );
         }
 
-        public void* storageStaticIndex(IndexExp expression) {
-            return evaluator.indexAddressOf(expression).ptr;
+        public size_t storageStaticIndexLength(IndexExp expression) {
+            return cast(size_t) expression.e1.type.isTypeSArray.dim
+                .toInteger;
         }
 
-        public void* storagePointerIndex(IndexExp expression) {
-            return evaluator.indexAddressOf(expression).ptr;
+        public void* storageIndexValue(
+            IndexExp expression, size_t length,
+        ) {
+            import snakebite.nativelayout: storeIntegral;
+
+            auto value = evaluator._temporaries.reserveValue(
+                size_t.sizeof, size_t.alignof);
+            storeIntegral(value, evaluator.indexOf(expression, length),
+                size_t.sizeof);
+            return value;
+        }
+
+        public void storageIndexBounds(
+            IndexExp expression, void* index, size_t length,
+        ) {
+            import snakebite.backends.elementaddress:
+                indexBoundsHook, indexBoundsRegisters;
+            import snakebite.nativelayout: loadIntegral;
+
+            const value = loadIntegral(index, size_t.sizeof, false);
+            if (value < length)
+                return;
+
+            evaluator.throwArrayBounds(
+                indexBoundsHook, indexBoundsRegisters, expression.loc,
+                [cast(const(void)*) index,
+                    cast(const(void)*) &length],
+            );
+        }
+
+        public void* storagePointerIndexBase(
+            IndexExp expression, void* base,
+        ) {
+            import snakebite.nativelayout: loadIntegral;
+
+            return cast(void*) loadIntegral(base, size_t.sizeof, false);
+        }
+
+        public void* storagePointerIndexValue(IndexExp expression) {
+            return storageIndexValue(expression, 0);
+        }
+
+        public void* storageDynamicIndex(
+            IndexExp expression, void* base, void* index,
+        ) {
+            import snakebite.nativelayout:
+                arrayPointerOffset, loadIntegral;
+
+            const stride = evaluator.factsOf(expression.e1.type.nextOf).size;
+            const value = loadIntegral(index, size_t.sizeof, false);
+            auto elements = cast(ubyte*) loadIntegral(
+                cast(ubyte*) base + arrayPointerOffset,
+                size_t.sizeof,
+                false,
+            );
+            return elements + value * stride;
+        }
+
+        public void* storageStaticIndex(
+            IndexExp expression, void* base, void* index,
+        ) {
+            import snakebite.nativelayout: loadIntegral;
+
+            const stride = evaluator.factsOf(expression.e1.type.nextOf).size;
+            const value = loadIntegral(index, size_t.sizeof, false);
+            return cast(ubyte*) base + value * stride;
+        }
+
+        public void* storagePointerIndex(
+            IndexExp expression, void* pointer, void* index,
+        ) {
+            import snakebite.nativelayout: loadIntegral;
+
+            const stride = evaluator.factsOf(expression.e1.type.nextOf).size;
+            const value = loadIntegral(index, size_t.sizeof, false);
+            auto elements = cast(ubyte*) pointer;
+            if (elements is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot index through a null pointer in `",
+                        expression.toString, "` at ", value),
+                );
+            return elements + value * stride;
         }
 
         public void* storageField(DotVarExp expression) {
@@ -2468,93 +2595,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         return StorageResolver!(void*, StorageAdapter)(StorageAdapter(this))
             .resolve(target);
-    }
-
-    // An element's address and its own type's stride, from the one
-    // `indexAddressOf` call both a read (`visit(IndexExp)`) and a write
-    // (`addressOf`) need: `FrameLayout.Slot` already hands an offset and
-    // its facts back together for the same reason - a caller that
-    // computed the stride itself first, then called here for the
-    // address, would pay `factsOf(array.type.nextOf)` twice, evicting
-    // and refilling the one-entry `_cachedType` in between with
-    // `factsOf(array.type)`, this call's own first lookup.
-    private struct ElementAddress {
-        void* ptr;
-        size_t stride;
-    }
-
-    private ElementAddress indexAddressOf(IndexExp expression) {
-        import snakebite.backends.elementaddress:
-            indexBoundsHook, indexBoundsRegisters;
-        import std.conv: text;
-
-        auto array = expression.e1;
-
-        // `ptr[i]` has no length of its own to bound-check against - the
-        // same as compiled D, which leaves that to whatever built the
-        // pointer. dmd's own rvalue-AA-index lowering (`aa[key]`, see
-        // `visit(AssocArrayLiteralExp)` for the literal's own lowering)
-        // takes exactly this shape: `_d_aaGetRvalueX!(K, V)(aa, key)[0]`,
-        // a pointer indexed at a literal `0`, wrapped by dmd's own
-        // semantic pass in a `? :` that already turned a missing key into
-        // `RangeError` before this is ever reached - so the null this
-        // would otherwise have to guard against never arrives here.
-        if (array.type.ty == Tpointer) {
-            const stride = factsOf(array.type.nextOf).size;
-            auto base = cast(ubyte*) asPointer(array);
-            const index = indexOf(expression, 0);
-
-            if (base is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot index through a null pointer in `",
-                        expression.toString, "` at ", index),
-                );
-
-            return ElementAddress(
-                cast(void*) (base + index * stride), stride);
-        }
-
-        // A static array's own storage is already contiguous elements,
-        // not a `{length, ptr}` pair `evaluateArray` below reads out of -
-        // the same distinction `visit(IndexExp)` draws for a read. The
-        // element's address is the array's own address (found the same
-        // way any other lvalue's is, recursing through another
-        // `indexAddressOf` call when `array` is itself an indexing of a
-        // further-nested static array, e.g. `b[1][2]`) plus its offset.
-        if (array.type.ty == Tsarray) {
-            const length = cast(size_t) array.type.isTypeSArray.dim.toInteger;
-            const index = indexOf(expression, length);
-            if (index < 0 || cast(size_t) index >= length) {
-                const boundedIndex = cast(size_t) index;
-                throwArrayBounds(
-                    indexBoundsHook, indexBoundsRegisters, expression.loc,
-                    [cast(const(void)*) &boundedIndex,
-                        cast(const(void)*) &length],
-                );
-            }
-
-            const stride = factsOf(array.type.nextOf).size;
-            auto base = cast(ubyte*) addressOf(array);
-            return ElementAddress(
-                cast(void*) (base + index * stride), stride);
-        }
-
-        const value = evaluateArray(array, factsOf(array.type));
-        const index = indexOf(expression, value.length);
-
-        if (index < 0 || cast(size_t) index >= value.length) {
-            const boundedIndex = cast(size_t) index;
-            const length = value.length;
-            throwArrayBounds(
-                indexBoundsHook, indexBoundsRegisters, expression.loc,
-                [cast(const(void)*) &boundedIndex,
-                    cast(const(void)*) &length],
-            );
-        }
-
-        const stride = factsOf(array.type.nextOf).size;
-        return ElementAddress(
-            cast(void*) (value.elements + index * stride), stride);
     }
 
     override void visit(AddAssignExp expression) {
@@ -2601,13 +2641,40 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         storeAssignExp!">>>"(expression);
     }
 
+    private void storeCompoundAt(BinAssignExp expression, void* target) {
+        if (expression.isAddAssignExp) return storeAssignExp!("+")(
+            expression, target);
+        if (expression.isMinAssignExp) return storeAssignExp!("-")(
+            expression, target);
+        if (expression.isMulAssignExp) return storeAssignExp!("*")(
+            expression, target);
+        if (expression.isDivAssignExp) return storeAssignExp!("/")(
+            expression, target);
+        if (expression.isModAssignExp) return storeAssignExp!("%")(
+            expression, target);
+        if (expression.isAndAssignExp) return storeAssignExp!("&")(
+            expression, target);
+        if (expression.isOrAssignExp) return storeAssignExp!("|")(
+            expression, target);
+        if (expression.isXorAssignExp) return storeAssignExp!("^")(
+            expression, target);
+        if (expression.isShlAssignExp) return storeAssignExp!("<<")(
+            expression, target);
+        if (expression.isShrAssignExp) return storeAssignExp!(">>")(
+            expression, target);
+        if (expression.isUshrAssignExp) return storeAssignExp!(">>>")(
+            expression, target);
+    }
+
     // The target is looked up once, not once to read and again to write:
     // D evaluates the left side of a compound assignment a single time. The
     // right side runs before the target is read, since evaluating it can
     // change what the target holds.
     //
     // `extern(D)`: a string template parameter has no C++ mangling.
-    private extern(D) void storeAssignExp(string op)(BinAssignExp expression) {
+    private extern(D) void storeAssignExp(string op)(
+        BinAssignExp expression, void* resolvedTarget = null,
+    ) {
         import snakebite.nativelayout: loadIntegral, storeIntegral;
         import std.conv: text;
 
@@ -2619,6 +2686,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`"),
             );
 
+        auto target = resolvedTarget;
+        if (target is null)
+            try {
+                target = addressOf(expression.e1);
+            } catch (SnakebiteException) {
+                throw new SnakebiteException(
+                    text("interpreter cannot assign to `",
+                        expression.e1.toString, "`: `", expression.toString,
+                        "`"),
+                );
+            }
+
         // A narrow target (`ubyte`, `short`, ...) arrives wrapped in the
         // `CastExp` dmd's `integralPromotions` adds for the operation
         // itself; the field behind it is what is stored to.
@@ -2629,27 +2708,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (field !is null && field.isBitFieldDeclaration !is null) {
                 const stepFacts = factsOf(expression.e2.type);
                 const step = asIntegral(expression.e2, stepFacts);
-                auto base = fieldBaseAddress(dot.e1);
-                const current = bitfieldValueAt(base, field);
+                const current = bitfieldValueAtPlace(field, target);
                 const result = combine!op(
                     current, step, targetFacts, stepFacts, expression);
-                storeBitfieldAt(field,
-                    cast(ubyte*) base + field.offset, result);
+                storeBitfieldAt(field, target, result);
                 storeIntegral(_place, result, _facts.size);
                 return;
             }
         }
 
-        void* target;
-        try {
-            target = addressOf(expression.e1);
-        } catch (SnakebiteException) {
-            throw new SnakebiteException(
-                text("interpreter cannot assign to `",
-                    expression.e1.toString, "`: `", expression.toString,
-                    "`"),
-            );
-        }
         const stepFacts = factsOf(expression.e2.type);
         const step = asIntegral(expression.e2, stepFacts);
         const current =
@@ -3562,12 +3629,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // operation to `int` while a `ubyte` field still has one byte of
     // storage.
     private long bitfieldValueAt(void* base, VarDeclaration field) {
+        return bitfieldValueAtPlace(field,
+            cast(ubyte*) base + field.offset);
+    }
+
+    private long bitfieldValueAtPlace(
+        VarDeclaration field, void* place,
+    ) {
         import snakebite.nativelayout: loadIntegral;
         const bits = field.isBitFieldDeclaration;
         const facts = factsOf(field.type);
         const raw = loadIntegral(
-            cast(ubyte*) base + field.offset,
-            facts.size, false);
+            place, facts.size, false);
         const mask = ulong.max >> (64 - bits.fieldWidth);
         auto value = (raw >> bits.bitOffset) & mask;
         if (!facts.isUnsigned && bits.fieldWidth < 64
@@ -3706,55 +3779,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         storeIntegral(_place, value.length, _facts.size);
     }
 
-    // The array is evaluated before the index, the order D specifies.
     override void visit(IndexExp expression) {
         import core.stdc.string: memcpy;
-        import snakebite.backends.elementaddress:
-            indexBoundsHook, indexBoundsRegisters;
-
-        auto array = expression.e1;
-
-        // A static array's own storage is already contiguous elements,
-        // not a `{length, ptr}` pair to a block elsewhere - `newCapacity`,
-        // on the `~=` lowering's own chain, indexes a `static immutable`
-        // lookup table this shape. The two differ only in how the
-        // elements' base address and count are found; the bounds check
-        // and the read below are the same read either way.
-        if (array.type.ty == Tsarray) {
-            const length = cast(size_t) array.type.isTypeSArray.dim.toInteger;
-            const index = indexOf(expression, length);
-            if (index < 0 || cast(size_t) index >= length) {
-                const boundedIndex = cast(size_t) index;
-                throwArrayBounds(
-                    indexBoundsHook, indexBoundsRegisters, expression.loc,
-                    [cast(const(void)*) &boundedIndex,
-                        cast(const(void)*) &length],
-                );
-            }
-
-            const stride = factsOf(array.type.nextOf).size;
-            assert(stride == _facts.size, "an index changed width");
-
-            auto base = cast(ubyte*) addressOf(array);
-            memcpy(_place, base + index * stride, stride);
-            return;
-        }
-
-        // `indexAddressOf` does the same evaluate-index-bounds-check-
-        // stride work an assignment's left side (`addressOf`) needs to
-        // find this same element's address; a read just copies out of it
-        // instead of writing through it. Compiled D throws a `RangeError`
-        // on an out-of-range index. `indexAddressOf` raises the same guest
-        // exception, so a guest catch can handle it and a host caller sees
-        // the unwrapped `RangeError`.
-        //
-        // The array's own element width, not the destination's: they
-        // agree only because dmd wraps this in a `CastExp` for any change
-        // of width, and `cast` is refused.
-        const element = indexAddressOf(expression);
-        assert(element.stride == _facts.size, "an index changed width");
-
-        memcpy(_place, element.ptr, element.stride);
+        const element = addressOf(expression);
+        memcpy(_place, element, _facts.size);
     }
 
     private long indexOf(IndexExp expression, in size_t length) {

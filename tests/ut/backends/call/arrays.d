@@ -74,6 +74,99 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE uses its own evaluator for dynamic index order"),
+)) {
+    @("arrays.index.dynamicEvaluatesIndexBeforeBase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        127.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int order;
+                    int[] values = [7];
+
+                    ref int[] base() {
+                        order = order * 10 + 2;
+                        return values;
+                    }
+
+                    size_t index() {
+                        order = order * 10 + 1;
+                        return 0;
+                    }
+
+                    auto value = base()[index()];
+                    return order * 10 + value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.index.pointerCapturesBaseBeforeIndex." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        127.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int order;
+                    int first = 7;
+                    int second = 9;
+                    int* pointer = &first;
+
+                    int* base() {
+                        order = order * 10 + 1;
+                        return pointer;
+                    }
+
+                    size_t index() {
+                        pointer = &second;
+                        order = order * 10 + 2;
+                        return 0;
+                    }
+
+                    auto value = base()[index()];
+                    return order * 10 + value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE uses its own evaluator for dynamic array replacement"),
+)) {
+    @("arrays.index.dollarCapturesLengthBeforeIndex." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        8.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int[] values = [1, 2];
+                    int[] replacement = [7, 8, 9];
+
+                    size_t change(size_t length) {
+                        values = replacement;
+                        return length - 1;
+                    }
+
+                    return values[change($)];
+                }
+            },
+            "result",
+        );
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("arrays.dollar." ~ backend.stringof)
     @Tags(backend.stringof)

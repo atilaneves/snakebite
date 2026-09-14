@@ -625,7 +625,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // The `$` currently in scope, if any: the `VarDeclaration` dmd hands
     // out for it (`IndexExp.lengthVar`) and where its value - the
     // enclosing array's own length, already evaluated - sits in this
-    // frame. `compileElementAddress` binds this around compiling an
+    // frame. The shared storage resolver binds this around compiling an
     // index's own expression and restores whatever was there before once
     // it is done, the same way a nested `$` inside that index (a call's
     // own argument, say) must see its own array's length rather than this
@@ -1907,87 +1907,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // goes too, `discardResult` when a caller at statement level has
     // nowhere for it and does not want it.
     private void compileAssign(AssignExp expression, in size_t destOffset) {
-        if (auto indexTarget = expression.e1.isIndexExp)
-            return compileIndexAssign(expression, indexTarget, destOffset);
-
-        // `a[] = 0`: dmd's own shape for blitting a scalar into every
-        // element of a static array - not just written by hand, but also
-        // what `dsymbolsem`'s default-init `constructInit` builds for a
-        // local static array with no initialiser of its own (a scalar
-        // `.init` cannot otherwise convert to an array type, so semantic
-        // analysis rewrites the blit's own target from the bare variable
-        // to its whole slice).
-        if (auto sliceTarget = expression.e1.isSliceExp)
-            return compileSliceAssign(expression, sliceTarget, destOffset);
-
-        // `pick(a, b, true) = 5;`: the call's own return is `ref`, an
-        // lvalue naming whichever of its own arguments it picked, not a
-        // value of its own - the same address `compileAddress`'s own
-        // `CallExp` case already knows how to compile.
-        if (auto callTarget = expression.e1.isCallExp)
-            return compileIndirectAssign(expression, callTarget, destOffset);
-        if (auto fieldTarget = expression.e1.isDotVarExp)
-            return compileFieldAssign(expression, fieldTarget, destOffset);
-
-        if (auto ptrTarget = expression.e1.isPtrExp)
-            return compileIndirectAssign(expression, ptrTarget, destOffset);
-
-        auto varExp = expression.e1.isVarExp;
-        auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
-        if (variable is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        if (isThisField(variable))
-            return compileIndirectAssign(expression, varExp, destOffset);
-
-        const facts = TypeFacts.of(variable.type);
-
-        if (variable.isDataseg) {
-            const valueOffset = reserveTemp(facts);
-            evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
-            emitStaticStore(variable, valueOffset, facts.size);
-
-            if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, facts.size);
-            return;
+        const target = compileAddress(expression);
+        if (destOffset != discardResult) {
+            if (auto dot = expression.e1.isDotVarExp) {
+                auto field = dot.var.isVarDeclaration;
+                if (field !is null
+                        && field.isBitFieldDeclaration !is null) {
+                    const facts = TypeFacts.of(field.type);
+                    emit(&opLoadBitfield, destOffset, target, facts.size,
+                        bitfieldMetadata(field, facts.size));
+                    return;
+                }
+            }
+            emit(&opLoadIndirect, destOffset, target,
+                TypeFacts.of(expression.type).size);
         }
-
-        if (_layout.isRef(variable))
-            return compileIndirectAssign(expression, varExp, destOffset);
-
-        if (!_layout.hasSlot(variable) || isClosureVariable(variable)) {
-            const refOffset = addressOfVariable(variable);
-            const valueOffset = reserveTemp(facts);
-            evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
-            emit(&opStoreIndirect, refOffset, valueOffset, facts.size);
-
-            if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, facts.size);
-            return;
-        }
-
-        const targetOffset = _layout.offsetOf(variable);
-
-        // A postfix expression yields the old value, but also increments
-        // its variable. If both the assignment target and postfix variable
-        // are this same slot, preserve the result in a temporary before
-        // the postfix operation changes the slot.
-        auto post = expression.e2.isPostExp;
-        auto postVarExp = post is null ? null : post.e1.isVarExp;
-        auto postVariable = postVarExp is null
-            ? null : postVarExp.var.isVarDeclaration;
-        if (postVariable is variable) {
-            const tempOffset = reserveTemp(facts);
-            evalInto(expression.e2, tempOffset, facts.size, expression.e1.type);
-            emit(&opCopy, targetOffset, tempOffset, facts.size);
-            return;
-        }
-
-        evalInto(expression.e2, targetOffset, facts.size, expression.e1.type);
-
-        if (destOffset != discardResult && destOffset != targetOffset)
-            emit(&opCopy, destOffset, targetOffset, facts.size);
     }
 
     private void emitStaticStore(
@@ -2034,11 +1968,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (byteOffset == 0)
             return pointerOffset;
 
+        const result = reserveTemp(pointerFacts);
+        emit(&opCopy, result, pointerOffset, size_t.sizeof);
         const offset = reserveTemp(pointerFacts);
         emit(&opConstant, offset, addConstant(cast(long) byteOffset),
             size_t.sizeof);
-        emit(&opAdd, pointerOffset, offset, size_t.sizeof);
-        return pointerOffset;
+        emit(&opAdd, result, offset, size_t.sizeof);
+        return result;
     }
 
     // The context of `owner`, as a pointer value in a temporary frame slot.
@@ -2063,11 +1999,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (path is null)
             throw rejection(_function, _function.loc, "a static chain");
 
-        const result = reserveTemp(pointerFacts);
+        auto result = reserveTemp(pointerFacts);
         emit(&opCopy, result, path[0].offset, size_t.sizeof);
 
         foreach (const hop; path[1 .. $]) {
-            addPointerOffset(result, hop.offset);
+            result = addPointerOffset(result, hop.offset);
             emit(&opLoadIndirect, result, result, size_t.sizeof);
         }
 
@@ -2207,9 +2143,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `*p = value` in every guise this compiler reaches it through: a `ref`
     // variable's own target, or a `ref`-returning call's own result.
     // `compileAddress` already knows how to compile either lvalue's
-    // address; this only adds the store once that address is in hand, the
-    // same split `visit(IndexExp)`/`compileIndexAssign` already share for
-    // an array element.
+    // address; this only adds the store once that address is in hand, using
+    // the same storage path as `visit(IndexExp)` for an array element.
     private void compileIndirectAssign(
         AssignExp expression, Expression target, in size_t destOffset,
     ) {
@@ -2221,6 +2156,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         AssignExp expression, in size_t addressOffset,
         in size_t destOffset = discardResult,
     ) {
+        if (auto dot = expression.e1.isDotVarExp) {
+            auto field = dot.var.isVarDeclaration;
+            if (field !is null && field.isBitFieldDeclaration !is null) {
+                const facts = TypeFacts.of(field.type);
+                const valueOffset = reserveTemp(facts);
+                evalInto(expression.e2, valueOffset, facts.size,
+                    expression.e1.type);
+                emitBitfieldStore(field, addressOffset, valueOffset,
+                    facts.size);
+                if (destOffset != discardResult)
+                    emit(&opCopy, destOffset, valueOffset, facts.size);
+                return;
+            }
+        }
+
         const facts = TypeFacts.of(expression.e1.type);
         const valueOffset = reserveTemp(facts);
         evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
@@ -2324,70 +2274,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             metadata);
     }
 
-    // `arr[i] = value`. `opStoreIndirect` writes `facts.size` bytes
-    // wherever `expression.e2` evaluated to, whatever that width is - a
-    // scalar or a whole plain-old struct - so this needs no case of its
-    // own for either.
-    private void compileIndexAssign(
-        AssignExp expression, IndexExp target, in size_t destOffset,
-    ) {
-        import dmd.astenums: Tpointer, Tsarray;
-
-        if (target.e1.type.ty == Tsarray)
-            return compileStaticIndexAssign(expression, target, destOffset);
-
-        // `_d_aaGetY(...)[0] = value`: dmd's own lvalue-AA-index lowering
-        // (`aa[key] = value`) ends in exactly this shape - an `IndexExp`
-        // at a literal `0` on the pointer druntime's insert-or-lookup
-        // hook returned, the same pointer indexing `compileAddress` and
-        // `visit(IndexExp)` already read through.
-        if (target.e1.type.ty == Tpointer) {
-            const addressOffset = compilePointerElementAddress(target);
-            const facts = TypeFacts.of(expression.e1.type);
-
-            const valueOffset = reserveTemp(facts);
-            evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
-            emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
-
-            if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, facts.size);
-            return;
-        }
-
-        const arrayFacts = TypeFacts.of(target.e1.type);
-        if (!arrayFacts.isDynamicArray)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        const facts = TypeFacts.of(expression.e1.type);
-
-        const addressOffset = compileElementAddress(target, arrayFacts);
-        const valueOffset = reserveTemp(facts);
-        evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
-        emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
-
-        if (destOffset != discardResult)
-            emit(&opCopy, destOffset, valueOffset, facts.size);
-    }
-
-    // `a[i] = value` when `a` is a static array: the same store
-    // `compileIndexAssign` already does for a dynamic array's element,
-    // just through `compileStaticElementAddress`'s address instead of
-    // `compileElementAddress`'s.
-    private void compileStaticIndexAssign(
-        AssignExp expression, IndexExp target, in size_t destOffset,
-    ) {
-        const facts = TypeFacts.of(expression.e1.type);
-
-        const addressOffset = compileStaticElementAddress(target);
-        const valueOffset = reserveTemp(facts);
-        evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
-        emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
-
-        if (destOffset != discardResult)
-            emit(&opCopy, destOffset, valueOffset, facts.size);
-    }
-
     // `arr[] = value;`, only for `arr` a static array's own whole slice - a
     // bounded slice or a dynamic array's own runtime fill are both out of
     // scope. When `value` is itself an array (another static array's own
@@ -2401,6 +2287,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // legal D).
     private void compileSliceAssign(
         AssignExp expression, SliceExp target, in size_t destOffset,
+        in size_t resolvedTarget = size_t.max,
     ) {
         import dmd.astenums: Tsarray;
 
@@ -2409,7 +2296,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // element count to unroll a loop over, unlike a static array's
         // own fixed `dim` below.
         if (target.e1.type.ty != Tsarray)
-            return compileDynamicSliceAssign(expression, target, destOffset);
+            return compileDynamicSliceAssign(
+                expression, target, destOffset, resolvedTarget);
 
         import dmd.astenums: Tarray;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
@@ -2441,7 +2329,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 && _layout.hasSlot(targetVariable)
             ? _layout.offsetOf(targetVariable) : size_t.max;
 
-        const baseOffset = compileAddress(target.e1);
+        const baseOffset = resolvedTarget == size_t.max
+            ? compileAddress(target.e1)
+            : loadSlicePointer(resolvedTarget, TypeFacts.of(target.type));
 
         const rightTy = expression.e2.type.ty;
         import snakebite.nativelayout: isStoredLiteral;
@@ -2508,6 +2398,27 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    private size_t loadSliceDescriptor(
+        in size_t address, in TypeFacts facts,
+    ) {
+        const descriptor = reserveTemp(facts);
+        emit(&opLoadIndirect, descriptor, address, facts.size);
+        return descriptor;
+    }
+
+    private size_t loadSlicePointer(
+        in size_t address, in TypeFacts facts,
+    ) {
+        import snakebite.nativelayout: arrayPointerOffset;
+
+        const descriptor = loadSliceDescriptor(address, facts);
+        const pointer = reserveTemp(pointerFacts);
+        emit(&opLoadIndirect, pointer,
+            addPointerOffset(descriptor, arrayPointerOffset),
+            size_t.sizeof);
+        return pointer;
+    }
+
     // `p[0 .. n] = q[];`/`a[] = b[];` (array-to-array) or
     // `p[a .. b] = v;` (scalar fill) for a dynamic-length target: a
     // pointer sliced to a run-time length (`_d_newclassT`'s own
@@ -2538,6 +2449,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // own compile-time-unrolled scalar fill for a static array.
     private void compileDynamicSliceAssign(
         AssignExp expression, SliceExp target, in size_t destOffset,
+        in size_t resolvedTarget = size_t.max,
     ) {
         import dmd.astenums: Tarray, Tpointer, Tvoid;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
@@ -2554,8 +2466,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             elementType.ty == Tvoid ? 1 : TypeFacts.of(elementType).size;
 
         const arrayFacts = TypeFacts.of(target.type);
-        const destSliceOffset = reserveTemp(arrayFacts);
-        evalInto(target, destSliceOffset, arrayFacts.size);
+        const destSliceOffset = resolvedTarget == size_t.max
+            ? reserveTemp(arrayFacts)
+            : loadSliceDescriptor(resolvedTarget, arrayFacts);
+        if (resolvedTarget == size_t.max)
+            evalInto(target, destSliceOffset, arrayFacts.size);
 
         if (expression.e2.type.ty != Tarray) {
             if (elementType.ty == Tvoid)
@@ -2619,15 +2534,25 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return addressOffset;
     }
 
-    // Evaluate the right operand before resolving the target, because target
-    // address evaluation can have side effects that must happen afterwards.
+    // Resolve the target before evaluating the right operand. Compound
+    // assignment captures its lvalue once, then evaluates and publishes the
+    // right side through that captured location.
     private void compileCompoundAssign(
         BinAssignExp expression, in size_t destOffset,
     ) {
+        const target = compileAddress(expression.e1);
+        compileCompoundAssignAt(expression, target, destOffset);
+    }
+
+    private void compileCompoundAssignAt(
+        BinAssignExp expression, in size_t targetOffset,
+        in size_t destOffset = discardResult,
+    ) {
         auto promotion = expression.e1.isCastExp;
         auto target = promotion is null ? expression.e1 : promotion.e1;
+        const targetFacts = TypeFacts.of(target.type);
         const operationFacts = promotion is null
-            ? TypeFacts.of(target.type) : TypeFacts.of(promotion.type);
+            ? targetFacts : TypeFacts.of(promotion.type);
         auto handler = compoundHandler(
             expression, operationFacts.isUnsigned);
         if (handler is null)
@@ -2636,8 +2561,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const rightOffset = reserveTemp(operationFacts);
         evalInto(expression.e2, rightOffset, operationFacts.size);
-        auto storage = scalarStorage(
-            target, expression.loc, expressionText(expression));
+        auto field = target.isDotVarExp;
+        auto fieldDeclaration = field is null
+            ? null : field.var.isVarDeclaration;
+        auto storage = ScalarStorage(
+            fieldDeclaration is null
+                || fieldDeclaration.isBitFieldDeclaration is null
+                ? ScalarStorage.Kind.indirect : ScalarStorage.Kind.bitfield,
+            targetFacts, targetOffset, fieldDeclaration,
+        );
         const valueOffset = readScalar(storage, operationFacts);
         emit(handler, valueOffset, rightOffset, operationFacts.size);
         writeScalar(storage, valueOffset, operationFacts.size);
@@ -2951,7 +2883,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // `$` inside an index has no frame slot of its own - dmd hands out
         // a fresh `VarDeclaration` for it that no statement declares
         // (`FrameLayout` never reserves it a slot for exactly that reason),
-        // and `compileElementAddress` binds `_dollar` to the length it
+        // and the shared storage resolver binds `_dollar` to the length it
         // stands for around evaluating the index expression it appears in.
         if (variable is _dollarVariable) {
             emit(&opCopy, _destination, _dollarOffset, _width);
@@ -3279,9 +3211,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return;
             }
 
-            const fieldAddress = reserveTemp(pointerFacts);
-            emit(&opCopy, fieldAddress, base, size_t.sizeof);
-            addPointerOffset(fieldAddress, step.offset);
+            const fieldAddress = addPointerOffset(base, step.offset);
             emit(&opStoreIndirect, fieldAddress, context, size_t.sizeof);
             return;
 
@@ -3294,9 +3224,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             const valueOffset = reserveTemp(step.facts);
             evalInto(step.source, valueOffset, step.facts.size, step.type);
-            const fieldAddress = reserveTemp(pointerFacts);
-            emit(&opCopy, fieldAddress, base, size_t.sizeof);
-            addPointerOffset(fieldAddress, step.offset);
+            const fieldAddress = addPointerOffset(base, step.offset);
             emit(&opStoreIndirect, fieldAddress, valueOffset, step.facts.size);
             return;
 
@@ -3304,10 +3232,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const valueOffset = reserveTemp(step.facts);
             evalInto(step.source, valueOffset, step.facts.size, step.type);
 
-            const addressOffset = reserveTemp(pointerFacts);
+            auto addressOffset = reserveTemp(pointerFacts);
             if (isPointer) {
-                emit(&opCopy, addressOffset, base, size_t.sizeof);
-                addPointerOffset(addressOffset, step.offset);
+                addressOffset = addPointerOffset(base, step.offset);
             } else
                 emit(&opFrameAddress, addressOffset, base + step.offset,
                     size_t.sizeof);
@@ -3356,7 +3283,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `arr.length`: the array's own length word, read straight out of its
     // own two-word slot - `arrayLengthOffset` is `0`, so this is really
     // just `arr`'s own first word, but named through the constant rather
-    // than assumed, the same way `compileElementAddress` names the pointer
+    // than assumed, the same way the shared storage resolver names the pointer
     // word through `arrayPointerOffset` instead of assuming it comes
     // second.
     override void visit(ArrayLengthExp expression) {
@@ -3533,8 +3460,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             pointerOffset, size_t.sizeof);
     }
 
-    // `arr[i]`, read as a value. `compileElementAddress` does the shared
-    // work of computing where that element actually lives; this only adds
+    // `arr[i]`, read as a value. The shared storage resolver computes where
+    // that element actually lives; this only adds
     // the load once that address is in hand.
     override void visit(IndexExp expression) {
         if (_destination == discardResult) {
@@ -3545,29 +3472,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         requireDestination(expression);
-
-        import dmd.astenums: Tpointer, Tsarray;
-
-        if (expression.e1.type.ty == Tsarray) {
-            const addressOffset = compileStaticElementAddress(expression);
-            emit(&opLoadIndirect, _destination, addressOffset, _width);
-            return;
-        }
-
-        const facts = TypeFacts.of(expression.e1.type);
-        if (facts.isDynamicArray) {
-            const addressOffset = compileElementAddress(expression, facts);
-            emit(&opLoadIndirect, _destination, addressOffset, _width);
-            return;
-        }
-
-        if (expression.e1.type.ty == Tpointer) {
-            const addressOffset = compilePointerElementAddress(expression);
-            emit(&opLoadIndirect, _destination, addressOffset, _width);
-            return;
-        }
-
-        return visit(cast(Expression) expression);
+        const addressOffset = compileAddress(expression);
+        emit(&opLoadIndirect, _destination, addressOffset, _width);
     }
 
     // `[a, b, c]`. Every element is evaluated in order into the block this
@@ -5528,185 +5434,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         *branchTargetField(_instructions[branchIndex]) = _instructions.length;
     }
 
-    // Where `expression`'s element actually lives: `expression.e1`'s own
-    // pointer word, offset by its index times the element's own size.
-    // Shared by a load (`visit(IndexExp)`) and a store
-    // (`compileIndexAssign`), which differ only in what they do with the
-    // address once they have it.
-    //
-    // An index outside the array would otherwise read or write through
-    // whatever raw address the arithmetic below happens to land on -
-    // corrupting host memory, not failing the guest - so this checks
-    // before computing that address. Compiled D specifies a
-    // `core.exception.ArrayIndexError` for an out-of-bounds index, so a
-    // guest `catch (ArrayIndexError)` or `catch (RangeError)` around an
-    // index must see one here too, not the different type `opAssert`'s
-    // `AssertError` would be - see `compileBoundsHook`'s own doc for why
-    // this calls druntime's own hook instead of a backend assertion.
-    private size_t compileElementAddress(
-        IndexExp expression, in TypeFacts arrayFacts,
-    ) {
-        import snakebite.backends.elementaddress:
-            indexBoundsHook, indexBoundsRegisters;
-        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
-
-        const arrayOffset = reserveTemp(arrayFacts);
-        evalInto(expression.e1, arrayOffset, arrayFacts.size);
-
-        auto outerDollarVariable = _dollarVariable;
-        auto outerDollarOffset = _dollarOffset;
-        scope (exit) {
-            _dollarVariable = outerDollarVariable;
-            _dollarOffset = outerDollarOffset;
-        }
-        if (expression.lengthVar !is null) {
-            _dollarVariable = expression.lengthVar;
-            _dollarOffset = arrayOffset + arrayLengthOffset;
-        }
-
-        const indexOffset = reserveTemp(pointerFacts);
-        evalOperandInto(expression.e2, indexOffset, size_t.sizeof);
-
-        const boundsOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, boundsOffset, indexOffset, size_t.sizeof);
-        emit(&opLessThanUnsigned, boundsOffset,
-            arrayOffset + arrayLengthOffset, size_t.sizeof);
-
-        compileBoundsHook(
-            boundsOffset,
-            indexBoundsHook,
-            indexBoundsRegisters,
-            [
-                Arg(indexOffset, 0, size_t.sizeof),
-                Arg(arrayOffset + arrayLengthOffset, 0, size_t.sizeof),
-            ],
-            expression.loc,
-        );
-
-        const elementSizeOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, elementSizeOffset,
-            addConstant(cast(long) arrayFacts.elementSize), size_t.sizeof);
-        emit(&opMultiply, indexOffset, elementSizeOffset, size_t.sizeof);
-
-        const addressOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, addressOffset, arrayOffset + arrayPointerOffset,
-            size_t.sizeof);
-        emit(&opAdd, addressOffset, indexOffset, size_t.sizeof);
-
-        return addressOffset;
-    }
-
-    // Where `expression`'s element lives when `expression.e1` is a plain
-    // pointer, not a dynamic array: no `{length, pointer}` header, and no
-    // bound to check against - a pointer index is `@system` in compiled D
-    // for exactly this reason, so this reads `expression.e1`'s own value
-    // and adds the index times the pointee's size, the same as compiled D
-    // would. dmd's own rvalue-AA-index lowering (`aa[key]`, see
-    // `visit(AssocArrayLiteralExp)` for the literal's own lowering) takes
-    // exactly this shape: `_d_aaGetRvalueX!(K, V)(aa, key)[0]`, a pointer
-    // returned by a druntime call and indexed at a literal `0`.
-    private size_t compilePointerElementAddress(IndexExp expression) {
-        const pointerOffset = reserveTemp(pointerFacts);
-        evalInto(expression.e1, pointerOffset, size_t.sizeof);
-
-        const elementFacts = TypeFacts.of(expression.e1.type.nextOf);
-
-        const indexOffset = reserveTemp(pointerFacts);
-        evalOperandInto(expression.e2, indexOffset, size_t.sizeof);
-
-        const elementSizeOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, elementSizeOffset,
-            addConstant(cast(long) elementFacts.size), size_t.sizeof);
-        emit(&opMultiply, indexOffset, elementSizeOffset, size_t.sizeof);
-
-        const addressOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, addressOffset, pointerOffset, size_t.sizeof);
-        emit(&opAdd, addressOffset, indexOffset, size_t.sizeof);
-
-        return addressOffset;
-    }
-
-    // Where `expression`'s element lives when `expression.e1` is a static
-    // array. dmd has no `IndexExp` lowering to reuse here - unlike
-    // assignment, construction or equality, indexing keeps no `.lowering`
-    // field at all, and `glue/e2ir.d`'s own `visitIndex` does exactly this
-    // arithmetic itself at codegen time: the bound comes from
-    // `TypeSArray.dim`, not a runtime length word, and the base address is
-    // the array's own address rather than a pointer read through a
-    // header. So this compiler has to do the same arithmetic dmd's
-    // codegen does, not reuse a lowering that does not exist. The
-    // dimension comes from `expression.e1.type` itself, known at compile
-    // time, and the base address is `expression.e1`'s own address,
-    // recursed through `compileAddress` since `expression.e1` can itself be
-    // a nested static-array index (`a[i][j]`, `expression.e1` is `a[i]`).
-    //
-    // The index is evaluated before that recursion, not after: dmd's own
-    // runtime codegen evaluates a nested static-array index write's
-    // rightmost bracket first and its leftmost bracket second, the
-    // opposite of source order - see
-    // `staticArray.nestedElementWriteIndexEvaluationOrder`'s own doc.
-    // Evaluating this level's own index first and only then recursing into
-    // `expression.e1`'s reproduces exactly that order, since each nested
-    // call does the same in turn.
-    private size_t compileStaticElementAddress(IndexExp expression) {
-        import dmd.expressionsem: toInteger;
-        import snakebite.backends.elementaddress:
-            indexBoundsHook, indexBoundsRegisters;
-
-        auto arrayType = expression.e1.type.isTypeSArray;
-        const elementFacts = TypeFacts.of(arrayType.next);
-        const dim = cast(size_t) arrayType.dim.toInteger;
-
-        const dimOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, dimOffset, addConstant(cast(long) dim),
-            size_t.sizeof);
-
-        auto outerDollarVariable = _dollarVariable;
-        auto outerDollarOffset = _dollarOffset;
-        scope (exit) {
-            _dollarVariable = outerDollarVariable;
-            _dollarOffset = outerDollarOffset;
-        }
-        if (expression.lengthVar !is null) {
-            _dollarVariable = expression.lengthVar;
-            _dollarOffset = dimOffset;
-        }
-
-        const indexOffset = reserveTemp(pointerFacts);
-        evalOperandInto(expression.e2, indexOffset, size_t.sizeof);
-
-        const boundsOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, boundsOffset, indexOffset, size_t.sizeof);
-        emit(&opLessThanUnsigned, boundsOffset, dimOffset, size_t.sizeof);
-
-        // Compiled D specifies an `ArrayIndexError` here too - see
-        // `compileBoundsHook`'s own doc for why this calls druntime's own
-        // hook instead of `opAssert`.
-        compileBoundsHook(
-            boundsOffset,
-            indexBoundsHook,
-            indexBoundsRegisters,
-            [
-                Arg(indexOffset, 0, size_t.sizeof),
-                Arg(dimOffset, 0, size_t.sizeof),
-            ],
-            expression.loc,
-        );
-
-        const baseOffset = compileAddress(expression.e1);
-
-        const elementSizeOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, elementSizeOffset,
-            addConstant(cast(long) elementFacts.size), size_t.sizeof);
-        emit(&opMultiply, indexOffset, elementSizeOffset, size_t.sizeof);
-
-        const addressOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, addressOffset, baseOffset, size_t.sizeof);
-        emit(&opAdd, addressOffset, indexOffset, size_t.sizeof);
-
-        return addressOffset;
-    }
-
     private struct StorageAdapter {
         FunctionCompiler compiler;
 
@@ -5775,10 +5502,31 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return storageValue(expression);
         }
 
-        public void storageAssignment(
+        public void storagePlainAssignment(
             AssignExp expression, size_t target,
         ) {
             compiler.compileAssignmentAt(expression, target);
+        }
+
+        public void storageSliceAssignment(
+            AssignExp expression, size_t target,
+        ) {
+            compiler.compileSliceAssign(
+                expression, cast() expression.e1.isSliceExp,
+                discardResult, target,
+            );
+        }
+
+        public void storageCompoundAssignment(
+            BinAssignExp expression, size_t target,
+        ) {
+            compiler.compileCompoundAssignAt(expression, target);
+        }
+
+        public void storageCatAssignment(
+            CatAssignExp expression, size_t target,
+        ) {
+            compiler.compileEffect(expression);
         }
 
         public size_t storageConstructorCall(CallExp expression) {
@@ -5802,17 +5550,128 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return compiler.addPointerOffset(base, arrayLengthOffset);
         }
 
-        public size_t storageDynamicIndex(IndexExp expression) {
-            return compiler.compileElementAddress(
-                expression, TypeFacts.of(expression.e1.type));
+        public size_t storageDynamicIndexLength(
+            IndexExp expression, size_t base,
+        ) {
+            import snakebite.nativelayout: arrayLengthOffset;
+
+            const facts = TypeFacts.of(expression.e1.type);
+            const array = compiler.reserveTemp(facts);
+            compiler.emit(&opLoadIndirect, array, base, facts.size);
+            return array + arrayLengthOffset;
         }
 
-        public size_t storageStaticIndex(IndexExp expression) {
-            return compiler.compileStaticElementAddress(expression);
+        public size_t storageStaticIndexLength(IndexExp expression) {
+            const length = compiler.reserveTemp(compiler.pointerFacts);
+            compiler.emit(&opConstant, length,
+                compiler.addConstant(cast(long) expression.e1.type
+                    .isTypeSArray.dim.toInteger),
+                size_t.sizeof);
+            return length;
         }
 
-        public size_t storagePointerIndex(IndexExp expression) {
-            return compiler.compilePointerElementAddress(expression);
+        public size_t storageIndexValue(
+            IndexExp expression, size_t length,
+        ) {
+            auto savedDollarVariable = compiler._dollarVariable;
+            auto savedDollarOffset = compiler._dollarOffset;
+            scope (exit) {
+                compiler._dollarVariable = savedDollarVariable;
+                compiler._dollarOffset = savedDollarOffset;
+            }
+            if (expression.lengthVar !is null) {
+                compiler._dollarVariable = expression.lengthVar;
+                compiler._dollarOffset = length;
+            }
+
+            const index = compiler.reserveTemp(compiler.pointerFacts);
+            compiler.evalOperandInto(expression.e2, index, size_t.sizeof);
+            return index;
+        }
+
+        public void storageIndexBounds(
+            IndexExp expression, size_t index, size_t length,
+        ) {
+            import snakebite.backends.elementaddress:
+                indexBoundsHook, indexBoundsRegisters;
+
+            const inBounds = compiler.reserveTemp(compiler.pointerFacts);
+            compiler.emit(&opCopy, inBounds, index, size_t.sizeof);
+            compiler.emit(&opLessThanUnsigned, inBounds, length,
+                size_t.sizeof);
+            compiler.compileBoundsHook(
+                inBounds,
+                indexBoundsHook,
+                indexBoundsRegisters,
+                [
+                    Arg(index, 0, size_t.sizeof),
+                    Arg(length, 0, size_t.sizeof),
+                ],
+                expression.loc,
+            );
+        }
+
+        public size_t storagePointerIndexBase(
+            IndexExp expression, size_t base,
+        ) {
+            const pointer = compiler.reserveTemp(compiler.pointerFacts);
+            compiler.emit(&opLoadIndirect, pointer, base, size_t.sizeof);
+            return pointer;
+        }
+
+        public size_t storagePointerIndexValue(IndexExp expression) {
+            return storageIndexValue(expression, 0);
+        }
+
+        public size_t storageDynamicIndex(
+            IndexExp expression, size_t base, size_t index,
+        ) {
+            import snakebite.nativelayout: arrayPointerOffset;
+
+            const stride = TypeFacts.of(expression.e1.type.nextOf).size;
+            const strideOffset = compiler.reserveTemp(compiler.pointerFacts);
+            compiler.emit(&opConstant, strideOffset,
+                compiler.addConstant(cast(long) stride), size_t.sizeof);
+            compiler.emit(&opMultiply, index, strideOffset, size_t.sizeof);
+
+            const facts = TypeFacts.of(expression.e1.type);
+            const array = compiler.reserveTemp(facts);
+            compiler.emit(&opLoadIndirect, array, base, facts.size);
+            const address = compiler.reserveTemp(compiler.pointerFacts);
+            compiler.emit(&opCopy, address,
+                array + arrayPointerOffset, size_t.sizeof);
+            compiler.emit(&opAdd, address, index, size_t.sizeof);
+            return address;
+        }
+
+        public size_t storageStaticIndex(
+            IndexExp expression, size_t base, size_t index,
+        ) {
+            const stride = TypeFacts.of(expression.e1.type.nextOf).size;
+            const strideOffset = compiler.reserveTemp(compiler.pointerFacts);
+            compiler.emit(&opConstant, strideOffset,
+                compiler.addConstant(cast(long) stride), size_t.sizeof);
+            compiler.emit(&opMultiply, index, strideOffset, size_t.sizeof);
+
+            const address = compiler.reserveTemp(compiler.pointerFacts);
+            compiler.emit(&opCopy, address, base, size_t.sizeof);
+            compiler.emit(&opAdd, address, index, size_t.sizeof);
+            return address;
+        }
+
+        public size_t storagePointerIndex(
+            IndexExp expression, size_t pointer, size_t index,
+        ) {
+            const stride = TypeFacts.of(expression.e1.type.nextOf).size;
+            const strideOffset = compiler.reserveTemp(compiler.pointerFacts);
+            compiler.emit(&opConstant, strideOffset,
+                compiler.addConstant(cast(long) stride), size_t.sizeof);
+            compiler.emit(&opMultiply, index, strideOffset, size_t.sizeof);
+
+            const address = compiler.reserveTemp(compiler.pointerFacts);
+            compiler.emit(&opCopy, address, pointer, size_t.sizeof);
+            compiler.emit(&opAdd, address, index, size_t.sizeof);
+            return address;
         }
 
         public size_t storageField(DotVarExp expression) {
