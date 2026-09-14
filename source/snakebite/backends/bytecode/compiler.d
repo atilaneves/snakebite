@@ -2639,6 +2639,33 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return addressOffset;
     }
 
+    // Evaluate the right operand before resolving the target, because target
+    // address evaluation can have side effects that must happen afterwards.
+    private void compileCompoundAssign(
+        BinAssignExp expression, in size_t destOffset,
+    ) {
+        auto promotion = expression.e1.isCastExp;
+        auto target = promotion is null ? expression.e1 : promotion.e1;
+        const operationFacts = promotion is null
+            ? TypeFacts.of(target.type) : TypeFacts.of(promotion.type);
+        auto handler = compoundHandler(
+            expression, operationFacts.isUnsigned);
+        if (handler is null)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const rightOffset = reserveTemp(operationFacts);
+        evalInto(expression.e2, rightOffset, operationFacts.size);
+        auto storage = scalarStorage(
+            target, expression.loc, expressionText(expression));
+        const valueOffset = readScalar(storage, operationFacts);
+        emit(handler, valueOffset, rightOffset, operationFacts.size);
+        writeScalar(storage, valueOffset, operationFacts.size);
+
+        if (destOffset != discardResult)
+            emit(&opCopy, destOffset, valueOffset, storage.facts.size);
+    }
+
     private struct ScalarStorage {
         enum Kind { frame, staticData, indirect, bitfield }
 
@@ -2652,7 +2679,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression target, in Loc loc,
         in string operation,
     ) {
-        auto facts = TypeFacts.of(target.type);
+        const facts = TypeFacts.of(target.type);
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             throw rejection(_function, loc, operation);
 
@@ -2700,28 +2727,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         );
     }
 
-    private void loadScalar(
-        ScalarStorage storage, in size_t destination, in size_t width,
-    ) {
-        final switch (storage.kind) with (ScalarStorage.Kind) {
-        case frame:
-            emit(&opCopy, destination, storage.offset, storage.facts.size);
-            break;
-        case staticData:
-            emitStaticLoad(storage.variable, destination, storage.facts.size);
-            break;
-        case indirect:
-            emit(&opLoadIndirect, destination, storage.offset,
-                storage.facts.size);
-            break;
-        case bitfield:
-            emit(&opLoadBitfield, destination, storage.offset,
-                storage.facts.size,
-                bitfieldMetadata(storage.variable, width));
-            break;
-        }
-    }
-
     private size_t readScalar(
         ScalarStorage storage, in TypeFacts resultFacts,
     ) {
@@ -2744,6 +2749,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return valueOffset;
     }
 
+    private void loadScalar(
+        ScalarStorage storage, in size_t destination, in size_t width,
+    ) {
+        final switch (storage.kind) with (ScalarStorage.Kind) {
+        case frame:
+            emit(&opCopy, destination, storage.offset, storage.facts.size);
+            break;
+        case staticData:
+            emitStaticLoad(storage.variable, destination, storage.facts.size);
+            break;
+        case indirect:
+            emit(&opLoadIndirect, destination, storage.offset,
+                storage.facts.size);
+            break;
+        case bitfield:
+            emit(&opLoadBitfield, destination, storage.offset,
+                storage.facts.size,
+                bitfieldMetadata(storage.variable, width));
+            break;
+        }
+    }
+
     private void writeScalar(
         ScalarStorage storage, in size_t valueOffset,
         in size_t valueWidth,
@@ -2761,37 +2788,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 storage.facts.size);
             break;
         case bitfield:
-            emit(&opStoreBitfield, storage.offset, valueOffset, valueWidth,
-                bitfieldMetadata(storage.variable, storage.facts.size));
+            emitBitfieldStore(storage.variable, storage.offset, valueOffset,
+                valueWidth);
             break;
         }
-    }
-
-    // `+=`, `-=`, ... resolve one storage location, apply the operation,
-    // and write the new value back. `destOffset` receives that new value.
-    private void compileCompoundAssign(
-        BinAssignExp expression, in size_t destOffset,
-    ) {
-        auto promotion = expression.e1.isCastExp;
-        auto target = promotion is null ? expression.e1 : promotion.e1;
-        const operationFacts = promotion is null
-            ? TypeFacts.of(target.type) : TypeFacts.of(promotion.type);
-        auto handler = compoundHandler(
-            expression, operationFacts.isUnsigned);
-        if (handler is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        const rightOffset = reserveTemp(operationFacts);
-        evalInto(expression.e2, rightOffset, operationFacts.size);
-        auto storage = scalarStorage(
-            target, expression.loc, expressionText(expression));
-        const valueOffset = readScalar(storage, operationFacts);
-        emit(handler, valueOffset, rightOffset, operationFacts.size);
-        writeScalar(storage, valueOffset, operationFacts.size);
-
-        if (destOffset != discardResult)
-            emit(&opCopy, destOffset, valueOffset, storage.facts.size);
     }
 
     private void emitStaticLoad(
