@@ -974,14 +974,38 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A successful indexed postincrement evaluates its index once, returns the
+// old element, and stores the incremented element.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot hold mutable static state across calls"),
+)) {
+    @("dynamicIndex.postincrement.changesElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        141.shouldBeRetOf!(backend, q{
+            int calls;
+
+            int index() {
+                ++calls;
+                return 1;
+            }
+
+            int answer() {
+                int[] values = [10, 20];
+                auto old = values[index()]++;
+                return old + values[1] + calls * 100;
+            }
+        }, "answer");
+    }
+}
+
 // `a[i]++` indexes as an lvalue and is bounds-checked like any other
 // element write.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE turns an out-of-range index into a compile-time error, so " ~
         "it cannot be expressed the same way as a runtime throw"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "cannot compile `a[i]++`: `PostExp` on an `IndexExp` is rejected"),
 )) {
     @("dynamicIndex.incrementIsRangeError." ~ backend.stringof)
     @Tags(backend.stringof)

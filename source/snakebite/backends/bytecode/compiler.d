@@ -382,6 +382,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import dmd.declaration: VarDeclaration;
     import dmd.identifier: Identifier;
     import dmd.init: ExpInitializer;
+    import dmd.location: Loc;
     import dmd.expression;
     import dmd.func: FuncDeclaration;
     import dmd.mtype: Type;
@@ -2638,262 +2639,159 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return addressOffset;
     }
 
-    // `+=`, `-=`, ... and every other compound assignment: the target is
-    // read once, not once to combine and again to write, since D
-    // evaluates the left side of one of these a single time. The right
-    // side is evaluated into a temporary first, before the target's
-    // current value is touched, since evaluating it can itself change
-    // what the target holds (`a[f()] += 1`). `destOffset` is where the
-    // assignment's own value - the *new* one, unlike `PostExp`'s own old
-    // one below - goes too, `discardResult` when nothing wants it.
+    // Evaluate the right operand before resolving the target, because target
+    // address evaluation can have side effects that must happen afterwards.
     private void compileCompoundAssign(
         BinAssignExp expression, in size_t destOffset,
     ) {
-        // A small-integer target (`ubyte`, `short`, ...) reaches dmd's
-        // semantic pass as a bare lvalue, but `typeCombine`'s own
-        // `integralPromotions` (dmd `dcast.d`) rewrites `expression.e1`
-        // into a `CastExp` promoting it to `int` for the operation itself
-        // - `expression.type` stays the original narrow storage type
-        // (`visit(BinAssignExp)` in dmd `expressionsem.d` captures it
-        // before that rewrite runs), so the value is combined at the
-        // promoted width and only the store back to the target is
-        // truncated to its own. `promotion` is that wrapping `CastExp`,
-        // null when the target's own width already covers `int` and no
-        // promotion was needed.
         auto promotion = expression.e1.isCastExp;
         auto target = promotion is null ? expression.e1 : promotion.e1;
-
-        // `this.calls` (a bare `calls` inside a class method, the same
-        // `DotVarExp` rewrite `compileFieldAssign` already reads through
-        // `compileFieldAddress`) - a field, unlike every other target
-        // this function handles, has no frame slot of its own, so it is
-        // read, modified through `handler` and stored back through its
-        // own address, rather than through any of the frame-offset
-        // shapes below.
-        if (auto fieldTarget = target.isDotVarExp) {
-            auto field = fieldTarget.var.isVarDeclaration;
-            if (field is null)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            if (field.isBitFieldDeclaration !is null) {
-                const storageFacts = TypeFacts.of(field.type);
-                const operationFacts = promotion is null
-                    ? storageFacts : TypeFacts.of(promotion.type);
-                auto handler = compoundHandler(
-                    expression, operationFacts.isUnsigned);
-                if (handler is null)
-                    throw rejection(_function, expression.loc,
-                        expressionText(expression));
-                const rightOffset = reserveTemp(operationFacts);
-                evalInto(expression.e2, rightOffset, operationFacts.size);
-                const valueOffset = reserveTemp(operationFacts);
-                const addressOffset = compileFieldAddress(fieldTarget);
-                emit(&opLoadBitfield, valueOffset, addressOffset,
-                    TypeFacts.of(field.type).size,
-                    bitfieldMetadata(field, operationFacts.size));
-                emit(handler, valueOffset, rightOffset, operationFacts.size);
-                emitBitfieldStore(field, addressOffset,
-                    valueOffset, operationFacts.size);
-                if (destOffset != discardResult)
-                    emit(&opCopy, destOffset, valueOffset,
-                        operationFacts.size);
-                return;
-            }
-
-            const storageFacts = TypeFacts.of(field.type);
-            if (!storageFacts.isIntegral || !isIntegralSize(storageFacts.size))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            const operationFacts = promotion is null
-                ? storageFacts : TypeFacts.of(promotion.type);
-
-            auto handler = compoundHandler(
-                expression, operationFacts.isUnsigned);
-            if (handler is null)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            const rightOffset = reserveTemp(operationFacts);
-            evalInto(expression.e2, rightOffset, operationFacts.size);
-
-            const addressOffset = compileFieldAddress(fieldTarget);
-            const valueOffset = reserveTemp(operationFacts);
-            if (promotion is null)
-                emit(&opLoadIndirect, valueOffset, addressOffset,
-                    storageFacts.size);
-            else
-                evalInto(promotion, valueOffset, operationFacts.size);
-            emit(handler, valueOffset, rightOffset, operationFacts.size);
-            emit(&opStoreIndirect, addressOffset, valueOffset,
-                storageFacts.size);
-
-            if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, storageFacts.size);
-            return;
-        }
-
-        // `*postblits += 1`, a destructor or postblit's own field-pointer
-        // dereferenced and updated in place: the pointee has no frame
-        // slot of its own either, read, modified through `handler` and
-        // stored back through its address the same way `res[pos] += value`
-        // below is - `compileAddress`'s own `PtrExp` dispatch already
-        // resolves the pointer value to dereference.
-        if (auto ptrTarget = target.isPtrExp) {
-            const storageFacts = TypeFacts.of(ptrTarget.type);
-            if (!storageFacts.isIntegral || !isIntegralSize(storageFacts.size))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            const operationFacts = promotion is null
-                ? storageFacts : TypeFacts.of(promotion.type);
-
-            auto handler = compoundHandler(
-                expression, operationFacts.isUnsigned);
-            if (handler is null)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            const rightOffset = reserveTemp(operationFacts);
-            evalInto(expression.e2, rightOffset, operationFacts.size);
-
-            const addressOffset = compileAddress(ptrTarget);
-            const valueOffset = reserveTemp(operationFacts);
-            if (promotion is null)
-                emit(&opLoadIndirect, valueOffset, addressOffset,
-                    storageFacts.size);
-            else
-                evalInto(promotion, valueOffset, operationFacts.size);
-            emit(handler, valueOffset, rightOffset, operationFacts.size);
-            emit(&opStoreIndirect, addressOffset, valueOffset,
-                storageFacts.size);
-
-            if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, storageFacts.size);
-            return;
-        }
-
-        // `res[pos] += value`: an indexed array element has no frame slot
-        // of its own, the same as a field, so it is read, modified
-        // through `handler` and stored back through its own address -
-        // `compileAddress`'s own `IndexExp` dispatch already covers every
-        // shape (dynamic array, static array, pointer) this needs.
-        if (auto indexTarget = target.isIndexExp) {
-            const storageFacts = TypeFacts.of(indexTarget.type);
-            if (!storageFacts.isIntegral || !isIntegralSize(storageFacts.size))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            const operationFacts = promotion is null
-                ? storageFacts : TypeFacts.of(promotion.type);
-
-            auto handler = compoundHandler(
-                expression, operationFacts.isUnsigned);
-            if (handler is null)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            const rightOffset = reserveTemp(operationFacts);
-            evalInto(expression.e2, rightOffset, operationFacts.size);
-
-            const addressOffset = compileAddress(indexTarget);
-            const valueOffset = reserveTemp(operationFacts);
-            if (promotion is null)
-                emit(&opLoadIndirect, valueOffset, addressOffset,
-                    storageFacts.size);
-            else
-                evalInto(promotion, valueOffset, operationFacts.size);
-            emit(handler, valueOffset, rightOffset, operationFacts.size);
-            emit(&opStoreIndirect, addressOffset, valueOffset,
-                storageFacts.size);
-
-            if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, storageFacts.size);
-            return;
-        }
-
-        auto varExp = target.isVarExp;
-        auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
-        if (variable is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        const storageFacts = TypeFacts.of(variable.type);
-        if (!storageFacts.isIntegral || !isIntegralSize(storageFacts.size))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
         const operationFacts = promotion is null
-            ? storageFacts : TypeFacts.of(promotion.type);
-
-        auto handler = compoundHandler(expression, operationFacts.isUnsigned);
+            ? TypeFacts.of(target.type) : TypeFacts.of(promotion.type);
+        auto handler = compoundHandler(
+            expression, operationFacts.isUnsigned);
         if (handler is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
         const rightOffset = reserveTemp(operationFacts);
         evalInto(expression.e2, rightOffset, operationFacts.size);
-
-        if (variable.isDataseg) {
-            const valueOffset = reserveTemp(operationFacts);
-            if (promotion is null)
-                emitStaticLoad(variable, valueOffset, storageFacts.size);
-            else
-                evalInto(promotion, valueOffset, operationFacts.size);
-            emit(handler, valueOffset, rightOffset, operationFacts.size);
-            emitStaticStore(variable, valueOffset, storageFacts.size);
-
-            if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, storageFacts.size);
-            return;
-        }
-
-        // A `ref` target, a captured variable, or a variable in an outer
-        // frame is reached through its storage address. Read and write
-        // through that address so the operation changes the variable's
-        // value, not a context pointer or a ref slot.
-        if (!_layout.hasSlot(variable) || isClosureVariable(variable)
-                || _layout.isRef(variable)) {
-            const refOffset = addressOfVariable(variable);
-            const valueOffset = reserveTemp(operationFacts);
-            if (promotion is null)
-                emit(&opLoadIndirect, valueOffset, refOffset,
-                    storageFacts.size);
-            else
-                evalInto(promotion, valueOffset, operationFacts.size);
-            emit(handler, valueOffset, rightOffset, operationFacts.size);
-            emit(&opStoreIndirect, refOffset, valueOffset, storageFacts.size);
-
-            if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, storageFacts.size);
-            return;
-        }
-
-        if (promotion is null) {
-            const varOffset = _layout.offsetOf(variable);
-            emit(handler, varOffset, rightOffset, operationFacts.size);
-
-            if (destOffset != discardResult && destOffset != varOffset)
-                emit(&opCopy, destOffset, varOffset, operationFacts.size);
-            return;
-        }
-
-        // A promoted target still has a frame slot, but the operation
-        // happens at the promoted width while the slot itself is only
-        // `storageFacts.size` wide: the in-place single-instruction form
-        // the plain frame-slot case above uses would read and write past
-        // the slot's own bytes, so this reads through `promotion` (dmd's
-        // own widening cast) into a wide temporary first, same as the
-        // dataseg/ref cases.
-        const varOffset = _layout.offsetOf(variable);
-        const valueOffset = reserveTemp(operationFacts);
-        evalInto(promotion, valueOffset, operationFacts.size);
+        auto storage = scalarStorage(
+            target, expression.loc, expressionText(expression));
+        const valueOffset = readScalar(storage, operationFacts);
         emit(handler, valueOffset, rightOffset, operationFacts.size);
-        emit(&opCopy, varOffset, valueOffset, storageFacts.size);
+        writeScalar(storage, valueOffset, operationFacts.size);
 
         if (destOffset != discardResult)
-            emit(&opCopy, destOffset, valueOffset, storageFacts.size);
+            emit(&opCopy, destOffset, valueOffset, storage.facts.size);
+    }
+
+    private struct ScalarStorage {
+        enum Kind { frame, staticData, indirect, bitfield }
+
+        Kind kind;
+        TypeFacts facts;
+        size_t offset;
+        VarDeclaration variable;
+    }
+
+    private ScalarStorage scalarStorage(
+        Expression target, in Loc loc,
+        in string operation,
+    ) {
+        const facts = TypeFacts.of(target.type);
+        if (!facts.isIntegral || !isIntegralSize(facts.size))
+            throw rejection(_function, loc, operation);
+
+        if (auto dot = target.isDotVarExp) {
+            auto field = dot.var.isVarDeclaration;
+            if (field is null)
+                throw rejection(_function, loc, operation);
+            const address = compileFieldAddress(dot);
+            return ScalarStorage(
+                field.isBitFieldDeclaration is null
+                    ? ScalarStorage.Kind.indirect
+                    : ScalarStorage.Kind.bitfield,
+                facts, address, field,
+            );
+        }
+
+        if (auto var = target.isVarExp) {
+            auto variable = var.var.isVarDeclaration;
+            if (variable is null)
+                throw rejection(_function, loc, operation);
+            if (isThisField(variable))
+                return ScalarStorage(
+                    ScalarStorage.Kind.indirect, facts,
+                    compileAddress(target), null,
+                );
+            if (variable.isDataseg)
+                return ScalarStorage(
+                    ScalarStorage.Kind.staticData, facts, 0, variable,
+                );
+            if (_layout.hasSlot(variable) && !isClosureVariable(variable)
+                    && !_layout.isRef(variable))
+                return ScalarStorage(
+                    ScalarStorage.Kind.frame, facts,
+                    _layout.offsetOf(variable), null,
+                );
+            return ScalarStorage(
+                ScalarStorage.Kind.indirect, facts,
+                addressOfVariable(variable), null,
+            );
+        }
+
+        return ScalarStorage(
+            ScalarStorage.Kind.indirect, facts,
+            compileAddress(target), null,
+        );
+    }
+
+    private size_t readScalar(
+        ScalarStorage storage, in TypeFacts resultFacts,
+    ) {
+        if (storage.kind == ScalarStorage.Kind.frame
+                && storage.facts.size == resultFacts.size)
+            return storage.offset;
+
+        const valueOffset = reserveTemp(resultFacts);
+        if (storage.facts.size == resultFacts.size) {
+            loadScalar(storage, valueOffset, resultFacts.size);
+            return valueOffset;
+        }
+
+        loadScalar(storage, valueOffset, storage.facts.size);
+        emit(
+            storage.facts.isUnsigned
+                ? &opCastWidenUnsigned : &opCastWidenSigned,
+            valueOffset, storage.facts.size, resultFacts.size,
+        );
+        return valueOffset;
+    }
+
+    private void loadScalar(
+        ScalarStorage storage, in size_t destination, in size_t width,
+    ) {
+        final switch (storage.kind) with (ScalarStorage.Kind) {
+        case frame:
+            emit(&opCopy, destination, storage.offset, storage.facts.size);
+            break;
+        case staticData:
+            emitStaticLoad(storage.variable, destination, storage.facts.size);
+            break;
+        case indirect:
+            emit(&opLoadIndirect, destination, storage.offset,
+                storage.facts.size);
+            break;
+        case bitfield:
+            emit(&opLoadBitfield, destination, storage.offset,
+                storage.facts.size,
+                bitfieldMetadata(storage.variable, width));
+            break;
+        }
+    }
+
+    private void writeScalar(
+        ScalarStorage storage, in size_t valueOffset,
+        in size_t valueWidth,
+    ) {
+        final switch (storage.kind) with (ScalarStorage.Kind) {
+        case frame:
+            if (storage.offset != valueOffset)
+                emit(&opCopy, storage.offset, valueOffset, storage.facts.size);
+            break;
+        case staticData:
+            emitStaticStore(storage.variable, valueOffset, storage.facts.size);
+            break;
+        case indirect:
+            emit(&opStoreIndirect, storage.offset, valueOffset,
+                storage.facts.size);
+            break;
+        case bitfield:
+            emitBitfieldStore(storage.variable, storage.offset, valueOffset,
+                valueWidth);
+            break;
+        }
     }
 
     private void emitStaticLoad(
@@ -2932,120 +2830,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // an expression - goes, captured before the target changes;
     // `discardResult` when a caller at statement level does not want it.
     private void compilePost(PostExp expression, in size_t destOffset) {
-        // `(*aa.impl).used++`: a field reached through a receiver lvalue
-        // (here a pointer dereference), the same address
-        // `compileCompoundAssign`'s own `DotVarExp` branch already reads
-        // and writes through `compileFieldAddress` rather than any frame
-        // slot.
-        if (auto fieldTarget = expression.e1.isDotVarExp) {
-            auto field = fieldTarget.var.isVarDeclaration;
-            if (field is null)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            const facts = TypeFacts.of(field.type);
-            if (!facts.isIntegral || !isIntegralSize(facts.size))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            const addressOffset = compileFieldAddress(fieldTarget);
-            const valueOffset = reserveTemp(facts);
-            if (field.isBitFieldDeclaration !is null)
-                emit(&opLoadBitfield, valueOffset, addressOffset,
-                    facts.size, bitfieldMetadata(field, facts.size));
-            else
-                emit(&opLoadIndirect, valueOffset, addressOffset, facts.size);
-
-            if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, facts.size);
-
-            const stepOffset = reserveTemp(facts);
-            evalInto(expression.e2, stepOffset, facts.size);
-
-            auto handler = expression.op == EXP.plusPlus
-                ? &opAdd : &opSubtract;
-            emit(handler, valueOffset, stepOffset, facts.size);
-            if (field.isBitFieldDeclaration !is null)
-                emitBitfieldStore(field, addressOffset, valueOffset,
-                    facts.size);
-            else
-                emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
-            return;
-        }
-
-        auto varExp = expression.e1.isVarExp;
-        auto variable = varExp is null ? null : varExp.var.isVarDeclaration;
-        if (variable is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        const facts = TypeFacts.of(variable.type);
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        if (variable.isDataseg) {
-            const valueOffset = reserveTemp(facts);
-            emitStaticLoad(variable, valueOffset, facts.size);
-
-            if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, facts.size);
-
-            const stepOffset = reserveTemp(facts);
-            evalInto(expression.e2, stepOffset, facts.size);
-
-            auto handler = expression.op == EXP.plusPlus
-                ? &opAdd : &opSubtract;
-            emit(handler, valueOffset, stepOffset, facts.size);
-            emitStaticStore(variable, valueOffset, facts.size);
-            return;
-        }
-
-        if (!_layout.hasSlot(variable) || isClosureVariable(variable)) {
-            const refOffset = addressOfVariable(variable);
-            const valueOffset = reserveTemp(facts);
-            emit(&opLoadIndirect, valueOffset, refOffset, facts.size);
-
-            if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, facts.size);
-
-            const stepOffset = reserveTemp(facts);
-            evalInto(expression.e2, stepOffset, facts.size);
-
-            auto handler = expression.op == EXP.plusPlus
-                ? &opAdd : &opSubtract;
-            emit(handler, valueOffset, stepOffset, facts.size);
-            emit(&opStoreIndirect, refOffset, valueOffset, facts.size);
-            return;
-        }
-
-        const varOffset = _layout.offsetOf(variable);
-
-        if (_layout.isRef(variable)) {
-            const valueOffset = reserveTemp(facts);
-            emit(&opLoadIndirect, valueOffset, varOffset, facts.size);
-
-            if (destOffset != discardResult)
-                emit(&opCopy, destOffset, valueOffset, facts.size);
-
-            const stepOffset = reserveTemp(facts);
-            evalInto(expression.e2, stepOffset, facts.size);
-
-            auto handler = expression.op == EXP.plusPlus
-                ? &opAdd : &opSubtract;
-            emit(handler, valueOffset, stepOffset, facts.size);
-            emit(&opStoreIndirect, varOffset, valueOffset, facts.size);
-            return;
-        }
+        auto storage = scalarStorage(
+            expression.e1, expression.loc, expressionText(expression));
+        const valueOffset = readScalar(storage, storage.facts);
 
         if (destOffset != discardResult)
-            emit(&opCopy, destOffset, varOffset, facts.size);
+            emit(&opCopy, destOffset, valueOffset, storage.facts.size);
 
-        const stepOffset = reserveTemp(facts);
-        evalInto(expression.e2, stepOffset, facts.size);
-
-        auto handler = expression.op == EXP.plusPlus ? &opAdd : &opSubtract;
-        emit(handler, varOffset, stepOffset, facts.size);
+        const stepOffset = reserveTemp(storage.facts);
+        evalInto(expression.e2, stepOffset, storage.facts.size);
+        auto handler = expression.op == EXP.plusPlus
+            ? &opAdd : &opSubtract;
+        emit(handler, valueOffset, stepOffset, storage.facts.size);
+        writeScalar(storage, valueOffset, storage.facts.size);
     }
 
     // Compiles `expression`'s value into `frame[destOffset .. destOffset +
