@@ -135,7 +135,20 @@ unittest {
     // Fixed from independent runs of a known-good revision: mean + 3 sample
     // standard deviations, rounded up. Do not let a candidate's own noise
     // raise its limit.
-    enum maxRatio = 2.40;
+    //
+    // Recalibrated against master (fe58792): 15 runs of `bin/at -d
+    // at.ffi.cost` on an otherwise idle machine, one core pinned so the OS
+    // could not migrate the tight timing loop mid-measurement - an unpinned
+    // run can swap cores between the baseline half of a round and the
+    // barrier half, which moves the printed ratio far more than the
+    // barrier's own cost does. Printed ratios: 3.065571, 3.288746,
+    // 3.291122, 3.293928, 3.294434, 3.295138, 3.297399, 3.298807, 3.300118,
+    // 3.301615, 3.302570, 3.302705, 3.303412, 3.303819, 3.305789. Mean
+    // 3.283, sample standard deviation 0.060, mean + 3 sd = 3.464, rounded
+    // up to one decimal. The old 2.40 predated the optimised bin/at build
+    // (see "Build the acceptance tests optimised"); it never matched this
+    // build's own steady state and only passed when a retry got lucky.
+    enum maxRatio = 3.5;
     // `-release` strips `assert`, so the gate is a `should` check, not an
     // `assert`. `bin/at` is always built with `-O`, so the ratio measures
     // the barrier itself rather than the cost of an unoptimised build.
