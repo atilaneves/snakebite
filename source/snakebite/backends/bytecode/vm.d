@@ -11,7 +11,7 @@ extern(C) void executeCallPlan(
     size_t argumentCount,
 );
 
-import snakebite.ffi.limits: maxArguments;
+import snakebite.callarguments: CallArguments;
 import snakebite.nativevalue: loadSigned, loadUnsigned, storeIntegral;
 import object: Throwable, TypeInfo_Class;
 
@@ -566,14 +566,16 @@ public const(Instruction)* opCall(
             *cast(const(Function)**) (frame + site.calleeSlotOffset);
         return callFunction(pc, frame, site, callee, frames);
     case native:
-        const(void)*[maxArguments] arguments;
+        auto arguments = CallArguments(site.args.length);
+        // const would make the address slots read-only.
+        auto values = arguments.values;
         foreach (i, arg; site.args)
-            arguments[i] = frame + arg.callerOffset;
+            values[i] = frame + arg.callerOffset;
         auto result = pc.destination == discardResult
             ? null
             : frame + pc.destination;
         executeCallPlan(
-            site.nativePlan, result, arguments.ptr, site.args.length,
+            site.nativePlan, result, values.ptr, values.length,
         );
         return pc + 1;
     }

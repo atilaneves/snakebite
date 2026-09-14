@@ -5,6 +5,7 @@ private:
 
 
 import core.sync.mutex: Mutex;
+import snakebite.callarguments: CallArguments;
 import snakebite.exception: SnakebiteException;
 
 
@@ -202,22 +203,15 @@ public final class CallbackBridge {
         return cast(void*) _entries[function_].address;
     }
 
-    // Values are returned in a fixed-size holder so callback addresses stay
-    // alive while the prepared call consumes them. The caller only learns
-    // the one slice needed by CallPlan.
+    // The holder keeps callback addresses alive until the call returns.
     public void adaptArguments(
         GuestFunction hostFunction,
         scope const(void*)[] arguments,
         ref CallbackArguments result,
     ) {
-        import snakebite.ffi.limits: maxArguments;
-
-        if (arguments.length > maxArguments)
-            throw new Exception("ffi callback arguments exceed the limit");
-
-        result._length = arguments.length;
-        foreach (i; 0 .. result._length)
-            result._arguments[i] = cast(void*) arguments[i];
+        result._arguments = CallArguments(arguments.length);
+        result._addresses = CallArguments(arguments.length);
+        result._arguments.values[] = arguments[];
         adapt(hostFunction, arguments, result);
     }
 
@@ -287,23 +281,20 @@ public final class CallbackBridge {
             if (!_isGuest(_owner, candidate))
                 continue;
 
-            result._addresses[argumentIndex] = cast(size_t)
+            result._addresses.values[argumentIndex] =
                 callbackAddress(hostFunction, candidate, indirect);
-            result._arguments[argumentIndex] =
-                &result._addresses[argumentIndex];
+            result._arguments.values[argumentIndex] =
+                &result._addresses.values[argumentIndex];
         }
     }
 }
 
 
 public struct CallbackArguments {
-    private void*[imported!"snakebite.ffi.limits".maxArguments]
-        _arguments;
-    private size_t[imported!"snakebite.ffi.limits".maxArguments]
-        _addresses;
-    private size_t _length;
+    private CallArguments _arguments;
+    private CallArguments _addresses;
 
-    public scope const(void*)[] values() {
-        return _arguments[0 .. _length];
+    public const(void*)[] values() return scope {
+        return _arguments.values;
     }
 }

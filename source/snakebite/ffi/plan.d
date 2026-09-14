@@ -32,22 +32,9 @@ private:
 // it into the frame, call that one entry once, and read the result back.
 public struct CallPlan {
     import snakebite.ffi.abi: ArgumentPlan, Register;
-    import snakebite.ffi.limits: maxArguments;
     import snakebite.ffi.sysv:
         CallEntry, CallFrame, snakebite_ffi_call_sysv_amd64,
         snakebite_ffi_call_sysv_amd64_integer;
-
-    // `prepare` refuses a callee whose parameters (hidden context and
-    // return pointer included) need more than `maxArguments` ABI words
-    // total (see its own `words > maxArguments` check), and the hidden
-    // return pointer - the one word that can be part of that count -
-    // never becomes a move (see `_returnPointerOffset`), so `maxArguments`
-    // moves is always enough, never `maxArguments` parameters each
-    // claiming two.
-    private enum maxMoves = maxArguments;
-    // Every move above is a candidate for the stack, so the same bound
-    // covers the stack-only subset of them.
-    private enum maxStackWords = maxArguments;
 
     // The System V `CallFrame` (ADR-0001) plus this plan's own stack word
     // storage, laid out contiguously right after it. Every move - whether
@@ -57,7 +44,7 @@ public struct CallPlan {
     // `stackBase` below are where each region starts.
     private struct Frame {
         private CallFrame callFrame;
-        private size_t[maxStackWords] stackArea;
+        private size_t[16] stackArea;
     }
 
     private enum size_t integerBase = CallFrame.integer.offsetof;
@@ -84,11 +71,11 @@ public struct CallPlan {
     // pointer, when this plan has one, is not a move - see
     // `_returnPointerOffset`.
     private struct Move {
+        private size_t parameterIndex;
+        private size_t destinationOffset;
         private Load load;
-        private ubyte parameterIndex;
         private ubyte byteOffset;
         private ubyte copyBytes;
-        private ushort destinationOffset;
     }
 
     // How to write one result eightbyte back into `returnPlace`: a
@@ -107,7 +94,7 @@ public struct CallPlan {
     // Indexed by parameter, not by register: a dynamic-array parameter
     // reserves one entry here and two registers at call time, since the
     // two travel together as one argument the guest evaluated once.
-    private ArgumentPlan[maxArguments] _arguments;
+    private ArgumentPlan[] _arguments;
     private size_t _parameterCount;
     private ArgumentPlan _return;
     // Whether `_return` is meaningless because the result travels through
@@ -123,7 +110,7 @@ public struct CallPlan {
     // reverse declaration order - see `abi.reversedDParameters`.
     private bool _reversedArguments;
     // The moves `callAt` replays - see the module comment.
-    private Move[maxMoves] _moves;
+    private Move[] _moves;
     private size_t _moveCount;
     // `CallFrame.sseCount`: how many of the moves above land in an SSE
     // register, for a variadic callee's `%al`.
@@ -184,17 +171,7 @@ public struct CallPlan {
         if (_hiddenReturnPointer && returnPlace is null)
             throwMissingReturnPlace;
 
-        // The integer-only entry never reads `sse`, `sseCount`, `stack`
-        // or `stackWords` (see `sysv_amd64.S`'s own comment on that
-        // entry), and a plan that chose it never spills a stack word
-        // either, so its call needs only a bare `CallFrame` local - 168
-        // bytes, instead of `Frame`'s 424 (`CallFrame` plus this plan's
-        // worst-case stack area), which only a plan using the general
-        // entry still needs. `CallFrame`'s own byte layout is what both
-        // `fillFrame`'s destination offsets and `readResult`'s source
-        // offsets already address into, so nothing about either helper
-        // changes between the two branches - only which local, and how
-        // much of it, exists.
+        // Calls without SSE or stack arguments need only the register frame.
         if (_integerOnly) {
             CallFrame frame = void;
             auto frameBytes = cast(ubyte*) &frame;
@@ -205,12 +182,18 @@ public struct CallPlan {
         }
 
         Frame frame = void;
-        auto frameBytes = cast(ubyte*) &frame;
+        // Keep small calls on the stack. The overflow storage has word
+        // alignment and retains the flat offsets used by the prepared moves.
+        auto storage = _stackWordCount <= frame.stackArea.length
+            ? null : new size_t[stackBase / size_t.sizeof + _stackWordCount];
+        auto frameBytes = storage is null
+            ? cast(ubyte*) &frame : cast(ubyte*) storage.ptr;
         fillFrame(frameBytes, returnPlace, arguments);
-        frame.callFrame.sseCount = _sseCount;
-        frame.callFrame.stack = frame.stackArea.ptr;
-        frame.callFrame.stackWords = _stackWordCount;
-        _entry(address, &frame.callFrame);
+        auto callFrame = cast(CallFrame*) frameBytes;
+        callFrame.sseCount = _sseCount;
+        callFrame.stack = cast(size_t*) (frameBytes + stackBase);
+        callFrame.stackWords = _stackWordCount;
+        _entry(address, callFrame);
         readResult(frameBytes, returnPlace);
     }
 
@@ -351,6 +334,7 @@ public struct CallPlan {
         CallPlan plan;
         plan._address = cast(void*) address;
         plan._parameterCount = parameterRegisters.length;
+        plan._arguments.length = parameterRegisters.length;
         foreach (i, register; parameterRegisters)
             plan._arguments[i] =
                 ArgumentPlan([register, Register.init], 1, false);
@@ -392,6 +376,7 @@ public struct CallPlan {
         size_t floatingCount;
         size_t stackCount;
         size_t moveCount;
+        _moves.length = _parameterCount * 2;
 
         void addRegisterMove(
             in Register register,
@@ -403,11 +388,8 @@ public struct CallPlan {
                 ? sseBase + (floatingCount++) * size_t.sizeof
                 : integerBase + (integerCount++) * size_t.sizeof;
             _moves[moveCount++] = Move(
-                loadOf(register),
-                cast(ubyte) parameterIndex,
-                cast(ubyte) byteOffset,
-                copyBytesOf(register),
-                cast(ushort) destinationOffset,
+                parameterIndex, destinationOffset, loadOf(register),
+                cast(ubyte) byteOffset, copyBytesOf(register),
             );
         }
 
@@ -419,9 +401,8 @@ public struct CallPlan {
             const destinationOffset =
                 stackBase + (stackCount++) * size_t.sizeof;
             _moves[moveCount++] = Move(
-                loadOf(register), cast(ubyte) parameterIndex,
+                parameterIndex, destinationOffset, loadOf(register),
                 cast(ubyte) byteOffset, copyBytesOf(register),
-                cast(ushort) destinationOffset,
             );
         }
 
@@ -463,7 +444,7 @@ public struct CallPlan {
         // deferred to a second pass, in descending parameter index when
         // `_reversedArguments`, ascending otherwise, once every parameter
         // that does fit has claimed its register.
-        size_t[maxArguments] spilled;
+        auto spilled = new size_t[_parameterCount];
         size_t spilledCount;
 
         // Whether argument `i`'s own eightbytes all still fit in whichever
@@ -791,7 +772,6 @@ private CallPlan prepare(
         ArgumentPlan, Register, contextPrecedesHiddenReturnPointer,
         needsHiddenReturnPointer, reversedDParameters,
         supported;
-    import snakebite.ffi.limits: maxArguments;
     import dmd.astenums: LINK, STC, VarArg;
     import dmd.mangle: mangleExact;
     import dmd.typesem: nextOf;
@@ -823,18 +803,8 @@ private CallPlan prepare(
         const count = type.parameterList.length;
         const hasContext = hasHiddenThis(function_);
         const argumentCount = count + hasContext;
-        if (argumentCount > maxArguments)
-            throw new Exception(
-                text("ffi cannot call `", function_.toString, "`: it takes ",
-                    argumentCount,
-                    hasContext
-                        ? " arguments including hidden context, "
-                        : " arguments, ",
-                    "and at most ", maxArguments,
-                    " argument slots are available"),
-            );
-
         CallPlan plan;
+        plan._arguments.length = argumentCount;
         // A `ref` return hands back the *address* of the result in the
         // return register, not the result: that address is what travels,
         // whatever `type.nextOf` says, so the return is a pointer and
@@ -860,10 +830,6 @@ private CallPlan prepare(
         plan._reversedArguments = reversedDParameters
             && (linkage == LINK.d || linkage == LINK.default_);
 
-        size_t words;
-        if (plan._hiddenReturnPointer)
-            words = 1;
-
         size_t argumentIndex;
         if (hasContext) {
             plan._hiddenContext = true;
@@ -871,7 +837,6 @@ private CallPlan prepare(
                 [Register(Register.Kind.pointer, 8), Register.init], 1,
                 false,
             );
-            ++words;
         }
 
         foreach (i; 0 .. count) {
@@ -900,14 +865,6 @@ private CallPlan prepare(
                         false,
                     )
                 : ArgumentPlan.of(type.parameterList[i].type);
-            words += argument.count;
-            if (words > maxArguments)
-                throw new Exception(
-                    text("ffi cannot call `", function_.toString,
-                        "`: its arguments need more than ", maxArguments,
-                        " ABI words"),
-                );
-
             plan._arguments[argumentIndex++] = argument;
         }
 

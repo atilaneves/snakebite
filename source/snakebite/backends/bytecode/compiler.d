@@ -8,7 +8,7 @@ import object: TypeInfo_Class;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
 import snakebite.ffi:
-    CallbackBridge, maxArguments, PlanCache, supportsBoolFunction;
+    CallbackBridge, PlanCache, supportsBoolFunction;
 import snakebite.ffi.abi: Register;
 
 

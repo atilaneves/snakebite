@@ -3,7 +3,6 @@ module snakebite.ffi.abi;
 
 private:
 
-import snakebite.ffi.limits: maxArguments;
 
 // This module classifies one value's System V AMD64 ABI shape -
 // `ArgumentPlan` and `Register` - and the two host-compiler switches

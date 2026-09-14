@@ -1,7 +1,6 @@
 module snakebite.ffi;
 
 
-public import snakebite.ffi.limits: maxArguments;
 public import snakebite.ffi.call: CallAdapter, CallResult;
 public import snakebite.ffi.callback:
     CallbackArguments, CallbackBridge, GuestFunction,

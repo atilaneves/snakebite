@@ -4,7 +4,7 @@ module snakebite.backends.interpreter.walker;
 private:
 
 import std.conv: text;
-import snakebite.ffi.limits: maxArguments;
+import snakebite.callarguments: CallArguments;
 
 
 // Walks dmd's AST directly. The one invariant: a result is never boxed
@@ -625,7 +625,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallExp callSite = null,
         bool classConstructor = false,
     ) {
-        const(void)*[maxArguments] slots;
+        auto arguments = argumentSlots(frameBase, layout);
 
         scope void executeCallee(
             scope void* place,
@@ -639,7 +639,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto result = callShapeOf(function_).adapter.invoke(
             returnPlace,
-            argumentSlots(slots, frameBase, layout),
+            arguments.values,
             &executeCallee,
         );
         if (function_.isCtorDeclaration !is null
@@ -954,25 +954,23 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // Where the hidden context and each explicit parameter's bytes sit in
     // the frame the caller just filled: what the FFI needs to hand them
     // over, built from the layout this interpreter already computed.
-    //
-    // Filled into the caller's own storage rather than a fresh array: this
-    // runs on every call through the FFI, and the slots are read and done
-    // with before the call returns, so there is nothing for an allocation
-    // to outlive.
-    extern(D) private const(void*)[] argumentSlots(
-        return scope ref const(void)*[maxArguments] slots,
+    extern(D) private CallArguments argumentSlots(
         ubyte* frameBase,
         const(FrameLayout)* layout,
     ) {
+        auto arguments = CallArguments(layout.parameters.length
+            + (layout.hiddenThis.variable !is null));
+        // const would make the address slots read-only.
+        auto values = arguments.values;
         size_t count;
         if (layout.hiddenThis.variable !is null)
-            slots[count++] =
+            values[count++] =
                 frameBase + layout.hiddenThis.parameter.offset;
 
         foreach (i, parameter; layout.parameters)
-            slots[count++] = frameBase + parameter.offset;
+            values[count++] = frameBase + parameter.offset;
 
-        return slots[0 .. count];
+        return arguments;
     }
 
     override void visit(Statement statement) {
@@ -4534,11 +4532,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto nativeVirtual = nativeVirtualAddress(function_, classReceiver);
         if (nativeVirtual !is null) {
-            const(void)*[maxArguments] slots;
+            auto arguments = argumentSlots(frame.base, layout);
             _plans.of(function_).callAt(
                 nativeVirtual,
                 _place,
-                argumentSlots(slots, frame.base, layout),
+                arguments.values,
             );
             return;
         }

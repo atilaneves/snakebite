@@ -5,6 +5,7 @@ import ut.backends;
 import snakebite.ffi: PlanCache;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
+import std.conv: text;
 
 
 private extern(C) ubyte[] snakebite_ut_dynamic_array() {
@@ -372,5 +373,130 @@ static foreach (backend; Matrix!(
             },
             "allocArray",
         );
+    }
+}
+
+
+private string manyArgumentSignature(string linkage, size_t count) {
+    auto code = text("pragma(mangle, \"snakebite_ut_many_", linkage,
+        count, "\") extern(", linkage, ") long many", linkage, count, "(");
+    foreach (i; 0 .. count)
+        code ~= text(i ? ", " : "", "long a", i);
+    return code ~ ")";
+}
+
+
+private string manyArgumentBody(size_t count) {
+    auto code = "{ long result;";
+    foreach (i; 0 .. count)
+        code ~= text("result += ", i + 1, " * a", i, ";");
+    return code ~ "return result; }";
+}
+
+
+private string manyArgumentCall(string linkage, size_t count) {
+    auto code = text("long answer() { return Ffi.many", linkage, count, "(");
+    foreach (i; 0 .. count)
+        code ~= text(i ? ", " : "", i + 1);
+    return code ~ "); }";
+}
+
+
+static foreach (linkage; AliasSeq!("C", "D")) {
+    static foreach (count; AliasSeq!(17, 31, 257)) {
+        mixin(manyArgumentSignature(linkage, count)
+            ~ manyArgumentBody(count));
+
+        static foreach (backend; Matrix!(
+            Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+        )) {
+            @("manyArguments." ~ linkage ~ count.stringof
+                ~ "." ~ backend.stringof)
+            @Tags(backend.stringof)
+            unittest {
+                enum code = "struct Ffi { static: "
+                    ~ manyArgumentSignature(linkage, count) ~ "; }"
+                    ~ manyArgumentCall(linkage, count);
+                enum expected = long(count) * (count + 1)
+                    * (2 * count + 1) / 6;
+                expected.shouldBeRetOf!(backend, code, "answer");
+            }
+        }
+    }
+}
+
+
+private extern(C) size_t snakebite_ut_many_strings(
+    string a, string b, string c, string d, string e,
+    string f, string g, string h, string i, string j,
+) {
+    return a.length + b.length * 2 + c.length * 3 + d.length * 4
+        + e.length * 5 + f.length * 6 + g.length * 7 + h.length * 8
+        + i.length * 9 + j.length * 10;
+}
+
+
+private alias ManyCallback = extern(D) bool function();
+
+
+private extern(C) long snakebite_ut_many_callback(
+    long a0, long a1, long a2, long a3,
+    long a4, long a5, long a6, long a7,
+    long a8, long a9, long a10, long a11,
+    long a12, long a13, long a14, long a15,
+    ManyCallback callback,
+) {
+    return a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7
+        + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15
+        + (callback() ? 100 : 0);
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("manyArguments.strings." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(385).shouldBeRetOf!(backend, q{
+            pragma(mangle, "snakebite_ut_many_strings")
+            extern(C) size_t snakebite_ut_many_strings(
+                string, string, string, string, string,
+                string, string, string, string, string,
+            );
+            size_t answer() {
+                return snakebite_ut_many_strings(
+                    "a", "bb", "ccc", "dddd", "eeeee",
+                    "ffffff", "ggggggg", "hhhhhhhh", "iiiiiiiii",
+                    "jjjjjjjjjj",
+                );
+            }
+        }, "answer");
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("manyArguments.callback." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        long(236).shouldBeRetOf!(backend, q{
+            alias Callback = extern(D) bool function();
+            pragma(mangle, "snakebite_ut_many_callback")
+            extern(C) long snakebite_ut_many_callback(
+                long, long, long, long, long, long, long, long,
+                long, long, long, long, long, long, long, long,
+                Callback,
+            );
+            static bool yes() { return true; }
+            long answer() {
+                return snakebite_ut_many_callback(
+                    1, 2, 3, 4, 5, 6, 7, 8,
+                    9, 10, 11, 12, 13, 14, 15, 16, &yes,
+                );
+            }
+        }, "answer");
     }
 }
