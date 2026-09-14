@@ -3,9 +3,11 @@ module ut.ffi.plan;
 
 import ut;
 import dmd.func: FuncDeclaration;
+import dmd.mtype: Type;
 import snakebite.ffi: CallAdapter, PlanCache;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction, findStruct;
+import std.algorithm.searching: canFind;
 import std.array: replace;
 
 
@@ -1835,4 +1837,381 @@ unittest {
     ]);
 
     result.should == 223_231;
+}
+
+
+// The variadic shapes below (issue #334 step 5) exercise `CallPlan.
+// prepareVariadic`/`PlanCache.variadicOf`: an `extern(C)` C-style
+// variadic callee's plan depends on one call site's own extra
+// arguments, not on the callee's declaration alone (ADR-0010's
+// C-variadics paragraph). Each host function is real, compiled code in
+// this test binary - the same shape as `snakebite_ut_bump` above -
+// written against `core.stdc.stdarg` so its own `va_arg` reads prove the
+// ABI classification these tests exercise, not just that the bytes
+// arrived somewhere.
+
+// Always reads exactly nine `int`s past `first` - paired with a guest
+// call site that always passes exactly nine, for `called.variadic.
+// tenIntsFourSpillToTheStack` below. Ten INTEGER-class words in total:
+// six fill the integer register file, and the last four spill to the
+// stack.
+private extern(C) int snakebite_ut_variadic_sum_ints(int first, ...) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, first);
+    int total = first;
+    foreach (i; 0 .. 9)
+        total += va_arg!int(args);
+    va_end(args);
+    return total;
+}
+
+
+// As `snakebite_ut_variadic_sum_ints`, but reads its own count of extra
+// arguments instead of a fixed nine, so two call sites can pass it a
+// different number of extra arguments safely (`called.variadic.
+// sameCalleeTwoCallSitesDifferentArgumentCounts` below).
+private extern(C) int snakebite_ut_variadic_count_sum(int count, ...) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, count);
+    int total;
+    foreach (i; 0 .. count)
+        total += va_arg!int(args);
+    va_end(args);
+    return total;
+}
+
+
+// Always reads exactly eight `double`s past `first` - nine SSE-class
+// words in total: eight fill the SSE register file (`%al` reports 8),
+// and the last one spills to the stack.
+private extern(C) double snakebite_ut_variadic_sum_doubles(
+    double first, ...
+) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, first);
+    double total = first;
+    foreach (i; 0 .. 8)
+        total += va_arg!double(args);
+    va_end(args);
+    return total;
+}
+
+
+private struct VariadicMixedPair {
+    int integer;
+    double floating;
+}
+
+
+// Reads one `VariadicMixedPair` - one INTEGER lane and one SSE lane in
+// the same eightbyte pair - as its one extra, variadic argument.
+private extern(C) long snakebite_ut_variadic_mixed_pair(int tag, ...) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, tag);
+    auto pair = va_arg!VariadicMixedPair(args);
+    va_end(args);
+    return tag * 1_000_000L + pair.integer * 1000 + cast(long) pair.floating;
+}
+
+
+// One call site's own callee and extra, variadic argument types - the
+// same information a backend reads off the very same `CallExp`
+// (`Evaluator.callVariadicNative`, the bytecode compiler's
+// `compileNativeCall`) to build its own plan through `PlanCache.
+// variadicOf`.
+private struct VariadicCallSite {
+    FuncDeclaration function_;
+    Type[] extraArgumentTypes;
+}
+
+
+// The one `return` statement anywhere in `statement`'s own tree - dmd
+// nests a multi-statement function body in `CompoundStatement`s of its
+// own (a local declaration followed by other statements becomes one
+// more nesting level, unlike `atomicOperation`'s single-statement
+// callee above, whose body is already flat), so finding the `return`
+// that answers a variadic call site needs a walk, not a fixed index.
+private imported!"dmd.statement".ReturnStatement returnStatementIn(
+    imported!"dmd.statement".Statement statement,
+) {
+    if (auto compound = statement.isCompoundStatement) {
+        foreach (inner; *compound.statements)
+            if (auto found = returnStatementIn(inner))
+                return found;
+        return null;
+    }
+    return statement.isReturnStatement;
+}
+
+
+// `wrapper`'s body may set up its arguments in whatever statements it
+// needs, as long as exactly one of them, anywhere in its own nesting, is
+// `return <call>;` (`returnStatementIn`'s own doc) - unlike
+// `atomicOperation` above, whose one-statement callee never needs a
+// local to build a struct or `float` argument first.
+private VariadicCallSite variadicCallSiteOf(FuncDeclaration wrapper) {
+    auto return_ = returnStatementIn(wrapper.fbody);
+    assert(return_ !is null,
+        "Expected `" ~ wrapper.toString ~ "` to return the call");
+    auto call = return_.exp.isCallExp;
+    assert(call !is null && call.f !is null,
+        "Expected a resolved call in `" ~ wrapper.toString ~ "`");
+
+    const declaredCount = call.f.type.isTypeFunction.parameterList.length;
+    Type[] extraTypes;
+    foreach (i; declaredCount .. call.arguments.length)
+        extraTypes ~= (*call.arguments)[i].type;
+
+    return VariadicCallSite(call.f, extraTypes);
+}
+
+
+private VariadicCallSite variadicCallSite(string source, string wrapperName) {
+    auto guestModule = parseSnippet(source);
+    auto wrapper = findFunction(guestModule, wrapperName);
+    assert(wrapper !is null,
+        "No function `" ~ wrapperName ~ "` in the guest program");
+    return variadicCallSiteOf(wrapper);
+}
+
+
+@("called.variadic.tenIntsFourSpillToTheStack")
+unittest {
+    auto site = variadicCallSite(q{
+        pragma(mangle, "snakebite_ut_variadic_sum_ints")
+        extern(C) int nativeSum(int first, ...);
+
+        int answer() {
+            return nativeSum(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+        }
+    }, "answer");
+
+    PlanCache cache;
+    int[10] values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    void*[10] arguments;
+    foreach (i, ref value; values)
+        arguments[i] = &value;
+
+    int result;
+    cache.variadicOf(site.function_, site.extraArgumentTypes)
+        .call(&result, arguments[]);
+
+    result.should == 55;
+}
+
+
+@("called.variadic.nineDoublesOneSpills")
+unittest {
+    auto site = variadicCallSite(q{
+        pragma(mangle, "snakebite_ut_variadic_sum_doubles")
+        extern(C) double nativeSum(double first, ...);
+
+        double answer() {
+            return nativeSum(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0);
+        }
+    }, "answer");
+
+    PlanCache cache;
+    double[9] values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+    void*[9] arguments;
+    foreach (i, ref value; values)
+        arguments[i] = &value;
+
+    double result;
+    cache.variadicOf(site.function_, site.extraArgumentTypes)
+        .call(&result, arguments[]);
+
+    result.should == 45.0;
+}
+
+
+// A `float` local widens to `double` before it ever reaches this plan -
+// dmd's own C default argument promotion, applied during semantic
+// analysis of the call, wraps it in an implicit `cast(double)` (verified
+// against dmd directly: `-vcg-ast` on this exact shape shows `cast
+// (double)x` in the lowered call). `site.extraArgumentTypes` already
+// reads `double`, not `float`, so the classification this plan uses
+// (`ArgumentPlan.of`) never even sees the narrower type.
+@("called.variadic.floatLiteralPromotedToDouble")
+unittest {
+    auto site = variadicCallSite(q{
+        pragma(mangle, "snakebite_ut_variadic_sum_doubles")
+        extern(C) double nativeSum(double first, ...);
+
+        double answer() {
+            float second = 2.0f;
+            return nativeSum(1.0, second, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0);
+        }
+    }, "answer");
+
+    site.extraArgumentTypes[0].toString.should == "double";
+
+    PlanCache cache;
+    double[9] values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+    void*[9] arguments;
+    foreach (i, ref value; values)
+        arguments[i] = &value;
+
+    double result;
+    cache.variadicOf(site.function_, site.extraArgumentTypes)
+        .call(&result, arguments[]);
+
+    result.should == 45.0;
+}
+
+
+// One extra argument classifies to a mixed INTEGER/SSE eightbyte pair
+// (issue #334 step 4's own shape), here reached through a variadic call
+// site instead of a named parameter.
+@("called.variadic.mixedIntegerSSEStructArgument")
+unittest {
+    auto site = variadicCallSite(q{
+        struct VariadicMixedPair {
+            int integer;
+            double floating;
+        }
+
+        pragma(mangle, "snakebite_ut_variadic_mixed_pair")
+        extern(C) long nativeMixedPair(int tag, ...);
+
+        long answer() {
+            VariadicMixedPair value;
+            value.integer = 7;
+            value.floating = 2.5;
+            return nativeMixedPair(3, value);
+        }
+    }, "answer");
+
+    PlanCache cache;
+    int tag = 3;
+    VariadicMixedPair value = VariadicMixedPair(7, 2.5);
+    long result;
+    cache.variadicOf(site.function_, site.extraArgumentTypes).call(&result, [
+        cast(const void*) &tag, cast(const void*) &value,
+    ]);
+
+    result.should == 3_007_002;
+}
+
+
+// The same callee, `snakebite_ut_variadic_count_sum`, at two call
+// sites that pass a different number of extra arguments - one plan per
+// call site (`VariadicCallSite`'s own doc), never one plan shared by
+// declaration the way `PlanCache._plans` shares an ordinary plan.
+// `cache.preparations` proves both plans were actually built, not one
+// reused for the other's shape.
+@("called.variadic.sameCalleeTwoCallSitesDifferentArgumentCounts")
+unittest {
+    auto guestModule = parseSnippet(q{
+        pragma(mangle, "snakebite_ut_variadic_count_sum")
+        extern(C) int nativeCountSum(int count, ...);
+
+        int callWithOne() {
+            return nativeCountSum(1, 41);
+        }
+
+        int callWithThree() {
+            return nativeCountSum(3, 1, 2, 3);
+        }
+    });
+
+    auto oneWrapper = findFunction(guestModule, "callWithOne");
+    auto threeWrapper = findFunction(guestModule, "callWithThree");
+    assert(oneWrapper !is null && threeWrapper !is null,
+        "No `callWithOne`/`callWithThree` in the guest program");
+
+    auto siteOne = variadicCallSiteOf(oneWrapper);
+    auto siteThree = variadicCallSiteOf(threeWrapper);
+
+    PlanCache cache;
+
+    int countOne = 1;
+    int valueOne = 41;
+    int resultOne;
+    cache.variadicOf(siteOne.function_, siteOne.extraArgumentTypes).call(
+        &resultOne,
+        [cast(const void*) &countOne, cast(const void*) &valueOne],
+    );
+
+    int countThree = 3;
+    int[3] valuesThree = [1, 2, 3];
+    int resultThree;
+    cache.variadicOf(siteThree.function_, siteThree.extraArgumentTypes).call(
+        &resultThree,
+        [
+            cast(const void*) &countThree,
+            cast(const void*) &valuesThree[0],
+            cast(const void*) &valuesThree[1],
+            cast(const void*) &valuesThree[2],
+        ],
+    );
+
+    resultOne.should == 41;
+    resultThree.should == 6;
+    cache.preparations.should == 2;
+}
+
+
+// `snprintf` is the real, druntime-declared host function - the same
+// callee `ut.ffi.sysv`'s stub-level `variadicCallee.snprintf` drives
+// directly, here reached through a full plan instead.
+@("called.variadic.snprintf")
+unittest {
+    auto site = variadicCallSite(q{
+        import core.stdc.stdio: snprintf;
+
+        int format(char* buffer, size_t n, int value, double scale) {
+            return snprintf(buffer, n, "%d %.1f", value, scale);
+        }
+    }, "format");
+
+    PlanCache cache;
+    char[32] buffer;
+    char* bufferPtr = buffer.ptr;
+    size_t n = buffer.length;
+    immutable(char)[9] format = "%d %.1f\0";
+    const(char)* formatPtr = format.ptr;
+    int value = 7;
+    double scale = 3.5;
+    int result;
+    cache.variadicOf(site.function_, site.extraArgumentTypes).call(&result, [
+        cast(const void*) &bufferPtr,
+        cast(const void*) &n,
+        cast(const void*) &formatPtr,
+        cast(const void*) &value,
+        cast(const void*) &scale,
+    ]);
+
+    import std.string: fromStringz;
+
+    buffer.ptr.fromStringz.should == "7 3.5";
+}
+
+
+// D's own variadic kinds - untyped `_arguments` here, always
+// `extern(D)` - stay refused (issue #334 step 6 is untyped D variadics;
+// typesafe D variadics remain unimplemented). `CallPlan.prepare`'s own
+// message says why, rather than merely that the call was refused.
+@("called.variadic.externDRefused")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(D) int snakebite_ut_extern_d_variadic(int x, ...);
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_extern_d_variadic");
+    assert(function_ !is null,
+        "No `snakebite_ut_extern_d_variadic` in the guest program");
+
+    PlanCache cache;
+    const thrown = cache.of(function_).shouldThrow;
+
+    thrown.msg.canFind("extern(C)").should == true;
 }

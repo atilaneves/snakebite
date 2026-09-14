@@ -6,6 +6,7 @@ import snakebite.backends.backend: Program;
 import snakebite.ffi: PlanCache;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
+import std.algorithm.searching: canFind;
 import std.conv: text;
 
 
@@ -1548,4 +1549,300 @@ static foreach (backend; Matrix!(
             "answer",
         );
     }
+}
+
+
+// The variadic shapes below (issue #334 step 5) mirror `tests/ut/ffi/
+// plan.d`'s own `called.variadic*` tests at the plan level - here,
+// through a guest call on every backend instead of `PlanCache` directly.
+// `_backend` distinguishes each native symbol's own linker name from its
+// plan-level counterpart in `ut.ffi.plan`, since both are `extern(C)` and
+// so share one flat, global symbol namespace in this test binary.
+
+// Always reads exactly nine `int`s past `first` - paired with a guest
+// call site that always passes exactly nine. Ten INTEGER-class words in
+// total: six fill the integer register file, and the last four spill to
+// the stack.
+private extern(C) int snakebite_ut_variadic_sum_ints_backend(
+    int first, ...
+) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, first);
+    int total = first;
+    foreach (i; 0 .. 9)
+        total += va_arg!int(args);
+    va_end(args);
+    return total;
+}
+
+
+// Reads its own count of extra arguments, so two call sites can pass it
+// a different number safely.
+private extern(C) int snakebite_ut_variadic_count_sum_backend(
+    int count, ...
+) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, count);
+    int total;
+    foreach (i; 0 .. count)
+        total += va_arg!int(args);
+    va_end(args);
+    return total;
+}
+
+
+// Always reads exactly eight `double`s past `first` - nine SSE-class
+// words in total: eight fill the SSE register file (`%al` reports 8),
+// and the last one spills to the stack.
+private extern(C) double snakebite_ut_variadic_sum_doubles_backend(
+    double first, ...
+) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, first);
+    double total = first;
+    foreach (i; 0 .. 8)
+        total += va_arg!double(args);
+    va_end(args);
+    return total;
+}
+
+
+private struct VariadicMixedPairBackend {
+    int integer;
+    double floating;
+}
+
+
+// Reads one `VariadicMixedPairBackend` - one INTEGER lane and one SSE
+// lane in the same eightbyte pair - as its one extra, variadic argument.
+private extern(C) long snakebite_ut_variadic_mixed_pair_backend(
+    int tag, ...
+) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, tag);
+    auto pair = va_arg!VariadicMixedPairBackend(args);
+    va_end(args);
+    return tag * 1_000_000L + pair.integer * 1000 + cast(long) pair.floating;
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("variadic.tenIntsFourSpillToTheStack." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        55.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_sum_ints_backend")
+                extern(C) int nativeSum(int first, ...);
+
+                int answer() {
+                    return nativeSum(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+                }
+            },
+            "answer",
+        );
+    }
+
+    @("variadic.nineDoublesOneSpills." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        45.0.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_sum_doubles_backend")
+                extern(C) double nativeSum(double first, ...);
+
+                double answer() {
+                    return nativeSum(
+                        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0);
+                }
+            },
+            "answer",
+        );
+    }
+
+    // A `float` local widens to `double` before it ever reaches the
+    // plan (dmd's own C default argument promotion) - `ut.ffi.plan`'s
+    // own `called.variadic.floatLiteralPromotedToDouble` checks the
+    // promoted `Type` directly; this checks the promoted call still
+    // answers correctly through a guest call on every backend.
+    @("variadic.floatLiteralPromotedToDouble." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        45.0.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_sum_doubles_backend")
+                extern(C) double nativeSum(double first, ...);
+
+                double answer() {
+                    float second = 2.0f;
+                    return nativeSum(
+                        1.0, second, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0);
+                }
+            },
+            "answer",
+        );
+    }
+
+    // One extra argument classifies to a mixed INTEGER/SSE eightbyte
+    // pair (issue #334 step 4's own shape), reached through a variadic
+    // call site instead of a named parameter.
+    @("variadic.mixedIntegerSSEStructArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3_007_002L.shouldBeRetOf!(
+            backend,
+            q{
+                struct VariadicMixedPair {
+                    int integer;
+                    double floating;
+                }
+
+                pragma(mangle, "snakebite_ut_variadic_mixed_pair_backend")
+                extern(C) long nativeMixedPair(int tag, ...);
+
+                long answer() {
+                    VariadicMixedPair value;
+                    value.integer = 7;
+                    value.floating = 2.5;
+                    return nativeMixedPair(3, value);
+                }
+            },
+            "answer",
+        );
+    }
+
+    // The same callee at two call sites in one guest function, passing a
+    // different number of extra arguments - one plan per call site
+    // (`ut.ffi.plan`'s own `called.variadic.
+    // sameCalleeTwoCallSitesDifferentArgumentCounts` checks this at the
+    // plan level; this exercises each backend's own call-site handling:
+    // the interpreter's call-site plan cache, and the bytecode
+    // compiler's own one-time-per-`CallExp` compilation).
+    @("variadic.sameCalleeTwoCallSitesDifferentArgumentCounts."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        47.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_count_sum_backend")
+                extern(C) int nativeCountSum(int count, ...);
+
+                int answer() {
+                    return nativeCountSum(1, 41) + nativeCountSum(3, 1, 2, 3);
+                }
+            },
+            "answer",
+        );
+    }
+
+}
+
+
+// `snprintf` into a guest buffer with `%d %s %f` and mixed integer,
+// pointer and `double` arguments - the comparison runs inside the guest
+// function itself and only the boolean answer crosses back, so this
+// needs no dynamic-array-return support from any backend to assert the
+// resulting string.
+//
+// `Bytecode` is separate from the `Matrix!(...)` above, and omits
+// itself too: slicing `buffer`, a fixed-size array, with a runtime upper
+// bound (`buffer[0 .. length]`) is a rejection the bytecode compiler
+// already gives for a plain slice-and-compare with no FFI or variadic
+// argument involved (verified: the same rejection reaches an ordinary,
+// non-variadic call once the comparison is pulled into its own
+// statement) - unrelated to this step, and not this step's to fix.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "the bytecode compiler cannot compile a fixed-size array sliced "
+            ~ "with a runtime bound, regardless of variadic FFI"),
+)) {
+    @("variadic.snprintf." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                import core.stdc.stdio: snprintf;
+
+                bool answer() {
+                    char[64] buffer;
+                    char[9] format = "%d %s %f\0";
+                    char[3] text = "hi\0";
+                    const length = snprintf(
+                        buffer.ptr, buffer.length, format.ptr,
+                        42, text.ptr, 3.5);
+                    return buffer[0 .. length] == "42 hi 3.500000";
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// D's own variadic kinds - untyped `_arguments` here, always
+// `extern(D)` - stay refused (issue #334 step 6 is untyped D variadics;
+// typesafe D variadics remain unimplemented). `ut.ffi.plan`'s own
+// `called.variadic.externDRefused` checks `CallPlan.prepare`'s own
+// message directly; these check it reaches a guest caller unchanged
+// through each backend that resolves a call to a plan (`Native` and
+// `Ctfe` never reach `CallPlan.prepare` at all: `Native` is compiled D,
+// which would fail to *link* rather than raise this refusal, and `Ctfe`
+// has no FFI plan machinery of its own).
+@("variadic.externDRefused.Interpreter")
+@Tags("Interpreter")
+unittest {
+    auto module_ = parseSnippet(q{
+        extern(D) int snakebite_ut_extern_d_variadic_ffi_backend(
+            int x, ...
+        );
+
+        int answer() {
+            return snakebite_ut_extern_d_variadic_ffi_backend(1, 2);
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+
+    int result;
+    interpreter(module_).call(function_, &result, [])
+        .shouldThrow
+        .msg.canFind("extern(C)").should == true;
+}
+
+
+@("variadic.externDRefused.Bytecode")
+@Tags("Bytecode")
+unittest {
+    import snakebite.backends.bytecode: Bytecode;
+
+    auto module_ = parseSnippet(q{
+        extern(D) int snakebite_ut_extern_d_variadic_ffi_backend(
+            int x, ...
+        );
+
+        int answer() {
+            return snakebite_ut_extern_d_variadic_ffi_backend(1, 2);
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+
+    int result;
+    new Bytecode(Program([module_])).call(function_, &result, [])
+        .shouldThrow
+        .msg.canFind("extern(C)").should == true;
 }
