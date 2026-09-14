@@ -274,9 +274,7 @@ static foreach (backend; Matrix!()) {
 
 // An op-assign whose left side is a `ref`-returning call writes through to
 // the referent, not to a temporary.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("opAssignThroughRefReturn." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
