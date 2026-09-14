@@ -308,6 +308,34 @@ unittest {
 }
 
 
+private extern(C) float snakebite_ut_scale_float(float value) {
+    return value * 2.5f;
+}
+
+
+// A scalar `float` argument classifies as `Register(sse, 4)` - `loadOf`
+// maps that to `Load.zero32` (a plain zero-extending load) rather than
+// `Load.copy` (a `memcpy`), so this exercises the fast path directly, not
+// just `Load.copy`'s generic one.
+@("called.scalarFloat")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(C) float snakebite_ut_scale_float(float value);
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_scale_float");
+    assert(function_ !is null,
+        "No `snakebite_ut_scale_float` in the guest program");
+
+    PlanCache cache;
+    float value = 2.0f;
+    float result;
+    cache.of(function_).call(&result, [cast(const void*) &value]);
+
+    result.should == 5.0f;
+}
+
+
 @("called.smallStruct")
 unittest {
     auto guestModule = parseSnippet(q{

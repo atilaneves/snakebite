@@ -76,32 +76,12 @@ public extern(C) void snakebite_ffi_call_sysv_amd64_integer(
 // of whichever one a plan was built for, in this field's own type, so
 // its hot call path is one indirect call through that stored address -
 // no branch between the two entries at call time, only at prepare time.
+//
+// No production code calls either entry any other way - `tests/ut/ffi/
+// sysv.d` keeps its own thin `@trusted` wrappers, driving each entry
+// directly with a hand-filled `CallFrame`, so that convenience stays
+// test-only instead of living here unused outside tests.
 public alias CallEntry = extern(C) void function(
     const(void)* address,
     CallFrame* frame,
 ) @system;
-
-// Calls `address` with `frame`'s argument words already filled in,
-// through the general entry, leaving its result words in
-// `frame.integerResult`/`frame.sseResult`.
-//
-// `@trusted`: the stub only ever reads and writes through `frame`, at
-// the offsets the `static assert`s above pin down, and calls `address`
-// exactly as an ordinary indirect call would - nothing about crossing
-// into assembly here needs auditing beyond that struct's layout.
-pragma(inline, true) public void call(
-    const(void)* address, ref CallFrame frame,
-) @trusted {
-    snakebite_ffi_call_sysv_amd64(address, &frame);
-}
-
-// As `call`, but through the leaner integer-only entry above. `plan.d`
-// itself calls through a stored `CallEntry` instead of this wrapper
-// (see `CallEntry`'s own doc) - this exists so a test can drive that
-// entry directly with a hand-filled `CallFrame`, the same way the
-// existing tests drive `call`.
-pragma(inline, true) public void callInteger(
-    const(void)* address, ref CallFrame frame,
-) @trusted {
-    snakebite_ffi_call_sysv_amd64_integer(address, &frame);
-}

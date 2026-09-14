@@ -2,7 +2,9 @@ module ut.ffi.sysv;
 
 
 import ut;
-import snakebite.ffi.sysv: CallFrame, call, callInteger;
+import snakebite.ffi.sysv:
+    CallFrame, snakebite_ffi_call_sysv_amd64,
+    snakebite_ffi_call_sysv_amd64_integer;
 
 
 // These tests hand-fill a `CallFrame` and drive one of the System V
@@ -16,6 +18,27 @@ import snakebite.ffi.sysv: CallFrame, call, callInteger;
 // classification is checkable by inspection.
 private size_t bitsOf(in double value) @trusted pure nothrow @nogc {
     return *cast(const size_t*) &value;
+}
+
+// Thin `@trusted` wrappers around the two entries above, kept here
+// rather than in `snakebite.ffi.sysv` itself: nothing outside this test
+// module calls either entry any other way (`plan.d` calls through its
+// own stored `CallEntry`), so this convenience stays test-only.
+//
+// `@trusted`: the stub only ever reads and writes through `frame`, at
+// the offsets `sysv.d`'s `static assert`s pin down, and calls `address`
+// exactly as an ordinary indirect call would - nothing about crossing
+// into assembly here needs auditing beyond that struct's layout.
+private void call(
+    const(void)* address, ref CallFrame frame,
+) @trusted {
+    snakebite_ffi_call_sysv_amd64(address, &frame);
+}
+
+private void callInteger(
+    const(void)* address, ref CallFrame frame,
+) @trusted {
+    snakebite_ffi_call_sysv_amd64_integer(address, &frame);
 }
 
 

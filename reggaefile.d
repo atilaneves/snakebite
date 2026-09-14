@@ -27,6 +27,17 @@ string ldcPath() {
 // identical to the reference `dubTarget` adds to each dub package's file
 // list below, so reggae's ninja backend resolves both to the same path
 // and links the one object it actually builds.
+//
+// The object lands in the project root, not under `$builddir`
+// (`.reggae/objs`, already covered by that directory's own `.gitignore`
+// entry) or a `.reggae/objs`-rooted path directly: tried, and it broke
+// the build. `$builddir/...` here expands correctly in this `Target`'s
+// own name (reggae's `expandOutput`, `build.d`), but the identical
+// string in `info.packages[0].files` below - which a dub `DubPackage`'s
+// file list does not run through that same expansion - reaches the
+// generated `build.ninja` as a literal, unexpanded `$builddir` token
+// glued onto an absolute path, which ninja then cannot resolve to the
+// object this `Target` actually builds. `*.o` stays in `.gitignore`.
 Target sysvAmd64Object() {
     return Target(
         "$project/sysv_amd64.o",

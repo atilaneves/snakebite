@@ -37,11 +37,17 @@ public struct CallPlan {
         CallEntry, CallFrame, snakebite_ffi_call_sysv_amd64,
         snakebite_ffi_call_sysv_amd64_integer;
 
-    // Worst case: every one of `maxArguments` parameters is a two-eightbyte
-    // aggregate, plus the hidden return pointer.
-    private enum maxMoves = maxArguments * 2 + 1;
-    // Worst case: every eightbyte above spills to the stack.
-    private enum maxStackWords = maxArguments * 2;
+    // `prepare` refuses a callee whose parameters (hidden context and
+    // return pointer included) need more than `maxArguments` ABI words
+    // total (see its own `words > maxArguments` check), and the hidden
+    // return pointer - the one word that can be part of that count -
+    // never becomes a move (see `_returnPointerOffset`), so `maxArguments`
+    // moves is always enough, never `maxArguments` parameters each
+    // claiming two.
+    private enum maxMoves = maxArguments;
+    // Every move above is a candidate for the stack, so the same bound
+    // covers the stack-only subset of them.
+    private enum maxStackWords = maxArguments;
 
     // The System V `CallFrame` (ADR-0001) plus this plan's own stack word
     // storage, laid out contiguously right after it. Every move - whether
@@ -50,8 +56,8 @@ public struct CallPlan {
     // switch on which region it is: `integerBase`, `sseBase` and
     // `stackBase` below are where each region starts.
     private struct Frame {
-        CallFrame callFrame;
-        size_t[maxStackWords] stackArea;
+        private CallFrame callFrame;
+        private size_t[maxStackWords] stackArea;
     }
 
     private enum size_t integerBase = CallFrame.integer.offsetof;
@@ -70,18 +76,19 @@ public struct CallPlan {
     }
 
     // One eightbyte's source and destination, fixed at prepare time. The
-    // source is either the hidden return pointer itself, when
-    // `isReturnPointer`, or `byteOffset` bytes into argument
-    // `parameterIndex`'s own bytes, read as `load` says; `copyBytes` is
-    // only meaningful when `load == copy`. `destinationOffset` is a byte
-    // offset into `Frame`, already resolved to its integer/SSE/stack
-    // region - `callAt` never has to ask which region a move belongs to.
+    // source is `byteOffset` bytes into argument `parameterIndex`'s own
+    // bytes, read as `load` says; `copyBytes` is only meaningful when
+    // `load == copy`. `destinationOffset` is a byte offset into `Frame`,
+    // already resolved to its integer/SSE/stack region - `callAt` never
+    // has to ask which region a move belongs to. The hidden return
+    // pointer, when this plan has one, is not a move - see
+    // `_returnPointerOffset`.
     private struct Move {
-        Load load;
-        ubyte parameterIndex;
-        ubyte byteOffset;
-        ubyte copyBytes;
-        ushort destinationOffset;
+        private Load load;
+        private ubyte parameterIndex;
+        private ubyte byteOffset;
+        private ubyte copyBytes;
+        private ushort destinationOffset;
     }
 
     // How to write one result eightbyte back into `returnPlace`: a
@@ -92,8 +99,8 @@ public struct CallPlan {
     private enum Store : ubyte { byte1, byte2, byte4, byte8 }
 
     private struct ResultMove {
-        ushort sourceOffset;
-        Store store;
+        private ushort sourceOffset;
+        private Store store;
     }
 
     private void* _address;
@@ -409,7 +416,8 @@ public struct CallPlan {
             in size_t parameterIndex,
             in size_t byteOffset,
         ) {
-            const destinationOffset = stackBase + (stackCount++) * size_t.sizeof;
+            const destinationOffset =
+                stackBase + (stackCount++) * size_t.sizeof;
             _moves[moveCount++] = Move(
                 loadOf(register), cast(ubyte) parameterIndex,
                 cast(ubyte) byteOffset, copyBytesOf(register),
@@ -570,8 +578,17 @@ public struct CallPlan {
                 }
 
             case integer:
-            case sse:
                 return register.size == 8 ? Load.word64 : Load.copy;
+
+            // A scalar `float` argument classifies as `Register(sse, 4)`
+            // - the common case, so it gets its own zero-extending load
+            // like `unsigned`'s size 4 above, instead of `copy`'s
+            // `memcpy`. Only a partial SSE-class aggregate eightbyte
+            // (sizes 1-3 and 5-7) still needs `copy`.
+            case sse:
+                if (register.size == 8)
+                    return Load.word64;
+                return register.size == 4 ? Load.zero32 : Load.copy;
 
             case none:
                 assert(false, "a `void` argument has nothing to pass");
