@@ -1208,10 +1208,6 @@ static foreach (useNull; AliasSeq!(false, true)) {
 }
 
 
-    }
-}
-
-
 // A mixed INTEGER/SSE aggregate (one plain `int` eightbyte, one `double`
 // eightbyte) with both register files free - the control for the shapes
 // below: both eightbytes fit and travel in registers (issue #334 step 4).
