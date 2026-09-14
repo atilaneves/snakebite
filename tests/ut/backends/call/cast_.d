@@ -474,9 +474,6 @@ static foreach (backend; Matrix!()) {
 // `cast(T) null` where `T` is a delegate: two words, both zero.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read `dg.ptr`"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter refuses a cast_ expression whose operand is " ~
-        "`null`"),
 )) {
     @("cast.null.delegate." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -495,11 +492,7 @@ static foreach (backend; Matrix!(
 }
 
 // `cast(bool) null` is `false`, `cast(size_t) null` is `0`.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter refuses a cast_ expression whose operand is " ~
-        "`null`"),
-)) {
+static foreach (backend; Matrix!()) {
     @("cast.null.arithmetic." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -520,11 +513,7 @@ static foreach (backend; Matrix!(
 
 // A null cast in a narrow-width context: the destination is an `int`
 // field of a struct, so a 16-byte zero fill would clobber a neighbour.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter refuses a cast_ expression whose operand is " ~
-        "`null`"),
-)) {
+static foreach (backend; Matrix!()) {
     @("cast.null.neighbourField." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
