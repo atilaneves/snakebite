@@ -16,9 +16,8 @@ stand in for real projects. Only `examples/rt` has a real dub
 dependency, and the maintainer rejected it as not representative.
 
 `barrier.overhead` stays. It keeps its 2.40 ratio gate and keeps
-running in CI. The gate runs on the optimised acceptance build
-`bin/at-release`; the unoptimised `bin/at` prints the same numbers
-without gating.
+running in CI. The acceptance build `bin/at` is optimised, so the gate
+runs on every build.
 
 A macro benchmark joins it: a suite of real dub projects, each pinned
 to a commit. The bench harness fetches each project at its pin. No

@@ -34,11 +34,13 @@ private __gshared Native directAbs;
 // The plan is prepared before the measured loops. This keeps the timing
 // gate focused on the steady-state call and removes the cold-path lookup.
 //
-// `bin/at` is built unoptimised; `bin/at-release` adds LDC's
-// `-release -O -flto=thin`. Both binaries print the same three numbers.
-// Only `bin/at-release` gates on the ratio: an unoptimised build cannot
-// inline or fold either loop, so its ratio cannot show what the barrier
-// itself costs.
+// `bin/at` is built with LDC's `-release -O -flto=thin`, the same flags
+// as `bin/sb`. This test's own ratio depends on that: an unoptimised
+// build cannot inline or fold either loop, so the gap between a generic
+// replay and a direct call is only meaningful with the optimiser on.
+// An unoptimised build would show noise instead of the barrier's own
+// cost, and the gate below would reject good builds for the wrong
+// reason.
 @("barrier.overhead")
 @Flaky(5)
 @Tags("timing")
@@ -135,14 +137,12 @@ unittest {
     // raise its limit.
     enum maxRatio = 2.40;
     // `-release` strips `assert`, so the gate is a `should` check, not an
-    // `assert`. It only runs where `-O` gives the barrier a chance to meet
-    // it: `bin/at` is unoptimised and would fail this gate on the generic
-    // call path alone, telling nothing about the barrier itself.
+    // `assert`. `bin/at` is always built with `-O`, so the ratio measures
+    // the barrier itself rather than the cost of an unoptimised build.
     //
     // `shouldBeSmallerThan`, not a `<` operator, because unit-threaded's
     // `should` proxy has no `<`: `double.should < x` does not compile
     // (relational operators route through `opCmp`, which `Should` does
     // not define), so this stays the free-function form.
-    version (D_Optimized)
-        ratios[2].shouldBeSmallerThan(maxRatio);
+    ratios[2].shouldBeSmallerThan(maxRatio);
 }

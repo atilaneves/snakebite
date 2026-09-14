@@ -44,6 +44,11 @@ unittest {
         const result = execute(
             [executable, "-b", backend, directory], null, Config.none,
         );
-        assert(result.status == 0, result.output);
+        // `-release` strips `assert`, and `bin/at` is always built with
+        // it, so this stays a `fail` call, not an `assert`: without it, a
+        // probe that crashed or an unrejected copy would pass silently.
+        // `fail` over `should`, to keep `result.output` in the message.
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
     }
 }

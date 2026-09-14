@@ -127,11 +127,10 @@ Build reggaeBuild() {
     auto build = Build(
         sysvAmd64Object(),
         dubTarget("dmd", "unittest", "unittest", "ut"),
-        dubTarget("dmd", "acceptance-test", "acceptance", "at"),
+        dubTarget("ldc2", "acceptance-test", "release", "at", CompilerFlags("-release", "-O", "-flto=thin")),
         dubTarget("ldc2", "sb", "release", "sb", CompilerFlags("-release", "-O", "-flto=thin")),
         dubTarget("ldc2", "sb-repl", "release", "sb-repl", CompilerFlags("-release", "-O", "-flto=thin")),
         dubTarget("ldc2", "bench", "release", "bench", CompilerFlags("-release", "-O", "-flto=thin")),
-        dubTarget("ldc2", "acceptance-test", "release", "at-release", CompilerFlags("-release", "-O", "-flto=thin")),
     );
     return build;
 }

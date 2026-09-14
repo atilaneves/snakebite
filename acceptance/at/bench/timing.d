@@ -97,13 +97,10 @@ unittest {
     );
 
     enum tolerance = 1.5;
-    assert(
-        ratio >= 1.0 / tolerance && ratio <= tolerance,
-        text(
-            "benchmark latency is not within ", tolerance,
-            " times the direct touch and dub test latency",
-        ),
-    );
+    // `-release` strips `assert`, and `bin/at` is always built with it,
+    // so this stays a `should` check: the numbers above already give the
+    // diagnostic an `assert` message would have repeated.
+    (ratio >= 1.0 / tolerance && ratio <= tolerance).should == true;
 }
 
 
@@ -120,7 +117,13 @@ private Duration directDubTest(in string directory) {
         directory,
     );
     const elapsed = stopWatch.peek;
-    assert(result.status == 0, result.output);
+    // `-release` strips `assert`, and `bin/at` is always built with it, so
+    // this stays a `fail` call, not an `assert`: without it, a failed
+    // `dub test` run would still time out and pass a bogus latency
+    // through. `fail` over `should`, to keep `result.output` in the
+    // failure message.
+    if (result.status != 0)
+        fail(result.output, __FILE__, __LINE__);
     return elapsed;
 }
 
