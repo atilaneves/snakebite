@@ -2710,9 +2710,7 @@ static foreach (backend; Matrix!()) {
 
 // As above, from a lambda: the same width rule applies to every guest
 // callee whatever syntax declared it.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed), // segfaults
-)) {
+static foreach (backend; Matrix!()) {
     @("fourWordStructReturnedByValueFromLambda." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
