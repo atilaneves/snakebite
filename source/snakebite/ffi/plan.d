@@ -69,12 +69,15 @@ public struct CallPlan {
     // already resolved to its integer/SSE/stack region - `callAt` never
     // has to ask which region a move belongs to. The hidden return
     // pointer, when this plan has one, is not a move - see
-    // `_returnPointerOffset`.
+    // `_returnPointerOffset`. `byteOffset` is `ushort`, not `ubyte`: a
+    // MEMORY-class argument's last eightbyte can start up to
+    // `abi.ArgumentPlan.maxMemoryBytes - 8` bytes in (504 at the current
+    // 512-byte limit), past what `ubyte` holds.
     private struct Move {
         private size_t parameterIndex;
         private size_t destinationOffset;
         private Load load;
-        private ubyte byteOffset;
+        private ushort byteOffset;
         private ubyte copyBytes;
     }
 
@@ -429,7 +432,7 @@ public struct CallPlan {
                 : integerBase + (integerCount++) * size_t.sizeof;
             _moves[moveCount++] = Move(
                 parameterIndex, destinationOffset, loadOf(register),
-                cast(ubyte) byteOffset, copyBytesOf(register),
+                cast(ushort) byteOffset, copyBytesOf(register),
             );
         }
 
@@ -442,7 +445,7 @@ public struct CallPlan {
                 stackBase + (stackCount++) * size_t.sizeof;
             _moves[moveCount++] = Move(
                 parameterIndex, destinationOffset, loadOf(register),
-                cast(ubyte) byteOffset, copyBytesOf(register),
+                cast(ushort) byteOffset, copyBytesOf(register),
             );
         }
 

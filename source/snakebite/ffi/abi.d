@@ -3,7 +3,6 @@ module snakebite.ffi.abi;
 
 private:
 
-
 // This module classifies one value's System V AMD64 ABI shape -
 // `ArgumentPlan` and `Register` - and the two host-compiler switches
 // below (`reversedDParameters`, `contextPrecedesHiddenReturnPointer`) a
@@ -95,16 +94,18 @@ public struct ArgumentPlan {
         return (memoryBytes + 7) / 8;
     }
 
-    // The largest MEMORY-class argument this plans for, in bytes: 16
-    // whole eightbytes, the same as `snakebite.ffi.limits.maxArguments` -
-    // a single MEMORY argument that size already claims this plan's
-    // entire ABI word budget (`prepare`'s own `words > maxArguments`
-    // check), so nothing above this bound could ever share a plan with
-    // another parameter anyway. No druntime or phobos function passes a
-    // by-value aggregate remotely this large - a 4x4 `double` matrix, a
-    // plausible real-world shape, is exactly this size - so refusing here
-    // gives a clearer message than waiting for that later, generic one.
-    private enum size_t maxMemoryBytes = 16 * 8;
+    // The largest MEMORY-class argument this plans for, in bytes: 64
+    // whole eightbytes. A large by-value aggregate does happen in
+    // practice - for example `std.regex`'s `Regex!char`, a struct of a
+    // dozen slices that `std.regex.matchFirst` takes by value, well over
+    // the old 128-byte limit this replaces (issue #334 step 3) - so this
+    // is a generous, independent sanity bound, not a derived one:
+    // `snakebite.ffi.plan.CallPlan`'s own stack capacity is no longer
+    // fixed (it grows on demand past its 16-word fast path - see
+    // `CallPlan.callAt`'s own heap fallback), so there is no plan-side
+    // number for this to track, and refusing here still gives a clearer
+    // message than an unbounded allocation would.
+    private enum size_t maxMemoryBytes = 64 * size_t.sizeof;
 
     public static ArgumentPlan of(imported!"dmd.mtype".Type type) {
         auto plan = aggregatePlan(type);
