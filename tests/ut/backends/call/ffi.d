@@ -227,6 +227,20 @@ public extern(C) long snakebite_ut_mixed_registers(MixedPair value) {
 
 
 public extern(C) long snakebite_ut_mixed_after_six_then_scalar(
+    int a, int b, int c, int d, int e, int f, MixedPair value, double g,
+) {
+    return a + b + c + d + e + f
+        + value.integer * 1000 + cast(long) value.floating
+        + cast(long) (g * 1_000_000.0);
+}
+
+
+// Kept under a new name from before `snakebite_ut_mixed_after_six_then_
+// scalar` above became the `double g` free-SSE-register check: `g` here
+// is still `int`, still spilled behind `value` for lack of any integer
+// register left - a different scenario (a scalar spilled behind the
+// aggregate, not a free register in the other file left untouched).
+public extern(C) long snakebite_ut_mixed_after_six_then_int_scalar(
     int a, int b, int c, int d, int e, int f, MixedPair value, int g,
 ) {
     return a + b + c + d + e + f
@@ -238,10 +252,11 @@ public extern(C) long snakebite_ut_mixed_after_six_then_scalar(
 public extern(C) long snakebite_ut_mixed_after_eight_doubles(
     double a, double b, double c, double d,
     double e, double f, double g, double h,
-    MixedPair value,
+    MixedPair value, int i,
 ) {
     return cast(long) (a + b + c + d + e + f + g + h)
-        + value.integer * 1000 + cast(long) value.floating;
+        + value.integer * 1000 + cast(long) value.floating
+        + i * 1_000_000L;
 }
 
 
@@ -1216,8 +1231,12 @@ static foreach (backend; Matrix!(
 // Six plain `int`s already fill the integer register file, and the SSE
 // register file is free - `value`'s INTEGER lane has no register left,
 // so the whole aggregate goes to the stack, both eightbytes together
-// (psABI 3.2.3 classification step 5c). `g`, declared after `value`, must
-// still arrive correctly too (issue #334 step 4).
+// (psABI 3.2.3 classification step 5c), consuming no register from
+// either file. `g`, a `double` declared after `value`, proves the free
+// SSE file was left untouched by that spill: a `buildMoves` that still
+// bumped the SSE count for the aggregate's own free-fitting SSE lane
+// would place `g` in `%xmm1`, but the real native callee below (built by
+// dmd, following the true ABI) reads it from `%xmm0` (issue #334 step 4).
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {
@@ -1235,7 +1254,7 @@ static foreach (backend; Matrix!(
                 pragma(mangle, "snakebite_ut_mixed_after_six_then_scalar")
                 extern(C) long nativeMixedAfterSixThenScalar(
                     int a, int b, int c, int d, int e, int f,
-                    MixedPair value, int g,
+                    MixedPair value, double g,
                 );
 
                 long answer() {
@@ -1243,6 +1262,48 @@ static foreach (backend; Matrix!(
                     value.integer = 7;
                     value.floating = 1.5;
                     return nativeMixedAfterSixThenScalar(
+                        1, 2, 3, 4, 5, 6, value, 9.0);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// The same six plain `int`s as above, but the trailing scalar is `int`,
+// not `double`: with the integer file already full, `g` has nowhere to
+// go either, and spills behind `value` on the stack - a scalar spilled
+// behind the aggregate, not a free register in the other file left
+// untouched (the scenario the test above now covers). Kept under this
+// new name so both scenarios stay tested (issue #334 step 4).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("mixedStruct.onStackAfterSixIntegersThenIntScalar."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        9_007_022L.shouldBeRetOf!(
+            backend,
+            q{
+                struct MixedPair {
+                    int integer;
+                    double floating;
+                }
+
+                pragma(mangle,
+                    "snakebite_ut_mixed_after_six_then_int_scalar")
+                extern(C) long nativeMixedAfterSixThenIntScalar(
+                    int a, int b, int c, int d, int e, int f,
+                    MixedPair value, int g,
+                );
+
+                long answer() {
+                    MixedPair value;
+                    value.integer = 7;
+                    value.floating = 1.5;
+                    return nativeMixedAfterSixThenIntScalar(
                         1, 2, 3, 4, 5, 6, value, 9);
                 }
             },
@@ -1254,15 +1315,19 @@ static foreach (backend; Matrix!(
 
 // Eight `double`s already fill the SSE register file, and the integer
 // register file is free - `value`'s SSE lane has no register left, so the
-// whole aggregate goes to the stack, both eightbytes together (issue #334
-// step 4).
+// whole aggregate goes to the stack, both eightbytes together, consuming
+// no register from either file. `g`, an `int` declared after `value`,
+// proves the free integer file was left untouched by that spill: a
+// `buildMoves` that still bumped the integer count for the aggregate's
+// own free-fitting INTEGER lane would place `g` in `%rsi`, but the real
+// native callee below reads it from `%rdi` (issue #334 step 4).
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {
     @("mixedStruct.onStackAfterEightDoubles." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        7_009L.shouldBeRetOf!(
+        3_007_009L.shouldBeRetOf!(
             backend,
             q{
                 struct MixedPair {
@@ -1274,7 +1339,7 @@ static foreach (backend; Matrix!(
                 extern(C) long nativeMixedAfterEightDoubles(
                     double a, double b, double c, double d,
                     double e, double f, double g, double h,
-                    MixedPair value,
+                    MixedPair value, int i,
                 );
 
                 long answer() {
@@ -1282,7 +1347,7 @@ static foreach (backend; Matrix!(
                     value.integer = 7;
                     value.floating = 1.5;
                     return nativeMixedAfterEightDoubles(
-                        1, 1, 1, 1, 1, 1, 1, 1, value);
+                        1, 1, 1, 1, 1, 1, 1, 1, value, 3);
                 }
             },
             "answer",

@@ -177,6 +177,37 @@ private extern(C) MixedPair snakebite_ut_mixed_after_eight(
     );
 }
 
+// Six plain `int`s fill the integer register file, so `value` spills
+// (its INTEGER lane has no register left), consuming no register from
+// either file. `g`, a `double` declared after `value`, proves the free
+// SSE file was left untouched by that spill: a `buildMoves` that still
+// bumped the SSE count for the aggregate's own free-fitting SSE lane
+// would place `g` in the second SSE register instead of the first, and
+// the real native callee below (built by dmd, following the true ABI)
+// would then read the wrong value from it (issue #334 step 4).
+private extern(C) long snakebite_ut_mixed_after_six_free_sse(
+    int a, int b, int c, int d, int e, int f, MixedPair value, double g,
+) {
+    return a + b + c + d + e + f
+        + value.integer * 1000 + cast(long) value.floating
+        + cast(long) (g * 1_000_000.0);
+}
+
+// Eight `double`s fill the SSE register file, so `value` spills (its SSE
+// lane has no register left), consuming no register from either file.
+// `g`, an `int` declared after `value`, proves the free integer file was
+// left untouched by that spill, the mirror image of
+// `snakebite_ut_mixed_after_six_free_sse` above (issue #334 step 4).
+private extern(C) long snakebite_ut_mixed_after_eight_free_integer(
+    double a, double b, double c, double d,
+    double e, double f, double g, double h,
+    MixedPair value, int i,
+) {
+    return cast(long) (a + b + c + d + e + f + g + h)
+        + value.integer * 1000 + cast(long) value.floating
+        + i * 1_000_000L;
+}
+
 // Six `long`s fill the integer register file and eight `double`s fill the
 // SSE register file - `value`'s INTEGER lane has no integer register left
 // and its SSE lane has no SSE register left, the shape the old code threw
@@ -541,6 +572,76 @@ unittest {
     ]);
 
     result.should == MixedPair(15, 7.5);
+}
+
+
+@("called.mixedStructOnStackFreeSSENotConsumed")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct MixedPair {
+            int integer;
+            double floating;
+        }
+
+        extern(C) long snakebite_ut_mixed_after_six_free_sse(
+            int a, int b, int c, int d, int e, int f, MixedPair value,
+            double g,
+        );
+    });
+    auto function_ = findFunction(guestModule,
+        "snakebite_ut_mixed_after_six_free_sse");
+    assert(function_ !is null,
+        "No `snakebite_ut_mixed_after_six_free_sse` in the program");
+
+    PlanCache cache;
+    int[6] integers = [1, 2, 3, 4, 5, 6];
+    MixedPair value = MixedPair(7, 1.5);
+    double g = 9.0;
+    long result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &integers[0], cast(const void*) &integers[1],
+        cast(const void*) &integers[2], cast(const void*) &integers[3],
+        cast(const void*) &integers[4], cast(const void*) &integers[5],
+        cast(const void*) &value, cast(const void*) &g,
+    ]);
+
+    result.should == 9_007_022;
+}
+
+
+@("called.mixedStructAfterSSEFreeIntegerNotConsumed")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct MixedPair {
+            int integer;
+            double floating;
+        }
+
+        extern(C) long snakebite_ut_mixed_after_eight_free_integer(
+            double a, double b, double c, double d,
+            double e, double f, double g, double h,
+            MixedPair value, int i,
+        );
+    });
+    auto function_ = findFunction(guestModule,
+        "snakebite_ut_mixed_after_eight_free_integer");
+    assert(function_ !is null,
+        "No `snakebite_ut_mixed_after_eight_free_integer` in the program");
+
+    PlanCache cache;
+    double[8] floating = [1, 1, 1, 1, 1, 1, 1, 1];
+    MixedPair value = MixedPair(7, 1.5);
+    int i = 3;
+    long result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &floating[0], cast(const void*) &floating[1],
+        cast(const void*) &floating[2], cast(const void*) &floating[3],
+        cast(const void*) &floating[4], cast(const void*) &floating[5],
+        cast(const void*) &floating[6], cast(const void*) &floating[7],
+        cast(const void*) &value, cast(const void*) &i,
+    ]);
+
+    result.should == 3_007_009;
 }
 
 
