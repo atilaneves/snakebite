@@ -2288,46 +2288,30 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     // `a[] = b[]`: both sides are evaluated as ordinary dynamic-array
-    // values first - `visit(SliceExp)` already knows how to find a
-    // slice's own base and length, bounded or not, so this reuses it
-    // rather than re-deriving the same address and length by hand.
-    // D requires the two lengths to agree at run time; a mismatch is a
-    // guest fault, not silently truncated or padded, so it is refused
-    // rather than guessed at. What is left is a plain byte range copy -
-    // `memmove`, not `memcpy`, since `a[] = a[1 .. $]` and similar
-    // self-overlapping copies are valid D and must still read every
-    // source byte before it is overwritten.
+    // values first, then handed to druntime so its length and overlap
+    // checks stay authoritative.
     private void* assignSlice(AssignExp expression) {
-        import core.stdc.string: memcpy, memmove;
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset, loadIntegral;
-        import std.conv: text;
+        import core.stdc.string: memcpy;
+        import snakebite.druntime.arraycopy: _d_arraycopy;
 
         auto destination = _frames.push(_facts.size, _facts.alignment);
         evaluate(expression.e1, _type, _facts, destination.base);
         auto source = _frames.push(_facts.size, _facts.alignment);
         evaluate(expression.e2, _type, _facts, source.base);
 
-        const destinationLength = loadIntegral(
-            destination.base + arrayLengthOffset, size_t.sizeof, false);
-        const sourceLength = loadIntegral(
-            source.base + arrayLengthOffset, size_t.sizeof, false);
-        if (destinationLength != sourceLength)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: lengths do not match (", destinationLength, " vs ",
-                    sourceLength, ")"),
-            );
-
-        auto destinationPointer =
-            *cast(void**) (destination.base + arrayPointerOffset);
-        auto sourcePointer =
-            *cast(const(void)**) (source.base + arrayPointerOffset);
         const elementSize = factsOf(_type.nextOf).size;
-        memmove(
-            destinationPointer, sourcePointer,
-            cast(size_t) destinationLength * elementSize,
-        );
+        try
+            _d_arraycopy(
+                elementSize,
+                *cast(void[]*) source.base,
+                *cast(void[]*) destination.base,
+            );
+        catch (SnakebiteException exception)
+            throw exception;
+        catch (GuestException exception)
+            throw exception;
+        catch (Throwable guest)
+            throw new GuestException(guest);
 
         memcpy(_place, destination.base, _facts.size);
         return destination.base;

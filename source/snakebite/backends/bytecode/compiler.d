@@ -2583,30 +2583,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const sourceSliceOffset = reserveTemp(sourceFacts);
             evalInto(expression.e2, sourceSliceOffset, sourceFacts.size);
 
-            // D requires both sides of a dynamic slice assignment to
-            // share one length; a compiled program never proves that at
-            // compile time, so this is the run-time counterpart to
-            // `_d_arraycopy`'s own `RangeError` on a mismatch. Native
-            // `_d_arraycopy` reports no index or length of its own, so the
-            // plain `_d_arrayboundsp` hook (`RangeError`, not one of its
-            // subclasses) is the closest match - see `compileBoundsHook`'s
-            // own doc.
-            const orderOffset = reserveTemp(pointerFacts);
-            emit(&opCopy, orderOffset, destSliceOffset + arrayLengthOffset,
-                size_t.sizeof);
-            emit(&opEqual, orderOffset,
-                sourceSliceOffset + arrayLengthOffset, size_t.sizeof);
-            compileBoundsHook(
-                orderOffset,
-                "_d_arrayboundsp",
-                [
-                    Register(Register.Kind.pointer, 8),
-                    Register(Register.Kind.unsigned, 4),
-                ],
-                [],
-                expression.loc,
-            );
-
             emit(&opSliceCopy, destSliceOffset, sourceSliceOffset,
                 elementSize);
         }

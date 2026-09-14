@@ -1006,12 +1006,6 @@ static foreach (backend; Matrix!()) {
 // corrupt the already-written overlap region. Not a pointer-element-only
 // case: an integral element must be checked the same way.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "the bytecode compiler does not check a slice assignment's source "
-            ~ "and destination for overlap"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter does not check a slice assignment's source and "
-            ~ "destination for overlap"),
 )) {
     @("arrays.slice.overlappingAssignRaises." ~ backend.stringof)
     @Tags(backend.stringof)

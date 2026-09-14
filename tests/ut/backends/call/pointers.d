@@ -707,12 +707,6 @@ static foreach (backend; Matrix!(
 // an ordinary forward copy would silently corrupt the already-written
 // overlap region.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "the bytecode compiler does not check a slice assignment's source "
-            ~ "and destination for overlap"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter does not check a slice assignment's source and "
-            ~ "destination for overlap"),
 )) {
     @("pointers.slice.overlappingAssignRaises." ~ backend.stringof)
     @Tags(backend.stringof)
