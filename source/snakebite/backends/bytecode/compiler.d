@@ -390,8 +390,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import dmd.statement:
         BreakStatement, CaseStatement, CompoundStatement, ContinueStatement,
         DefaultStatement, DoStatement, ExpStatement, ForStatement,
-        GotoCaseStatement, GotoDefaultStatement, IfStatement, ImportStatement,
-        LabelStatement, ReturnStatement, ScopeStatement, Statement,
+        GotoCaseStatement, GotoDefaultStatement, GotoStatement, IfStatement,
+        ImportStatement, LabelStatement, ReturnStatement, ScopeStatement, Statement,
         SwitchErrorStatement, SwitchStatement, ThrowStatement,
         TryCatchStatement, TryFinallyStatement, UnrolledLoopStatement,
         WithStatement;
@@ -618,6 +618,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         SwitchStatement switch_;
     }
     private PendingDefaultJump[] _pendingDefaultJumps;
+    private size_t[LabelStatement] _labelTargets;
+    private struct PendingLabelJump {
+        size_t instructionIndex;
+        LabelStatement label;
+    }
+    private PendingLabelJump[] _pendingLabelJumps;
     private LoopContext[] _loops;
     private size_t _destination;
     private size_t _width;
@@ -943,6 +949,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `gotoTarget` is unset when dmd did not need to rewrite the labelled
     // statement, so the label names `statement.statement` itself then.
     override void visit(LabelStatement statement) {
+        const target = _instructions.length;
+        _labelTargets[statement] = target;
+        size_t remaining;
+        foreach (pending; _pendingLabelJumps)
+            if (pending.label is statement)
+                patchTarget(pending.instructionIndex, target);
+            else
+                _pendingLabelJumps[remaining++] = pending;
+        _pendingLabelJumps = _pendingLabelJumps[0 .. remaining];
+
         auto outerLabel = _pendingLabel; // auto: const(Identifier) will not implicitly convert back
         auto outerTarget = _pendingLabelTarget;
         _pendingLabel = statement.ident;
@@ -1206,6 +1222,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         jumpToDefault(statement.sw, index);
         _finished = true;
         ++_unflushedExitCount;
+    }
+
+    override void visit(GotoStatement statement) {
+        if (statement.label is null || statement.label.statement is null)
+            throw rejection(_function, statement.loc, statementText(statement));
+
+        auto target = statement.label.statement;
+        const index = _instructions.length;
+        emit(&opJump, 0, 0, 0);
+        if (auto known = target in _labelTargets)
+            patchTarget(index, *known);
+        else
+            _pendingLabelJumps ~= PendingLabelJump(index, target);
+
+        // A goto only leaves the path that reaches it. Other paths still
+        // fall through to the statements after it, including its target.
     }
 
     // dmd's own synthesised "no case matched" default (see

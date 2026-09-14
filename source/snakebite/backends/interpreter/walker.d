@@ -137,7 +137,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import dmd.statement:
         BreakStatement, CaseStatement, Catch, CompoundStatement,
         ContinueStatement, DefaultStatement, DoStatement, ExpStatement,
-        ForStatement, GotoCaseStatement, GotoDefaultStatement, IfStatement,
+        ForStatement, GotoCaseStatement, GotoDefaultStatement, GotoStatement,
+        IfStatement,
         ImportStatement, LabelStatement, ReturnStatement, ScopeStatement,
         Statement, SwitchStatement, ThrowStatement, TryCatchStatement,
         TryFinallyStatement, UnrolledLoopStatement, WithStatement;
@@ -1103,6 +1104,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         foreach (child; *statement.statements) {
             if (child !is null) {
+                if (_gotoTarget !is null) {
+                    if (child is _gotoTarget)
+                        _gotoTarget = null;
+                    else if (!containsGotoTarget(child))
+                        continue;
+                }
                 if (_switchStart !is null) {
                     if (child is _switchStart)
                         _switchStart = null;
@@ -1123,6 +1130,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         foreach (child; *statement.statements) {
             if (child !is null) {
+                if (_gotoTarget !is null) {
+                    if (child is _gotoTarget)
+                        _gotoTarget = null;
+                    else if (!containsGotoTarget(child))
+                        continue;
+                }
                 if (_switchStart !is null) {
                     if (child is _switchStart)
                         _switchStart = null;
@@ -1158,6 +1171,28 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             else
                 return false;
         }
+
+        return false;
+    }
+
+    private bool containsGotoTarget(Statement statement) {
+        if (statement is _gotoTarget)
+            return true;
+
+        if (auto compound = statement.isCompoundStatement) {
+            if (compound.statements is null)
+                return false;
+
+            foreach (child; *compound.statements)
+                if (child !is null && containsGotoTarget(child))
+                    return true;
+        }
+        else if (auto scope_ = statement.isScopeStatement)
+            return scope_.statement !is null
+                && containsGotoTarget(scope_.statement);
+        else if (auto label = statement.isLabelStatement)
+            return label.statement !is null
+                && containsGotoTarget(label.statement);
 
         return false;
     }
@@ -1386,6 +1421,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
 
         _gotoTarget = statement.sw.sdefault;
+    }
+
+    override void visit(GotoStatement statement) {
+        if (statement.label is null || statement.label.statement is null)
+            throw new SnakebiteException(
+                "interpreter cannot execute an unresolved `goto`",
+            );
+
+        _gotoTarget = statement.label.statement;
     }
 
     override void visit(ThrowStatement statement) {
