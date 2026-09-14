@@ -44,9 +44,11 @@ static assert(CallFrame.stackWords.offsetof == 128);
 static assert(CallFrame.integerResult.offsetof == 136);
 static assert(CallFrame.sseResult.offsetof == 152);
 
-// `snakebite_ffi_call_sysv_amd64` in `sysv_amd64.S`. The only place a
-// forward call across the barrier happens (ADR-0001); everything else in
-// this module and in `plan.d` exists to fill and read `frame`.
+// `snakebite_ffi_call_sysv_amd64`, the general entry, in `sysv_amd64.S`.
+// One of two entry points that make a forward call across the barrier
+// (ADR-0001) - `snakebite_ffi_call_sysv_amd64_integer` below is the
+// other; everything else in this module and in `plan.d` exists to fill
+// and read `frame`.
 //
 // `frame` is `scope` only in intent, not in the type system: the stub
 // keeps its address in a callee-saved register for the width of the call,
@@ -56,8 +58,30 @@ public extern(C) void snakebite_ffi_call_sysv_amd64(
     CallFrame* frame,
 ) @system;
 
+// The leaner entry for a plan with no SSE argument registers and no
+// stack words (issue #334) - see this function's own comment in
+// `sysv_amd64.S` for what it skips relative to the general entry above.
+// `snakebite.ffi.plan.CallPlan.buildMoves` picks one of these two
+// entries once, at prepare time, from `_sseCount`/`_stackWordCount`;
+// this is a choice between two generic entries, not per-signature code,
+// which ADR-0011 reserves for a measured need.
+public extern(C) void snakebite_ffi_call_sysv_amd64_integer(
+    const(void)* address,
+    CallFrame* frame,
+) @system;
+
+// The exact type both entries above share. `plan.d` stores the address
+// of whichever one a plan was built for, in this field's own type, so
+// its hot call path is one indirect call through that stored address -
+// no branch between the two entries at call time, only at prepare time.
+public alias CallEntry = extern(C) void function(
+    const(void)* address,
+    CallFrame* frame,
+) @system;
+
 // Calls `address` with `frame`'s argument words already filled in,
-// leaving its result words in `frame.integerResult`/`frame.sseResult`.
+// through the general entry, leaving its result words in
+// `frame.integerResult`/`frame.sseResult`.
 //
 // `@trusted`: the stub only ever reads and writes through `frame`, at
 // the offsets the `static assert`s above pin down, and calls `address`
@@ -67,4 +91,15 @@ pragma(inline, true) public void call(
     const(void)* address, ref CallFrame frame,
 ) @trusted {
     snakebite_ffi_call_sysv_amd64(address, &frame);
+}
+
+// As `call`, but through the leaner integer-only entry above. `plan.d`
+// itself calls through a stored `CallEntry` instead of this wrapper
+// (see `CallEntry`'s own doc) - this exists so a test can drive that
+// entry directly with a hand-filled `CallFrame`, the same way the
+// existing tests drive `call`.
+pragma(inline, true) public void callInteger(
+    const(void)* address, ref CallFrame frame,
+) @trusted {
+    snakebite_ffi_call_sysv_amd64_integer(address, &frame);
 }

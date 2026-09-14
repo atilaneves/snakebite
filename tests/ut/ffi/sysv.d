@@ -2,16 +2,18 @@ module ut.ffi.sysv;
 
 
 import ut;
-import snakebite.ffi.sysv: CallFrame, call;
+import snakebite.ffi.sysv: CallFrame, call, callInteger;
 
 
-// These tests hand-fill a `CallFrame` and drive `snakebite_ffi_call_
-// sysv_amd64` directly, the way `snakebite.ffi.plan.CallPlan.callGeneric`
-// will from step 2 of issue #334 onward. Nothing here goes through a
-// `PlanCache` or a dmd `Type`: each test works out its callee's real
-// System V AMD64 argument and return classification by hand, and states
-// it in the callee's own declaration so the classification is checkable
-// by inspection.
+// These tests hand-fill a `CallFrame` and drive one of the System V
+// stub's two entries (`snakebite_ffi_call_sysv_amd64`, the general one,
+// or `snakebite_ffi_call_sysv_amd64_integer`, the leaner one - see
+// `sysv_amd64.S`'s header comment) directly, the same way `snakebite.
+// ffi.plan.CallPlan.callAt` does through its own stored entry. Nothing
+// here goes through a `PlanCache` or a dmd `Type`: each test works out
+// its callee's real System V AMD64 argument and return classification by
+// hand, and states it in the callee's own declaration so the
+// classification is checkable by inspection.
 private size_t bitsOf(in double value) @trusted pure nothrow @nogc {
     return *cast(const size_t*) &value;
 }
@@ -388,4 +390,155 @@ unittest {
     shortFrame.integer[0] = short.max;
     call(cast(const void*) &snakebite_ut_sysv_narrowShort, shortFrame);
     (cast(short) shortFrame.integerResult[0]).should == short.min;
+}
+
+
+// The tests below drive `snakebite_ffi_call_sysv_amd64_integer` (issue
+// #334) directly, through `callInteger`. This entry is chosen only for
+// a plan with no SSE argument registers and no stack words, so every
+// callee here takes only INTEGER-class arguments and none - reusing
+// several of the callees the general-entry tests above already declare,
+// since the ABI shape they classify to does not change with which entry
+// calls them.
+private int integerEntryNoArgumentsCalls;
+
+
+private extern(C) void snakebite_ut_sysv_integerEntry_noop() {
+    ++integerEntryNoArgumentsCalls;
+}
+
+
+@("integerEntry.noArguments")
+unittest {
+    integerEntryNoArgumentsCalls = 0;
+    CallFrame frame;
+
+    callInteger(cast(const void*) &snakebite_ut_sysv_integerEntry_noop, frame);
+
+    integerEntryNoArgumentsCalls.should == 1;
+}
+
+
+@("integerEntry.oneInt.returnsInt")
+unittest {
+    CallFrame frame;
+    frame.integer[0] = 41;
+
+    callInteger(cast(const void*) &snakebite_ut_sysv_addOne, frame);
+
+    (cast(int) frame.integerResult[0]).should == 42;
+}
+
+
+@("integerEntry.sixInts.allInRegisters")
+unittest {
+    CallFrame frame;
+    frame.integer = [1, 2, 3, 4, 5, 6];
+
+    callInteger(cast(const void*) &snakebite_ut_sysv_sum6, frame);
+
+    (cast(int) frame.integerResult[0]).should == 21;
+}
+
+
+@("integerEntry.returnPointer")
+unittest {
+    int probe = 17;
+    CallFrame frame;
+    frame.integer[0] = cast(size_t) &probe;
+
+    callInteger(cast(const void*) &snakebite_ut_sysv_identityPointer, frame);
+
+    frame.integerResult[0].should == cast(size_t) &probe;
+}
+
+
+@("integerEntry.returnTwoWordStruct.raxRdx")
+unittest {
+    CallFrame frame;
+    frame.integer[0] = 17;
+    frame.integer[1] = 31;
+
+    callInteger(cast(const void*) &snakebite_ut_sysv_twoWordStruct, frame);
+
+    frame.integerResult[0].should == 17;
+    frame.integerResult[1].should == 31;
+}
+
+
+private extern(C) double snakebite_ut_sysv_integerEntry_doubleOfLong(
+    long value,
+) {
+    return cast(double) value;
+}
+
+
+// This callee's one argument is INTEGER class, so a plan calling it
+// would pick this entry - but its *return* is SSE class. Proves the
+// integer entry still stores `%xmm0` into `frame.sseResult`, even
+// though it never loaded an SSE argument register for the call itself.
+@("integerEntry.doubleReturn.xmm0")
+unittest {
+    CallFrame frame;
+    frame.integer[0] = 6;
+
+    callInteger(
+        cast(const void*) &snakebite_ut_sysv_integerEntry_doubleOfLong,
+        frame,
+    );
+
+    frame.sseResult[0].should == 6.0;
+}
+
+
+// `snprintf` again (see the general entry's own `variadicCallee` test
+// above), but with only integer-class fixed and variadic arguments -
+// `%d %d`, no `%f`. Proves `%al` reports 0 SSE registers used: if this
+// entry left it holding anything else, glibc's variadic prologue would
+// still behave correctly here (it only acts on `%al` to decide how many
+// `%xmm` registers to spill to its register save area), so this test
+// only guards the `xorl %eax, %eax` itself, not an observable failure
+// mode - but it is the shape ADR-0001's variadic-callee coverage exists
+// for, and this entry needs its own instance of it.
+@("integerEntry.variadicCallee.snprintf")
+unittest {
+    import core.stdc.stdio: snprintf;
+    import std.string: fromStringz;
+
+    char[32] buffer;
+    immutable(char)[6] format = "%d %d\0";
+
+    CallFrame frame;
+    frame.integer[0] = cast(size_t) buffer.ptr;
+    frame.integer[1] = buffer.length;
+    frame.integer[2] = cast(size_t) format.ptr;
+    frame.integer[3] = 7;
+    frame.integer[4] = 8;
+
+    callInteger(cast(const void*) &snprintf, frame);
+
+    buffer.ptr.fromStringz.should == "7 8";
+}
+
+
+private extern(C) void snakebite_ut_sysv_integerEntry_throws() {
+    throw new Exception("thrown across the integer entry");
+}
+
+
+private void callIntegerThrows() @system {
+    CallFrame frame;
+    callInteger(cast(const void*) &snakebite_ut_sysv_integerEntry_throws,
+        frame);
+}
+
+
+// The whole point of this entry's own `.cfi_` directives (ADR-0004): a
+// `Throwable` raised by the callee must unwind through this leaner frame
+// exactly as it does through the general entry's frame, even though this
+// one has no `%rbp` frame pointer and pushes only `%rbx`.
+@("integerEntry.exceptionUnwindsThroughTheStub")
+unittest {
+    callIntegerThrows.shouldThrowWithMessage(
+        "thrown across the integer entry");
 }

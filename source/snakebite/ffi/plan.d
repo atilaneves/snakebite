@@ -24,13 +24,18 @@ private:
 // and which `CallFrame` slot (ADR-0001) it lands in. That shape - which
 // eightbyte reaches which integer register, SSE register or stack word -
 // depends only on the callee's signature, never on an argument's value, so
-// `prepare`/`ofRawAddress` compute it once, in `buildMoves`. `callAt` only
-// replays it: read a word, write it into the frame, call the System V stub
-// (`snakebite.ffi.sysv`) once, and read the result back.
+// `prepare`/`ofRawAddress` compute it once, in `buildMoves`. `buildMoves`
+// also picks which of the System V stub's two entries (`snakebite.ffi.
+// sysv`) the plan uses - the general one, or the leaner integer-only one
+// for a plan with no SSE argument registers and no stack words - and
+// keeps its address. `callAt` only replays the moves: read a word, write
+// it into the frame, call that one entry once, and read the result back.
 public struct CallPlan {
     import snakebite.ffi.abi: ArgumentPlan, Register;
     import snakebite.ffi.limits: maxArguments;
-    import snakebite.ffi.sysv: CallFrame;
+    import snakebite.ffi.sysv:
+        CallEntry, CallFrame, snakebite_ffi_call_sysv_amd64,
+        snakebite_ffi_call_sysv_amd64_integer;
 
     // Worst case: every one of `maxArguments` parameters is a two-eightbyte
     // aggregate, plus the hidden return pointer.
@@ -123,6 +128,14 @@ public struct CallPlan {
     // pair when the return classifies to two eightbytes.
     private ResultMove[2] _resultMoves;
     private size_t _resultCount;
+    // The stub entry this plan calls through - `snakebite_ffi_call_sysv_
+    // amd64` or `snakebite_ffi_call_sysv_amd64_integer`, chosen once in
+    // `buildMoves` from `_sseCount`/`_stackWordCount`. This is a
+    // prepare-time choice between two generic entries (see `sysv.
+    // CallEntry`'s own doc), not per-signature code, which ADR-0011
+    // reserves for a measured need: `callAt` below does one indirect call
+    // through this field, with no branch of its own between the two.
+    private CallEntry _entry;
 
     // Calls the function this plan was prepared for.
     //
@@ -142,18 +155,18 @@ public struct CallPlan {
 
     // Calls another function with this plan's prepared ABI shape: fills a
     // `Frame` by replaying the moves `prepare`/`ofRawAddress` computed,
-    // calls the System V stub once, and writes the result back. Every step
-    // is an argument-count check, a loop of plain loads and stores, the
-    // stub call, and at most two result stores - no `final switch` on a
-    // destination region and no throw expression inline in this body (see
-    // `throwArgumentCountMismatch`/`throwMissingReturnPlace`).
+    // calls the System V stub's `_entry` once, and writes the result back.
+    // Every step is an argument-count check, a loop of plain loads and
+    // stores, the stub call, and at most two result stores - no `final
+    // switch` on a destination region, no branch between the stub's two
+    // entries (that choice is `buildMoves`', at prepare time - see
+    // `_entry`'s own doc), and no throw expression inline in this body
+    // (see `throwArgumentCountMismatch`/`throwMissingReturnPlace`).
     pragma(inline, true) public void callAt(
         const(void)* address,
         void* returnPlace,
         scope const(void*)[] arguments,
     ) const {
-        import snakebite.ffi.sysv: call;
-
         if (arguments.length != _parameterCount)
             throwArgumentCountMismatch(_parameterCount, arguments.length);
         if (_hiddenReturnPointer && returnPlace is null)
@@ -173,7 +186,7 @@ public struct CallPlan {
         frame.callFrame.stack = frame.stackArea.ptr;
         frame.callFrame.stackWords = _stackWordCount;
 
-        call(address, frame.callFrame);
+        _entry(address, &frame.callFrame);
 
         // A hidden-pointer return already left its bytes at `returnPlace`
         // through that pointer, not in the return registers - which the
@@ -430,6 +443,11 @@ public struct CallPlan {
         _moveCount = moveCount;
         _sseCount = floatingCount;
         _stackWordCount = stackCount;
+        // The leaner entry is safe exactly when this plan fills no SSE
+        // register and spills no stack word - see `_entry`'s own doc.
+        _entry = _sseCount == 0 && _stackWordCount == 0
+            ? &snakebite_ffi_call_sysv_amd64_integer
+            : &snakebite_ffi_call_sysv_amd64;
 
         // At most two result eightbytes (`_return.count`), each read from
         // its own register file's next result slot - see `callAt`.

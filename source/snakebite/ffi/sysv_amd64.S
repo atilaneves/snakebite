@@ -1,10 +1,24 @@
 /* System V AMD64 call stub - ADR-0001.
  *
- * One hand-written function, `snakebite_ffi_call_sysv_amd64`, replays a
- * plan-built `CallFrame` (offsets below) onto the real integer, SSE and
- * stack argument registers, calls the target address indirectly, and
- * writes the raw return registers back into the frame. This file is the
- * only place that makes a forward call across the barrier (ADR-0001).
+ * One stub with two entries, chosen at prepare time (issue #334):
+ *
+ * - `snakebite_ffi_call_sysv_amd64`, the general entry, replays a
+ *   plan-built `CallFrame` (offsets below) onto the real integer, SSE
+ *   and stack argument registers, calls the target address indirectly,
+ *   and writes the raw return registers back into the frame.
+ * - `snakebite_ffi_call_sysv_amd64_integer`, the leaner entry, does the
+ *   same for the common shape a plan already knows at prepare time it
+ *   will never need: no SSE argument registers, no stack words. It
+ *   skips the frame pointer, the stack-word test, and the eight SSE
+ *   register loads the general entry always pays for.
+ *
+ * `snakebite.ffi.plan.CallPlan.buildMoves` decides once, per plan, which
+ * entry a call uses, and stores its address; this is a prepare-time
+ * choice between two generic entries, not per-signature code, which
+ * ADR-0011 reserves for a measured need.
+ *
+ * This file is the only place that makes a forward call across the
+ * barrier (ADR-0001).
  *
  * `CallFrame`'s D declaration, with the `static assert`s that keep the
  * offsets below in sync with the struct's real layout, lives in
@@ -41,6 +55,10 @@
  *     const void* address, -- %rdi
  *     CallFrame* frame,    -- %rsi
  * );
+ *
+ * The general entry: used whenever a plan has an SSE argument register,
+ * a stack word, or both (`snakebite_ffi_call_sysv_amd64_integer` below
+ * is the leaner entry for the common shape that has neither).
  *
  * `%rbx` holds `address` and `%r12` holds `frame` across the call: both
  * are callee-saved, so they survive the indirect call to `address`
@@ -181,5 +199,76 @@ snakebite_ffi_call_sysv_amd64:
 
     .cfi_endproc
     .size   snakebite_ffi_call_sysv_amd64, . - snakebite_ffi_call_sysv_amd64
+
+
+    .globl  snakebite_ffi_call_sysv_amd64_integer
+    .type   snakebite_ffi_call_sysv_amd64_integer, @function
+    .align  16
+
+/* extern(C) void snakebite_ffi_call_sysv_amd64_integer(
+ *     const void* address, -- %rdi
+ *     CallFrame* frame,    -- %rsi
+ * );
+ *
+ * The leaner entry (issue #334): chosen at prepare time, by `plan.d`'s
+ * `buildMoves`, only for a plan with no SSE argument registers and no
+ * stack words. One push, six integer register loads, the indirect
+ * call, and the four result stores - no frame pointer, no stack-word
+ * test, no SSE register loads.
+ *
+ * `%rbx` holds `frame` across the call: callee-saved, so it survives
+ * the indirect call to `address` untouched, and is itself saved and
+ * restored here. `address` needs no callee-saved register: it is read
+ * once, into the caller-saved `%r10`, immediately before `call *%r10`
+ * consumes it, so nothing has to preserve it across the call.
+ *
+ * Entry `%rsp` is 8 mod 16 (SysV ABI); this one push leaves it
+ * 16-byte aligned for the `call` below, with no stack area to
+ * allocate.
+ */
+snakebite_ffi_call_sysv_amd64_integer:
+    .cfi_startproc
+
+    pushq   %rbx
+    .cfi_def_cfa_offset 16
+    .cfi_offset rbx, -16
+
+    movq    %rsi, %rbx      /* rbx = frame */
+    movq    %rdi, %r10      /* r10 = address (scratch, dead after the call) */
+
+    /* Load the integer argument registers. Always all six; a callee
+     * that takes fewer simply never reads the rest - same as the
+     * general entry above. */
+    movq    CF_INTEGER+0(%rbx), %rdi
+    movq    CF_INTEGER+8(%rbx), %rsi
+    movq    CF_INTEGER+16(%rbx), %rdx
+    movq    CF_INTEGER+24(%rbx), %rcx
+    movq    CF_INTEGER+32(%rbx), %r8
+    movq    CF_INTEGER+40(%rbx), %r9
+
+    /* `%al` reports 0 SSE registers used, for a variadic callee - this
+     * entry is only chosen for a plan with no SSE argument registers,
+     * but a variadic callee still reads %al unconditionally (see the
+     * `variadicCallee` tests in `tests/ut/ffi/sysv.d`). */
+    xorl    %eax, %eax
+
+    call    *%r10
+
+    /* Same four result registers as the general entry above (ADR-0002):
+     * a callee may still return in SSE registers even though it took no
+     * SSE arguments itself - `double f(long)`, for example. */
+    movq    %rax, CF_INTEGER_RESULT+0(%rbx)
+    movq    %rdx, CF_INTEGER_RESULT+8(%rbx)
+    movsd   %xmm0, CF_SSE_RESULT+0(%rbx)
+    movsd   %xmm1, CF_SSE_RESULT+8(%rbx)
+
+    popq    %rbx
+    .cfi_def_cfa_offset 8
+    .cfi_restore rbx
+
+    ret
+
+    .cfi_endproc
+    .size   snakebite_ffi_call_sysv_amd64_integer, . - snakebite_ffi_call_sysv_amd64_integer
 
     .section .note.GNU-stack,"",@progbits
