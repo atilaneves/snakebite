@@ -280,12 +280,7 @@ static foreach (backend; Matrix!()) {
 // them is written, so `a = [a[1], a[0]]` swaps the two elements rather
 // than writing `a[1]` into `a[0]` and then reading that new `a[0]` back
 // as the second element.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter writes the literal's elements straight into " ~
-        "`a` one by one, so the second element reads the first one's " ~
-        "new value"),
-)) {
+static foreach (backend; Matrix!()) {
     @("staticArray.assignLiteralReadingItself." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -295,6 +290,32 @@ static foreach (backend; Matrix!(
                 a = [a[1], a[0]];
                 assert(a[0] == 2);
                 assert(a[1] == 1);
+            }
+        });
+    }
+}
+
+// An assignment publishes its right side only after the complete expression
+// has been evaluated. A throw from a later literal element leaves the target
+// unchanged, as it does in compiled D.
+static foreach (backend; Matrix!()) {
+    @("staticArray.assignLiteralThrowDoesNotPublishPartially." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int fail() {
+                throw new Exception("expected");
+            }
+
+            void main() {
+                int[2] a = [1, 2];
+                try {
+                    a = [3, fail()];
+                    assert(false);
+                } catch (Exception) {
+                }
+                assert(a[0] == 1);
+                assert(a[1] == 2);
             }
         });
     }

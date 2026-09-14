@@ -174,9 +174,7 @@ static foreach (backend; Matrix!()) {
 // Growing storage through the allocator keeps what was already there,
 // across both the element-at-a-time and slice-at-a-time appends.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("manualReallocationKeepsContents." ~ backend.stringof)
     @Tags(backend.stringof)
