@@ -1846,3 +1846,55 @@ unittest {
         .shouldThrow
         .msg.canFind("extern(C)").should == true;
 }
+
+
+// A function pointer or delegate extra argument has no callback pool
+// entry (ADR-0003) to turn it into a native-callable address - a named
+// parameter of that shape crosses through the bool-function bridge
+// instead (`snakebite.ffi.callback`), which a variadic extra argument
+// has no parameter to attach to (issue #9). `CallPlan.prepareVariadic`
+// refuses both shapes before either backend ever calls the native
+// callee; this checks the refusal reaches a guest caller unchanged.
+static foreach (Backend; AliasSeq!(Interpreter, Bytecode)) {
+    @("variadic.callbackExtraArgumentRefused." ~ Backend.stringof)
+    @Tags(Backend.stringof)
+    unittest {
+        auto functionPointerModule = parseSnippet(q{
+            pragma(mangle, "snakebite_ut_variadic_sum_ints_backend")
+            extern(C) int nativeSum(int first, ...);
+
+            int twice(int x) {
+                return x * 2;
+            }
+
+            int answer() {
+                int function(int) callback = &twice;
+                return nativeSum(1, callback);
+            }
+        });
+        auto functionPointerAnswer =
+            findFunction(functionPointerModule, "answer");
+
+        int result;
+        new Backend(Program([functionPointerModule]))
+            .call(functionPointerAnswer, &result, [])
+            .shouldThrow
+            .msg.canFind("ADR-0003").should == true;
+
+        auto delegateModule = parseSnippet(q{
+            pragma(mangle, "snakebite_ut_variadic_sum_ints_backend")
+            extern(C) int nativeSum(int first, ...);
+
+            int answer() {
+                int delegate(int) callback = (int x) => x * 2;
+                return nativeSum(1, callback);
+            }
+        });
+        auto delegateAnswer = findFunction(delegateModule, "answer");
+
+        new Backend(Program([delegateModule]))
+            .call(delegateAnswer, &result, [])
+            .shouldThrow
+            .msg.canFind("ADR-0003").should == true;
+    }
+}

@@ -1060,8 +1060,28 @@ private CallPlan prepareCommon(
         // `argumentIndex` keeps counting up from where the declared
         // parameters left off, so `buildMoves` never has to know where
         // one group ends and the other begins.
-        foreach (extraType; extraArgumentTypes)
+        //
+        // A function pointer or delegate extra argument is refused
+        // instead: a *parameter* of that shape crosses through the
+        // callback pool's per-function slot (ADR-0003), which a named
+        // parameter's type gives a way to install ahead of the call, but
+        // a variadic extra argument has no parameter for that slot to
+        // attach to. Passing one through here would hand the callee the
+        // guest's own function value's bytes, not a callable address
+        // (issue #9).
+        foreach (extraType; extraArgumentTypes) {
+            auto pointer = extraType.isTypePointer;
+            const isFunctionPointer =
+                pointer !is null && pointer.nextOf.isTypeFunction !is null;
+            if (isFunctionPointer || extraType.ty == Tdelegate)
+                throw new Exception(
+                    text("ffi cannot pass `", extraType.toString, "` as a ",
+                        "variadic argument to `", function_.toString,
+                        "`: a function pointer or delegate extra argument ",
+                        "has no callback pool entry (ADR-0003)"),
+                );
             addArgument(ArgumentPlan.of(extraType));
+        }
 
         auto name = mangleExact(function_);
         void* address = target.address;
