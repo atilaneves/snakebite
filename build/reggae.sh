@@ -2,7 +2,8 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
-if [[ ! -f build.ninja ]]; then
+# Apply generator version changes to existing builds too.
+if [[ ! -f build.ninja || "${BASH_SOURCE[0]}" -nt build.ninja ]]; then
     if [[ -n "${REGGAE_BIN:-}" ]]; then
         "$REGGAE_BIN" -b ninja
     else
