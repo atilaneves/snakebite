@@ -244,7 +244,96 @@ public struct RuntimeTypes {
         info.m_align = declaration.alignsize;
         if (declaration.hasPointerField)
             info.m_flags = TypeInfo_Struct.StructFlags.hasPointers;
+        setSysVArgTypes(info, declaration.type);
         _structs[declaration] = info;
         return info;
+    }
+}
+
+// A guest struct's fabricated `TypeInfo_Struct` needs its own `m_arg1`/
+// `m_arg2` set, the same way the real compiler's own codegen sets them
+// for a host-compiled struct (`dmd.glue.todt`'s `visit(
+// TypeInfoStructDeclaration)`, reading `StructDeclaration.argType`):
+// druntime's own `core.vararg` TypeInfo-driven `va_arg` (`core.internal.
+// vararg.sysv_x64`, the one an `extern(D)` untyped variadic callee needs
+// to read a runtime-typed extra argument - issue #334 step 6) reads
+// these two fields to find which SysV register-save-area eightbyte(s) a
+// struct-typed argument occupies. Left unset (null, this class' own
+// `.init`), that `va_arg` wrongly assumes the value was always passed in
+// memory and reads whatever garbage sits at its own stale `stack_args`
+// pointer instead of the real register bytes - verified: a from-scratch
+// repro reading a two-`int` struct's `_arguments[0]` this way, with `
+// m_arg1`/`m_arg2` left null, reads four bytes of stack garbage instead
+// of the struct's own two fields; setting them from this backend's own
+// SysV eightbyte classification (`snakebite.ffi.abi.ArgumentPlan`, the
+// very same classification `snakebite.ffi.plan.CallPlan` already uses to
+// place this same struct into a register when it is the caller) fixes
+// it. A MEMORY-class struct needs neither field set: `va_arg`'s own
+// "always passed in memory" path, the one it falls back to when `arg1`
+// is null, is exactly right for it - reading from `stack_args`, not a
+// register-save-area eightbyte, is where a MEMORY-class argument's bytes
+// actually are.
+//
+// `structInfo` fabricates a `TypeInfo_Struct` for every guest struct
+// that ever needs one - an associative array key, a plain `typeid`, a
+// class field's own reflection - almost none of which ever cross the
+// FFI barrier as a variadic argument. `ArgumentPlan.of` refuses a shape
+// it cannot classify (an associative-array field, say - `abi.classify`'s
+// own final `throw`), which is only ever a real problem for a struct
+// actually passed that way; a plan built for an actual call site
+// classifies it again anyway (`CallPlan.prepareCommon`'s own `foreach`)
+// and raises the very same refusal, clearly, at the point that struct is
+// truly being passed. So a classification failure here is swallowed,
+// leaving `m_arg1`/`m_arg2` unset - "always passed in memory" is the
+// wrong read for a register-class struct's own `va_arg`, but never
+// wrong enough to fail fabricating this struct's `TypeInfo` for every
+// other reason it exists.
+private void setSysVArgTypes(
+    TypeInfo_Struct info, imported!"dmd.mtype".Type type,
+) {
+    import snakebite.ffi.abi: ArgumentPlan, supported;
+
+    static if (supported) {
+        try {
+            auto plan = ArgumentPlan.of(type);
+            if (plan.memory)
+                return;
+
+            info.m_arg1 = eightbyteRepresentative(plan.registers[0]);
+            if (plan.count > 1)
+                info.m_arg2 = eightbyteRepresentative(plan.registers[1]);
+        } catch (Exception)
+            {}
+    }
+}
+
+// A real host `TypeInfo` standing in for one SysV eightbyte: `core.
+// internal.vararg.sysv_x64.va_arg`'s TypeInfo-driven overload only ever
+// reads two things off it - `tsize` (to know how many bytes this
+// eightbyte holds; the second eightbyte's own `tsize` is never read, only
+// whether it is non-null) and `flags` bit 1 (`inXMMregister`, to pick the
+// SSE save area over the integer one) - so any host type with the right
+// `tsize` and the right SSE-ness stands in correctly, whether or not it
+// is the guest's own type. `float`/`double` both set that flags bit
+// (verified: `typeid(float).flags`/`typeid(double).flags` are `2` on
+// this exact host); no integral type does. An odd-sized (3, 5, 6 or 7
+// byte) partial INTEGER eightbyte - only possible for the *last*
+// eightbyte of an unaligned or padded struct - has no exact-size
+// built-in type to stand in for it; `long` is the closest safe
+// over-read, since the register save area always reserves a full
+// eightbyte regardless of the argument's own narrower size.
+private imported!"object".TypeInfo eightbyteRepresentative(
+    imported!"snakebite.ffi.abi".Register register,
+) {
+    import snakebite.ffi.abi: Register;
+
+    if (register.kind == Register.Kind.sse)
+        return register.size == 4 ? typeid(float) : typeid(double);
+
+    switch (register.size) {
+        case 1: return typeid(byte);
+        case 2: return typeid(short);
+        case 4: return typeid(int);
+        default: return typeid(long);
     }
 }

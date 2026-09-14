@@ -5159,6 +5159,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         size_t delegate() thisOffsetOf,
         in size_t destOffset,
     ) {
+        import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         import snakebite.backends.calls:
@@ -5188,15 +5189,33 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             arityMismatches, prefersGuestBody, usesGuestBody;
         const isConstructor = callee.isCtorDeclaration !is null;
 
-        const guest = usesGuestBody(
-            callee, arguments, &_bytecode.isGuestFunction,
-            prefersGuestBody(
-                callee, _bytecode.isGuestFunction(callee),
-                _bytecode.hasNativeSymbol(callee)),
-        );
-        if (!guest) {
-            auto type = typeFunctionOf(callee);
+        import dmd.astenums: VarArg;
+        auto type = typeFunctionOf(callee);
 
+        // A `VarArg.variadic` callee - `extern(C)` C-style or `extern(D)`
+        // untyped (issue #334 steps 5 and 6) - always reaches a native
+        // symbol, the same way `Evaluator.visit(CallExp)`'s own check
+        // does for the interpreter (its own doc): nothing this compiler
+        // compiles can walk a `va_arg`-reading body correctly, and a
+        // guest declaration written only so dmd's `semantic3` populates
+        // its own hidden context (the `ContextHiddenPointer`-style
+        // prototype `ut.ffi.plan`'s own `called.
+        // contextPrecedesHiddenReturnPointer` documents) or `_arguments`/
+        // `_argptr` locals is never meant to be walked as guest code
+        // either - so this bypasses `usesGuestBody`'s ordinary preference
+        // entirely instead of letting a callee that merely *has* a body
+        // (`{ assert(0); }`, say) fall into the guest branch below and
+        // trip over its own compiler-synthesised `_arguments = v_
+        // arguments.elements;` construct statement, which reads a hidden
+        // parameter no `FrameLayout` ever reserves a guest frame slot for.
+        const guest = type.parameterList.varargs != VarArg.variadic
+            && usesGuestBody(
+                callee, arguments, &_bytecode.isGuestFunction,
+                prefersGuestBody(
+                    callee, _bytecode.isGuestFunction(callee),
+                    _bytecode.hasNativeSymbol(callee)),
+            );
+        if (!guest) {
             Arg[] initialArgs;
             if (hasThis)
                 initialArgs ~= Arg(receiverOffset, 0, size_t.sizeof);
@@ -5293,6 +5312,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (arityMismatches(type.parameterList, arguments, true))
             throw rejection(_function, loc, exprText);
 
+        // An `extern(D)` untyped variadic call site carries one more
+        // argument the frontend itself inserted ahead of every declared
+        // parameter: `arguments[0]`, the call's own `_arguments` (`dmd.
+        // mtype.TypeFunction.isDstyleVariadic`'s own doc; ADR-0010's D
+        // variadic paragraph; issue #334 step 6). `declaredArgumentOffset`
+        // skips it below when compiling the declared parameters and when
+        // finding where the extra, variadic arguments start.
+        const isDVariadic = type.isDstyleVariadic;
+        const declaredArgumentOffset = isDVariadic ? 1 : 0;
+
         // A `ref` return hands back its target's address in the
         // return register, whatever the pointee's own facts are - the
         // same convention `snakebite.ffi.plan` already prepares for a
@@ -5307,8 +5336,25 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, loc, exprText);
 
         Arg[] args = initialArgs;
+
+        // An `extern(D)` untyped variadic callee's own hidden
+        // `_arguments` (`declaredArgumentOffset`'s own doc above) is
+        // evaluated exactly like any other argument and placed right
+        // after any hidden `this` (`initialArgs`) and right before the
+        // declared parameters - `CallPlan.prepareVariadic`'s own
+        // `hasVArguments` places its `ArgumentPlan` at that same
+        // position, for the same ABI-ordering reason (its own doc).
+        if (isDVariadic) {
+            auto vArguments = (*arguments)[0];
+            const facts = TypeFacts.of(vArguments.type);
+            const argumentOffset = reserveTemp(facts);
+            evalInto(vArguments, argumentOffset, facts.size);
+            args ~= Arg(argumentOffset, 0, facts.size);
+        }
+
         foreach (i; 0 .. parameterCount) {
             auto parameter = type.parameterList[i];
+            auto declared = (*arguments)[declaredArgumentOffset + i];
 
             // The bool-function callback bridge only ever stands in
             // for a plain function-pointer parameter (the one native
@@ -5320,7 +5366,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // trampoline needed at all.
             auto pointer = parameter.type.isTypePointer;
             if (pointer !is null && pointer.next.isTypeFunction !is null) {
-                if (auto callback = guestFunctionPointer((*arguments)[i])) {
+                if (auto callback = guestFunctionPointer(declared)) {
                     const argumentOffset = reserveTemp(pointerFacts);
                     const address = _bytecode.boolFunctionAddress(callback);
                     emit(&opConstant, argumentOffset,
@@ -5330,7 +5376,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     continue;
                 }
 
-                if ((*arguments)[i].isNullExp is null)
+                if (declared.isNullExp is null)
                     throw rejection(_function, loc, exprText);
             }
 
@@ -5343,7 +5389,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // `Evaluator.bindArguments` reads to pick address over value
             // for a guest-body callee's own parameter.
             if (CallAdapter.Argument.of(parameter).isReference) {
-                const argumentOffset = compileAddress((*arguments)[i]);
+                const argumentOffset = compileAddress(declared);
                 args ~= Arg(argumentOffset, 0, size_t.sizeof);
                 continue;
             }
@@ -5352,46 +5398,54 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // delegate, two pointer-sized registers
             // (`snakebite.ffi.plan.CallPlan.prepare` already plans it that
             // way), not whatever plain type it appears to declare - dmd's
-            // own semantic pass already wrapped `(*arguments)[i]` into
-            // that delegate (`expressionsem.d`'s `functionParameters`
-            // calls `toDelegate`), so only the destination slot's own
-            // facts need to widen to match it.
+            // own semantic pass already wrapped `declared` into that
+            // delegate (`expressionsem.d`'s `functionParameters` calls
+            // `toDelegate`), so only the destination slot's own facts
+            // need to widen to match it.
             const facts = parameter.storageClass & STC.lazy_
                 ? TypeFacts.lazyArgument
                 : TypeFacts.of(parameter.type);
             const argumentOffset = reserveTemp(facts);
-            evalInto((*arguments)[i], argumentOffset, facts.size);
+            evalInto(declared, argumentOffset, facts.size);
             args ~= Arg(argumentOffset, 0, facts.size);
         }
 
         // A C-style variadic callee's extra arguments (issue #334 step
-        // 5) sit past `parameterCount` in `arguments` - `arityMismatches`
-        // above already let them through, passed `allowExtra` `true`.
-        // Each extra argument's own dmd `Type` - the frontend's
-        // default-promoted call-site type (`float` to `double`, a
-        // narrower-than-`int` integral to `int`) - is collected first,
-        // types only, and handed to `PlanCache.variadicOf` before any of
-        // them is compiled into a temp: the plan's own argument-count
-        // check is then what decides whether this call is refused, ahead
-        // of spending any temps or emitted code on it (issue #334 step 5
-        // review finding 2 - the interpreter's own `callVariadicNative`
-        // orders its two matching steps the same way). This compiler
-        // visits one `CallExp` exactly once, so this is already that
-        // call site's own, one-time plan preparation - no further
-        // call-site cache is needed the way the interpreter keeps one
-        // (issue #96).
+        // 5), and an `extern(D)` untyped variadic callee's own extra
+        // arguments (issue #334 step 6), sit past the declared
+        // parameters in `arguments` - `arityMismatches` above already
+        // let them through, passed `allowExtra` `true`. Each extra
+        // argument's own dmd `Type` - a C-style call's frontend-promoted
+        // type (`float` to `double`, a narrower-than-`int` integral to
+        // `int`), or an `extern(D)` call's own argument type - is
+        // collected first, types only, and handed to `PlanCache.
+        // variadicOf` before any of them is compiled into a temp: the
+        // plan's own argument-count check is then what decides whether
+        // this call is refused, ahead of spending any temps or emitted
+        // code on it (issue #334 step 5 review finding 2 - the
+        // interpreter's own `callVariadicNative` orders its two matching
+        // steps the same way). This compiler visits one `CallExp`
+        // exactly once, so this is already that call site's own,
+        // one-time plan preparation - no further call-site cache is
+        // needed the way the interpreter keeps one (issue #96).
         const totalCount = arguments is null ? 0 : arguments.length;
         Type[] extraArgumentTypes;
         if (type.parameterList.varargs == VarArg.variadic)
-            foreach (i; parameterCount .. totalCount)
+            foreach (i; declaredArgumentOffset + parameterCount .. totalCount)
                 extraArgumentTypes ~= (*arguments)[i].type;
 
-        auto plan = type.parameterList.varargs == VarArg.none
-            ? _bytecode._plans.of(callee)
-            : _bytecode._plans.variadicOf(callee, extraArgumentTypes);
+        // `VarArg.typesafe` (`T t...`) needs neither a per-call-site
+        // plan nor an `_arguments` argument: the frontend has already
+        // packed its trailing arguments into one array-typed declared
+        // parameter, classified like any other above, so only `VarArg.
+        // variadic` (C-style or `extern(D)` untyped) routes through
+        // `variadicOf`.
+        auto plan = type.parameterList.varargs == VarArg.variadic
+            ? _bytecode._plans.variadicOf(callee, extraArgumentTypes)
+            : _bytecode._plans.of(callee);
 
         if (type.parameterList.varargs == VarArg.variadic)
-            foreach (i; parameterCount .. totalCount) {
+            foreach (i; declaredArgumentOffset + parameterCount .. totalCount) {
                 auto argument = (*arguments)[i];
                 const facts = TypeFacts.of(argument.type);
                 const argumentOffset = reserveTemp(facts);
@@ -5839,6 +5893,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return compiler.compileFieldAddress(expression);
         }
 
+        // The generic fallback for any expression `StorageResolver.resolve`
+        // does not otherwise recognise - a struct literal (`storageStructLiteral`),
+        // any slice (`storageSlice`), and any rvalue with no storage of its
+        // own yet, `ArrayLiteralExp` included: dmd's own typesafe variadic
+        // packing (`dmd.expressionsem.functionParameters`, issue #334 step
+        // 6) slices a fresh `ArrayLiteralExp` of static-array type directly
+        // (`T t...`), with no hidden variable declaration of its own the
+        // way a named local would have one, and `visit(SliceExp)`'s own
+        // `Tsarray` whole-array-slice case (above) asks `compileAddress`
+        // for that literal's own address. Materialising it here, into
+        // scratch storage, then reading its address, is what supplies one.
         public size_t storageValue(Expression expression) {
             const facts = TypeFacts.of(expression.type);
             const value = compiler.reserveTemp(facts);

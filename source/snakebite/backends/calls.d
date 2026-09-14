@@ -57,12 +57,16 @@ public bool prefersGuestBody(
 //
 // `allowExtra` opts a call site into accepting more arguments than
 // `parameterList.length`, positionally unmatched to any parameter: only
-// the two call sites that go on to read those extra arguments
-// themselves pass it - a C-style variadic call's own extra arguments
-// (issue #334 step 5), which `snakebite.ffi.plan.CallPlan.
-// prepareVariadic` is what actually classifies. Every other call site
-// stays exact, so none of them can silently drop arguments it never
-// reads.
+// the call sites that go on to read those extra arguments themselves
+// pass it - a C-style variadic call's own extra arguments (issue #334
+// step 5), and an `extern(D)` untyped variadic call site's own leading
+// `_arguments` plus its extra arguments (issue #334 step 6), both of
+// which `snakebite.ffi.plan.CallPlan.prepareVariadic` is what actually
+// classifies. `VarArg.typesafe` (`T t...`) needs no such allowance: the
+// frontend has already packed a typesafe call's trailing arguments into
+// one array-typed argument by the time this ever runs. Every other call
+// site stays exact, so none of them can silently drop arguments it
+// never reads.
 public bool arityMismatches(
     imported!"dmd.mtype".ParameterList parameterList,
     imported!"dmd.arraytypes".Expressions* arguments,
