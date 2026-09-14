@@ -2,6 +2,7 @@ module ut.backends.call.ffi;
 
 
 import ut.backends;
+import snakebite.backends.backend: Program;
 import snakebite.ffi: PlanCache;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -498,5 +499,100 @@ static foreach (backend; Matrix!(
                 );
             }
         }, "answer");
+    }
+}
+
+
+private alias VoidCallback = void delegate();
+
+
+private extern(C) int snakebite_ut_delegate_value(VoidCallback callback) {
+    return 1;
+}
+
+
+private extern(C) int snakebite_ut_delegate_ref(ref VoidCallback callback) {
+    return 1;
+}
+
+
+private extern(C) int snakebite_ut_delegate_out(out VoidCallback callback) {
+    return 1;
+}
+
+
+private extern(C) int snakebite_ut_delegate_lazy(lazy int value) {
+    return 1;
+}
+
+
+static foreach (form; AliasSeq!("value", "ref", "out", "lazy")) {
+    static foreach (backend; Matrix!(
+        Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+    )) {
+        @("delegateArgument." ~ (form == "out" ? "output." : "refused.")
+            ~ form ~ "." ~ backend.stringof)
+        @Tags(backend.stringof)
+        unittest {
+            enum parameter = form == "lazy" ? "lazy int value"
+                : (form == "value" ? "" : form ~ " ") ~ "Callback cb";
+            enum argument = form == "lazy" ? "42" : "callback";
+            enum code = "alias Callback = void delegate();"
+                ~ "pragma(mangle, \"snakebite_ut_delegate_" ~ form ~ "\")"
+                ~ "extern(C) int host(" ~ parameter ~ ");"
+                ~ "int answer() { int value;"
+                ~ "Callback callback = () { ++value; };"
+                ~ "return host(" ~ argument ~ "); }";
+            static if (is(backend == Native) || form == "out") {
+                1.shouldBeRetOf!(backend, code, "answer");
+            } else {
+                auto module_ = parseSnippet(code);
+                auto function_ = findFunction(module_, "answer");
+                auto backend_ = new backend(Program([module_]));
+                int result;
+                backend_.call(function_, &result, [])
+                    .shouldThrowWithMessage(
+                        "ffi cannot call `host`: guest delegate callbacks "
+                            ~ "are not supported");
+            }
+        }
+    }
+}
+
+
+private int _nativeDelegateCalls;
+
+
+private extern(C) VoidCallback snakebite_ut_native_delegate() {
+    _nativeDelegateCalls = 0;
+    return () { ++_nativeDelegateCalls; };
+}
+
+
+private extern(C) int snakebite_ut_invoke_delegate(VoidCallback callback) {
+    if (callback !is null)
+        callback();
+    return _nativeDelegateCalls;
+}
+
+
+static foreach (useNull; AliasSeq!(false, true)) {
+    static foreach (backend; Matrix!(
+        Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+    )) {
+        @("delegateArgument.native." ~ useNull.stringof ~ "."
+            ~ backend.stringof)
+        @Tags(backend.stringof)
+        unittest {
+            enum code = q{
+                alias Callback = void delegate();
+                pragma(mangle, "snakebite_ut_native_delegate")
+                extern(C) Callback make();
+                pragma(mangle, "snakebite_ut_invoke_delegate")
+                extern(C) int invoke(Callback);
+            } ~ "int answer() { auto callback = make(); return invoke("
+                ~ (useNull ? "null" : "callback") ~ "); }";
+            (useNull ? 0 : 1).shouldBeRetOf!(backend, code, "answer");
+        }
     }
 }

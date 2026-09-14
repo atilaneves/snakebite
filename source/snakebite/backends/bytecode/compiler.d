@@ -3090,6 +3090,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         auto compiled = _bytecode.compileFunction(target.function_);
+        _bytecode._plans.registerGuestDelegate(compiled);
         emit(&opConstant, _destination + delegateFunctionOffset,
             addConstant(cast(long) cast(size_t) compiled), size_t.sizeof);
     }

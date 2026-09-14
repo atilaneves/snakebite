@@ -1730,6 +1730,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
         storeIntegral(
             bytes + delegateContextOffset, context, size_t.sizeof);
+        _plans.registerGuestDelegate(cast(void*) target.function_);
         storeIntegral(
             bytes + delegateFunctionOffset,
             cast(size_t) cast(void*) target.function_,

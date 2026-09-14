@@ -112,6 +112,14 @@ public struct CallPlan {
     // The moves `callAt` replays - see the module comment.
     private Move[] _moves;
     private size_t _moveCount;
+    private struct DelegateArgument {
+        size_t index;
+        bool indirect;
+    }
+    private DelegateArgument[] _delegateArguments;
+    private GuestDelegates* _guestDelegates;
+    private string _hostName;
+
     // `CallFrame.sseCount`: how many of the moves above land in an SSE
     // register, for a variadic callee's `%al`.
     private size_t _sseCount;
@@ -170,6 +178,8 @@ public struct CallPlan {
             throwArgumentCountMismatch(_parameterCount, arguments.length);
         if (_hiddenReturnPointer && returnPlace is null)
             throwMissingReturnPlace;
+        if (_delegateArguments.length)
+            checkDelegates(arguments);
 
         // Calls without SSE or stack arguments need only the register frame.
         if (_integerOnly) {
@@ -195,6 +205,26 @@ public struct CallPlan {
         callFrame.stackWords = _stackWordCount;
         _entry(address, callFrame);
         readResult(frameBytes, returnPlace);
+    }
+
+    private void checkDelegates(scope const(void*)[] arguments) const {
+        import snakebite.nativelayout: delegateFunctionOffset;
+        import snakebite.exception: SnakebiteException;
+        import std.conv: text;
+
+        foreach (argument; _delegateArguments) {
+            // auto would retain the slot's top-level const qualifier.
+            const(void)* place = arguments[argument.index];
+            if (argument.indirect)
+                place = *cast(const(void*)*) place;
+            if (place is null)
+                continue;
+            const address = *cast(const(void*)*)
+                (cast(const(ubyte)*) place + delegateFunctionOffset);
+            if (address in _guestDelegates.addresses)
+                throw new SnakebiteException(text("ffi cannot call `",
+                    _hostName, "`: guest delegate callbacks are not supported"));
+        }
     }
 
     // Writes the hidden return pointer, when this plan has one, and every
@@ -643,7 +673,26 @@ public extern(C) void executeCallPlan(
 // resolve to. A call site is the finer key, and would let a plan be found
 // without hashing at all, but it needs somewhere on the call site to keep
 // it, which is the caller's business and not this package's.
+private struct GuestDelegates {
+    bool[const(void)*] addresses;
+}
+
+
 public struct PlanCache {
+    private GuestDelegates* _guestDelegates;
+
+    // Only addresses emitted by a backend are registered. Host code
+    // addresses must never be inspected as frontend or bytecode objects.
+    public void registerGuestDelegate(const(void)* address) {
+        guestDelegates.addresses[address] = true;
+    }
+
+    private GuestDelegates* guestDelegates() {
+        if (_guestDelegates is null)
+            _guestDelegates = new GuestDelegates;
+        return _guestDelegates;
+    }
+
     private CallPlan*[imported!"dmd.func".FuncDeclaration] _plans;
     private CallPlan*[string] _rawPlans;
     private bool[imported!"dmd.func".FuncDeclaration] _nativeSymbols;
@@ -715,6 +764,7 @@ public struct PlanCache {
         ++_preparations;
         auto plan = new CallPlan;
         *plan = prepare(function_, _resolver);
+        plan._guestDelegates = guestDelegates;
         _plans[function_] = plan;
         return *plan;
     }
@@ -772,9 +822,9 @@ private CallPlan prepare(
         ArgumentPlan, Register, contextPrecedesHiddenReturnPointer,
         needsHiddenReturnPointer, reversedDParameters,
         supported;
-    import dmd.astenums: LINK, STC, VarArg;
+    import dmd.astenums: LINK, STC, Tdelegate, VarArg;
     import dmd.mangle: mangleExact;
-    import dmd.typesem: nextOf;
+    import dmd.typesem: nextOf, toBasetype;
     import std.conv: text;
     import std.string: fromStringz;
 
@@ -850,6 +900,14 @@ private CallPlan prepare(
             // classify as.
             const storageClass = type.parameterList[i].storageClass;
             const isRef = (storageClass & (STC.ref_ | STC.out_)) != 0;
+            // An out parameter is initialized by the callee before use.
+            if ((storageClass & STC.out_) == 0
+                    && (type.parameterList[i].type.toBasetype.ty == Tdelegate
+                        || (storageClass & STC.lazy_) != 0)) {
+                plan._delegateArguments ~= CallPlan.DelegateArgument(
+                    argumentIndex, isRef);
+                plan._hostName = function_.toString.idup;
+            }
             const argument = isRef
                 ? ArgumentPlan(
                     [Register(Register.Kind.pointer, 8), Register.init], 1,
