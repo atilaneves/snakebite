@@ -109,7 +109,7 @@ private struct MemoryTriple {
 
 
 public extern(C) size_t snakebite_ut_memory_triple(MemoryTriple value) {
-    return value.first + value.second + value.third;
+    return value.first * 100 + value.second * 10 + value.third;
 }
 
 
@@ -125,8 +125,8 @@ pragma(mangle, "snakebite_ut_memory_after_six_backend")
 public extern(C) size_t snakebite_ut_memory_after_six_backend(
     int a, int b, int c, int d, int e, int f, MemoryQuad value, int g,
 ) {
-    return a + b + c + d + e + f + value.first + value.second
-        + value.third + value.fourth + g;
+    return a + b + c + d + e + f + value.first * 10_000
+        + value.second * 1_000 + value.third * 100 + value.fourth * 10 + g;
 }
 
 
@@ -157,7 +157,7 @@ pragma(mangle, "snakebite_ut_memory_with_sse_backend")
 public extern(C) double snakebite_ut_memory_with_sse_backend(
     double x, double y, MemoryTriple value,
 ) {
-    return x + y + value.first + value.second + value.third;
+    return x + y + value.first * 100 + value.second * 10 + value.third;
 }
 
 
@@ -172,7 +172,8 @@ private struct TwentyBytes {
 
 pragma(mangle, "snakebite_ut_twenty_bytes_backend")
 public extern(C) int snakebite_ut_twenty_bytes_backend(TwentyBytes value) {
-    return value.a + value.b + value.c + value.d + value.e;
+    return value.a * 10_000 + value.b * 1_000 + value.c * 100
+        + value.d * 10 + value.e;
 }
 
 
@@ -585,14 +586,17 @@ static foreach (backend; Matrix!(
 // A 24-byte struct (three `size_t` fields) by value, passed to a host
 // `extern(C)` function that sums its fields - the ABI class MEMORY,
 // larger than two eightbytes, used to be refused outright (issue #334
-// step 3).
+// step 3). The callee weights each field differently, the way
+// `snakebite_ut_eightLongs` (`ut.ffi.plan`) does, so a permuted
+// eightbyte order changes the answer instead of leaving a plain sum
+// unchanged.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {
     @("memoryClassParameter.threeWords." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        95.shouldBeRetOf!(
+        2_057.shouldBeRetOf!(
             backend,
             q{
                 struct MemoryTriple {
@@ -621,7 +625,9 @@ static foreach (backend; Matrix!(
 // A 32-byte MEMORY-class struct declared after six plain `int`s, which
 // already fill the integer register file, with one more `int` declared
 // after it - the struct and the trailing `int` both spill, and must land
-// on the stack in declaration order (issue #334 step 3).
+// on the stack in declaration order (issue #334 step 3). `g`'s weight
+// (`1`) differs from `value.fourth`'s (`10`), the word next to it on the
+// stack, so swapping either with the other changes the answer.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {
@@ -629,7 +635,7 @@ static foreach (backend; Matrix!(
         backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        128.shouldBeRetOf!(
+        123_428.shouldBeRetOf!(
             backend,
             q{
                 struct MemoryQuad {
@@ -747,13 +753,15 @@ static foreach (backend; Matrix!(
 // `%xmm0`/`%xmm1` - room in the SSE register file does not change
 // `value`'s own class, and its always-on-stack placement must not
 // disturb the SSE arguments' own register assignment (issue #334 step 3).
+// `value`'s three fields carry different weights, so a permuted
+// eightbyte order changes the answer.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {
     @("memoryClassParameter.withSSEArguments." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        64.0.shouldBeRetOf!(
+        1_234.0.shouldBeRetOf!(
             backend,
             q{
                 struct MemoryTriple {
@@ -784,14 +792,20 @@ static foreach (backend; Matrix!(
 // Five plain `int` fields: 20 bytes, whose last eightbyte (`value`'s
 // bytes 16-19, field `e` alone) is only half full. The move for that
 // eightbyte must copy only those 4 remaining bytes, never reading past
-// `value`'s own 20 bytes of storage (issue #334 step 3).
+// `value`'s own 20 bytes of storage (issue #334 step 3). Each field
+// carries a different weight so a permuted word order changes the
+// answer; the plan-level `called.memoryClassParameter.
+// partialLastEightbyte` (`ut.ffi.plan`) additionally places `value` at
+// the end of a guarded page, so an over-read faults instead of just
+// reading harmless padding - an ordinary struct here is enough, since
+// this test's own job is the matrix, not the over-read.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {
     @("memoryClassParameter.partialLastEightbyte." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        15.shouldBeRetOf!(
+        12_345.shouldBeRetOf!(
             backend,
             q{
                 struct TwentyBytes {

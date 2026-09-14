@@ -140,7 +140,7 @@ private extern(C) ThreeWords snakebite_ut_three_words() {
 }
 
 private extern(C) size_t snakebite_ut_memory_param(ThreeWords value) {
-    return value.first + value.second + value.third;
+    return value.first * 100 + value.second * 10 + value.third;
 }
 
 private extern(C) Pair snakebite_ut_pair(Pair value) {
@@ -652,6 +652,9 @@ unittest {
 // three-`size_t` shape `called.hiddenPointerReturn` above already uses for
 // a MEMORY-class *return*; this is the same shape as an explicit
 // *parameter*, the case `abi.ArgumentPlan.of` used to refuse outright.
+// `snakebite_ut_memory_param` weights each field differently - a plain
+// sum would return the same answer for any permutation of `value`'s own
+// three eightbytes, so it could not catch a wrong move order.
 @("called.memoryClassParameter")
 unittest {
     auto guestModule = parseSnippet(q{
@@ -673,7 +676,7 @@ unittest {
     size_t result;
     cache.of(function_).call(&result, [cast(const void*) &value]);
 
-    result.should == 95;
+    result.should == 2_057;
 }
 
 
@@ -773,8 +776,8 @@ private struct FourWords {
 private extern(C) size_t snakebite_ut_memory_after_six(
     int a, int b, int c, int d, int e, int f, FourWords value, int g,
 ) {
-    return a + b + c + d + e + f + value.first + value.second
-        + value.third + value.fourth + g;
+    return a + b + c + d + e + f + value.first * 10_000
+        + value.second * 1_000 + value.third * 100 + value.fourth * 10 + g;
 }
 
 
@@ -784,7 +787,10 @@ private extern(C) size_t snakebite_ut_memory_after_six(
 // register (`abi.ArgumentPlan`'s own doc) - and `g` spills too, since no
 // integer register is left for it either; both land on the stack in
 // declaration order, `value`'s four eightbytes first and then `g`, the
-// same order a native `extern(C)` call would use.
+// same order a native `extern(C)` call would use. `g`'s weight (`1`)
+// differs from `value.fourth`'s (`10`), the word next to it on the
+// stack, so a plan that puts `g` where `value.fourth` belongs (or the
+// reverse) changes the answer instead of leaving the sum unchanged.
 @("called.memoryClassParameter.afterSixIntegersThenOneMore")
 unittest {
     auto guestModule = parseSnippet(q{
@@ -817,7 +823,7 @@ unittest {
         cast(const void*) &value, cast(const void*) &g,
     ]);
 
-    result.should == 128;
+    result.should == 123_428;
 }
 
 
@@ -932,7 +938,7 @@ unittest {
 private extern(C) double snakebite_ut_memory_with_sse(
     double x, double y, ThreeWords value,
 ) {
-    return x + y + value.first + value.second + value.third;
+    return x + y + value.first * 100 + value.second * 10 + value.third;
 }
 
 
@@ -942,6 +948,9 @@ private extern(C) double snakebite_ut_memory_with_sse(
 // disturb the SSE arguments' own register assignment. This also picks
 // the general stub entry, not the integer-only one
 // (`CallPlan._entry`'s own doc), since `value` fills a stack word.
+// `value`'s three fields carry different weights, the way
+// `snakebite_ut_eightLongs` above does, so a permuted eightbyte order
+// changes the answer.
 @("called.memoryClassParameter.withSSEArguments")
 unittest {
     auto guestModule = parseSnippet(q{
@@ -970,7 +979,7 @@ unittest {
         cast(const void*) &value,
     ]);
 
-    result.should == 64.0;
+    result.should == 1_234.0;
 }
 
 
