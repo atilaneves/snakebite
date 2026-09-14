@@ -4328,13 +4328,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         in Loc loc,
         ubyte* frameBase,
         const(FrameLayout)* layout,
+        in bool allowExtra = false,
     ) {
         import dmd.astenums: STC;
         import snakebite.backends.calls: arityMismatches;
         import std.conv: text;
 
         auto parameterList = typeFunctionOf(function_).parameterList;
-        if (arityMismatches(parameterList, arguments))
+        if (arityMismatches(parameterList, arguments, allowExtra))
             throw new SnakebiteException(
                 text("interpreter: `", function_.toString, "` expects ",
                     parameterList.length, " argument(s), got ",
@@ -4622,6 +4623,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             expression,
             function_,
             layout,
+            false,
             classReceiver,
             hasClassReceiver,
             callee.context,
@@ -4653,15 +4655,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // this never checks `usesGuestBody` the way `executeRaw` does.
     //
     // `funcType.parameterList`'s own, declared parameters bind into a
-    // frame exactly as any other call (`bindFrame`) - this backend's own
-    // `arityMismatches` is relaxed for a variadic parameter list, so
-    // `expression.arguments` running longer than that declared list does
-    // not reject the call. Every argument past that point is this call's
-    // own extra, variadic argument: it has no frame slot; each is
-    // evaluated here, in call order, into its own scratch storage, and
-    // its own dmd `Type` - the frontend's own default-promoted call-site
-    // type (`float` to `double`, a narrower-than-`int` integral to
-    // `int`) - is what `variadicCallPlanOf` classifies it by.
+    // frame exactly as any other call (`bindFrame`, passed `allowExtra:
+    // true` below), so `expression.arguments` running longer than that
+    // declared list does not reject the call - the only caller of
+    // `arityMismatches` that opts into that (`snakebite.backends.calls`'s
+    // own doc). Every argument past that point is this call's own extra,
+    // variadic argument: it has no frame slot; each is evaluated here, in
+    // call order, into its own scratch storage, and its own dmd `Type` -
+    // the frontend's own default-promoted call-site type (`float` to
+    // `double`, a narrower-than-`int` integral to `int`) - is what
+    // `variadicCallPlanOf` classifies it by.
     //
     // The plan is built first, from types alone, before anything is
     // evaluated or bound: a refusal `variadicCallPlanOf` raises - a
@@ -4687,7 +4690,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto plan = variadicCallPlanOf(expression, function_, extraTypes);
 
         auto layout = layoutOf(function_);
-        auto frame = bindFrame(expression, function_, layout);
+        auto frame = bindFrame(expression, function_, layout, true);
+        bindArguments(function_, arguments, expression.loc,
+            frame.base, layout, true);
 
         // `slots` holds the hidden context, the declared parameters, and
         // every extra argument, in that order - `CallArguments` keeps
@@ -4896,6 +4901,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallExp expression,
         FuncDeclaration function_,
         const(FrameLayout)* layout,
+        in bool allowExtra = false,
         void* classReceiver = null,
         bool hasClassReceiver = false,
         void* delegateContext = null,
@@ -4911,7 +4917,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // only a body has.
         auto parameterList = typeFunctionOf(function_).parameterList;
         auto arguments = expression.arguments;
-        if (arityMismatches(parameterList, arguments))
+        if (arityMismatches(parameterList, arguments, allowExtra))
             throw new SnakebiteException(
                 text("interpreter: `", function_.toString, "` expects ",
                     parameterList.length, " argument(s), got ",

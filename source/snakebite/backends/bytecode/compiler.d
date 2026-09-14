@@ -5210,7 +5210,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.backends.calls: arityMismatches;
 
         const parameterCount = type.parameterList.length;
-        if (arityMismatches(type.parameterList, arguments))
+        if (arityMismatches(type.parameterList, arguments, true))
             throw rejection(_function, loc, exprText);
 
         // A `ref` return hands back its target's address in the
@@ -5286,8 +5286,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         // A C-style variadic callee's extra arguments (issue #334 step
         // 5) sit past `parameterCount` in `arguments` - `arityMismatches`
-        // above already let them through for a variadic `type`. Each
-        // extra argument's own dmd `Type` - the frontend's
+        // above already let them through, passed `allowExtra` `true`.
+        // Each extra argument's own dmd `Type` - the frontend's
         // default-promoted call-site type (`float` to `double`, a
         // narrower-than-`int` integral to `int`) - is collected first,
         // types only, and handed to `PlanCache.variadicOf` before any of
