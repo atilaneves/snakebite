@@ -97,6 +97,85 @@ public extern(C) double snakebite_ut_double_of_long(long value) {
 }
 
 
+// The MEMORY-class shapes below (issue #334 step 3) mirror
+// `tests/ut/ffi/plan.d`'s own `called.memoryClassParameter*` tests at the
+// plan level - here, through a guest call on every backend instead of
+// `PlanCache` directly.
+private struct MemoryTriple {
+    size_t first;
+    size_t second;
+    size_t third;
+}
+
+
+public extern(C) size_t snakebite_ut_memory_triple(MemoryTriple value) {
+    return value.first + value.second + value.third;
+}
+
+
+private struct MemoryQuad {
+    size_t first;
+    size_t second;
+    size_t third;
+    size_t fourth;
+}
+
+
+pragma(mangle, "snakebite_ut_memory_after_six_backend")
+public extern(C) size_t snakebite_ut_memory_after_six_backend(
+    int a, int b, int c, int d, int e, int f, MemoryQuad value, int g,
+) {
+    return a + b + c + d + e + f + value.first + value.second
+        + value.third + value.fourth + g;
+}
+
+
+private struct PackedPair {
+    int a;
+    align(1) long b;
+}
+
+
+pragma(mangle, "snakebite_ut_packed_pair_backend")
+public extern(C) long snakebite_ut_packed_pair_backend(PackedPair value) {
+    return value.a + value.b;
+}
+
+
+pragma(mangle, "snakebite_ut_extern_d_memory_two_spill_backend")
+private extern(D) long snakebite_ut_externDMemoryTwoSpill(
+    long a0, long a1, long a2, long a3, long a4, long a5,
+    MemoryTriple value, long b0, long b1,
+) {
+    return a0 * 1_000_000 + a1 * 100_000 + b0 * 100 + b1
+        + cast(long) (value.first * 1000 + value.second * 10
+            + value.third);
+}
+
+
+pragma(mangle, "snakebite_ut_memory_with_sse_backend")
+public extern(C) double snakebite_ut_memory_with_sse_backend(
+    double x, double y, MemoryTriple value,
+) {
+    return x + y + value.first + value.second + value.third;
+}
+
+
+private struct TwentyBytes {
+    int a;
+    int b;
+    int c;
+    int d;
+    int e;
+}
+
+
+pragma(mangle, "snakebite_ut_twenty_bytes_backend")
+public extern(C) int snakebite_ut_twenty_bytes_backend(TwentyBytes value) {
+    return value.a + value.b + value.c + value.d + value.e;
+}
+
+
 // `abs` is declared `extern(C)` with no body: nothing in the guest program
 // implements it, so the only way to run these is to call the real symbol
 // the host process already links against.
@@ -560,7 +639,7 @@ static foreach (backend; Matrix!(
                     size_t fourth;
                 }
 
-                pragma(mangle, "snakebite_ut_memory_after_six")
+                pragma(mangle, "snakebite_ut_memory_after_six_backend")
                 extern(C) size_t nativeMemoryAfterSix(
                     int a, int b, int c, int d, int e, int f,
                     MemoryQuad value, int g,
@@ -601,7 +680,7 @@ static foreach (backend; Matrix!(
                     align(1) long b;
                 }
 
-                pragma(mangle, "snakebite_ut_packed_pair")
+                pragma(mangle, "snakebite_ut_packed_pair_backend")
                 extern(C) long nativePackedPair(PackedPair value);
 
                 int answer() {
@@ -683,7 +762,7 @@ static foreach (backend; Matrix!(
                     size_t third;
                 }
 
-                pragma(mangle, "snakebite_ut_memory_with_sse")
+                pragma(mangle, "snakebite_ut_memory_with_sse_backend")
                 extern(C) double nativeMemoryWithSse(
                     double x, double y, MemoryTriple value,
                 );
@@ -723,7 +802,7 @@ static foreach (backend; Matrix!(
                     int e;
                 }
 
-                pragma(mangle, "snakebite_ut_twenty_bytes")
+                pragma(mangle, "snakebite_ut_twenty_bytes_backend")
                 extern(C) int nativeTwentyBytes(TwentyBytes value);
 
                 int answer() {
