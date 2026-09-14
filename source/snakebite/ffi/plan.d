@@ -519,17 +519,10 @@ public struct CallPlan {
                 else
                     ++integerLanes;
 
-            const mixed = integerLanes == 1 && floatingLanes == 1;
             const integerSpills = integerLanes > 0
                 && integerCount + integerLanes > maxIntegerArguments;
             const floatingSpills = floatingLanes > 0
                 && floatingCount + floatingLanes > maxFloatingArguments;
-
-            if (mixed && integerSpills && floatingSpills)
-                throw new Exception(
-                    "ffi cannot place a mixed INTEGER/SSE aggregate " ~
-                        "when both register files need stack arguments",
-                );
 
             if (!integerSpills && !floatingSpills)
                 registerArgument(i);
