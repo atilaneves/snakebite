@@ -768,18 +768,27 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             hostFunction, arguments[0 .. argumentCount], adapted,
         );
 
-        // Native code throws a real `Throwable`, not the `GuestException`
-        // wrapper a guest `throw` or a failed native `assert` produces
-        // (`throwGuest`, `visit(HaltStatement)`) - a guest `catch` only
-        // ever looks for that wrapper (`visit(TryCatchStatement)`). A
-        // callback re-entering the interpreter (`callBoolFunction` and
-        // friends) can also unwind through here with a `GuestException`
-        // already, or with a `SnakebiteException` reporting that the
-        // interpreter itself could not run the callback - both must reach
-        // the host exactly as thrown, not double-wrapped or reinterpreted
-        // as a guest-catchable exception.
+        callPlan(plan, returnPlace, adapted.values);
+    }
+
+    // Every crossing of the barrier through a `CallPlan` shares this catch
+    // chain (`callHost`, `throwArrayBounds`, `callVariadicNative`): native
+    // code throws a real `Throwable`, not the `GuestException` wrapper a
+    // guest `throw` or a failed native `assert` produces (`throwGuest`,
+    // `visit(HaltStatement)`) - a guest `catch` only ever looks for that
+    // wrapper (`visit(TryCatchStatement)`). A callback re-entering the
+    // interpreter (`callBoolFunction` and friends) can also unwind through
+    // here with a `GuestException` already, or with a `SnakebiteException`
+    // reporting that the interpreter itself could not run the callback -
+    // both must reach the host exactly as thrown, not double-wrapped or
+    // reinterpreted as a guest-catchable exception.
+    extern(D) private void callPlan(
+        const(CallPlan)* plan,
+        void* place,
+        scope const(void*)[] slots,
+    ) {
         try
-            plan.call(returnPlace, adapted.values);
+            plan.call(place, slots);
         catch (SnakebiteException exception)
             throw exception;
         catch (GuestException exception)
@@ -792,10 +801,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // or `_d_arraybounds_slicep`, see `snakebite.backends.elementaddress`
     // - the same one the bytecode compiler emits a call to. It never
     // returns, so every caller here only reaches this once its own bounds
-    // check already failed; wrapping its throw the same way `callHost`
-    // wraps any other native call lets a guest `catch (RangeError)` see
-    // it, instead of the interpreter's own refusal or a hand-built guest
-    // exception.
+    // check already failed; wrapping its throw through `callPlan`, the
+    // same as any other native call, lets a guest `catch (RangeError)`
+    // see it, instead of the interpreter's own refusal or a hand-built
+    // guest exception.
     extern(D) private void throwArrayBounds(
         string hookName,
         scope const(Register)[] parameterRegisters,
@@ -815,14 +824,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             [cast(const(void)*) &file, cast(const(void)*) &line]
             ~ extraArguments;
 
-        try
-            plan.call(null, arguments);
-        catch (SnakebiteException exception)
-            throw exception;
-        catch (GuestException exception)
-            throw exception;
-        catch (Throwable guest)
-            throw new GuestException(guest);
+        callPlan(plan, null, arguments);
     }
 
     extern(C) private static bool isGuestFunction(
@@ -989,12 +991,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // Where the hidden context and each explicit parameter's bytes sit in
     // the frame the caller just filled: what the FFI needs to hand them
     // over, built from the layout this interpreter already computed.
+    // `extraCount` reserves that many more trailing slots, left unfilled,
+    // for a variadic call site's own extra arguments
+    // (`callVariadicNative`'s own doc) - zero for every ordinary call.
     extern(D) private CallArguments argumentSlots(
         ubyte* frameBase,
         const(FrameLayout)* layout,
+        in size_t extraCount = 0,
     ) {
         auto arguments = CallArguments(layout.parameters.length
-            + (layout.hiddenThis.variable !is null));
+            + (layout.hiddenThis.variable !is null) + extraCount);
         // const would make the address slots read-only.
         auto values = arguments.values;
         size_t count;
@@ -4655,15 +4661,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // this never checks `usesGuestBody` the way `executeRaw` does.
     //
     // `funcType.parameterList`'s own, declared parameters bind into a
-    // frame exactly as any other call (`bindFrame`, passed `allowExtra:
-    // true` below), so `expression.arguments` running longer than that
+    // frame exactly as any other call (`bindFrame`, passed `allowExtra`
+    // `true` below), so `expression.arguments` running longer than that
     // declared list does not reject the call - the only caller of
     // `arityMismatches` that opts into that (`snakebite.backends.calls`'s
-    // own doc). Every argument past that point is this call's own extra,
+    // own doc). The hidden-`this`/declared-parameter portion of `slots`
+    // below comes from `argumentSlots`, the same helper an ordinary call
+    // uses. Every argument past that point is this call's own extra,
     // variadic argument: it has no frame slot; each is evaluated here, in
-    // call order, into its own scratch storage, and its own dmd `Type` -
-    // the frontend's own default-promoted call-site type (`float` to
-    // `double`, a narrower-than-`int` integral to `int`) - is what
+    // call order, into its own scratch storage past what `argumentSlots`
+    // already filled, and its own dmd `Type` - the frontend's own
+    // default-promoted call-site type (`float` to `double`, a
+    // narrower-than-`int` integral to `int`) - is what
     // `variadicCallPlanOf` classifies it by.
     //
     // The plan is built first, from types alone, before anything is
@@ -4695,22 +4704,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             frame.base, layout, true);
 
         // `slots` holds the hidden context, the declared parameters, and
-        // every extra argument, in that order - `CallArguments` keeps
-        // them inline for the common, small call and only reaches the
-        // heap once a call runs past its inline capacity (see its own
-        // doc), the same fallback the FFI plan itself relies on.
-        auto slots = CallArguments(layout.parameters.length
-            + (layout.hiddenThis.variable !is null)
-            + (totalCount - declaredCount));
+        // every extra argument, in that order - `argumentSlots` fills the
+        // first two, the same helper an ordinary call uses, reserving
+        // `totalCount - declaredCount` trailing slots for the extra
+        // arguments filled below. `CallArguments` keeps every slot
+        // inline for the common, small call and only reaches the heap
+        // once a call runs past its inline capacity (see its own doc),
+        // the same fallback the FFI plan itself relies on.
+        auto slots =
+            argumentSlots(frame.base, layout, totalCount - declaredCount);
         auto values = slots.values;
-        size_t count;
-        if (layout.hiddenThis.variable !is null)
-            values[count++] = frame.base + layout.hiddenThis.parameter.offset;
-        foreach (parameter; layout.parameters)
-            values[count++] = frame.base + parameter.offset;
+        size_t count =
+            layout.parameters.length + (layout.hiddenThis.variable !is null);
 
         // One mark for every extra argument's own scratch storage: they
-        // are read by `plan.call` below and done with before this method
+        // are read by `callPlan` below and done with before this method
         // returns, so LIFO release here, rather than each argument
         // keeping its own `Frame`, is enough.
         const mark = _frames.mark;
@@ -4724,14 +4732,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             values[count++] = storage;
         }
 
-        try
-            plan.call(_place, values);
-        catch (SnakebiteException exception)
-            throw exception;
-        catch (GuestException exception)
-            throw exception;
-        catch (Throwable guest)
-            throw new GuestException(guest);
+        callPlan(plan, _place, values);
     }
 
     // `receiver`'s own dynamic `TypeInfo_Class`, read the same way `visit
