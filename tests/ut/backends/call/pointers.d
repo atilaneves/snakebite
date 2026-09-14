@@ -1048,10 +1048,7 @@ static foreach (backend; Matrix!()) {
 
 // `&sarr[1]` is dmd's `SymOffExp` with a non-zero offset: the address is
 // the array's own storage plus one element's width, not the array's start.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "bytecode compiler cannot compile `(& sarr + 4)` in `deref`"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.addressOf.staticArrayElement." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1066,6 +1063,31 @@ static foreach (backend; Matrix!(
             },
             "deref",
         );
+    }
+}
+
+
+// A non-zero `SymOffExp` offset must not change a `ref` parameter's own
+// binding. Reading the parameter after taking the element address must still
+// use the original array.
+static foreach (backend; Matrix!()) {
+    @("pointers.addressOf.staticArrayElement.refParameter."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int read(ref int[3] values) {
+                int* second = &values[1];
+                assert(*second == 20);
+                assert(values[0] == 10);
+                return values[1];
+            }
+
+            void main() {
+                int[3] values = [10, 20, 30];
+                assert(read(values) == 20);
+            }
+        });
     }
 }
 

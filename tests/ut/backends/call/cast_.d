@@ -183,7 +183,6 @@ static foreach (backend; Matrix!()) {
 // array makes the pointer values runtime values, and its two elements show
 // that the bits preserve an `int`-sized address offset, not only non-null.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot cast a pointer to an integral type"),
 )) {

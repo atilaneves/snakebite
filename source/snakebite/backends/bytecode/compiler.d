@@ -1967,7 +1967,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private size_t addPointerOffset(
         in size_t pointerOffset,
-        in size_t byteOffset,
+        in long byteOffset,
     ) {
         const result = reserveTemp(pointerFacts);
         emit(&opCopy, result, pointerOffset, size_t.sizeof);
@@ -2929,51 +2929,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // `&variable`: dmd folds this straight into a `SymOffExp` naming the
     // variable and a byte offset into it, rather than wrapping a `VarExp`
-    // in a general `AddrExp` - the address a `ref` return's own ternary
-    // (`cond ? &a : &b`) is built from. A field offset (`offset != 0`) is
-    // out of scope; only a whole variable's own address is supported.
+    // in a general `AddrExp`. `SymbolAddressResolver` shares the offset
+    // operation with the interpreter while this visitor supplies the VM's
+    // frame-slot primitives.
     override void visit(SymOffExp expression) {
         requireDestination(expression);
-        if (auto function_ = expression.var.isFuncDeclaration) {
-            if (expression.offset != 0)
-                return visit(cast(Expression) expression);
-
-            // A guest function pointer's run-time value is the compiled
-            // callee itself - the same `const(Function)*` `opCall` already
-            // dereferences for an ordinary call - not `function_`'s own
-            // address: the VM module never imports dmd's frontend (see
-            // `ai/CODING.md`), so it has no `FuncDeclaration` to resolve
-            // one from at call time; this is the only place that can.
-            auto compiled = _bytecode.compileFunction(function_);
-            emit(&opConstant, _destination,
-                addConstant(cast(long) cast(size_t) compiled), _width);
-            return;
-        }
-
-        // `SomeClass.classinfo` on a static class type dmd resolves at
-        // compile time to `&SomeClass.vclassinfo` (a
-        // `TypeInfoClassDeclaration`), folded into this same node - not a
-        // real guest or linked global. Nothing ever emits that symbol for
-        // a guest class (see `snakebite.backends.classinfo`'s own doc), so
-        // this reaches for the same run-time `TypeInfo_Class` `TypeidExp`
-        // already resolves `typeid(SomeClass)` to, instead of falling into
-        // the generic static-variable path below and reading whatever
-        // unrelated storage its symbol name happens to resolve to.
-        if (auto typeInfo = expression.var.isTypeInfoDeclaration)
-            return emitRuntimeTypeInfoConstant(expression, typeInfo.tinfo);
-
-        auto variable = expression.var.isVarDeclaration;
-        if (variable is null || expression.offset != 0)
-            return visit(cast(Expression) expression);
-
-        if (variable.isDataseg) {
-            const addressOffset = compileStaticAddress(variable);
-            if (addressOffset != _destination)
-                emit(&opCopy, _destination, addressOffset, size_t.sizeof);
-            return;
-        }
-
-        const addressOffset = addressOfVariable(variable);
+        const addressOffset = compileSymbolAddress(expression);
         if (addressOffset != _destination)
             emit(&opCopy, _destination, addressOffset, size_t.sizeof);
     }
@@ -3702,7 +3663,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // destination. A null result is a rejection, not a fallback to
     // another compilation path - `RuntimeTypes.get` returning null means
     // there is no such run-time type to read.
-    private void emitRuntimeTypeInfoConstant(Expression expression, Type type) {
+    private void emitRuntimeTypeInfoConstant(
+        Expression expression,
+        Type type,
+        in size_t destination = size_t.max,
+        in size_t width = size_t.max,
+    ) {
         import std.conv: text;
 
         auto address = cast(void*) _bytecode._runtimeTypes.get(type);
@@ -3710,8 +3676,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, expression.loc,
                 text("unresolved ", expressionText(expression)));
 
-        emit(&opConstant, _destination,
-            addConstant(cast(long) cast(size_t) address), _width);
+        emit(&opConstant,
+            destination == size_t.max ? _destination : destination,
+            addConstant(cast(long) cast(size_t) address),
+            width == size_t.max ? _width : width);
     }
 
     override void visit(CallExp expression) {
@@ -5683,11 +5651,62 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    private struct SymbolAddressAdapter {
+        FunctionCompiler compiler;
+
+        public size_t symbolAddress(SymOffExp expression) {
+            if (auto function_ = expression.var.isFuncDeclaration) {
+                const result = compiler.reserveTemp(compiler.pointerFacts);
+                // A guest function pointer is the compiled callee's stable
+                // bytecode address, which is the value the VM call path uses.
+                auto compiled = compiler._bytecode.compileFunction(function_);
+                compiler.emit(&opConstant, result,
+                    compiler.addConstant(cast(long) cast(size_t) compiled),
+                    size_t.sizeof);
+                return result;
+            }
+
+            if (auto typeInfo = expression.var.isTypeInfoDeclaration) {
+                const result = compiler.reserveTemp(compiler.pointerFacts);
+                compiler.emitRuntimeTypeInfoConstant(
+                    expression, typeInfo.tinfo, result, size_t.sizeof,
+                );
+                return result;
+            }
+
+            auto variable = expression.var.isVarDeclaration;
+            if (variable is null)
+                throw rejection(
+                    compiler._function, expression.loc,
+                    expressionText(expression),
+                );
+
+            return variable.isDataseg
+                ? compiler.compileStaticAddress(variable)
+                : compiler.addressOfVariable(variable);
+        }
+
+        public size_t addSymbolOffset(
+            in size_t address,
+            in long offset,
+        ) {
+            return compiler.addPointerOffset(address, offset);
+        }
+    }
+
     private size_t compileAddress(Expression expression) {
         import snakebite.frontend.storage: StorageResolver;
 
         return StorageResolver!(size_t, StorageAdapter)(StorageAdapter(this))
             .resolve(expression);
+    }
+
+    private size_t compileSymbolAddress(SymOffExp expression) {
+        import snakebite.frontend.storage: SymbolAddressResolver;
+
+        return SymbolAddressResolver!(size_t, SymbolAddressAdapter)(
+            SymbolAddressAdapter(this),
+        ).resolve(expression);
     }
 
     // Calls druntime's allocator for `size` bytes and leaves the resulting
