@@ -993,17 +993,33 @@ private struct TwentyBytes {
 
 
 private extern(C) int snakebite_ut_twenty_bytes(TwentyBytes value) {
-    return value.a + value.b + value.c + value.d + value.e;
+    return value.a * 10_000 + value.b * 1_000 + value.c * 100
+        + value.d * 10 + value.e;
 }
 
 
-// Five plain `int` fields: 20 bytes, whose last eightbyte
-// (`value`'s bytes 16-19, field `e` alone) is only half full. The move
-// for that eightbyte must copy only those 4 remaining bytes, never
-// reading past `value`'s own 20 bytes of storage - a full 8-byte load
-// there would read outside it.
+// Five plain `int` fields: 20 bytes, whose last eightbyte (`value`'s
+// bytes 16-19, field `e` alone) is only half full. The move for that
+// eightbyte must copy only those 4 remaining bytes, never reading past
+// `value`'s own 20 bytes of storage. A guest call cannot observe a
+// 4-byte over-read by its result alone - the extra bytes are stack
+// padding the callee never looks at - so `value` is placed instead in
+// the last 20 bytes of an `mmap`ed page, immediately followed by a
+// second page with no access at all (the same guarded-page trick
+// `bitfieldCompoundAssignStoresStorageWidth`,
+// `tests/ut/backends/run/structs.d`, uses): a full 8-byte load at
+// `value`'s offset 16 reads 4 bytes into the unmapped page and faults,
+// where the correct 4-byte `copy` load never crosses the page boundary.
+// Confirmed by hand: changing `loadOf`'s `case integer` to always
+// return `Load.word64` (a full-word load, never `Load.copy`) crashes
+// this test with `SIGSEGV`; reverting that one-line change passes it
+// again.
 @("called.memoryClassParameter.partialLastEightbyte")
 unittest {
+    import core.sys.posix.sys.mman:
+        MAP_ANON, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE,
+        mmap, mprotect, munmap;
+
     auto guestModule = parseSnippet(q{
         struct TwentyBytes {
             int a;
@@ -1019,10 +1035,21 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_twenty_bytes` in the guest program");
 
-    PlanCache cache;
-    TwentyBytes value = TwentyBytes(1, 2, 3, 4, 5);
-    int result;
-    cache.of(function_).call(&result, [cast(const void*) &value]);
+    enum pageSize = 4096;
+    auto base = cast(ubyte*) mmap(
+        null, 2 * pageSize, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANON, -1, 0);
+    assert(base !is null, "mmap failed");
+    assert(mprotect(base + pageSize, pageSize, PROT_NONE) == 0);
+    auto value =
+        cast(TwentyBytes*) (base + pageSize - TwentyBytes.sizeof);
+    *value = TwentyBytes(1, 2, 3, 4, 5);
 
-    result.should == 15;
+    PlanCache cache;
+    int result;
+    cache.of(function_).call(&result, [cast(const void*) value]);
+
+    munmap(base, 2 * pageSize);
+
+    result.should == 12_345;
 }
