@@ -139,6 +139,10 @@ private extern(C) ThreeWords snakebite_ut_three_words() {
     return ThreeWords(17, 31, 47);
 }
 
+private extern(C) size_t snakebite_ut_memory_param(ThreeWords value) {
+    return value.first + value.second + value.third;
+}
+
 private extern(C) Pair snakebite_ut_pair(Pair value) {
     return Pair(value.first + 1, value.second + 2);
 }
@@ -642,23 +646,22 @@ unittest {
 
 
 // A parameter whose ABI class is MEMORY (more than two eightbytes, or an
-// unaligned aggregate the ABI classifies as MEMORY regardless of size) is
-// refused as an explicit argument until stack memory values have a
-// separate call path (`abi.ArgumentPlan.of`'s own doc). `prepare` walks
-// every parameter before it ever resolves a symbol (see `prepare`'s own
-// body), so this throws before native resolution, and no native
-// implementation of `snakebite_ut_memory_param` needs to exist for this
-// test.
-@("prepare.refusesMemoryClassParameter")
+// unaligned aggregate the ABI classifies as MEMORY regardless of size)
+// travels entirely on the stack, in declaration position, as whole
+// eightbytes (issue #334 step 3) - `ThreeWords` is exactly the 24-byte,
+// three-`size_t` shape `called.hiddenPointerReturn` above already uses for
+// a MEMORY-class *return*; this is the same shape as an explicit
+// *parameter*, the case `abi.ArgumentPlan.of` used to refuse outright.
+@("called.memoryClassParameter")
 unittest {
     auto guestModule = parseSnippet(q{
-        struct ThreeWordStruct {
+        struct ThreeWords {
             size_t first;
             size_t second;
             size_t third;
         }
 
-        extern(C) void snakebite_ut_memory_param(ThreeWordStruct value);
+        extern(C) size_t snakebite_ut_memory_param(ThreeWords value);
     });
     auto function_ =
         findFunction(guestModule, "snakebite_ut_memory_param");
@@ -666,9 +669,11 @@ unittest {
         "No `snakebite_ut_memory_param` in the guest program");
 
     PlanCache cache;
-    cache.of(function_).shouldThrowWithMessage(
-        "ffi cannot pass a value of type `ThreeWordStruct`: " ~
-            "its ABI class is MEMORY");
+    ThreeWords value = ThreeWords(17, 31, 47);
+    size_t result;
+    cache.of(function_).call(&result, [cast(const void*) &value]);
+
+    result.should == 95;
 }
 
 
@@ -754,4 +759,261 @@ unittest {
     cache.of(function_).call(&result, [cast(const void*) &receiver]);
 
     result.should == ThreeWords(17, 31, 47);
+}
+
+
+private struct FourWords {
+    size_t first;
+    size_t second;
+    size_t third;
+    size_t fourth;
+}
+
+
+private extern(C) size_t snakebite_ut_memory_after_six(
+    int a, int b, int c, int d, int e, int f, FourWords value, int g,
+) {
+    return a + b + c + d + e + f + value.first + value.second
+        + value.third + value.fourth + g;
+}
+
+
+// A 32-byte MEMORY-class argument declared after six plain `int`s, which
+// already fill the integer register file, with one more `int` declared
+// after it. `value` always spills - a MEMORY-class value never reaches a
+// register (`abi.ArgumentPlan`'s own doc) - and `g` spills too, since no
+// integer register is left for it either; both land on the stack in
+// declaration order, `value`'s four eightbytes first and then `g`, the
+// same order a native `extern(C)` call would use.
+@("called.memoryClassParameter.afterSixIntegersThenOneMore")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct FourWords {
+            size_t first;
+            size_t second;
+            size_t third;
+            size_t fourth;
+        }
+
+        extern(C) size_t snakebite_ut_memory_after_six(
+            int a, int b, int c, int d, int e, int f, FourWords value,
+            int g,
+        );
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_memory_after_six");
+    assert(function_ !is null,
+        "No `snakebite_ut_memory_after_six` in the guest program");
+
+    PlanCache cache;
+    int[6] integers = [1, 2, 3, 4, 5, 6];
+    FourWords value = FourWords(10, 20, 30, 40);
+    int g = 7;
+    size_t result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &integers[0], cast(const void*) &integers[1],
+        cast(const void*) &integers[2], cast(const void*) &integers[3],
+        cast(const void*) &integers[4], cast(const void*) &integers[5],
+        cast(const void*) &value, cast(const void*) &g,
+    ]);
+
+    result.should == 128;
+}
+
+
+private struct PackedPair {
+    int a;
+    align(1) long b;
+}
+
+
+private extern(C) long snakebite_ut_packed_pair(PackedPair value) {
+    return value.a + value.b;
+}
+
+
+// `b`'s `align(1)` forces it to sit at offset 4, not the 8-byte boundary
+// its own type (`long`) needs - the SysV ABI classifies an aggregate with
+// an unaligned field as MEMORY regardless of its size
+// (`abi.classify`'s own doc), so this 12-byte struct, under the 16-byte
+// threshold that alone would trigger MEMORY, still does.
+@("called.memoryClassParameter.unalignedField")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct PackedPair {
+            int a;
+            align(1) long b;
+        }
+
+        extern(C) long snakebite_ut_packed_pair(PackedPair value);
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_packed_pair");
+    assert(function_ !is null,
+        "No `snakebite_ut_packed_pair` in the guest program");
+
+    PlanCache cache;
+    PackedPair value = PackedPair(3, 39);
+    long result;
+    cache.of(function_).call(&result, [cast(const void*) &value]);
+
+    result.should == 42;
+}
+
+
+private long _memoryTwoSpillA0;
+private long _memoryTwoSpillA1;
+private long _memoryTwoSpillB0;
+private long _memoryTwoSpillB1;
+private ThreeWords _memoryTwoSpillValue;
+
+
+pragma(mangle, "snakebite_ut_extern_d_memory_two_spill")
+private extern(D) void snakebite_ut_memoryTwoSpill(
+    long a0, long a1, long a2, long a3, long a4, long a5,
+    ThreeWords value, long b0, long b1,
+) {
+    _memoryTwoSpillA0 = a0;
+    _memoryTwoSpillA1 = a1;
+    _memoryTwoSpillB0 = b0;
+    _memoryTwoSpillB1 = b1;
+    _memoryTwoSpillValue = value;
+}
+
+
+// Six `long`s (`a0` .. `a5`) fill the integer register file; `value` - a
+// MEMORY-class argument - always spills, whatever room is left
+// (`abi.ArgumentPlan`'s own doc), and the two `long`s declared after it
+// (`b0`, `b1`) spill too, for lack of any integer register left. dmd's
+// reversed `extern(D)` convention (`_reversedArguments`'s own doc) places
+// spilled arguments on the stack in descending declaration order, so
+// `value`'s three eightbytes land first, then `b0`, then `a1`, then `a0`
+// - not merely declaration order among the scalars, and not the order
+// `spilled[]` first collects them in.
+@("called.externD.memoryClassParameterTwoScalarSpills")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct ThreeWords {
+            size_t first;
+            size_t second;
+            size_t third;
+        }
+
+        pragma(mangle, "snakebite_ut_extern_d_memory_two_spill")
+        extern(D) void snakebite_ut_memoryTwoSpill(
+            long a0, long a1, long a2, long a3, long a4, long a5,
+            ThreeWords value, long b0, long b1,
+        );
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_memoryTwoSpill");
+    assert(function_ !is null,
+        "No `snakebite_ut_memoryTwoSpill` in the guest program");
+
+    PlanCache cache;
+    long a0 = 1, a1 = 2, a2 = 3, a3 = 4, a4 = 5, a5 = 6;
+    ThreeWords value = ThreeWords(70, 80, 90);
+    long b0 = 100, b1 = 200;
+    cache.of(function_).call(null, [
+        cast(const void*) &a0, cast(const void*) &a1,
+        cast(const void*) &a2, cast(const void*) &a3,
+        cast(const void*) &a4, cast(const void*) &a5,
+        cast(const void*) &value,
+        cast(const void*) &b0, cast(const void*) &b1,
+    ]);
+
+    _memoryTwoSpillA0.should == 1;
+    _memoryTwoSpillA1.should == 2;
+    _memoryTwoSpillB0.should == 100;
+    _memoryTwoSpillB1.should == 200;
+    _memoryTwoSpillValue.should == ThreeWords(70, 80, 90);
+}
+
+
+private extern(C) double snakebite_ut_memory_with_sse(
+    double x, double y, ThreeWords value,
+) {
+    return x + y + value.first + value.second + value.third;
+}
+
+
+// A MEMORY-class argument declared after two `double`s, which stay in
+// `%xmm0`/`%xmm1` - room in the SSE register file does not change
+// `value`'s own class, and its always-on-stack placement must not
+// disturb the SSE arguments' own register assignment. This also picks
+// the general stub entry, not the integer-only one
+// (`CallPlan._entry`'s own doc), since `value` fills a stack word.
+@("called.memoryClassParameter.withSSEArguments")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct ThreeWords {
+            size_t first;
+            size_t second;
+            size_t third;
+        }
+
+        extern(C) double snakebite_ut_memory_with_sse(
+            double x, double y, ThreeWords value,
+        );
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_memory_with_sse");
+    assert(function_ !is null,
+        "No `snakebite_ut_memory_with_sse` in the guest program");
+
+    PlanCache cache;
+    double x = 1.5;
+    double y = 2.5;
+    ThreeWords value = ThreeWords(10, 20, 30);
+    double result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &x, cast(const void*) &y,
+        cast(const void*) &value,
+    ]);
+
+    result.should == 64.0;
+}
+
+
+private struct TwentyBytes {
+    int a;
+    int b;
+    int c;
+    int d;
+    int e;
+}
+
+
+private extern(C) int snakebite_ut_twenty_bytes(TwentyBytes value) {
+    return value.a + value.b + value.c + value.d + value.e;
+}
+
+
+// Five plain `int` fields: 20 bytes, whose last eightbyte
+// (`value`'s bytes 16-19, field `e` alone) is only half full. The move
+// for that eightbyte must copy only those 4 remaining bytes, never
+// reading past `value`'s own 20 bytes of storage - a full 8-byte load
+// there would read outside it.
+@("called.memoryClassParameter.partialLastEightbyte")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct TwentyBytes {
+            int a;
+            int b;
+            int c;
+            int d;
+            int e;
+        }
+
+        extern(C) int snakebite_ut_twenty_bytes(TwentyBytes value);
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_twenty_bytes");
+    assert(function_ !is null,
+        "No `snakebite_ut_twenty_bytes` in the guest program");
+
+    PlanCache cache;
+    TwentyBytes value = TwentyBytes(1, 2, 3, 4, 5);
+    int result;
+    cache.of(function_).call(&result, [cast(const void*) &value]);
+
+    result.should == 15;
 }

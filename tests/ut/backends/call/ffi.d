@@ -503,6 +503,245 @@ static foreach (backend; Matrix!(
 }
 
 
+// A 24-byte struct (three `size_t` fields) by value, passed to a host
+// `extern(C)` function that sums its fields - the ABI class MEMORY,
+// larger than two eightbytes, used to be refused outright (issue #334
+// step 3).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.threeWords." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        95.shouldBeRetOf!(
+            backend,
+            q{
+                struct MemoryTriple {
+                    size_t first;
+                    size_t second;
+                    size_t third;
+                }
+
+                pragma(mangle, "snakebite_ut_memory_triple")
+                extern(C) size_t nativeMemoryTriple(MemoryTriple value);
+
+                int answer() {
+                    MemoryTriple value;
+                    value.first = 17;
+                    value.second = 31;
+                    value.third = 47;
+                    return cast(int) nativeMemoryTriple(value);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// A 32-byte MEMORY-class struct declared after six plain `int`s, which
+// already fill the integer register file, with one more `int` declared
+// after it - the struct and the trailing `int` both spill, and must land
+// on the stack in declaration order (issue #334 step 3).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.afterSixIntegersThenOneMore." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        128.shouldBeRetOf!(
+            backend,
+            q{
+                struct MemoryQuad {
+                    size_t first;
+                    size_t second;
+                    size_t third;
+                    size_t fourth;
+                }
+
+                pragma(mangle, "snakebite_ut_memory_after_six")
+                extern(C) size_t nativeMemoryAfterSix(
+                    int a, int b, int c, int d, int e, int f,
+                    MemoryQuad value, int g,
+                );
+
+                int answer() {
+                    MemoryQuad value;
+                    value.first = 10;
+                    value.second = 20;
+                    value.third = 30;
+                    value.fourth = 40;
+                    return cast(int) nativeMemoryAfterSix(
+                        1, 2, 3, 4, 5, 6, value, 7);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// `b`'s `align(1)` forces it to sit at offset 4, not the 8-byte boundary
+// its own type (`long`) needs - the SysV ABI classifies an aggregate with
+// an unaligned field as MEMORY regardless of its size, so this 12-byte
+// struct, under the 16-byte threshold that alone would trigger MEMORY,
+// still does (issue #334 step 3).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.unalignedField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                struct PackedPair {
+                    int a;
+                    align(1) long b;
+                }
+
+                pragma(mangle, "snakebite_ut_packed_pair")
+                extern(C) long nativePackedPair(PackedPair value);
+
+                int answer() {
+                    PackedPair value;
+                    value.a = 3;
+                    value.b = 39;
+                    return cast(int) nativePackedPair(value);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// A MEMORY-class struct passed to a host `extern(D)` function on dmd,
+// where two other `long` parameters also spill - dmd's reversed
+// `extern(D)` convention places every spilled argument, `value` included,
+// on the stack in descending declaration order (issue #334 step 3). The
+// `Ffi` static struct member sidesteps a `shouldBeRetOf` oracle quirk - a
+// free `extern(D)` forward declaration nested this deeply loses dmd's own
+// reversed calling convention - the same trick
+// `signatures.externD.nineWordsTwoStringsSpill` above uses.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.externD.twoScalarSpills." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1_217_289.shouldBeRetOf!(
+            backend,
+            q{
+                struct MemoryTriple {
+                    size_t first;
+                    size_t second;
+                    size_t third;
+                }
+
+                struct Ffi {
+                    static:
+                    pragma(mangle, "snakebite_ut_extern_d_memory_two_spill_backend")
+                    extern(D) long externDMemoryTwoSpill(
+                        long a0, long a1, long a2, long a3, long a4,
+                        long a5, MemoryTriple value, long b0, long b1,
+                    );
+                }
+
+                int answer() {
+                    MemoryTriple value;
+                    value.first = 7;
+                    value.second = 8;
+                    value.third = 9;
+                    return cast(int) Ffi.externDMemoryTwoSpill(
+                        1, 2, 3, 4, 5, 6, value, 100, 200);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// A MEMORY-class struct declared after two `double`s, which stay in
+// `%xmm0`/`%xmm1` - room in the SSE register file does not change
+// `value`'s own class, and its always-on-stack placement must not
+// disturb the SSE arguments' own register assignment (issue #334 step 3).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.withSSEArguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        64.0.shouldBeRetOf!(
+            backend,
+            q{
+                struct MemoryTriple {
+                    size_t first;
+                    size_t second;
+                    size_t third;
+                }
+
+                pragma(mangle, "snakebite_ut_memory_with_sse")
+                extern(C) double nativeMemoryWithSse(
+                    double x, double y, MemoryTriple value,
+                );
+
+                double answer() {
+                    MemoryTriple value;
+                    value.first = 10;
+                    value.second = 20;
+                    value.third = 30;
+                    return nativeMemoryWithSse(1.5, 2.5, value);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// Five plain `int` fields: 20 bytes, whose last eightbyte (`value`'s
+// bytes 16-19, field `e` alone) is only half full. The move for that
+// eightbyte must copy only those 4 remaining bytes, never reading past
+// `value`'s own 20 bytes of storage (issue #334 step 3).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.partialLastEightbyte." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        15.shouldBeRetOf!(
+            backend,
+            q{
+                struct TwentyBytes {
+                    int a;
+                    int b;
+                    int c;
+                    int d;
+                    int e;
+                }
+
+                pragma(mangle, "snakebite_ut_twenty_bytes")
+                extern(C) int nativeTwentyBytes(TwentyBytes value);
+
+                int answer() {
+                    TwentyBytes value;
+                    value.a = 1;
+                    value.b = 2;
+                    value.c = 3;
+                    value.d = 4;
+                    value.e = 5;
+                    return nativeTwentyBytes(value);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
 private alias VoidCallback = void delegate();
 
 
