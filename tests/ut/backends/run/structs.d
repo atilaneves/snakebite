@@ -402,10 +402,7 @@ static foreach (backend; Matrix!(
 // `.tupleof` on both sides assigns field by field between the two field
 // lists, so it works across struct types that share a field layout even
 // though they share no other relationship.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("tupleofAssignsFieldwise." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -426,6 +423,33 @@ static foreach (backend; Matrix!(
                 target.tupleof = source.tupleof;
                 assert(target.head == 2);
                 assert(target.tail == 3);
+            }
+        });
+    }
+}
+
+// A tuple-valued right operand can be enclosed by a comma expression. The
+// comma's left operand still runs before every tuple assignment element.
+static foreach (backend; Matrix!()) {
+    @("tupleofAssignsAfterComma." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Pair {
+                int x;
+                int y;
+            }
+
+            void main() {
+                Pair target;
+                auto source = Pair(7, 9);
+                int count;
+
+                (++count, target.tupleof = source.tupleof);
+
+                assert(count == 1);
+                assert(target.x == 7);
+                assert(target.y == 9);
             }
         });
     }

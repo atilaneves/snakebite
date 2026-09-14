@@ -6,7 +6,7 @@ private:
 import dmd.expression:
     ArrayLiteralExp, AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp, EqualExp,
     CatElemAssignExp, CatDcharAssignExp,
-    ConstructExp, Expression, IdentityExp, LoweredAssignExp, NewExp;
+    ConstructExp, Expression, IdentityExp, LoweredAssignExp, NewExp, TupleExp;
 import snakebite.backends.identity: IdentityPlan, identityPlan;
 import dmd.visitor: Visitor;
 import dmd.mtype: Type;
@@ -157,6 +157,20 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     protected abstract void prepareNew(NewExp expression);
     protected abstract void restoreNew();
     protected abstract void visitLoweredNew(NewExp expression);
+
+    // DMD's tuple expansion stores a side-effecting receiver in `e0`; it must
+    // run before the field expressions, which then retain their own lowering
+    // and assignment semantics through this visitor.
+    final override void visit(TupleExp expression) {
+        if (expression.e0 !is null)
+            visitTupleElement(expression.e0);
+
+        if (expression.exps !is null)
+            foreach (element; *expression.exps)
+                visitTupleElement(element);
+    }
+
+    protected abstract void visitTupleElement(Expression expression);
 
     final override void visit(ArrayLiteralExp expression) {
         import dmd.astenums: Tpointer;
