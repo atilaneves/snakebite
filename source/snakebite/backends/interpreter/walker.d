@@ -1021,10 +1021,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (statement._body !is null)
                 statement._body.accept(this);
         } finally {
-            auto returned = _returned;
-            auto continued = _continued;
+            const returned = _returned;
+            const continued = _continued;
             auto continueLabel = _continueLabel;
-            auto broken = _break;
+            const broken = _break;
             auto breakLabel = _breakLabel;
             auto gotoTarget = _gotoTarget;
 
