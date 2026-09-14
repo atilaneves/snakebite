@@ -9,6 +9,73 @@ module ut.backends.run.structs;
 import ut.backends;
 
 
+// Native D initializes the receiver before evaluating constructor arguments.
+// Arming it after the call must preserve that original lifetime order.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE does not run these temporary destructors"),
+)) {
+    @("temporaryCleanupPreservesDeclarationOrderDuringConstruction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner {
+                int* log;
+                ~this() { *log = *log * 10 + 1; }
+                int get() { return 1; }
+            }
+            struct Outer {
+                int* log;
+                this(int* target, int argument) {
+                    log = target;
+                }
+                ~this() { *log = *log * 10 + 2; }
+                int get() { return 42; }
+            }
+            void main() {
+                int log;
+                int result = Outer(&log, Inner(&log).get()).get();
+                assert(result == 42);
+                assert(log == 12);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE does not run the temporary destructor or catch its exception"),
+)) {
+    @("temporaryCleanupContinuesWhenDestructorThrows." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* log;
+                int value;
+                ~this() {
+                    *log = *log * 10 + value;
+                    if (value == 2)
+                        throw new Exception("destructor");
+                }
+                int get() { return value; }
+            }
+            void main() {
+                int log;
+                bool caught;
+                try {
+                    int result = Tracked(&log, 1).get()
+                        + Tracked(&log, 2).get();
+                } catch (Exception) {
+                    caught = true;
+                }
+                assert(caught);
+                assert(log == 21);
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
         "CTFE does not destroy the temporary before the condition body"),
@@ -1859,8 +1926,6 @@ static foreach (backend; Matrix!(
 // the full expression that created it - three destructor runs in
 // total, never a shared or clobbered slot.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "Bytecode does not destroy all recursive constructor temporaries"),
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of any of the three reentrant " ~
@@ -2012,9 +2077,6 @@ static foreach (backend; Matrix!()) {
 // declaration, and its destructor runs once at the end of the full
 // expression.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "Bytecode does not preserve the expected destructor count for a "
-        ~ "returned constructor value"),
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of the temporary initialized from " ~
@@ -2066,8 +2128,6 @@ static foreach (backend; Matrix!(
 // while the condition temporary's frame slot is still live - never
 // later, against a frame that is already gone.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "Bytecode cannot compile the guarded destructor expression"),
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of the taken ternary branch's " ~

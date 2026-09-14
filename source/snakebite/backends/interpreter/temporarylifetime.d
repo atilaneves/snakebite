@@ -5,7 +5,7 @@ private:
 
 import dmd.declaration: VarDeclaration;
 import dmd.expression: DeclarationExp, Expression, StructLiteralExp;
-import snakebite.backends.temporary: ownsTemporaryDestructor;
+import snakebite.backends.temporary: TemporaryPlan;
 import snakebite.backends.temporarystack: TemporaryStack;
 import snakebite.backends.fullexpression:
     FullExpressionKind, FullExpressionScope;
@@ -87,27 +87,20 @@ public final class TemporaryLifetime {
         withLifetime(_temporaries.length, action);
     }
 
-    public void registerDestructor(
+    public void initialize(
         VarDeclaration variable,
         DeclarationExp declaration,
         ubyte* base,
+        scope Action evaluate,
     ) {
-        if (!_expressions.active()
-                || !ownsTemporaryDestructor(
-                    variable, declaration,
-                    cast(Expression) _expressions.root,
-                    _expressions.rootOwnsTemporary,
-                ))
-            return;
-
-        const payload = _temporaries.length;
-        _temporaries ~= Temporary(
-            null,
-            _frames.mark,
-            base,
-            variable.edtor,
-        );
-        _stack.registerTemporary(base, payload, true);
+        const plan = TemporaryPlan.of(variable, declaration,
+            cast(Expression) _expressions.root,
+            _expressions.rootOwnsTemporary);
+        plan.initialize((Expression destructor) {
+            const payload = _temporaries.length;
+            _temporaries ~= Temporary(null, _frames.mark, base, destructor);
+            _stack.registerTemporary(base, payload);
+        }, evaluate, { _stack.arm(base); });
     }
 
     // Reserves a value-returning temporary. Its address remains valid until
@@ -197,11 +190,10 @@ public final class TemporaryLifetime {
                 _frames.release(_temporaries[mark].mark);
             _temporaries.length = mark;
             _temporaries.assumeSafeAppend;
-            _stack.discard(stackMark);
         }
 
-        foreach_reverse (entry; _stack.entries[stackMark .. $])
-            if (entry.armed)
-                _destroy(_temporaries[entry.payload].edtor);
+        _stack.finish(stackMark, (in TemporaryStack.Entry entry) {
+            _destroy(_temporaries[entry.payload].edtor);
+        });
     }
 }

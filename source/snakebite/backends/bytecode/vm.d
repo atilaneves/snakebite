@@ -473,13 +473,8 @@ private void cleanupSince(
     scope const AssertSite[] assertSites,
     FrameStack* frames,
 ) {
-    while (frames.cleanupMark > mark) {
-        const cleanup = frames.cleanupBack;
-        frames.popCleanup;
-        if (!cleanup.armed)
-            continue;
-
-        auto site = &callSites[cleanup.payload];
+    frames.finishCleanups(mark, (in size_t siteIndex) {
+        auto site = &callSites[siteIndex];
         assert(site.cleanupStart !is null, "temporary cleanup start missing");
         assert(site.cleanupEnd !is null, "temporary cleanup end missing");
         auto pc = cast(const(Instruction)*) site.cleanupStart;
@@ -488,7 +483,7 @@ private void cleanupSince(
             pc = pc.handler(
                 pc, frame, null, constants, callSites, assertSites, frames);
         }
-    }
+    });
 }
 
 

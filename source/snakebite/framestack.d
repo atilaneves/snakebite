@@ -131,16 +131,13 @@ public struct FrameStack {
         _cleanups.suspend(address);
     }
 
-    public const(TemporaryStack.Entry) cleanupBack() const {
-        return _cleanups.back;
-    }
-
-    public void popCleanup() {
-        _cleanups.pop;
-    }
-
-    public void discardCleanups(in size_t mark) {
-        _cleanups.discard(mark);
+    public void finishCleanups(
+        in size_t mark,
+        scope void delegate(in size_t) destroy,
+    ) {
+        _cleanups.finish(mark, (in TemporaryStack.Entry entry) {
+            destroy(entry.payload);
+        });
     }
 
     // One `push` reservation: `base` is where its bytes start, `null` for
