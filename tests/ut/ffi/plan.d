@@ -1054,3 +1054,285 @@ unittest {
 
     result.should == 12_345;
 }
+
+
+private struct AlignedMemory {
+    real r;
+    long padding;
+}
+
+
+// A MEMORY-class argument whose own ABI alignment is 16, not 8 - the
+// stack area `buildMoves` writes into is only 8-byte aligned
+// (`abi.validateMemoryParameter`'s own comment), so this is refused with
+// a clear message instead of silently misaligning it (issue #334 step
+// 3). `real`'s SysV alignment is 16, and the trailing `long` pushes the
+// struct past two eightbytes, so `aggregatePlan` classifies it MEMORY
+// by size alone (the `count > 2` check), without ever needing `classify`
+// to understand a `real` field itself. `prepare` validates every
+// parameter before it resolves a symbol (see `prepare`'s own body), so
+// no native implementation of `snakebite_ut_aligned_memory` needs to
+// exist for this test.
+@("called.memoryClassParameter.refusedAlignment")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct AlignedMemory {
+            real r;
+            long padding;
+        }
+
+        extern(C) void snakebite_ut_aligned_memory(AlignedMemory value);
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_aligned_memory");
+    assert(function_ !is null,
+        "No `snakebite_ut_aligned_memory` in the guest program");
+
+    PlanCache cache;
+    cache.of(function_).shouldThrowWithMessage(
+        "ffi cannot pass a value of type `AlignedMemory`: its ABI " ~
+            "alignment is 16 bytes, and only 8-byte-aligned MEMORY-class " ~
+            "arguments are supported");
+}
+
+
+private struct TooBigMemory {
+    size_t[65] words;
+}
+
+
+// A MEMORY-class argument whose size (520 bytes) exceeds `abi.
+// ArgumentPlan.maxMemoryBytes` (512 bytes, `maxStackWords` whole
+// eightbytes, issue #334 step 3) - refused with a clear message rather
+// than only failing later, and more vaguely, against `prepare`'s own
+// generic `words > maxStackWords` check. As with the alignment refusal
+// above, nothing needs to resolve `snakebite_ut_too_big_memory`
+// natively: this throws before symbol resolution.
+@("called.memoryClassParameter.refusedSize")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct TooBigMemory {
+            size_t[65] words;
+        }
+
+        extern(C) void snakebite_ut_too_big_memory(TooBigMemory value);
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_too_big_memory");
+    assert(function_ !is null,
+        "No `snakebite_ut_too_big_memory` in the guest program");
+
+    PlanCache cache;
+    cache.of(function_).shouldThrowWithMessage(
+        "ffi cannot pass a value of type `TooBigMemory`: its 520 bytes " ~
+            "exceed the 512-byte limit for a MEMORY-class argument");
+}
+
+
+private extern(C) ThreeWords snakebite_ut_three_words_transform(
+    ThreeWords value,
+) {
+    return ThreeWords(value.first + 1, value.second + 2, value.third + 3);
+}
+
+
+// A MEMORY-class struct both passed and returned in the same call - the
+// one interaction of the new parameter path with `_returnPointerOffset`
+// (issue #334 step 3): the hidden return pointer travels in the one
+// integer register a scalar argument would otherwise use, exactly as
+// `called.hiddenPointerReturn` already exercises for a MEMORY-class
+// *return* alone, while `value` travels entirely on the stack,
+// unaffected by that register being spoken for.
+@("called.memoryClassParameter.returnedAndPassed")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct ThreeWords {
+            size_t first;
+            size_t second;
+            size_t third;
+        }
+
+        extern(C) ThreeWords snakebite_ut_three_words_transform(
+            ThreeWords value,
+        );
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_three_words_transform");
+    assert(function_ !is null,
+        "No `snakebite_ut_three_words_transform` in the guest program");
+
+    PlanCache cache;
+    ThreeWords value = ThreeWords(17, 31, 47);
+    ThreeWords result;
+    cache.of(function_).call(&result, [cast(const void*) &value]);
+
+    result.should == ThreeWords(18, 33, 50);
+}
+
+
+private struct ContextMemoryParam {
+    size_t offset;
+
+    pragma(mangle, "snakebite_ut_context_memory_param")
+    ThreeWords addOffset(ThreeWords value) {
+        return ThreeWords(
+            value.first + offset, value.second + offset,
+            value.third + offset);
+    }
+}
+
+
+// A method with a MEMORY-class parameter: the hidden context (`this`)
+// and the hidden return pointer - this method returns a MEMORY-class
+// `ThreeWords` too - travel together, in dmd's order (`this` first,
+// `abi.contextPrecedesHiddenReturnPointer`'s own doc;
+// `called.contextPrecedesHiddenReturnPointer` above checks the pair
+// alone). `value` spills to the stack after both, the only spilled
+// parameter here.
+@("called.memoryClassParameter.methodParameter")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct ThreeWords {
+            size_t first;
+            size_t second;
+            size_t third;
+        }
+
+        struct ContextMemoryParam {
+            size_t offset;
+
+            // A body, never walked - see
+            // `called.contextPrecedesHiddenReturnPointer`'s own comment
+            // on why a body-less prototype would not have a hidden
+            // `this` at all.
+            pragma(mangle, "snakebite_ut_context_memory_param")
+            extern(D) ThreeWords addOffset(ThreeWords value) { assert(0); }
+        }
+    });
+    auto struct_ = findStruct(guestModule, "ContextMemoryParam");
+    assert(struct_ !is null,
+        "No struct `ContextMemoryParam` in the guest program");
+    auto function_ = findFunction(struct_, "addOffset");
+    assert(function_ !is null,
+        "No `addOffset` method in the guest program");
+
+    PlanCache cache;
+    ContextMemoryParam instance;
+    instance.offset = 100;
+    ContextMemoryParam* receiver = &instance;
+    ThreeWords value = ThreeWords(17, 31, 47);
+    ThreeWords result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &receiver, cast(const void*) &value,
+    ]);
+
+    result.should == ThreeWords(117, 131, 147);
+}
+
+
+private ThreeWords _twoMemoryFirst;
+private FourWords _twoMemorySecond;
+
+
+pragma(mangle, "snakebite_ut_extern_d_two_memory")
+private extern(D) void snakebite_ut_twoMemoryParams(
+    ThreeWords first, FourWords second,
+) {
+    _twoMemoryFirst = first;
+    _twoMemorySecond = second;
+}
+
+
+// Two MEMORY-class parameters in one call - both always spill (`abi.
+// ArgumentPlan`'s own doc), and dmd's reversed `extern(D)` convention
+// places every spilled argument on the stack in descending declaration
+// order (`_reversedArguments`'s own doc), so `second`'s four eightbytes
+// land before `first`'s three - reversed from declaration order. The
+// same rule `called.externD.memoryClassParameterTwoScalarSpills` checks
+// for a mix of MEMORY and scalar spills, exercised here for two MEMORY
+// parameters alone.
+@("called.memoryClassParameter.twoParameters")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct ThreeWords {
+            size_t first;
+            size_t second;
+            size_t third;
+        }
+
+        struct FourWords {
+            size_t first;
+            size_t second;
+            size_t third;
+            size_t fourth;
+        }
+
+        pragma(mangle, "snakebite_ut_extern_d_two_memory")
+        extern(D) void snakebite_ut_twoMemoryParams(
+            ThreeWords first, FourWords second,
+        );
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_twoMemoryParams");
+    assert(function_ !is null,
+        "No `snakebite_ut_twoMemoryParams` in the guest program");
+
+    PlanCache cache;
+    ThreeWords first = ThreeWords(1, 2, 3);
+    FourWords second = FourWords(10, 20, 30, 40);
+    cache.of(function_).call(null, [
+        cast(const void*) &first, cast(const void*) &second,
+    ]);
+
+    _twoMemoryFirst.should == ThreeWords(1, 2, 3);
+    _twoMemorySecond.should == FourWords(10, 20, 30, 40);
+}
+
+
+private struct SixteenBytesAligned {
+    int a;
+    align(1) long b;
+    int c;
+}
+
+
+private extern(C) long snakebite_ut_sixteen_bytes_aligned(
+    SixteenBytesAligned value,
+) {
+    return value.a * 10_000 + value.b * 100 + value.c;
+}
+
+
+// A 16-byte struct with an `align(1)` field - MEMORY purely by
+// alignment (`abi.classify`'s field-offset check), not by size: its
+// byte count alone (16) classifies as two ordinary eightbytes (the
+// `count > 2` check in `aggregatePlan` never fires), unlike
+// `memoryClassParameter.unalignedField`'s 12-byte `PackedPair`. Its own
+// size is a whole number of eightbytes, so both of `value`'s moves are
+// full `word64` loads - no partial-eightbyte `copy`, unlike
+// `partialLastEightbyte`.
+@("called.memoryClassParameter.sixteenBytesAlignedField")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct SixteenBytesAligned {
+            int a;
+            align(1) long b;
+            int c;
+        }
+
+        extern(C) long snakebite_ut_sixteen_bytes_aligned(
+            SixteenBytesAligned value,
+        );
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_sixteen_bytes_aligned");
+    assert(function_ !is null,
+        "No `snakebite_ut_sixteen_bytes_aligned` in the guest program");
+
+    PlanCache cache;
+    SixteenBytesAligned value = SixteenBytesAligned(3, 39, 5);
+    long result;
+    cache.of(function_).call(&result, [cast(const void*) &value]);
+
+    result.should == 33_905;
+}

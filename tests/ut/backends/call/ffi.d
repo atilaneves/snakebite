@@ -177,6 +177,40 @@ public extern(C) int snakebite_ut_twenty_bytes_backend(TwentyBytes value) {
 }
 
 
+pragma(mangle, "snakebite_ut_memory_triple_transform_backend")
+public extern(C) MemoryTriple snakebite_ut_memoryTripleTransform_backend(
+    MemoryTriple value,
+) {
+    return MemoryTriple(
+        value.first + 1, value.second + 2, value.third + 3);
+}
+
+
+pragma(mangle, "snakebite_ut_extern_d_two_memory_backend")
+public extern(D) long snakebite_ut_twoMemoryParams_backend(
+    MemoryTriple first, MemoryQuad second,
+) {
+    return cast(long) (first.first * 1_000_000 + first.second * 100_000
+        + first.third * 10_000 + second.first * 1_000 + second.second * 100
+        + second.third * 10 + second.fourth);
+}
+
+
+private struct SixteenBytesAligned {
+    int a;
+    align(1) long b;
+    int c;
+}
+
+
+pragma(mangle, "snakebite_ut_sixteen_bytes_aligned_backend")
+public extern(C) long snakebite_ut_sixteen_bytes_aligned_backend(
+    SixteenBytesAligned value,
+) {
+    return value.a * 10_000 + value.b * 100 + value.c;
+}
+
+
 // `abs` is declared `extern(C)` with no body: nothing in the guest program
 // implements it, so the only way to run these is to call the real symbol
 // the host process already links against.
@@ -827,6 +861,146 @@ static foreach (backend; Matrix!(
                     value.d = 4;
                     value.e = 5;
                     return nativeTwentyBytes(value);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// A MEMORY-class struct both passed and returned in the same call - the
+// plan-level `called.memoryClassParameter.returnedAndPassed`
+// (`ut.ffi.plan`) checks the interaction with `_returnPointerOffset`
+// directly; here through a guest call on every backend instead (issue
+// #334 step 3).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.returnedAndPassed." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2_180.shouldBeRetOf!(
+            backend,
+            q{
+                struct MemoryTriple {
+                    size_t first;
+                    size_t second;
+                    size_t third;
+                }
+
+                pragma(mangle, "snakebite_ut_memory_triple_transform_backend")
+                extern(C) MemoryTriple nativeMemoryTripleTransform(
+                    MemoryTriple value,
+                );
+
+                int answer() {
+                    MemoryTriple value;
+                    value.first = 17;
+                    value.second = 31;
+                    value.third = 47;
+                    auto result = nativeMemoryTripleTransform(value);
+                    return cast(int) (result.first * 100
+                        + result.second * 10 + result.third);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// Two MEMORY-class parameters in one call - both always spill, and dmd's
+// reversed `extern(D)` convention places every spilled argument on the
+// stack in descending declaration order, so `second`'s four eightbytes
+// land before `first`'s three. The plan-level `called.
+// memoryClassParameter.twoParameters` (`ut.ffi.plan`) checks each field
+// individually through globals; here the native callee folds both
+// structs into one weighted result instead, since a guest call only has
+// a return value to check. The `Ffi` static struct member sidesteps the
+// same oracle quirk `memoryClassParameter.externD.twoScalarSpills`
+// above does.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.twoParameters." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1_242_340.shouldBeRetOf!(
+            backend,
+            q{
+                struct MemoryTriple {
+                    size_t first;
+                    size_t second;
+                    size_t third;
+                }
+
+                struct MemoryQuad {
+                    size_t first;
+                    size_t second;
+                    size_t third;
+                    size_t fourth;
+                }
+
+                struct Ffi {
+                    static:
+                    pragma(mangle, "snakebite_ut_extern_d_two_memory_backend")
+                    extern(D) long twoMemoryParams(
+                        MemoryTriple first, MemoryQuad second,
+                    );
+                }
+
+                int answer() {
+                    MemoryTriple first;
+                    first.first = 1;
+                    first.second = 2;
+                    first.third = 3;
+                    MemoryQuad second;
+                    second.first = 10;
+                    second.second = 20;
+                    second.third = 30;
+                    second.fourth = 40;
+                    return cast(int) Ffi.twoMemoryParams(first, second);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// A 16-byte struct with an `align(1)` field - MEMORY purely by alignment
+// (`abi.classify`'s field-offset check), not by size, unlike
+// `memoryClassParameter.unalignedField`'s 12-byte `PackedPair`. Its own
+// size is a whole number of eightbytes, so both of `value`'s moves are
+// full `word64` loads - no partial-eightbyte `copy`, unlike
+// `partialLastEightbyte` (issue #334 step 3).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.sixteenBytesAlignedField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        33_905.shouldBeRetOf!(
+            backend,
+            q{
+                struct SixteenBytesAligned {
+                    int a;
+                    align(1) long b;
+                    int c;
+                }
+
+                pragma(mangle, "snakebite_ut_sixteen_bytes_aligned_backend")
+                extern(C) long nativeSixteenBytesAligned(
+                    SixteenBytesAligned value,
+                );
+
+                int answer() {
+                    SixteenBytesAligned value;
+                    value.a = 3;
+                    value.b = 39;
+                    value.c = 5;
+                    return cast(int) nativeSixteenBytesAligned(value);
                 }
             },
             "answer",
