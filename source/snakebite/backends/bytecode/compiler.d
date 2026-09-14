@@ -1388,11 +1388,26 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (handler is null)
             return size_t.max;
         const leftOffset = reserveTemp(facts);
-        evalInto(expression.e1, leftOffset, facts.size);
         const rightOffset = reserveTemp(facts);
-        evalInto(expression.e2, rightOffset, facts.size);
+        withFullExpression(FullExpressionKind.value, expression, {
+            evalInto(expression.e1, leftOffset, facts.size);
+            evalInto(expression.e2, rightOffset, facts.size);
+        });
         const index = _instructions.length;
         emit(handler, leftOffset, rightOffset, facts.size, 0);
+        return index;
+    }
+
+    private size_t compileConditionBranch(Expression condition) {
+        auto comparison = condition.isBinExp;
+        const comparisonIndex = comparison is null
+            ? size_t.max : compileIntegralComparisonBranch(comparison);
+        if (comparisonIndex != size_t.max)
+            return comparisonIndex;
+
+        const offset = compileCondition(condition);
+        const index = _instructions.length;
+        emit(&opBranchFalse, offset, 0, conditionWidth(condition));
         return index;
     }
 
@@ -1468,11 +1483,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        size_t branchIndex;
-        const conditionOffset = compileCondition(statement.condition);
-        const width = conditionWidth(statement.condition);
-        branchIndex = _instructions.length;
-        emit(&opBranchFalse, conditionOffset, 0, width);
+        const branchIndex = compileConditionBranch(statement.condition);
 
         compileStatement(statement.ifbody);
         const ifFinished = _finished;
@@ -1556,12 +1567,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             && !isTriviallyTrueCondition(statement.condition);
         const conditionIndex = _instructions.length;
         size_t branchIndex = size_t.max;
-        if (guarded) {
-            const conditionOffset = compileCondition(statement.condition);
-            const width = conditionWidth(statement.condition);
-            branchIndex = _instructions.length;
-            emit(&opBranchFalse, conditionOffset, 0, width);
-        }
+        if (guarded)
+            branchIndex = compileConditionBranch(statement.condition);
 
         _loops ~= LoopContext(label);
         _breakables ~= Breakable(label);
@@ -1762,9 +1769,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _width = 0;
 
         withFullExpression(FullExpressionKind.effect, expression,
-            { beginLifetime(expression); },
             { expression.accept(this); },
-            { endLifetime; },
         );
     }
 
@@ -1775,32 +1780,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return evalInto(expression, destination, width);
 
         withFullExpression(FullExpressionKind.value, expression,
-            { beginLifetime(expression); },
             { evalInto(expression, destination, width); },
-            { endLifetime; },
         );
     }
 
     private void withFullExpression(
         FullExpressionKind kind,
         Expression root,
-        scope void delegate() begin,
         scope void delegate() evaluate,
-        scope void delegate() end,
     ) {
-        const outer = _expressions.enter(
-            kind, cast(const(void)*) root);
-        if (outer)
-            begin();
-        scope (exit) {
-            if (outer)
-                end();
-            _expressions.leave;
-        }
-        evaluate();
+        _expressions.run(kind, cast(const(void)*) root,
+            { beginLifetime; }, evaluate, { endLifetime; });
     }
 
-    private void beginLifetime(Expression expression) {
+    private void beginLifetime() {
         const marker = reserveTemp(pointerFacts);
         emit(&opTemporaryBegin, marker, 0, 0);
         _lifetimeMarkers ~= marker;
@@ -1943,9 +1936,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return emitDeclaration();
 
         withFullExpression(FullExpressionKind.effect, expression,
-            { beginLifetime(expression); },
             emitDeclaration,
-            { endLifetime; },
         );
     }
 

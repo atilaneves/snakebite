@@ -77,16 +77,8 @@ public final class TemporaryLifetime {
         Expression root,
         scope Action action,
     ) {
-        const outer = _expressions.enter(
-            kind, cast(const(void)*) root);
-        if (outer)
-            beginExpression;
-        scope (exit) {
-            if (outer)
-                endExpression;
-            _expressions.leave;
-        }
-        action();
+        _expressions.run(kind, cast(const(void)*) root,
+            { beginExpression; }, action, { endExpression; });
     }
 
     // Gives a nested evaluation its own temporary pairing and cleanup

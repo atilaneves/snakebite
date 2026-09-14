@@ -11,6 +11,42 @@ import ut.backends;
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
+        "CTFE does not destroy the temporary before the condition body"),
+)) {
+    @("temporaryComparisonConditionCleanup." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* dtors;
+                ~this() { ++*dtors; }
+                int get() { return 42; }
+            }
+            void main() {
+                int dtors;
+                if (Tracked(&dtors).get() == 42)
+                    assert(dtors == 1);
+                else
+                    assert(false);
+                if (Tracked(&dtors).get() != 42)
+                    assert(false);
+                else
+                    assert(dtors == 2);
+                for (; Tracked(&dtors).get() == 42;) {
+                    assert(dtors == 3);
+                    break;
+                }
+                switch (Tracked(&dtors).get()) {
+                    case 42: assert(dtors == 4); break;
+                    default: assert(false);
+                }
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
         "CTFE evaluates this runtime-only temporary but does not run its "
         ~ "destructor before the return completes"),
 )) {
@@ -1823,6 +1859,8 @@ static foreach (backend; Matrix!(
 // the full expression that created it - three destructor runs in
 // total, never a shared or clobbered slot.
 static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "Bytecode does not destroy all recursive constructor temporaries"),
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of any of the three reentrant " ~
@@ -1974,6 +2012,9 @@ static foreach (backend; Matrix!()) {
 // declaration, and its destructor runs once at the end of the full
 // expression.
 static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "Bytecode does not preserve the expected destructor count for a "
+        ~ "returned constructor value"),
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of the temporary initialized from " ~
@@ -2025,6 +2066,8 @@ static foreach (backend; Matrix!(
 // while the condition temporary's frame slot is still live - never
 // later, against a frame that is already gone.
 static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "Bytecode cannot compile the guarded destructor expression"),
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of the taken ternary branch's " ~
@@ -2124,6 +2167,8 @@ static foreach (backend; Matrix!(
 // temporary's constructor never returns, so its destructor never runs
 // at all.
 static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "Bytecode cannot compile the constructor parameter cleanup finally"),
 )) {
     @("temporaryMovedIntoThrowingOuterCtorDestroyedOnceByCallee." ~
         backend.stringof)

@@ -23,11 +23,31 @@ public struct FullExpressionScope {
     private FullExpressionKind _kind;
     private size_t _depth;
 
-    public bool enter(
+    public void run(
         FullExpressionKind kind,
         const(void)* root,
+        scope void delegate() begin,
+        scope void delegate() evaluate,
+        scope void delegate() end,
     ) {
-        return start(kind, root);
+        const outer = _depth == 0;
+        if (outer) {
+            _kind = kind;
+            _root = root;
+        }
+        ++_depth;
+        scope (exit) {
+            --_depth;
+            if (_depth == 0)
+                _root = null;
+        }
+        if (outer)
+            begin();
+        scope (exit) {
+            if (outer)
+                end();
+        }
+        evaluate();
     }
 
     public CallState suspendCall() {
@@ -55,23 +75,4 @@ public struct FullExpressionScope {
         return _kind == FullExpressionKind.value;
     }
 
-    private bool start(
-        FullExpressionKind kind,
-        const(void)* root,
-    ) {
-        const outer = _depth == 0;
-        if (outer) {
-            _kind = kind;
-            _root = root;
-        }
-        ++_depth;
-        return outer;
-    }
-
-    public void leave() {
-        assert(_depth != 0);
-        --_depth;
-        if (_depth == 0)
-            _root = null;
-    }
 }
