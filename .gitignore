@@ -2,6 +2,7 @@ bin
 coverage
 *.so
 *.a
+*.o
 .ninja*
 compile_commands.json
 *.ninja
