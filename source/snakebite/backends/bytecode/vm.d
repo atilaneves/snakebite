@@ -152,19 +152,106 @@ public enum discardResult = size_t.max;
 // Storage operands retain byte-offset arithmetic for aggregate fields. The
 // upper word names an address slot when the high bit is set; the lower word
 // is the displacement from that address. Other instruction operands (branch
-// targets, constants, and call sites) never pass through storageAddress.
+// targets, constants, and call sites) are decoded separately from storage.
 package size_t indirectStorage(in size_t addressSlot) @safe pure nothrow @nogc {
     assert(addressSlot < (1UL << 31));
     return (1UL << 63) | (addressSlot << 32);
 }
 
-private ubyte* storageAddress(ubyte* frame, in size_t operand)
-    pure nothrow @nogc
-{
-    if ((operand & (1UL << 63)) == 0)
-        return frame + operand;
-    const addressSlot = (operand >> 32) & 0x7fff_ffffUL;
-    return *cast(ubyte**) (frame + addressSlot) + cast(uint) operand;
+// The handler adapter owns operand decoding. An operation receives native
+// addresses for storage and integer words for immediates, so it cannot
+// accidentally interpret a branch target or constant index as frame storage.
+private enum OperandKind {
+    storage,
+    immediate,
+    result,
+}
+
+private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
+    static if (destinationKind == OperandKind.immediate)
+        public size_t destination;
+    else
+        public ubyte* destination;
+    static if (sourceKind == OperandKind.immediate)
+        public size_t source;
+    else
+        public ubyte* source;
+
+    public void* returnPlace;
+    public const(long)[] constants;
+    public const(CallSite)[] callSites;
+    public const(AssertSite)[] assertSites;
+    public FrameStack* frames;
+
+    private const(Instruction)* _pc;
+    private ubyte* _frame;
+
+    public this(
+        const(Instruction)* pc, ubyte* frame, void* returnPlace,
+        const(long)[] constants, const(CallSite)[] callSites,
+        const(AssertSite)[] assertSites, FrameStack* frames,
+    ) pure nothrow @nogc {
+        _pc = pc;
+        _frame = frame;
+        this.returnPlace = returnPlace;
+        this.constants = constants;
+        this.callSites = callSites;
+        this.assertSites = assertSites;
+        this.frames = frames;
+        destination = decode!destinationKind(pc.destination);
+        source = decode!sourceKind(pc.source);
+    }
+
+    public const(Instruction)* next() const pure nothrow @nogc {
+        return _pc + 1;
+    }
+
+    public size_t width() const @safe pure nothrow @nogc {
+        return _pc.width;
+    }
+
+    public size_t sourceWidth() const @safe pure nothrow @nogc {
+        return _pc.sourceWidth;
+    }
+
+    private auto decode(OperandKind kind)(in size_t operand)
+        pure nothrow @nogc
+    {
+        static if (kind == OperandKind.immediate)
+            return operand;
+        else static if (kind == OperandKind.result)
+            return operand == discardResult ? null : storage(operand);
+        else
+            return storage(operand);
+    }
+
+    public ubyte* storage(in size_t operand) pure nothrow @nogc {
+        if ((operand & (1UL << 63)) == 0)
+            return _frame + operand;
+        const addressSlot = (operand >> 32) & 0x7fff_ffffUL;
+        return *cast(ubyte**) (_frame + addressSlot) + cast(uint) operand;
+    }
+}
+
+private const(Instruction)* execute(
+    alias operation,
+    OperandKind destinationKind,
+    OperandKind sourceKind,
+    Parameters...,
+)(
+    const(Instruction)* pc,
+    ubyte* frame,
+    void* returnPlace,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    // const would prevent operations from writing through storage pointers.
+    auto execution = Execution!(destinationKind, sourceKind)(
+        pc, frame, returnPlace, constants, callSites, assertSites, frames,
+    );
+    return operation!Parameters(execution);
 }
 
 
@@ -185,7 +272,7 @@ public struct Instruction {
     // opcode does not use a given field. The roles a field plays, across
     // every opcode this VM has:
     //
-    //  - a frame offset, for `opCopy`/`opReturn` and for every arithmetic,
+    //  - a storage operand, for `opCopy`/`opReturn` and for every arithmetic,
     //    comparison, unary and cast opcode below, whose `destination` is
     //    also where their one or two operands already sit: a binary
     //    opcode reads its left operand from `destination` and its right
@@ -331,24 +418,6 @@ private void initializeClosure(
 }
 
 
-// Returns `pc`'s successor: what every opcode below does once it has done
-// its own work, unless it is a branch that took the other path. The
-// dispatch loop invokes the returned handler.
-// Not `@nogc nothrow`; see `opConstant`.
-private const(Instruction)* advance(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
-) {
-    const next = pc + 1;
-    return next;
-}
-
-
 // Runs one guest function without consuming host stack space per opcode.
 private void dispatch(
     const(Instruction)* pc,
@@ -397,206 +466,169 @@ private const(ExceptionHandler)* findHandler(
 }
 
 
-// Writes `constants[pc.source]`, narrowed to `pc.width` bytes, at
-// `frame + pc.destination`.
-//
-// Not `@nogc nothrow`: dispatching a returned handler can reach `opCall`,
-// which can throw (a frame stack overflow) - and the handler alias itself
-// is declared without those attributes for exactly that reason, so every
-// handler that returns through it, this one included, has to go without
-// them too even though nothing this handler itself does allocates or
-// throws.
-public const(Instruction)* opConstant(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+// Writes a constant into the decoded destination storage.
+public alias opConstant =
+    execute!(runConstant, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runConstant(Decoded)(
+    ref Decoded execution,
 ) {
-    storeWidth(storageAddress(frame, pc.destination), constants[pc.source], pc.width);
-    const next = pc + 1;
-    return next;
+    storeWidth(execution.destination, execution.constants[execution.source],
+        execution.width);
+    return execution.next;
 }
 
 
-// Copies `pc.width` bytes from `frame + pc.source` to `frame +
-// pc.destination`: a parameter or local read into another slot, or an
+// Copies `execution.width` bytes from `execution.source` to
+// `execution.destination`: a parameter or local read into another slot, or
+// an
 // assignment's right side already evaluated into the target's own slot
-// copied out to wherever the assignment's value is also needed. Not
-// `@nogc nothrow`; see `opConstant`.
-package const(Instruction)* opCopy(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+// copied out to wherever the assignment's value is also needed.
+package alias opCopy =
+    execute!(runCopy, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runCopy(Decoded)(
+    ref Decoded execution,
 ) {
     import core.stdc.string: memcpy;
 
-    memcpy(storageAddress(frame, pc.destination), storageAddress(frame, pc.source), pc.width);
-    const next = pc + 1;
-    return next;
+    memcpy(execution.destination, execution.source, execution.width);
+    return execution.next;
 }
 
 
 // Constant lengths let the native compiler inline copies without requiring
 // aligned frame slots or typed pointer access.
-package const(Instruction)* opCopyFixed(size_t width, bool staticSource = false)(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opCopyFixed(size_t width, bool staticSource = false) =
+    execute!(runCopyFixed, OperandKind.storage,
+        staticSource ? OperandKind.immediate : OperandKind.storage,
+        width, staticSource);
+
+private const(Instruction)* runCopyFixed(size_t width, bool staticSource = false, Decoded)(
+    ref Decoded execution,
 ) {
     import core.stdc.string: memcpy;
 
     static if (staticSource)
-        const source = cast(const(void)*) pc.source;
+        const source = cast(const(void)*) execution.source;
     else
-        const source = storageAddress(frame, pc.source);
-    memcpy(storageAddress(frame, pc.destination), source, width);
-    return pc + 1;
+        const source = execution.source;
+    memcpy(execution.destination, source, width);
+    return execution.next;
 }
 
 
 // Persistent storage can belong to a constant or a data-segment variable.
-package const(Instruction)* opStaticLoad(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opStaticLoad =
+    execute!(runStaticLoad, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runStaticLoad(Decoded)(
+    ref Decoded execution,
 ) {
     import core.stdc.string: memcpy;
 
-    memcpy(storageAddress(frame, pc.destination), cast(const(void)*) pc.source, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    memcpy(execution.destination, cast(const(void)*) execution.source, execution.width);
+    return execution.next;
 }
 
 
-package const(Instruction)* opStaticStore(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opStaticStore =
+    execute!(runStaticStore, OperandKind.immediate, OperandKind.storage);
+
+private const(Instruction)* runStaticStore(Decoded)(
+    ref Decoded execution,
 ) {
     import core.stdc.string: memcpy;
 
-    memcpy(cast(void*) pc.destination, storageAddress(frame, pc.source), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    memcpy(cast(void*) execution.destination, execution.source, execution.width);
+    return execution.next;
 }
 
 
 // Writes the address of a function-local static into the current frame.
 // The address remains stable for the lifetime of the compiled function and
 // is used by native druntime calls such as array append.
-package const(Instruction)* opStaticAddress(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opStaticAddress =
+    execute!(runStaticAddress, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runStaticAddress(Decoded)(
+    ref Decoded execution,
 ) {
-    *cast(void**) (storageAddress(frame, pc.destination)) = cast(void*) pc.source;
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    *cast(void**) (execution.destination) = cast(void*) execution.source;
+    return execution.next;
 }
 
 
-// `assert(cond)`: when the `pc.width` bytes at `frame + pc.destination` are
+// `assert(cond)`: when the `execution.width` bytes at
+// `execution.destination` are
 // nonzero, execution just continues. Otherwise this throws a real
 // `AssertError` - the same `Throwable` compiled D throws for a failing
-// assertion - built from `assertSites[pc.source]`, so a guest catch or an
+// assertion - built from `assertSites[execution.source]`, so a guest catch
+// or an
 // unhandled failure both see the genuine object, never a second exception
 // type standing in for it. Each `opCall` this throw unwinds through pops
 // its own callee `Frame` via that struct's destructor (see
 // `snakebite.framestack`), so no explicit cleanup is needed here.
-package const(Instruction)* opAssert(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opAssert =
+    execute!(runAssert, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runAssert(Decoded)(
+    ref Decoded execution,
 ) {
-    if (loadUnsigned(storageAddress(frame, pc.destination), pc.width) != 0)
-        return advance(pc, frame, returnPlace, constants, callSites,
-            assertSites, frames);
+    if (loadUnsigned(execution.destination, execution.width) != 0)
+        return execution.next;
 
     import core.exception: AssertError;
 
-    const site = assertSites[pc.source];
+    const site = execution.assertSites[execution.source];
     throw new AssertError(site.message, site.file, site.line);
 }
 
 
-// Throws the Throwable reference at `pc.destination`. The expression has
+// Throws the Throwable reference at `execution.destination`. The expression has
 // already been evaluated into the frame, so this preserves the original
 // object while dispatch unwinds through guest catch handlers and frames.
-package const(Instruction)* opThrow(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opThrow =
+    execute!(runThrow, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runThrow(Decoded)(
+    ref Decoded execution,
 ) {
-    auto throwable = cast(Throwable) *cast(void**) (storageAddress(frame, pc.destination));
+    auto throwable = cast(Throwable) *cast(void**) (execution.destination);
     throw throwable;
 }
 
 
-// Calls `callSites[pc.source]`'s callee, one of the three `CallSite.Kind`s:
+// Calls `callSites[execution.source]`'s callee, one of the three
+// `CallSite.Kind`s:
 // a guest callee already compiled to `Instruction`s, a native one reached
 // through a prepared FFI plan, or an indirect one whose own address sits
-// in the caller's frame. `pc.width` is unused.
-public const(Instruction)* opCall(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+// in the caller's frame. `execution.width` is unused.
+public alias opCall =
+    execute!(runCall, OperandKind.result, OperandKind.immediate);
+
+private const(Instruction)* runCall(Decoded)(
+    ref Decoded execution,
 ) {
-    const site = callSites[pc.source];
+    const site = execution.callSites[execution.source];
     final switch (site.kind) with (CallSite.Kind) {
     case guest:
-        return callFunction(pc, frame, site, site.callee, frames);
+        return callFunction(execution, site, site.callee);
     case indirect:
         auto callee =
-            *cast(const(Function)**) (storageAddress(frame, site.calleeSlotOffset));
-        return callFunction(pc, frame, site, callee, frames);
+            *cast(const(Function)**) (execution.storage(site.calleeSlotOffset));
+        return callFunction(execution, site, callee);
     case native:
         auto arguments = CallArguments(site.args.length);
         // const would make the address slots read-only.
         auto values = arguments.values;
         foreach (i, arg; site.args)
-            values[i] = storageAddress(frame, arg.callerOffset);
-        auto result = pc.destination == discardResult
-            ? null
-            : storageAddress(frame, pc.destination);
+            values[i] = execution.storage(arg.callerOffset);
+        auto result = execution.destination;
         executeCallPlan(
             site.nativePlan, result, values.ptr, values.length,
         );
-        return pc + 1;
+        return execution.next;
     }
 }
 
@@ -604,41 +636,38 @@ public const(Instruction)* opCall(
 // `opCall`'s own `guest`/`indirect` arms, once each has found its own
 // `callee`: pushes its frame, copies `site.args` into it, and runs it to
 // its own return instruction through the nested dispatch loop with
-// `frame + pc.destination` as its result slot (unless `pc.destination` is
-// `discardResult`).
-private const(Instruction)* callFunction(
-    const(Instruction)* pc,
-    ubyte* frame,
+// `execution.destination` as its result slot, or null for a discarded result.
+private const(Instruction)* callFunction(Decoded)(
+    ref Decoded execution,
     scope const ref CallSite site,
     const(Function)* callee,
-    FrameStack* frames,
 ) {
     import core.stdc.string: memcpy;
 
-    auto calleeFrame = frames.push(callee.frameSize, callee.frameAlignment);
+    auto calleeFrame = execution.frames.push(callee.frameSize, callee.frameAlignment);
 
     foreach (arg; site.args)
         memcpy(
             calleeFrame.base + arg.calleeOffset,
-            storageAddress(frame, arg.callerOffset),
+            execution.storage(arg.callerOffset),
             arg.width,
         );
 
-    initializeClosure(callee, calleeFrame.base, frames);
+    initializeClosure(callee, calleeFrame.base, execution.frames);
 
     // The caller frame stays at a fixed address during nested calls.
     // This pointer must stay mutable so the callee can write the result.
-    auto returnDestination = pc.destination == discardResult || site.returnWidth == 0
+    auto returnDestination = site.returnWidth == 0
         ? null
-        : storageAddress(frame, pc.destination);
+        : execution.destination;
 
     auto calleePc = callee.instructions.ptr;
     dispatch(
         calleePc, calleeFrame.base, returnDestination, callee.constants,
-        callee.callSites, callee.assertSites, callee.exceptionHandlers, frames,
+        callee.callSites, callee.assertSites, callee.exceptionHandlers, execution.frames,
     );
 
-    return pc + 1;
+    return execution.next;
 }
 
 
@@ -647,122 +676,105 @@ private const(Instruction)* callFunction(
 // method is - the same interface method sits at a different index in
 // every implementing class's own vtable, and a call site only ever knows
 // the interface's own index, never which class it will reach at run time.
-// This resolves `frame + pc.source`'s own override through
-// `resolveInterfaceMethod` and stores the result at `frame +
-// pc.destination`, for `compileVirtualCall`'s interface branch to call
-// through the same way it would any other indirect call. `pc.width` is
-// the interface's own `methodIndex`; `pc.sourceWidth` is `interfaceInfo`,
+// This resolves `execution.source`'s own override through
+// `resolveInterfaceMethod` and stores the result at `execution.destination`,
+// for `compileVirtualCall`'s interface branch to call
+// through the same way it would any other indirect call. `execution.width` is
+// the interface's own `methodIndex`; `execution.sourceWidth` is
+// `interfaceInfo`,
 // cast to a `size_t` the same way `opStaticLoad`'s own `source` carries a
 // resolved address.
-public const(Instruction)* opResolveInterfaceMethod(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+public alias opResolveInterfaceMethod =
+    execute!(runResolveInterfaceMethod, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runResolveInterfaceMethod(Decoded)(
+    ref Decoded execution,
 ) {
-    auto object = *cast(void**) (storageAddress(frame, pc.source));
+    auto object = *cast(void**) (execution.source);
     auto result = resolveInterfaceMethod(
-        object, cast(void*) pc.sourceWidth, pc.width);
-    *cast(void**) (storageAddress(frame, pc.destination)) = result;
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+        object, cast(void*) execution.sourceWidth, execution.width);
+    *cast(void**) (execution.destination) = result;
+    return execution.next;
 }
 
 
-// Copies `pc.width` bytes from `frame + pc.source` to `returnPlace` -
+// Copies `execution.width` bytes from `execution.source` to `returnPlace` -
 // `null` when the caller discarded the result, the same convention every
-// backend uses for a call whose value nothing reads. `pc.destination` is
+// backend uses for a call whose value nothing reads. `execution.destination` is
 // unused: there is no frame slot on the receiving end, only `returnPlace`.
-public const(Instruction)* opReturn(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
-) @nogc nothrow {
+public alias opReturn =
+    execute!(runReturn, OperandKind.immediate, OperandKind.storage);
+
+private const(Instruction)* runReturn(Decoded)(
+    ref Decoded execution,
+) {
     import core.stdc.string: memcpy;
 
-    if (returnPlace !is null)
-        memcpy(returnPlace, storageAddress(frame, pc.source), pc.width);
+    if (execution.returnPlace !is null)
+        memcpy(execution.returnPlace, execution.source, execution.width);
     return null;
 }
 
 
-public const(Instruction)* opReturnVoid(
-    const(Instruction)*,
-    ubyte*,
-    void*,
-    scope const long[],
-    scope const CallSite[],
-    scope const AssertSite[],
-    FrameStack*,
-) @nogc nothrow {
+public alias opReturnVoid =
+    execute!(runReturnVoid, OperandKind.immediate, OperandKind.immediate);
+
+private const(Instruction)* runReturnVoid(Decoded)(
+    ref Decoded execution,
+) {
     return null;
 }
 
 
-// Unconditionally transfers control to the instruction `pc.destination`
+// Unconditionally transfers control to the instruction `execution.destination`
 // already names, resolved (see `Instruction.destination`'s own doc) to
 // that instruction's address by the compiler before this VM ever runs it.
-package const(Instruction)* opJump(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opJump =
+    execute!(runJump, OperandKind.immediate, OperandKind.immediate);
+
+private const(Instruction)* runJump(Decoded)(
+    ref Decoded execution,
 ) {
-    const target = cast(const(Instruction)*) pc.destination;
+    const target = cast(const(Instruction)*) execution.destination;
     return target;
 }
 
 
-// Transfers control to `pc.source` (resolved the same way `opJump`'s own
-// target is) when the `pc.width` bytes at `frame + pc.destination` are all
+// Transfers control to `execution.source` (resolved the same way `opJump`'s own
+// target is) when the `execution.width` bytes at `execution.destination` are
+// all
 // zero - an `if` whose condition was false, a loop whose condition no
 // longer holds, the left side of a short-circuiting `&&` - and falls
 // through to the next instruction otherwise.
-package const(Instruction)* opBranchFalse(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opBranchFalse =
+    execute!(runBranchFalse, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runBranchFalse(Decoded)(
+    ref Decoded execution,
 ) {
-    if (loadUnsigned(storageAddress(frame, pc.destination), pc.width) == 0) {
-        const target = cast(const(Instruction)*) pc.source;
+    if (loadUnsigned(execution.destination, execution.width) == 0) {
+        const target = cast(const(Instruction)*) execution.source;
         return target;
     }
 
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    return execution.next;
 }
 
 
 // As `opBranchFalse`, taking the branch when the tested bytes are instead
 // nonzero - the left side of a short-circuiting `||`.
-package const(Instruction)* opBranchTrue(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opBranchTrue =
+    execute!(runBranchTrue, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runBranchTrue(Decoded)(
+    ref Decoded execution,
 ) {
-    if (loadUnsigned(storageAddress(frame, pc.destination), pc.width) != 0) {
-        const target = cast(const(Instruction)*) pc.source;
+    if (loadUnsigned(execution.destination, execution.width) != 0) {
+        const target = cast(const(Instruction)*) execution.source;
         return target;
     }
 
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    return execution.next;
 }
 
 
@@ -773,52 +785,43 @@ package const(Instruction)* opBranchTrue(
 // leave are the same whichever way the wider intermediate was extended.
 // `destination` holds the left operand on entry and the answer on exit;
 // `source` holds the right operand, read but not written.
-package const(Instruction)* opAdd(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opAdd =
+    execute!(runAdd, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runAdd(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
-    storeWidth(place, cast(long) (a + b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
+    storeWidth(place, cast(long) (a + b), execution.width);
+    return execution.next;
 }
 
-package const(Instruction)* opSubtract(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opSubtract =
+    execute!(runSubtract, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runSubtract(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
-    storeWidth(place, cast(long) (a - b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
+    storeWidth(place, cast(long) (a - b), execution.width);
+    return execution.next;
 }
 
-package const(Instruction)* opMultiply(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opMultiply =
+    execute!(runMultiply, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runMultiply(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
-    storeWidth(place, cast(long) (a * b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
+    storeWidth(place, cast(long) (a * b), execution.width);
+    return execution.next;
 }
 
 private T applyFloatBinary(string operation, T)(T left, T right)
@@ -826,35 +829,31 @@ private T applyFloatBinary(string operation, T)(T left, T right)
     return mixin("left " ~ operation ~ " right");
 }
 
-private const(Instruction)* opFloatBinary(string operation)(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+private alias opFloatBinary(string operation) =
+    execute!(runFloatBinary, OperandKind.storage, OperandKind.storage, operation);
+
+private const(Instruction)* runFloatBinary(string operation, Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    if (pc.width == float.sizeof)
+    auto place = execution.destination;
+    if (execution.width == float.sizeof)
         *cast(float*) place = applyFloatBinary!operation(
             *cast(float*) place,
-            *cast(const float*) (storageAddress(frame, pc.source)),
+            *cast(const float*) (execution.source),
         );
-    else if (pc.width == double.sizeof)
+    else if (execution.width == double.sizeof)
         *cast(double*) place = applyFloatBinary!operation(
             *cast(double*) place,
-            *cast(const double*) (storageAddress(frame, pc.source)),
+            *cast(const double*) (execution.source),
         );
     else {
-        assert(pc.width == real.sizeof);
+        assert(execution.width == real.sizeof);
         *cast(real*) place = applyFloatBinary!operation(
             *cast(real*) place,
-            *cast(const real*) (storageAddress(frame, pc.source)),
+            *cast(const real*) (execution.source),
         );
     }
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    return execution.next;
 }
 
 package alias opFloatAdd = opFloatBinary!"+";
@@ -863,86 +862,71 @@ package alias opFloatMultiply = opFloatBinary!"*";
 package alias opFloatDivide = opFloatBinary!"/";
 package alias opFloatModulo = opFloatBinary!"%";
 
-package const(Instruction)* opBitAnd(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opBitAnd =
+    execute!(runBitAnd, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runBitAnd(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
-    storeWidth(place, cast(long) (a & b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
+    storeWidth(place, cast(long) (a & b), execution.width);
+    return execution.next;
 }
 
-package const(Instruction)* opBitOr(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opBitOr =
+    execute!(runBitOr, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runBitOr(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
-    storeWidth(place, cast(long) (a | b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
+    storeWidth(place, cast(long) (a | b), execution.width);
+    return execution.next;
 }
 
-package const(Instruction)* opBitXor(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opBitXor =
+    execute!(runBitXor, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runBitXor(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
-    storeWidth(place, cast(long) (a ^ b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
+    storeWidth(place, cast(long) (a ^ b), execution.width);
+    return execution.next;
 }
 
-package const(Instruction)* opShiftLeft(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opShiftLeft =
+    execute!(runShiftLeft, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runShiftLeft(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
-    storeWidth(place, cast(long) (a << b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
+    storeWidth(place, cast(long) (a << b), execution.width);
+    return execution.next;
 }
 
 // `>>` on an unsigned left operand, and `>>>` whatever the left operand's
 // signedness: both fill the vacated high bits with zero.
-package const(Instruction)* opShiftRightLogical(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opShiftRightLogical =
+    execute!(runShiftRightLogical, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runShiftRightLogical(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
-    storeWidth(place, cast(long) (a >> b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
+    storeWidth(place, cast(long) (a >> b), execution.width);
+    return execution.next;
 }
 
 // `>>` on a signed left operand: the vacated high bits copy the sign bit
@@ -951,20 +935,17 @@ package const(Instruction)* opShiftRightLogical(
 // an operand's signedness, and the only one of those where reading
 // `source` signed as well would be wrong: the right operand is a shift
 // count, not a value in the left operand's own domain.
-package const(Instruction)* opShiftRightArithmetic(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opShiftRightArithmetic =
+    execute!(runShiftRightArithmetic, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runShiftRightArithmetic(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadSigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
-    storeWidth(place, a >> b, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const a = loadSigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
+    storeWidth(place, a >> b, execution.width);
+    return execution.next;
 }
 
 // Division and modulo, unlike every other binary opcode above, answer
@@ -973,250 +954,209 @@ package const(Instruction)* opShiftRightArithmetic(
 // according to the same signedness as `destination` rather than always
 // unsigned. D's own `/` and `%` on `long` already truncate toward zero
 // and take the dividend's sign the way this needs, so this opcode is
-// nothing more than that operator applied to the widened operands.
-package const(Instruction)* opDivideSigned(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+// nothing more than that operator applied to the widened execution.
+package alias opDivideSigned =
+    execute!(runDivideSigned, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runDivideSigned(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadSigned(place, pc.width);
-    const b = loadSigned(storageAddress(frame, pc.source), pc.width);
-    storeWidth(place, a / b, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const a = loadSigned(place, execution.width);
+    const b = loadSigned(execution.source, execution.width);
+    storeWidth(place, a / b, execution.width);
+    return execution.next;
 }
 
-package const(Instruction)* opModuloSigned(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opModuloSigned =
+    execute!(runModuloSigned, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runModuloSigned(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadSigned(place, pc.width);
-    const b = loadSigned(storageAddress(frame, pc.source), pc.width);
-    storeWidth(place, a % b, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const a = loadSigned(place, execution.width);
+    const b = loadSigned(execution.source, execution.width);
+    storeWidth(place, a % b, execution.width);
+    return execution.next;
 }
 
-package const(Instruction)* opDivideUnsigned(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opDivideUnsigned =
+    execute!(runDivideUnsigned, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runDivideUnsigned(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
-    storeWidth(place, cast(long) (a / b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
+    storeWidth(place, cast(long) (a / b), execution.width);
+    return execution.next;
 }
 
-package const(Instruction)* opModuloUnsigned(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opModuloUnsigned =
+    execute!(runModuloUnsigned, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runModuloUnsigned(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
-    storeWidth(place, cast(long) (a % b), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
+    storeWidth(place, cast(long) (a % b), execution.width);
+    return execution.next;
 }
 
 
 // The eight relational-comparison opcodes: `destination` holds the left
-// operand and `source` the right one on entry, both read at `pc.width`
+// operand and `source` the right one on entry, both read at `execution.width`
 // with the signedness the opcode's own name commits to, since an
 // ordering answers differently depending on it - `uint.max < 1u` is
 // false, but the same bits read signed (`-1 < 1`) are true. Only the
 // answer's single byte at `destination` is written; the compiler copies
 // it out to wherever the `bool` result is actually needed.
-package const(Instruction)* opLessThanSigned(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opLessThanSigned =
+    execute!(runLessThanSigned, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runLessThanSigned(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadSigned(place, pc.width);
-    const b = loadSigned(storageAddress(frame, pc.source), pc.width);
+    auto place = execution.destination;
+    const a = loadSigned(place, execution.width);
+    const b = loadSigned(execution.source, execution.width);
     *cast(ubyte*) place = (a < b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    return execution.next;
 }
 
-package const(Instruction)* opLessThanUnsigned(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opLessThanUnsigned =
+    execute!(runLessThanUnsigned, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runLessThanUnsigned(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
     *cast(ubyte*) place = (a < b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    return execution.next;
 }
 
-package const(Instruction)* opLessOrEqualSigned(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opLessOrEqualSigned =
+    execute!(runLessOrEqualSigned, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runLessOrEqualSigned(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadSigned(place, pc.width);
-    const b = loadSigned(storageAddress(frame, pc.source), pc.width);
+    auto place = execution.destination;
+    const a = loadSigned(place, execution.width);
+    const b = loadSigned(execution.source, execution.width);
     *cast(ubyte*) place = (a <= b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    return execution.next;
 }
 
-package const(Instruction)* opLessOrEqualUnsigned(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opLessOrEqualUnsigned =
+    execute!(runLessOrEqualUnsigned, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runLessOrEqualUnsigned(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
     *cast(ubyte*) place = (a <= b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    return execution.next;
 }
 
-package const(Instruction)* opGreaterThanSigned(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opGreaterThanSigned =
+    execute!(runGreaterThanSigned, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runGreaterThanSigned(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadSigned(place, pc.width);
-    const b = loadSigned(storageAddress(frame, pc.source), pc.width);
+    auto place = execution.destination;
+    const a = loadSigned(place, execution.width);
+    const b = loadSigned(execution.source, execution.width);
     *cast(ubyte*) place = (a > b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    return execution.next;
 }
 
-package const(Instruction)* opGreaterThanUnsigned(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opGreaterThanUnsigned =
+    execute!(runGreaterThanUnsigned, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runGreaterThanUnsigned(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
     *cast(ubyte*) place = (a > b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    return execution.next;
 }
 
-package const(Instruction)* opGreaterOrEqualSigned(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opGreaterOrEqualSigned =
+    execute!(runGreaterOrEqualSigned, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runGreaterOrEqualSigned(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadSigned(place, pc.width);
-    const b = loadSigned(storageAddress(frame, pc.source), pc.width);
+    auto place = execution.destination;
+    const a = loadSigned(place, execution.width);
+    const b = loadSigned(execution.source, execution.width);
     *cast(ubyte*) place = (a >= b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    return execution.next;
 }
 
-package const(Instruction)* opGreaterOrEqualUnsigned(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opGreaterOrEqualUnsigned =
+    execute!(runGreaterOrEqualUnsigned, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runGreaterOrEqualUnsigned(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
     *cast(ubyte*) place = (a >= b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    return execution.next;
 }
 
 // `==`/`!=`: both operands share one type by the time the compiler emits
 // either of these, so the same bits compare equal whichever way they are
 // read - neither needs a signed and an unsigned form.
-package const(Instruction)* opEqual(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opEqual =
+    execute!(runEqual, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runEqual(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
     *cast(ubyte*) place = (a == b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    return execution.next;
 }
 
 // Integral comparison whose result is used only to choose a control-flow
 // target. `sourceWidth` stores the resolved target address; unlike the
 // value-producing comparison handlers this does not write a temporary bool.
-private const(Instruction)* opCompareBranch(string operation, bool unsigned,
-    bool branchWhenTrue)(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+private alias opCompareBranch(string operation, bool unsigned,
+    bool branchWhenTrue) =
+    execute!(runCompareBranch, OperandKind.storage, OperandKind.storage,
+        operation, unsigned, branchWhenTrue);
+
+private const(Instruction)* runCompareBranch(string operation, bool unsigned,
+    bool branchWhenTrue, Decoded)(
+    ref Decoded execution,
 ) {
     static if (unsigned)
         alias load = loadUnsigned;
     else
         alias load = loadSigned;
-    const left = load(storageAddress(frame, pc.destination), pc.width);
-    const right = load(storageAddress(frame, pc.source), pc.width);
+    const left = load(execution.destination, execution.width);
+    const right = load(execution.source, execution.width);
     const result = mixin("left " ~ operation ~ " right");
     if (result == branchWhenTrue)
-        return cast(const(Instruction)*) pc.sourceWidth;
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+        return cast(const(Instruction)*) execution.sourceWidth;
+    return execution.next;
 }
 
 package alias opLessThanSignedBranch =
@@ -1243,25 +1183,21 @@ package alias opNotEqualBranch = opCompareBranch!("!=", false, false);
 // types are safe for memcmp. `destination` holds the left array on entry and
 // the bool result on exit; `source` holds the right array; `width` is the
 // element size.
-package const(Instruction)* opArrayEqual(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opArrayEqual =
+    execute!(runArrayEqual, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runArrayEqual(Decoded)(
+    ref Decoded execution,
 ) {
     import core.stdc.string: memcmp;
 
-    const left = *cast(const(void)[]*) (storageAddress(frame, pc.destination));
-    const right = *cast(const(void)[]*) (storageAddress(frame, pc.source));
-    const byteLength = left.length * pc.width;
+    const left = *cast(const(void)[]*) (execution.destination);
+    const right = *cast(const(void)[]*) (execution.source);
+    const byteLength = left.length * execution.width;
     const equal = left.length == right.length
         && (byteLength == 0 || memcmp(left.ptr, right.ptr, byteLength) == 0);
-    *cast(ubyte*) (storageAddress(frame, pc.destination)) = equal ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    *cast(ubyte*) (execution.destination) = equal ? 1 : 0;
+    return execution.next;
 }
 
 // Bytewise equality for two native static-array values, laid out in place
@@ -1271,38 +1207,31 @@ package const(Instruction)* opArrayEqual(
 // `width` is the whole array's own byte size, every element's bytes
 // together, since a static array's dimension is part of its type rather
 // than a run-time value to compare separately.
-package const(Instruction)* opStaticArrayEqual(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opStaticArrayEqual =
+    execute!(runStaticArrayEqual, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runStaticArrayEqual(Decoded)(
+    ref Decoded execution,
 ) {
     import core.stdc.string: memcmp;
 
-    const equal = pc.width == 0
-        || memcmp(storageAddress(frame, pc.destination), storageAddress(frame, pc.source), pc.width) == 0;
-    *cast(ubyte*) (storageAddress(frame, pc.destination)) = equal ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    const equal = execution.width == 0
+        || memcmp(execution.destination, execution.source, execution.width) == 0;
+    *cast(ubyte*) (execution.destination) = equal ? 1 : 0;
+    return execution.next;
 }
 
-package const(Instruction)* opNotEqual(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opNotEqual =
+    execute!(runNotEqual, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runNotEqual(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    const b = loadUnsigned(storageAddress(frame, pc.source), pc.width);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    const b = loadUnsigned(execution.source, execution.width);
     *cast(ubyte*) place = (a != b) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    return execution.next;
 }
 
 // Floating comparisons read values in their declared precision instead of
@@ -1313,37 +1242,33 @@ private bool applyFloatComparison(string operation, T)(T left, T right)
     return mixin("left " ~ operation ~ " right");
 }
 
-private const(Instruction)* opFloatComparison(string operation)(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+private alias opFloatComparison(string operation) =
+    execute!(runFloatComparison, OperandKind.storage, OperandKind.storage, operation);
+
+private const(Instruction)* runFloatComparison(string operation, Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
+    auto place = execution.destination;
     bool result;
-    if (pc.width == float.sizeof)
+    if (execution.width == float.sizeof)
         result = applyFloatComparison!operation(
             *cast(float*) place,
-            *cast(const float*) (storageAddress(frame, pc.source)),
+            *cast(const float*) (execution.source),
         );
-    else if (pc.width == double.sizeof)
+    else if (execution.width == double.sizeof)
         result = applyFloatComparison!operation(
             *cast(double*) place,
-            *cast(const double*) (storageAddress(frame, pc.source)),
+            *cast(const double*) (execution.source),
         );
     else {
-        assert(pc.width == real.sizeof);
+        assert(execution.width == real.sizeof);
         result = applyFloatComparison!operation(
             *cast(real*) place,
-            *cast(const real*) (storageAddress(frame, pc.source)),
+            *cast(const real*) (execution.source),
         );
     }
     *cast(ubyte*) place = result ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    return execution.next;
 }
 
 package alias opFloatEqual = opFloatComparison!"==";
@@ -1357,137 +1282,115 @@ package alias opFloatGreaterOrEqual = opFloatComparison!">=";
 // `-x` and `~x`: `destination` holds the one operand on entry and the
 // answer on exit; `source` is unused. Neither depends on the operand's
 // signedness - the same low bits result whichever way it was widened.
-package const(Instruction)* opNegate(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opNegate =
+    execute!(runNegate, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runNegate(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    storeWidth(place, cast(long) (-a), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    storeWidth(place, cast(long) (-a), execution.width);
+    return execution.next;
 }
 
 private T applyFloatUnary(string operation, T)(T value) @nogc nothrow pure {
     return mixin(operation ~ "value");
 }
 
-private const(Instruction)* opFloatUnary(string operation)(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+private alias opFloatUnary(string operation) =
+    execute!(runFloatUnary, OperandKind.storage, OperandKind.immediate, operation);
+
+private const(Instruction)* runFloatUnary(string operation, Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    if (pc.width == float.sizeof)
+    auto place = execution.destination;
+    if (execution.width == float.sizeof)
         *cast(float*) place = applyFloatUnary!operation(*cast(float*) place);
-    else if (pc.width == double.sizeof)
+    else if (execution.width == double.sizeof)
         *cast(double*) place =
             applyFloatUnary!operation(*cast(double*) place);
     else {
-        assert(pc.width == real.sizeof);
+        assert(execution.width == real.sizeof);
         *cast(real*) place = applyFloatUnary!operation(*cast(real*) place);
     }
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    return execution.next;
 }
 
 package alias opFloatNegate = opFloatUnary!"-";
 
-package const(Instruction)* opComplement(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opComplement =
+    execute!(runComplement, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runComplement(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
-    storeWidth(place, cast(long) (~a), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
+    storeWidth(place, cast(long) (~a), execution.width);
+    return execution.next;
 }
 
 // `!x`: true when `x` is zero. `destination` holds the operand, at
-// `pc.width`, on entry and the single-byte `bool` answer on exit.
-package const(Instruction)* opLogicalNot(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+// `execution.width`, on entry and the single-byte `bool` answer on exit.
+package alias opLogicalNot =
+    execute!(runLogicalNot, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runLogicalNot(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
     *cast(ubyte*) place = (a == 0) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    return execution.next;
 }
 
 // `cast(bool) x`: true when `x` is nonzero - dmd classifies `bool` as an
 // integral type, so a plain narrowing copy of the operand's low byte would
 // answer wrongly for an operand like `256`, whose low byte is zero.
-package const(Instruction)* opCastToBool(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opCastToBool =
+    execute!(runCastToBool, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runCastToBool(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const a = loadUnsigned(place, pc.width);
+    auto place = execution.destination;
+    const a = loadUnsigned(place, execution.width);
     *cast(ubyte*) place = (a != 0) ? 1 : 0;
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    return execution.next;
 }
 
-// Widens the `pc.source`-byte operand already at `destination` to fill
-// `pc.width` bytes there instead, copying the sign bit into the new high
+// Widens the `execution.source`-byte operand already at `destination` to fill
+// `execution.width` bytes there instead, copying the sign bit into the new high
 // bits. A narrowing cast needs no opcode of its own: on this VM's
 // little-endian host, the low bytes of any stored integral already are
 // its truncation to a narrower width, so the compiler reaches for
 // `opCopy` instead. Reinterpreting a same-width operand as a differently
 // signed one changes no bits at all, so the compiler does not even emit
 // a copy for that.
-package const(Instruction)* opCastWidenSigned(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opCastWidenSigned =
+    execute!(runCastWidenSigned, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runCastWidenSigned(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const value = loadSigned(place, pc.source);
-    storeWidth(place, value, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const value = loadSigned(place, execution.source);
+    storeWidth(place, value, execution.width);
+    return execution.next;
 }
 
 // As `opCastWidenSigned`, filling the new high bits with zero instead.
-package const(Instruction)* opCastWidenUnsigned(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opCastWidenUnsigned =
+    execute!(runCastWidenUnsigned, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runCastWidenUnsigned(Decoded)(
+    ref Decoded execution,
 ) {
-    auto place = storageAddress(frame, pc.destination);
-    const value = loadUnsigned(place, pc.source);
-    storeWidth(place, cast(long) value, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites, assertSites, frames);
+    auto place = execution.destination;
+    const value = loadUnsigned(place, execution.source);
+    storeWidth(place, cast(long) value, execution.width);
+    return execution.next;
 }
 
 private void storeFloating(T)(void* place, in T value, in size_t width)
@@ -1517,210 +1420,179 @@ private real loadFloating(const(void)* place, in size_t width)
     return *cast(const real*) place;
 }
 
-private const(Instruction)* opIntegralToFloat(bool unsigned_)(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+private alias opIntegralToFloat(bool unsigned_) =
+    execute!(runIntegralToFloat, OperandKind.storage, OperandKind.storage, unsigned_);
+
+private const(Instruction)* runIntegralToFloat(bool unsigned_, Decoded)(
+    ref Decoded execution,
 ) {
     static if (unsigned_)
-        const value = loadUnsigned(storageAddress(frame, pc.source), pc.sourceWidth);
+        const value = loadUnsigned(execution.source, execution.sourceWidth);
     else
-        const value = loadSigned(storageAddress(frame, pc.source), pc.sourceWidth);
-    storeFloating(storageAddress(frame, pc.destination), value, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+        const value = loadSigned(execution.source, execution.sourceWidth);
+    storeFloating(execution.destination, value, execution.width);
+    return execution.next;
 }
 
 package alias opIntegralToFloatSigned = opIntegralToFloat!false;
 package alias opIntegralToFloatUnsigned = opIntegralToFloat!true;
 
-private const(Instruction)* opFloatToIntegral(bool unsigned_)(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+private alias opFloatToIntegral(bool unsigned_) =
+    execute!(runFloatToIntegral, OperandKind.storage, OperandKind.storage, unsigned_);
+
+private const(Instruction)* runFloatToIntegral(bool unsigned_, Decoded)(
+    ref Decoded execution,
 ) {
-    const value = loadFloating(storageAddress(frame, pc.source), pc.sourceWidth);
+    const value = loadFloating(execution.source, execution.sourceWidth);
     static if (unsigned_)
         const converted = cast(long) cast(ulong) value;
     else
         const converted = cast(long) value;
-    storeWidth(storageAddress(frame, pc.destination), converted, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    storeWidth(execution.destination, converted, execution.width);
+    return execution.next;
 }
 
 package alias opFloatToIntegralSigned = opFloatToIntegral!false;
 package alias opFloatToIntegralUnsigned = opFloatToIntegral!true;
 
-package const(Instruction)* opFloatWidthCast(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opFloatWidthCast =
+    execute!(runFloatWidthCast, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runFloatWidthCast(Decoded)(
+    ref Decoded execution,
 ) {
-    const value = loadFloating(storageAddress(frame, pc.source), pc.sourceWidth);
-    storeFloating(storageAddress(frame, pc.destination), value, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    const value = loadFloating(execution.source, execution.sourceWidth);
+    storeFloating(execution.destination, value, execution.width);
+    return execution.next;
 }
 
 
-// Reads `pc.width` bytes from the address held at `frame + pc.source` -
+// Reads `execution.width` bytes from the address held at `execution.source` -
 // a dynamic array's element, at an address the compiler computed from its
-// pointer word and an index - and writes them to `frame + pc.destination`.
-package const(Instruction)* opLoadIndirect(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+// pointer word and an index - and writes them to `execution.destination`.
+package alias opLoadIndirect =
+    execute!(runLoadIndirect, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runLoadIndirect(Decoded)(
+    ref Decoded execution,
 ) {
     import core.stdc.string: memcpy;
 
-    auto address = *cast(void**) (storageAddress(frame, pc.source));
-    memcpy(storageAddress(frame, pc.destination), address, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    auto address = *cast(void**) (execution.source);
+    memcpy(execution.destination, address, execution.width);
+    return execution.next;
 }
 
-package const(Instruction)* opLoadBitfield(
-    const(Instruction)* pc, ubyte* frame, void* returnPlace,
-    scope const long[] constants, scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites, FrameStack* frames,
+package alias opLoadBitfield =
+    execute!(runLoadBitfield, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runLoadBitfield(Decoded)(
+    ref Decoded execution,
 ) {
-    auto address = *cast(void**) (storageAddress(frame, pc.source));
-    const metadata = pc.sourceWidth;
+    auto address = *cast(void**) (execution.source);
+    const metadata = execution.sourceWidth;
     const bitOffset = metadata & 0xffff;
     const fieldWidth = (metadata >> 16) & 0xffff;
     const resultWidth = (metadata >> 40) & 0xff;
     const isSigned = (metadata & (1UL << 32)) != 0;
-    const storage = loadUnsigned(address, pc.width);
+    const storage = loadUnsigned(address, execution.width);
     const mask = ulong.max >> (64 - fieldWidth);
     ulong value = (storage >> bitOffset) & mask;
     if (isSigned && fieldWidth < 64 && (value & (1UL << (fieldWidth - 1))))
         value |= ulong.max << fieldWidth;
-    storeWidth(storageAddress(frame, pc.destination), cast(long) value, resultWidth);
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    storeWidth(execution.destination, cast(long) value, resultWidth);
+    return execution.next;
 }
 
 
-// Writes `frame + pc.source` itself - not the bytes stored there, the
-// address of that slot - to `frame + pc.destination`, always `size_t.sizeof`
+// Writes `execution.source` itself - not the bytes stored there, the
+// address of that slot - to `execution.destination`, always `size_t.sizeof`
 // bytes: the one place this VM turns a frame slot into a value a `ref`
 // binding, a `~=`'s `ref` argument to druntime, or a `ref` return can carry
 // around and dereference later through `opLoadIndirect`/`opStoreIndirect`.
-package const(Instruction)* opFrameAddress(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opFrameAddress =
+    execute!(runFrameAddress, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runFrameAddress(Decoded)(
+    ref Decoded execution,
 ) {
-    *cast(void**) (storageAddress(frame, pc.destination)) = storageAddress(frame, pc.source);
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    *cast(void**) (execution.destination) = execution.source;
+    return execution.next;
 }
 
-// Zeroes `pc.width` bytes at `frame + pc.destination` - a zero-init struct
+// Zeroes `execution.width` bytes at `execution.destination` - a zero-init
+// struct
 // local or array element wider than the 8 bytes `opConstant`'s `storeWidth`
 // lays out, the only width this VM's integral opcodes cannot already carry
 // as a single constant.
-package const(Instruction)* opZero(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opZero =
+    execute!(runZero, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runZero(Decoded)(
+    ref Decoded execution,
 ) {
     import core.stdc.string: memset;
 
-    memset(storageAddress(frame, pc.destination), 0, pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    memset(execution.destination, 0, execution.width);
+    return execution.next;
 }
 
 
-// As `opLoadIndirect`, the other way: writes `pc.width` bytes from `frame +
-// pc.source` to the address held at `frame + pc.destination`.
-package const(Instruction)* opStoreIndirect(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+// As `opLoadIndirect`, the other way: writes `execution.width` bytes from
+// `execution.source` to the address held at `execution.destination`.
+package alias opStoreIndirect =
+    execute!(runStoreIndirect, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runStoreIndirect(Decoded)(
+    ref Decoded execution,
 ) {
     import core.stdc.string: memcpy;
 
-    auto address = *cast(void**) (storageAddress(frame, pc.destination));
-    memcpy(address, storageAddress(frame, pc.source), pc.width);
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    auto address = *cast(void**) (execution.destination);
+    memcpy(address, execution.source, execution.width);
+    return execution.next;
 }
 
-package const(Instruction)* opStoreBitfield(
-    const(Instruction)* pc, ubyte* frame, void* returnPlace,
-    scope const long[] constants, scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites, FrameStack* frames,
+package alias opStoreBitfield =
+    execute!(runStoreBitfield, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runStoreBitfield(Decoded)(
+    ref Decoded execution,
 ) {
-    auto address = *cast(void**) (storageAddress(frame, pc.destination));
-    const metadata = pc.sourceWidth;
+    auto address = *cast(void**) (execution.destination);
+    const metadata = execution.sourceWidth;
     const bitOffset = metadata & 0xffff;
     const fieldWidth = (metadata >> 16) & 0xffff;
-    auto value = loadUnsigned(storageAddress(frame, pc.source), pc.width);
+    auto value = loadUnsigned(execution.source, execution.width);
     const mask = (ulong.max >> (64 - fieldWidth)) << bitOffset;
     auto storage = loadUnsigned(address, (metadata >> 40) & 0xff);
     storage = (storage & ~mask) | ((value << bitOffset) & mask);
     storeWidth(address, cast(long) storage, (metadata >> 40) & 0xff);
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    return execution.next;
 }
 
 
-// `dest[] = src[]`, `{length, pointer}` pairs at `frame + pc.destination`
-// and `frame + pc.source`, with `pc.width` the element size baked in at
+// `dest[] = src[]`, `{length, pointer}` pairs at `execution.destination`
+// and `execution.source`, with `execution.width` the element size baked in at
 // compile time (both sides share one element size - the compiler checked
 // that before emitting this). Druntime owns the length and overlap checks.
-package const(Instruction)* opSliceCopy(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+package alias opSliceCopy =
+    execute!(runSliceCopy, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runSliceCopy(Decoded)(
+    ref Decoded execution,
 ) {
     import snakebite.druntime.arraycopy: _d_arraycopy;
 
-    auto dest = storageAddress(frame, pc.destination);
-    auto src = storageAddress(frame, pc.source);
+    auto dest = execution.destination;
+    auto src = execution.source;
     _d_arraycopy(
-        pc.width,
+        execution.width,
         *cast(void[]*) src,
         *cast(void[]*) dest,
     );
 
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    return execution.next;
 }
 
 
@@ -1728,30 +1600,27 @@ package const(Instruction)* opSliceCopy(
 // right side (`v` is a single element, not an array): the run-time
 // counterpart to `compileSliceAssign`'s own compile-time-unrolled fill
 // loop for a static array, whose element count is not known until the
-// program runs here. `v`'s bytes (`pc.width` wide, at `frame +
-// pc.source`) are copied into every element of the `{length, pointer}`
-// pair at `frame + pc.destination`.
-package const(Instruction)* opSliceFill(
-    const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
-    FrameStack* frames,
+// program runs here. `v`'s bytes (`execution.width` wide, at
+// `execution.source`) are copied into every element of the `{length,
+// pointer}`
+// pair at `execution.destination`.
+package alias opSliceFill =
+    execute!(runSliceFill, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runSliceFill(Decoded)(
+    ref Decoded execution,
 ) {
     import core.stdc.string: memcpy;
     import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
 
-    auto dest = storageAddress(frame, pc.destination);
-    auto value = storageAddress(frame, pc.source);
+    auto dest = execution.destination;
+    auto value = execution.source;
     const length = *cast(const(size_t)*) (dest + arrayLengthOffset);
     auto destPtr = *cast(ubyte**) (dest + arrayPointerOffset);
     foreach (_; 0 .. length) {
-        memcpy(destPtr, value, pc.width);
-        destPtr += pc.width;
+        memcpy(destPtr, value, execution.width);
+        destPtr += execution.width;
     }
 
-    return advance(pc, frame, returnPlace, constants, callSites,
-        assertSites, frames);
+    return execution.next;
 }
