@@ -52,11 +52,29 @@ public bool prefersGuestBody(
 // whether the callee is a resolved declaration, a bare `TypeFunction`
 // reached through a pointer or delegate value, or a constructor's own
 // parameter list.
+//
+// A variadic parameter list (`VarArg.variadic`) only requires *at
+// least* its declared parameters: a C-style variadic call site's extra
+// arguments (issue #334 step 5) sit past `parameterList.length` in
+// `arguments`, positionally unmatched to any parameter, so nothing here
+// need know their count or types - only whoever builds the call's own
+// plan does (`snakebite.ffi.plan.CallPlan.prepareVariadic`). Every other
+// variadic kind - D's untyped `_arguments` and typesafe `T t...`, both
+// always `extern(D)` - stays refused elsewhere (`CallPlan.prepare`'s own
+// check), but the frontend has already packed a typesafe call's trailing
+// arguments into one array-typed argument by the time this ever runs, so
+// `>=` never actually admits more arguments than `parameterList.length`
+// for that kind.
 public bool arityMismatches(
     imported!"dmd.mtype".ParameterList parameterList,
     imported!"dmd.arraytypes".Expressions* arguments,
 ) {
-    return (arguments is null ? 0 : arguments.length) != parameterList.length;
+    import dmd.astenums: VarArg;
+
+    const count = arguments is null ? 0 : arguments.length;
+    return parameterList.varargs == VarArg.none
+        ? count != parameterList.length
+        : count < parameterList.length;
 }
 
 private bool hasGuestDelegateArgument(

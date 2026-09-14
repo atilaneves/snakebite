@@ -5206,7 +5206,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg[] initialArgs,
         in size_t destOffset,
     ) {
-        import dmd.astenums: STC;
+        import dmd.astenums: STC, VarArg;
         import snakebite.backends.calls: arityMismatches;
 
         const parameterCount = type.parameterList.length;
@@ -5284,7 +5284,33 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             args ~= Arg(argumentOffset, 0, facts.size);
         }
 
-        auto plan = &_bytecode._plans.of(callee);
+        // A C-style variadic callee's extra arguments (issue #334 step
+        // 5) sit past `parameterCount` in `arguments` - `arityMismatches`
+        // above already let them through for a variadic `type`. Each
+        // gets its own temp slot, filled the same way as a named
+        // argument above, and its own dmd `Type` - the frontend's
+        // default-promoted call-site type (`float` to `double`, a
+        // narrower-than-`int` integral to `int`) - which is what
+        // `PlanCache.variadicOf` classifies it by. This compiler visits
+        // one `CallExp` exactly once, so this is already that call
+        // site's own, one-time plan preparation - no further call-site
+        // cache is needed the way the interpreter keeps one (issue #96).
+        Type[] extraArgumentTypes;
+        if (type.parameterList.varargs == VarArg.variadic) {
+            const totalCount = arguments is null ? 0 : arguments.length;
+            foreach (i; parameterCount .. totalCount) {
+                auto argument = (*arguments)[i];
+                const facts = TypeFacts.of(argument.type);
+                const argumentOffset = reserveTemp(facts);
+                evalInto(argument, argumentOffset, facts.size);
+                args ~= Arg(argumentOffset, 0, facts.size);
+                extraArgumentTypes ~= argument.type;
+            }
+        }
+
+        auto plan = type.parameterList.varargs == VarArg.none
+            ? &_bytecode._plans.of(callee)
+            : _bytecode._plans.variadicOf(callee, extraArgumentTypes);
         _callSites ~= CallSite.native(
             cast(const(void)*) plan, args,
             returnShape.returnFacts.size,

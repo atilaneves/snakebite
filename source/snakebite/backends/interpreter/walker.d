@@ -124,7 +124,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import dmd.astenums:
         Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32, Tfloat64,
         Tfloat80, Tnoreturn, Tint64, Tpointer, Tsarray, Ttuple, Tuns32,
-        Tuns8, Tvoid, Twchar;
+        Tuns8, Tvoid, Twchar, VarArg;
     import dmd.arraytypes: Expressions;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
@@ -134,7 +134,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import dmd.identifier: Identifier;
     import dmd.init: ExpInitializer;
     import dmd.location: Loc;
-    import dmd.mtype: Type;
+    import dmd.mtype: Type, TypeFunction;
     import dmd.statement:
         BreakStatement, CaseStatement, Catch, CompoundStatement,
         ContinueStatement, DefaultStatement, DoStatement, ExpStatement,
@@ -870,6 +870,38 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallExp callSite,
         FuncDeclaration function_,
     ) {
+        return cachedCallPlan(
+            callSite, function_, () => &_plans.of(function_));
+    }
+
+    // As `callPlanOf`, for one call site of an `extern(C)` C-style
+    // variadic callee: `extraArgumentTypes` are that call's own extra
+    // arguments' types (`CallPlan.prepareVariadic`'s own doc). The AST
+    // fixes a `CallExp`'s argument expressions, and so their types,
+    // once - `callSite` always names the same extra argument types on
+    // every visit - so keying this the same way `callPlanOf` keys an
+    // ordinary plan, by `(callSite, function_)` identity, is exactly
+    // right: `_plans.variadicOf` never has to run twice for the same
+    // call site.
+    extern(D) private const(CallPlan)* variadicCallPlanOf(
+        CallExp callSite,
+        FuncDeclaration function_,
+        scope Type[] extraArgumentTypes,
+    ) {
+        return cachedCallPlan(callSite, function_,
+            () => _plans.variadicOf(function_, extraArgumentTypes));
+    }
+
+    // The call-site cache (issue #96) shared by `callPlanOf` and
+    // `variadicCallPlanOf`: a call expression is one call site, even when
+    // a loop visits it many times, so the plan cache proper
+    // (`PlanCache._plans`/`.of`) stays the cold path, reached only once
+    // per site through `build`.
+    extern(D) private const(CallPlan)* cachedCallPlan(
+        CallExp callSite,
+        FuncDeclaration function_,
+        scope const(CallPlan)* delegate() build,
+    ) {
         if (_lastCallSitePlan._callSite is callSite
                 && _lastCallSitePlan._function is function_)
             return _lastCallSitePlan._plan;
@@ -884,7 +916,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         countForeignNameLookup;
-        const plan = &_plans.of(function_);
+        const plan = build();
         _callPlans ~= CallSitePlan(callSite, function_, plan);
         _lastCallSitePlan = _callPlans[$ - 1];
         return plan;
@@ -4553,6 +4585,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             : Callee(expression.f, null, false);
         auto function_ = callee.function_;
 
+        // A C-style variadic callee (issue #334 step 5) always reaches a
+        // native symbol - see `callVariadicNative`'s own doc - so this
+        // never joins the class-receiver/virtual-dispatch machinery
+        // below, which exists for guest method calls only.
+        auto funcType = typeFunctionOf(function_);
+        if (funcType.parameterList.varargs == VarArg.variadic) {
+            callVariadicNative(expression, function_, funcType);
+            return;
+        }
+
         void* classReceiver;
         bool hasClassReceiver;
         auto aggregate = function_.isThis;
@@ -4602,6 +4644,79 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             function_, _place, frame.base, layout, expression,
             function_.isCtorDeclaration() !is null,
         );
+    }
+
+    // Calls a C-style variadic callee (`VarArg.variadic`, always
+    // `extern(C)` - `CallPlan.prepare`'s own doc refuses every other
+    // variadic kind): always a native symbol, since nothing this backend
+    // interprets can have its `va_arg`-reading body walked correctly, so
+    // this never checks `usesGuestBody` the way `executeRaw` does.
+    //
+    // `funcType.parameterList`'s own, declared parameters bind into a
+    // frame exactly as any other call (`bindFrame`) - this backend's own
+    // `arityMismatches` is relaxed for a variadic parameter list, so
+    // `expression.arguments` running longer than that declared list does
+    // not reject the call. Every argument past that point is this call's
+    // own extra, variadic argument: it has no frame slot; each is
+    // evaluated here, in call order, into its own scratch storage, and
+    // its own dmd `Type` - the frontend's own default-promoted call-site
+    // type (`float` to `double`, a narrower-than-`int` integral to
+    // `int`) - is what `variadicCallPlanOf` classifies it by.
+    private void callVariadicNative(
+        CallExp expression,
+        FuncDeclaration function_,
+        TypeFunction funcType,
+    ) {
+        auto layout = layoutOf(function_);
+        auto frame = bindFrame(expression, function_, layout);
+
+        const declaredCount = funcType.parameterList.length;
+        auto arguments = expression.arguments;
+        const totalCount = arguments is null ? 0 : arguments.length;
+
+        // `slots` holds the hidden context, the declared parameters, and
+        // every extra argument, in that order - `CallArguments` keeps
+        // them inline for the common, small call and only reaches the
+        // heap once a call runs past its inline capacity (see its own
+        // doc), the same fallback the FFI plan itself relies on.
+        auto slots = CallArguments(layout.parameters.length
+            + (layout.hiddenThis.variable !is null)
+            + (totalCount - declaredCount));
+        auto values = slots.values;
+        size_t count;
+        if (layout.hiddenThis.variable !is null)
+            values[count++] = frame.base + layout.hiddenThis.parameter.offset;
+        foreach (parameter; layout.parameters)
+            values[count++] = frame.base + parameter.offset;
+
+        Type[] extraTypes;
+
+        // One mark for every extra argument's own scratch storage: they
+        // are read by `plan.call` below and done with before this method
+        // returns, so LIFO release here, rather than each argument
+        // keeping its own `Frame`, is enough.
+        const mark = _frames.mark;
+        scope(exit) _frames.release(mark);
+
+        foreach (i; declaredCount .. totalCount) {
+            auto argument = (*arguments)[i];
+            const facts = factsOf(argument.type);
+            auto storage = _frames.reserve(facts.size, facts.alignment);
+            evaluate(argument, argument.type, facts, storage);
+            values[count++] = storage;
+            extraTypes ~= argument.type;
+        }
+
+        auto plan = variadicCallPlanOf(expression, function_, extraTypes);
+
+        try
+            plan.call(_place, values);
+        catch (SnakebiteException exception)
+            throw exception;
+        catch (GuestException exception)
+            throw exception;
+        catch (Throwable guest)
+            throw new GuestException(guest);
     }
 
     // `receiver`'s own dynamic `TypeInfo_Class`, read the same way `visit
