@@ -77,12 +77,11 @@ public struct CallPlan {
     // offset into `Frame`, already resolved to its integer/SSE/stack
     // region - `callAt` never has to ask which region a move belongs to.
     private struct Move {
-        bool isReturnPointer;
         Load load;
         ubyte parameterIndex;
         ubyte byteOffset;
         ubyte copyBytes;
-        uint destinationOffset;
+        ushort destinationOffset;
     }
 
     // How to write one result eightbyte back into `returnPlace`: a
@@ -93,8 +92,7 @@ public struct CallPlan {
     private enum Store : ubyte { byte1, byte2, byte4, byte8 }
 
     private struct ResultMove {
-        bool fromSse;
-        ubyte sourceIndex;
+        ushort sourceOffset;
         Store store;
     }
 
@@ -136,6 +134,13 @@ public struct CallPlan {
     // reserves for a measured need: `callAt` below does one indirect call
     // through this field, with no branch of its own between the two.
     private CallEntry _entry;
+    // Whether `_entry` is the integer-only stub - the same condition
+    // `buildMoves` already computed to choose `_entry`, kept so `callAt`
+    // can skip filling fields that entry never reads (see its own call
+    // site below) instead of recomputing `_sseCount == 0 && _stackWordCount
+    // == 0` on every call.
+    private bool _integerOnly;
+    private uint _returnPointerOffset;
 
     // Calls the function this plan was prepared for.
     //
@@ -172,39 +177,79 @@ public struct CallPlan {
         if (_hiddenReturnPointer && returnPlace is null)
             throwMissingReturnPlace;
 
-        Frame frame = void;
-        auto frameBytes = cast(ubyte*) &frame;
-
-        foreach (ref move; _moves[0 .. _moveCount]) {
-            const value = move.isReturnPointer
-                ? cast(size_t) returnPlace
-                : loadValue(move, arguments);
-            *cast(size_t*) (frameBytes + move.destinationOffset) = value;
+        // The integer-only entry never reads `sse`, `sseCount`, `stack`
+        // or `stackWords` (see `sysv_amd64.S`'s own comment on that
+        // entry), and a plan that chose it never spills a stack word
+        // either, so its call needs only a bare `CallFrame` local - 168
+        // bytes, instead of `Frame`'s 424 (`CallFrame` plus this plan's
+        // worst-case stack area), which only a plan using the general
+        // entry still needs. `CallFrame`'s own byte layout is what both
+        // `fillFrame`'s destination offsets and `readResult`'s source
+        // offsets already address into, so nothing about either helper
+        // changes between the two branches - only which local, and how
+        // much of it, exists.
+        if (_integerOnly) {
+            CallFrame frame = void;
+            auto frameBytes = cast(ubyte*) &frame;
+            fillFrame(frameBytes, returnPlace, arguments);
+            _entry(address, &frame);
+            readResult(frameBytes, returnPlace);
+            return;
         }
 
+        Frame frame = void;
+        auto frameBytes = cast(ubyte*) &frame;
+        fillFrame(frameBytes, returnPlace, arguments);
         frame.callFrame.sseCount = _sseCount;
         frame.callFrame.stack = frame.stackArea.ptr;
         frame.callFrame.stackWords = _stackWordCount;
-
         _entry(address, &frame.callFrame);
+        readResult(frameBytes, returnPlace);
+    }
 
-        // A hidden-pointer return already left its bytes at `returnPlace`
-        // through that pointer, not in the return registers - which the
-        // callee leaves holding that same pointer, not the value. A `void`
-        // callee leaves the registers holding whatever it last used them
-        // for, so reading them in either case would be reading garbage or
-        // an address, not the result.
-        if (_hiddenReturnPointer || returnPlace is null)
+    // Writes the hidden return pointer, when this plan has one, and every
+    // move's loaded value, into `frameBytes` - the shared first half of
+    // `callAt`'s two branches.
+    pragma(inline, true)
+    private void fillFrame(
+        ubyte* frameBytes,
+        void* returnPlace,
+        scope const(void*)[] arguments,
+    ) const {
+        if (_hiddenReturnPointer)
+            *cast(size_t*) (frameBytes + _returnPointerOffset) =
+                cast(size_t) returnPlace;
+        if (_moveCount != 0) {
+            *cast(size_t*) (frameBytes + _moves[0].destinationOffset) =
+                loadValue(_moves[0], arguments);
+            foreach (ref move; _moves[1 .. _moveCount])
+                *cast(size_t*) (frameBytes + move.destinationOffset) =
+                    loadValue(move, arguments);
+        }
+    }
+
+    // Reads the call's result out of `frameBytes` into `returnPlace` - the
+    // shared second half of `callAt`'s two branches.
+    //
+    // A hidden-pointer return already left its bytes at `returnPlace`
+    // through that pointer, not in the return registers - which the
+    // callee leaves holding that same pointer, not the value. A `void`
+    // callee leaves the registers holding whatever it last used them for,
+    // so reading them in either case would be reading garbage or an
+    // address, not the result.
+    pragma(inline, true)
+    private void readResult(ubyte* frameBytes, void* returnPlace) const {
+        if (returnPlace is null || _resultCount == 0)
             return;
 
         auto bytes = cast(ubyte*) returnPlace;
-        foreach (i; 0 .. _resultCount) {
-            const move = _resultMoves[i];
-            const resultWord = move.fromSse
-                ? bitsOf(frame.callFrame.sseResult[move.sourceIndex])
-                : frame.callFrame.integerResult[move.sourceIndex];
-            storeResult(move.store, resultWord, bytes + i * size_t.sizeof);
-        }
+        storeResult(_resultMoves[0].store,
+            *cast(size_t*) (frameBytes + _resultMoves[0].sourceOffset),
+            bytes);
+        if (_resultCount > 1)
+            storeResult(_resultMoves[1].store,
+                *cast(size_t*) (frameBytes + _resultMoves[1].sourceOffset),
+                bytes + size_t.sizeof);
     }
 
     // `move`'s source bytes, widened or truncated as `move.load` says.
@@ -216,6 +261,15 @@ public struct CallPlan {
     ) {
         auto src = cast(ubyte*) arguments[move.parameterIndex]
             + move.byteOffset;
+        if (move.load == Load.word64)
+            return *cast(size_t*) src;
+        if (move.load == Load.sign32)
+            return cast(size_t) cast(long) *cast(int*) src;
+        return loadRare(move, src);
+    }
+
+    pragma(inline, false)
+    private static size_t loadRare(in Move move, const(ubyte)* src) {
         final switch (move.load) with (Load) {
             case word64: return *cast(size_t*) src;
             case zero8:  return *cast(ubyte*) src;
@@ -243,6 +297,21 @@ public struct CallPlan {
     // every call.
     pragma(inline, true)
     private static void storeResult(
+        in Store store, in size_t value, void* place,
+    ) {
+        if (store == Store.byte8) {
+            *cast(size_t*) place = value;
+            return;
+        }
+        if (store == Store.byte4) {
+            *cast(uint*) place = cast(uint) value;
+            return;
+        }
+        storeRare(store, value, place);
+    }
+
+    pragma(inline, false)
+    private static void storeRare(
         in Store store, in size_t value, void* place,
     ) {
         final switch (store) with (Store) {
@@ -319,7 +388,6 @@ public struct CallPlan {
 
         void addRegisterMove(
             in Register register,
-            in bool isReturnPointer,
             in size_t parameterIndex,
             in size_t byteOffset,
             in bool toFloating,
@@ -328,12 +396,11 @@ public struct CallPlan {
                 ? sseBase + (floatingCount++) * size_t.sizeof
                 : integerBase + (integerCount++) * size_t.sizeof;
             _moves[moveCount++] = Move(
-                isReturnPointer,
-                isReturnPointer ? Load.init : loadOf(register),
+                loadOf(register),
                 cast(ubyte) parameterIndex,
                 cast(ubyte) byteOffset,
-                isReturnPointer ? cast(ubyte) 0 : copyBytesOf(register),
-                cast(uint) destinationOffset,
+                copyBytesOf(register),
+                cast(ushort) destinationOffset,
             );
         }
 
@@ -344,9 +411,9 @@ public struct CallPlan {
         ) {
             const destinationOffset = stackBase + (stackCount++) * size_t.sizeof;
             _moves[moveCount++] = Move(
-                false, loadOf(register), cast(ubyte) parameterIndex,
+                loadOf(register), cast(ubyte) parameterIndex,
                 cast(ubyte) byteOffset, copyBytesOf(register),
-                cast(uint) destinationOffset,
+                cast(ushort) destinationOffset,
             );
         }
 
@@ -359,7 +426,7 @@ public struct CallPlan {
                 const toFloating =
                     plan.registers[j].kind == Register.Kind.sse;
                 addRegisterMove(
-                    plan.registers[j], false, i, j * size_t.sizeof,
+                    plan.registers[j], i, j * size_t.sizeof,
                     toFloating,
                 );
             }
@@ -373,9 +440,8 @@ public struct CallPlan {
         }
 
         if (_hiddenReturnPointer)
-            addRegisterMove(
-                Register(Register.Kind.pointer, 8), true, 0, 0, false,
-            );
+            _returnPointerOffset = cast(uint)
+                (integerBase + (integerCount++) * size_t.sizeof);
 
         if (_hiddenContext && !_contextPrecedesHiddenReturnPointer)
             registerArgument(0);
@@ -454,7 +520,8 @@ public struct CallPlan {
         _stackWordCount = stackCount;
         // The leaner entry is safe exactly when this plan fills no SSE
         // register and spills no stack word - see `_entry`'s own doc.
-        _entry = _sseCount == 0 && _stackWordCount == 0
+        _integerOnly = _sseCount == 0 && _stackWordCount == 0;
+        _entry = _integerOnly
             ? &snakebite_ffi_call_sysv_amd64_integer
             : &snakebite_ffi_call_sysv_amd64;
 
@@ -464,10 +531,13 @@ public struct CallPlan {
         size_t floatingResultIndex;
         foreach (i; 0 .. _return.count) {
             const fromSse = _return.registers[i].kind == Register.Kind.sse;
+            const sourceOffset = fromSse
+                ? CallFrame.sseResult.offsetof
+                    + (floatingResultIndex++) * size_t.sizeof
+                : CallFrame.integerResult.offsetof
+                    + (integerResultIndex++) * size_t.sizeof;
             _resultMoves[i] = ResultMove(
-                fromSse,
-                cast(ubyte) (
-                    fromSse ? floatingResultIndex++ : integerResultIndex++),
+                cast(ushort) sourceOffset,
                 storeOf(_return.registers[i].size),
             );
         }
@@ -551,10 +621,6 @@ private void throwMissingReturnPlace() {
         "ffi: this plan returns a value larger than a " ~
             "register, and needs somewhere to write it",
     );
-}
-
-private size_t bitsOf(in double value) @trusted pure nothrow @nogc {
-    return *cast(const size_t*) &value;
 }
 
 // The DMD-free runtime entry point for a prepared call. Backends keep the
