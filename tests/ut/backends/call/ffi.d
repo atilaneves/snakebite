@@ -211,6 +211,77 @@ public extern(C) long snakebite_ut_sixteen_bytes_aligned_backend(
 }
 
 
+// The mixed INTEGER/SSE shapes below (issue #334 step 4) mirror
+// `tests/ut/ffi/plan.d`'s own `called.mixedStruct*`/`called.externD.
+// mixedStruct*` tests at the plan level - here, through a guest call on
+// every backend instead of `PlanCache` directly.
+private struct MixedPair {
+    int integer;
+    double floating;
+}
+
+
+public extern(C) long snakebite_ut_mixed_registers(MixedPair value) {
+    return value.integer * 1000 + cast(long) value.floating;
+}
+
+
+public extern(C) long snakebite_ut_mixed_after_six_then_scalar(
+    int a, int b, int c, int d, int e, int f, MixedPair value, int g,
+) {
+    return a + b + c + d + e + f
+        + value.integer * 1000 + cast(long) value.floating
+        + g * 1_000_000L;
+}
+
+
+public extern(C) long snakebite_ut_mixed_after_eight_doubles(
+    double a, double b, double c, double d,
+    double e, double f, double g, double h,
+    MixedPair value,
+) {
+    return cast(long) (a + b + c + d + e + f + g + h)
+        + value.integer * 1000 + cast(long) value.floating;
+}
+
+
+public extern(C) long snakebite_ut_mixed_both_files_full_backend(
+    long i0, long i1, long i2, long i3, long i4, long i5,
+    double d0, double d1, double d2, double d3, double d4, double d5,
+    double d6, double d7,
+    MixedPair value,
+) {
+    return i0 + i1 + i2 + i3 + i4 + i5
+        + cast(long) (d0 + d1 + d2 + d3 + d4 + d5 + d6 + d7)
+        + value.integer * 1000 + cast(long) value.floating;
+}
+
+
+pragma(mangle, "snakebite_ut_extern_d_mixed_struct_scalar_spill")
+private extern(D) long snakebite_ut_externDMixedStructScalarSpill(
+    long i0, long i1, long i2, long i3, long i4, long i5,
+    MixedPair value, long j,
+) {
+    return i0 + i1 + i2 + i3 + i4 + i5
+        + value.integer * 1000 + cast(long) value.floating
+        + j * 1_000_000L;
+}
+
+
+private struct MixedPairReversed {
+    double floating;
+    int integer;
+}
+
+
+public extern(C) long snakebite_ut_mixed_reversed_after_six_backend(
+    int a, int b, int c, int d, int e, int f, MixedPairReversed value,
+) {
+    return a + b + c + d + e + f
+        + cast(long) value.floating * 100 + value.integer;
+}
+
+
 // `abs` is declared `extern(C)` with no body: nothing in the guest program
 // implements it, so the only way to run these is to call the real symbol
 // the host process already links against.
@@ -1101,5 +1172,252 @@ static foreach (useNull; AliasSeq!(false, true)) {
                 ~ (useNull ? "null" : "callback") ~ "); }";
             (useNull ? 0 : 1).shouldBeRetOf!(backend, code, "answer");
         }
+    }
+}
+
+
+    }
+}
+
+
+// A mixed INTEGER/SSE aggregate (one plain `int` eightbyte, one `double`
+// eightbyte) with both register files free - the control for the shapes
+// below: both eightbytes fit and travel in registers (issue #334 step 4).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("mixedStruct.registers." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        39_001L.shouldBeRetOf!(
+            backend,
+            q{
+                struct MixedPair {
+                    int integer;
+                    double floating;
+                }
+
+                pragma(mangle, "snakebite_ut_mixed_registers")
+                extern(C) long nativeMixedRegisters(MixedPair value);
+
+                long answer() {
+                    MixedPair value;
+                    value.integer = 39;
+                    value.floating = 1.5;
+                    return nativeMixedRegisters(value);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// Six plain `int`s already fill the integer register file, and the SSE
+// register file is free - `value`'s INTEGER lane has no register left,
+// so the whole aggregate goes to the stack, both eightbytes together
+// (psABI 3.2.3 classification step 5c). `g`, declared after `value`, must
+// still arrive correctly too (issue #334 step 4).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("mixedStruct.onStackAfterSixIntegersThenScalar." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        9_007_022L.shouldBeRetOf!(
+            backend,
+            q{
+                struct MixedPair {
+                    int integer;
+                    double floating;
+                }
+
+                pragma(mangle, "snakebite_ut_mixed_after_six_then_scalar")
+                extern(C) long nativeMixedAfterSixThenScalar(
+                    int a, int b, int c, int d, int e, int f,
+                    MixedPair value, int g,
+                );
+
+                long answer() {
+                    MixedPair value;
+                    value.integer = 7;
+                    value.floating = 1.5;
+                    return nativeMixedAfterSixThenScalar(
+                        1, 2, 3, 4, 5, 6, value, 9);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// Eight `double`s already fill the SSE register file, and the integer
+// register file is free - `value`'s SSE lane has no register left, so the
+// whole aggregate goes to the stack, both eightbytes together (issue #334
+// step 4).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("mixedStruct.onStackAfterEightDoubles." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7_009L.shouldBeRetOf!(
+            backend,
+            q{
+                struct MixedPair {
+                    int integer;
+                    double floating;
+                }
+
+                pragma(mangle, "snakebite_ut_mixed_after_eight_doubles")
+                extern(C) long nativeMixedAfterEightDoubles(
+                    double a, double b, double c, double d,
+                    double e, double f, double g, double h,
+                    MixedPair value,
+                );
+
+                long answer() {
+                    MixedPair value;
+                    value.integer = 7;
+                    value.floating = 1.5;
+                    return nativeMixedAfterEightDoubles(
+                        1, 1, 1, 1, 1, 1, 1, 1, value);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// Six `long`s fill the integer register file and eight `double`s fill the
+// SSE register file - `value`'s INTEGER lane and its SSE lane both have
+// no register left in their own file, the shape the old code refused
+// with "ffi cannot place a mixed INTEGER/SSE aggregate when both register
+// files need stack arguments". Per the psABI's classification step 5c,
+// this still just spills: the whole argument goes to the stack, both
+// eightbytes together (issue #334 step 4).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("mixedStruct.bothFilesFull." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7_030L.shouldBeRetOf!(
+            backend,
+            q{
+                struct MixedPair {
+                    int integer;
+                    double floating;
+                }
+
+                pragma(mangle, "snakebite_ut_mixed_both_files_full_backend")
+                extern(C) long nativeMixedBothFilesFull(
+                    long i0, long i1, long i2, long i3, long i4, long i5,
+                    double d0, double d1, double d2, double d3, double d4,
+                    double d5, double d6, double d7,
+                    MixedPair value,
+                );
+
+                long answer() {
+                    MixedPair value;
+                    value.integer = 7;
+                    value.floating = 1.5;
+                    return nativeMixedBothFilesFull(
+                        1, 2, 3, 4, 5, 6,
+                        1, 1, 1, 1, 1, 1, 1, 1,
+                        value);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// Six `long`s fill the integer register file on the real `extern(D)`
+// function below, compiled with dmd's own reversed-parameter convention
+// (the same real native `extern(D)` setup `signatures.externD.
+// nineWordsTwoStringsSpill` above uses, for the same oracle-quirk reason -
+// see its own comment). `value` - a mixed INTEGER/SSE pair whose INTEGER
+// lane has no register left - spills whole, and `j`, declared after it,
+// spills too; both must land correctly under dmd's reversed spill order
+// (issue #334 step 4).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("mixedStruct.externD.scalarSpill." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        99_007_211L.shouldBeRetOf!(
+            backend,
+            q{
+                struct MixedPair {
+                    int integer;
+                    double floating;
+                }
+
+                struct Ffi {
+                    static:
+                    pragma(mangle,
+                        "snakebite_ut_extern_d_mixed_struct_scalar_spill")
+                    extern(D) long externDMixedStructScalarSpill(
+                        long i0, long i1, long i2, long i3, long i4,
+                        long i5, MixedPair value, long j,
+                    );
+                }
+
+                long answer() {
+                    MixedPair value;
+                    value.integer = 7;
+                    value.floating = 1.5;
+                    return Ffi.externDMixedStructScalarSpill(
+                        10, 20, 30, 40, 50, 60, value, 99);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// `MixedPairReversed` declares its SSE-class field (`floating`) before
+// its INTEGER-class one (`integer`) - the opposite field order from
+// `MixedPair` above. Six plain `int`s fill the integer register file, so
+// `value` spills; the stack copy must keep `floating`'s eightbyte before
+// `integer`'s, matching the struct's own declaration order (issue #334
+// step 4).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("mixedStruct.doubleFirstLayoutSpills." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        258L.shouldBeRetOf!(
+            backend,
+            q{
+                struct MixedPairReversed {
+                    double floating;
+                    int integer;
+                }
+
+                pragma(mangle,
+                    "snakebite_ut_mixed_reversed_after_six_backend")
+                extern(C) long nativeMixedReversedAfterSix(
+                    int a, int b, int c, int d, int e, int f,
+                    MixedPairReversed value,
+                );
+
+                long answer() {
+                    MixedPairReversed value;
+                    value.floating = 2.0;
+                    value.integer = 37;
+                    return nativeMixedReversedAfterSix(
+                        1, 2, 3, 4, 5, 6, value);
+                }
+            },
+            "answer",
+        );
     }
 }

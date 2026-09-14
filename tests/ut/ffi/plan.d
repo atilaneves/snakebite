@@ -177,6 +177,65 @@ private extern(C) MixedPair snakebite_ut_mixed_after_eight(
     );
 }
 
+// Six `long`s fill the integer register file and eight `double`s fill the
+// SSE register file - `value`'s INTEGER lane has no integer register left
+// and its SSE lane has no SSE register left, the shape the old code threw
+// on (issue #334 step 4). Per the psABI's classification step 5c, when
+// either file has no register left for one of `value`'s eightbytes, the
+// whole argument goes to the stack, both eightbytes together, and no
+// register is consumed from either file.
+private extern(C) long snakebite_ut_mixed_both_files_full(
+    long i0, long i1, long i2, long i3, long i4, long i5,
+    double d0, double d1, double d2, double d3, double d4, double d5,
+    double d6, double d7,
+    MixedPair value,
+) {
+    return i0 + i1 + i2 + i3 + i4 + i5
+        + cast(long) (d0 + d1 + d2 + d3 + d4 + d5 + d6 + d7)
+        + value.integer * 1000 + cast(long) value.floating;
+}
+
+private long _mixedScalarSpillIntegerSeen;
+private double _mixedScalarSpillFloatingSeen;
+private long _mixedScalarSpillTrailingSeen;
+
+// Six `long`s fill the integer register file; `value` - a mixed
+// INTEGER/SSE pair whose SSE lane still has room but whose INTEGER lane
+// does not - spills whole, and `j`, declared after it, spills too for
+// lack of any integer register left. dmd's reversed `extern(D)`
+// convention (`_reversedArguments`'s own doc) places every spilled
+// argument on the stack in descending declaration order, `value` before
+// `j` in program order but after it on the reversed stack, exercising
+// that reversal for a mixed aggregate, not just plain scalars.
+pragma(mangle, "snakebite_ut_extern_d_mixed_scalar_spill")
+private extern(D) void snakebite_ut_externDMixedScalarSpill(
+    long i0, long i1, long i2, long i3, long i4, long i5,
+    MixedPair value, long j,
+) {
+    _mixedScalarSpillIntegerSeen = i0;
+    _mixedScalarSpillFloatingSeen = value.floating;
+    _mixedScalarSpillTrailingSeen = j;
+}
+
+private struct MixedPairReversed {
+    double floating;
+    int integer;
+}
+
+// `floating` (SSE) comes first and `integer` (INTEGER) second - the
+// opposite field order from `MixedPair` above. When this spills, the
+// stack copy must keep that same eightbyte order: `classify` assigns
+// `plan.registers[0]` to the SSE lane and `plan.registers[1]` to the
+// INTEGER lane, and `buildMoves`'s spilled pass walks `registers` in
+// that order, so the stack layout must match the struct's own layout,
+// not `MixedPair`'s.
+private extern(C) long snakebite_ut_mixed_reversed_after_six(
+    int a, int b, int c, int d, int e, int f, MixedPairReversed value,
+) {
+    return a + b + c + d + e + f
+        + cast(long) value.floating * 100 + value.integer;
+}
+
 private extern(C) double snakebite_ut_scale(double value) {
     return value * 2.5;
 }
@@ -1335,4 +1394,132 @@ unittest {
     cache.of(function_).call(&result, [cast(const void*) &value]);
 
     result.should == 33_905;
+}
+
+
+// A mixed INTEGER/SSE pair whose INTEGER lane and SSE lane both have no
+// register left in their own file - the shape the old code threw on with
+// "ffi cannot place a mixed INTEGER/SSE aggregate when both register
+// files need stack arguments" (issue #334 step 4). Per the psABI's
+// classification step 5c, this still just spills: the whole argument
+// goes to the stack, both eightbytes together, leaving the (already
+// full) registers alone.
+@("called.mixedStructBothFilesFull")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct MixedPair {
+            int integer;
+            double floating;
+        }
+
+        extern(C) long snakebite_ut_mixed_both_files_full(
+            long i0, long i1, long i2, long i3, long i4, long i5,
+            double d0, double d1, double d2, double d3, double d4,
+            double d5, double d6, double d7,
+            MixedPair value,
+        );
+    });
+    auto function_ = findFunction(guestModule,
+        "snakebite_ut_mixed_both_files_full");
+    assert(function_ !is null,
+        "No `snakebite_ut_mixed_both_files_full` in the guest program");
+
+    PlanCache cache;
+    long[6] integers = [1, 2, 3, 4, 5, 6];
+    double[8] floatings = [1, 1, 1, 1, 1, 1, 1, 1];
+    MixedPair value = MixedPair(7, 1.5);
+    long result;
+    void*[15] arguments;
+    foreach (i, ref v; integers)
+        arguments[i] = &v;
+    foreach (i, ref v; floatings)
+        arguments[6 + i] = &v;
+    arguments[14] = &value;
+
+    cache.of(function_).call(&result, arguments[]);
+
+    result.should == 7030;
+}
+
+
+// Six `long`s fill the integer register file; `value` - a mixed
+// INTEGER/SSE pair - spills whole because its INTEGER lane has no
+// register left, even though its SSE lane still would fit, and `j`,
+// declared after it, spills too. dmd's reversed `extern(D)` convention
+// places every spilled argument on the stack in descending declaration
+// order, so this exercises that reversal for a mixed aggregate spill
+// alongside a scalar spill, not just plain scalars
+// (`called.externD.mixedSpillsOneLongOneDouble` above).
+@("called.externD.mixedStructWithScalarSpill")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct MixedPair {
+            int integer;
+            double floating;
+        }
+
+        pragma(mangle, "snakebite_ut_extern_d_mixed_scalar_spill")
+        extern(D) void snakebite_ut_externDMixedScalarSpill(
+            long i0, long i1, long i2, long i3, long i4, long i5,
+            MixedPair value, long j,
+        );
+    });
+    auto function_ = findFunction(guestModule,
+        "snakebite_ut_externDMixedScalarSpill");
+    assert(function_ !is null,
+        "No `snakebite_ut_externDMixedScalarSpill` in the guest program");
+
+    PlanCache cache;
+    long i0 = 10, i1 = 20, i2 = 30, i3 = 40, i4 = 50, i5 = 60;
+    MixedPair value = MixedPair(7, 1.5);
+    long j = 99;
+    cache.of(function_).call(null, [
+        cast(const void*) &i0, cast(const void*) &i1,
+        cast(const void*) &i2, cast(const void*) &i3,
+        cast(const void*) &i4, cast(const void*) &i5,
+        cast(const void*) &value, cast(const void*) &j,
+    ]);
+
+    _mixedScalarSpillIntegerSeen.should == 10;
+    _mixedScalarSpillFloatingSeen.should == 1.5;
+    _mixedScalarSpillTrailingSeen.should == 99;
+}
+
+
+// `MixedPairReversed` declares its SSE-class field (`floating`) before
+// its INTEGER-class one (`integer`) - the opposite field order from
+// `MixedPair`. Six plain `int`s fill the integer register file, so
+// `value` spills; the stack copy must still place `floating`'s eightbyte
+// before `integer`'s, matching the struct's own declaration order, not
+// swap them to some fixed INTEGER-then-SSE order.
+@("called.mixedStructDoubleFirstSpills")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct MixedPairReversed {
+            double floating;
+            int integer;
+        }
+
+        extern(C) long snakebite_ut_mixed_reversed_after_six(
+            int a, int b, int c, int d, int e, int f,
+            MixedPairReversed value,
+        );
+    });
+    auto function_ = findFunction(guestModule,
+        "snakebite_ut_mixed_reversed_after_six");
+    assert(function_ !is null,
+        "No `snakebite_ut_mixed_reversed_after_six` in the guest program");
+
+    PlanCache cache;
+    int[6] integers = [1, 2, 3, 4, 5, 6];
+    MixedPairReversed value = MixedPairReversed(2.0, 37);
+    long result;
+    cache.of(function_).call(&result, [
+        cast(const void*) &integers[0], cast(const void*) &integers[1],
+        cast(const void*) &integers[2], cast(const void*) &integers[3],
+        cast(const void*) &integers[4], cast(const void*) &integers[5],
+        cast(const void*) &value,
+    ]);
+
+    result.should == 258;
 }
