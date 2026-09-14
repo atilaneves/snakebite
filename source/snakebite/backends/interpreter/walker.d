@@ -88,6 +88,8 @@ private final class GuestException: Exception {
 
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
+import snakebite.backends.controlflow: ControlFlowState, ScopeFrame,
+    cleanupCount, scopePath;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.backends.fullexpression: FullExpressionKind;
 
@@ -315,12 +317,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // A label stays pending while its wrapped statement is entered. The
     // wrapped loop takes it, even when dmd put a scope block between them.
     private Identifier _pendingLoopLabel;
-    // A `goto case` or `goto default` leaves the current statement sequence
-    // before the switch resumes it at its resolved target.
-    private Statement _gotoTarget;
-    // While a switch walks its body, this skips statements before the case
-    // selected by its condition or by a `goto case` transfer.
-    private Statement _switchStart;
+    // A control transfer carries DMD's resolved statement destination. The
+    // state also records when a function is being resumed at that statement,
+    // so every enclosing visitor can continue its normal statement sequence.
+    private ControlFlowState _controlFlow;
+    private SwitchStatement[] _switchStack;
     // `extern(D)`: `Program` holds a dynamic array, which is not a valid
     // member of an `extern(C++)` signature, and only `Visitor`'s `visit`
     // overloads need that linkage.
@@ -742,9 +743,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _break = false;
         _breakLabel = null;
         _pendingLoopLabel = null;
-        _gotoTarget = null;
-        _switchStart = null;
-        body_.accept(this);
+        _controlFlow = ControlFlowState.init;
+        _switchStack = null;
+        while (true) {
+            body_.accept(this);
+            if (!_controlFlow.hasTransfer)
+                break;
+
+            _controlFlow.resume;
+        }
     }
 
     // `visit(SymOffExp)`/`visit(FuncExp)` store a function pointer's value
@@ -911,8 +918,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         private bool _break;
         private Identifier _breakLabel;
         private Identifier _pendingLoopLabel;
-        private Statement _gotoTarget;
-        private Statement _switchStart;
+        private ControlFlowState _controlFlow;
+        private SwitchStatement[] _switchStack;
 
         @disable this();
         @disable this(this);
@@ -932,8 +939,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _break = evaluator._break;
             _breakLabel = evaluator._breakLabel;
             _pendingLoopLabel = evaluator._pendingLoopLabel;
-            _gotoTarget = evaluator._gotoTarget;
-            _switchStart = evaluator._switchStart;
+            _controlFlow = evaluator._controlFlow;
+            _switchStack = evaluator._switchStack;
         }
 
         ~this() {
@@ -950,8 +957,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _evaluator._break = _break;
             _evaluator._breakLabel = _breakLabel;
             _evaluator._pendingLoopLabel = _pendingLoopLabel;
-            _evaluator._gotoTarget = _gotoTarget;
-            _evaluator._switchStart = _switchStart;
+            _evaluator._controlFlow = _controlFlow;
+            _evaluator._switchStack = _switchStack;
         }
     }
 
@@ -1004,6 +1011,29 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(TryCatchStatement statement) {
+        if (_controlFlow.seeking) {
+            try {
+                if (statement._body !is null)
+                    statement._body.accept(this);
+            } catch (GuestException exception) {
+                foreach (catch_; *statement.catches) {
+                    if (!matchesThrowable(catch_, exception))
+                        continue;
+
+                    bindCatchVariable(catch_, exception._guest);
+                    catch_.handler.accept(this);
+                    return;
+                }
+
+                throw exception;
+            }
+            if (_controlFlow.seeking)
+                foreach (catch_; *statement.catches)
+                    if (catch_.handler !is null)
+                        catch_.handler.accept(this);
+            return;
+        }
+
         try {
             statement._body.accept(this);
         } catch (GuestException exception) {
@@ -1020,17 +1050,49 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
     }
 
+    private Statement controlTarget() const {
+        return cast(Statement) _controlFlow.target;
+    }
+
+    private bool exitsFinally(TryFinallyStatement statement) const {
+        auto target = controlTarget;
+        if (target is null)
+            return false;
+
+        auto source = ScopeFrame(cast(void*) statement, true) ~
+            scopePath(statement.tryBody);
+        return cleanupCount(
+            source,
+            scopePath(cast(Statement) _controlFlow.destinationScope),
+        ) != 0;
+    }
+
     override void visit(TryFinallyStatement statement) {
-        try {
+        bool bodyRan;
+        if (_controlFlow.seeking) {
             if (statement._body !is null)
                 statement._body.accept(this);
+            if (_controlFlow.seeking)
+                return;
+            bodyRan = true;
+        }
+
+        try {
+            if (!bodyRan && statement._body !is null)
+                statement._body.accept(this);
+
+            while (_controlFlow.hasTransfer && !exitsFinally(statement)) {
+                _controlFlow.resume;
+                if (statement._body !is null)
+                    statement._body.accept(this);
+            }
         } finally {
-            const returned = _returned;
-            const continued = _continued;
+            auto returned = _returned;
+            auto continued = _continued;
             auto continueLabel = _continueLabel;
-            const broken = _break;
+            auto broken = _break;
             auto breakLabel = _breakLabel;
-            auto gotoTarget = _gotoTarget;
+            auto transfer = _controlFlow;
 
             // A control transfer exits the try body before its finally body,
             // but it must not stop the finally body itself. A transfer from
@@ -1040,18 +1102,19 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _continueLabel = null;
             _break = false;
             _breakLabel = null;
-            _gotoTarget = null;
+            _controlFlow.clearTransfer;
 
             if (statement.finalbody !is null)
                 statement.finalbody.accept(this);
 
-            if (!_returned && !_continued && !_break && _gotoTarget is null) {
+            if (!_returned && !_continued && !_break
+                    && !_controlFlow.hasTransfer) {
                 _returned = returned;
                 _continued = continued;
                 _continueLabel = continueLabel;
                 _break = broken;
                 _breakLabel = breakLabel;
-                _gotoTarget = gotoTarget;
+                _controlFlow = transfer;
             }
         }
     }
@@ -1107,21 +1170,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         foreach (child; *statement.statements) {
             if (child !is null) {
-                if (_gotoTarget !is null) {
-                    if (child is _gotoTarget)
-                        _gotoTarget = null;
-                    else if (!containsGotoTarget(child))
-                        continue;
-                }
-                if (_switchStart !is null) {
-                    if (child is _switchStart)
-                        _switchStart = null;
-                    else if (!containsSwitchTarget(child))
-                        continue;
-                }
                 child.accept(this);
                 if (_returned || _continued || _break
-                        || _gotoTarget !is null)
+                        || _controlFlow.hasTransfer)
                     return;
             }
         }
@@ -1133,71 +1184,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         foreach (child; *statement.statements) {
             if (child !is null) {
-                if (_gotoTarget !is null) {
-                    if (child is _gotoTarget)
-                        _gotoTarget = null;
-                    else if (!containsGotoTarget(child))
-                        continue;
-                }
-                if (_switchStart !is null) {
-                    if (child is _switchStart)
-                        _switchStart = null;
-                    else if (!containsSwitchTarget(child))
-                        continue;
-                }
                 child.accept(this);
                 if (_returned || _continued || _break
-                        || _gotoTarget !is null)
+                        || _controlFlow.hasTransfer)
                     return;
             }
         }
-    }
-
-    private bool containsSwitchTarget(Statement statement) {
-        while (statement !is null) {
-            if (statement is _switchStart)
-                return true;
-
-            if (auto case_ = statement.isCaseStatement)
-                statement = case_.statement;
-            else if (auto scope_ = statement.isScopeStatement)
-                statement = scope_.statement;
-            else if (auto compound = statement.isCompoundStatement) {
-                if (compound.statements is null)
-                    return false;
-
-                foreach (child; *compound.statements)
-                    if (child !is null && containsSwitchTarget(child))
-                        return true;
-                return false;
-            }
-            else
-                return false;
-        }
-
-        return false;
-    }
-
-    private bool containsGotoTarget(Statement statement) {
-        if (statement is _gotoTarget)
-            return true;
-
-        if (auto compound = statement.isCompoundStatement) {
-            if (compound.statements is null)
-                return false;
-
-            foreach (child; *compound.statements)
-                if (child !is null && containsGotoTarget(child))
-                    return true;
-        }
-        else if (auto scope_ = statement.isScopeStatement)
-            return scope_.statement !is null
-                && containsGotoTarget(scope_.statement);
-        else if (auto label = statement.isLabelStatement)
-            return label.statement !is null
-                && containsGotoTarget(label.statement);
-
-        return false;
     }
 
     // `{ ... }` is a `ScopeStatement` wrapping the `CompoundStatement` (or
@@ -1221,6 +1213,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // and aliasing behaviour as compiled D. A type `with` has no temporary:
     // it only changes name lookup, which semantic analysis already did.
     override void visit(WithStatement statement) {
+        if (_controlFlow.seeking) {
+            if (statement._body !is null)
+                statement._body.accept(this);
+            return;
+        }
+
         if (statement.wthis !is null) {
             auto initializer = statement.wthis._init.isExpInitializer;
             if (initializer is null)
@@ -1240,6 +1238,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(ReturnStatement statement) {
+        if (_controlFlow.seeking)
+            return;
+
         _returned = true;
 
         // `return f();` in a `void` function never reaches here with
@@ -1287,6 +1288,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(ExpStatement statement) {
+        if (_controlFlow.seeking)
+            return;
+
         if (statement.exp is null)
             return;
 
@@ -1316,11 +1320,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(BreakStatement statement) {
+        if (_controlFlow.seeking)
+            return;
+
         _break = true;
         _breakLabel = statement.ident;
     }
 
     override void visit(LabelStatement statement) {
+        _controlFlow.at(cast(void*) statement);
+
         auto previousLabel = _pendingLoopLabel;
         _pendingLoopLabel = statement.ident;
         scope (exit) _pendingLoopLabel = previousLabel;
@@ -1336,6 +1345,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     override void visit(SwitchStatement statement) {
         _pendingLoopLabel = null;
+
+        if (_controlFlow.seeking) {
+            if (statement._body !is null)
+                statement._body.accept(this);
+            return;
+        }
+
         Statement selected;
         _temporaries.withExpression(FullExpressionKind.value,
             statement.condition, {
@@ -1354,16 +1370,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (selected is null)
             return;
 
-        auto previousStart = _switchStart;
-        auto previousTarget = _gotoTarget;
-        scope (exit) {
-            _switchStart = previousStart;
-            _gotoTarget = previousTarget;
-        }
+        _switchStack ~= statement;
+        scope (exit)
+            _switchStack = _switchStack[0 .. $ - 1];
 
         while (true) {
-            _switchStart = selected;
-            _gotoTarget = null;
+            _controlFlow.seek(cast(void*) selected);
             statement._body.accept(this);
 
             if (_returned || _continued)
@@ -1378,7 +1390,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return;
             }
 
-            auto target = _gotoTarget;
+            auto target = controlTarget;
             if (target is null)
                 return;
 
@@ -1395,48 +1407,77 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (!belongs)
                 return;
 
+            _controlFlow.resume;
             selected = target;
         }
     }
 
     override void visit(CaseStatement statement) {
+        _controlFlow.at(cast(void*) statement);
         if (statement.statement !is null)
             statement.statement.accept(this);
     }
 
     override void visit(DefaultStatement statement) {
+        _controlFlow.at(cast(void*) statement);
         if (statement.statement !is null)
             statement.statement.accept(this);
     }
 
     override void visit(GotoCaseStatement statement) {
+        if (_controlFlow.seeking)
+            return;
+
         if (statement.cs is null)
             throw new SnakebiteException(
                 "interpreter cannot execute an unresolved `goto case`",
             );
 
-        _gotoTarget = statement.cs;
+        if (_switchStack.length == 0)
+            throw new SnakebiteException(
+                "interpreter cannot execute `goto case` outside a switch",
+            );
+
+        _controlFlow.transfer(
+            cast(void*) statement.cs,
+            cast(void*) _switchStack[$ - 1].tryBody,
+        );
     }
 
     override void visit(GotoDefaultStatement statement) {
+        if (_controlFlow.seeking)
+            return;
+
         if (statement.sw is null || statement.sw.sdefault is null)
             throw new SnakebiteException(
                 "interpreter cannot execute an unresolved `goto default`",
             );
 
-        _gotoTarget = statement.sw.sdefault;
+        _controlFlow.transfer(
+            cast(void*) statement.sw.sdefault,
+            cast(void*) statement.sw.tryBody,
+        );
     }
 
     override void visit(GotoStatement statement) {
+        if (_controlFlow.seeking)
+            return;
+
         if (statement.label is null || statement.label.statement is null)
             throw new SnakebiteException(
                 "interpreter cannot execute an unresolved `goto`",
             );
 
-        _gotoTarget = statement.label.statement;
+        _controlFlow.transfer(
+            cast(void*) statement.label.statement,
+            cast(void*) statement.label.statement.tryBody,
+        );
     }
 
     override void visit(ThrowStatement statement) {
+        if (_controlFlow.seeking)
+            return;
+
         _temporaries.withTemporaryLifetime({
             throwGuest(statement.exp);
         });
@@ -1504,6 +1545,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // Only the branch that runs is walked: the other one never executes,
     // so nothing in it is ever evaluated, not even to be discarded.
     override void visit(IfStatement statement) {
+        if (_controlFlow.seeking) {
+            if (statement.ifbody !is null)
+                statement.ifbody.accept(this);
+            if (_controlFlow.seeking && statement.elsebody !is null)
+                statement.elsebody.accept(this);
+            return;
+        }
+
         auto taken = conditionHolds(statement.condition)
             ? statement.ifbody
             : statement.elsebody;
@@ -1516,11 +1565,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto loopLabel = _pendingLoopLabel;
         _pendingLoopLabel = null;
 
-        while (statement.condition is null
+        bool bodyRan;
+        if (_controlFlow.seeking) {
+            if (statement._body !is null)
+                statement._body.accept(this);
+            if (_controlFlow.seeking)
+                return;
+            bodyRan = true;
+        }
+
+        while (bodyRan || statement.condition is null
                 || conditionHolds(statement.condition)) {
             if (statement._body !is null) {
-                statement._body.accept(this);
-                if (_returned || _gotoTarget !is null)
+                if (!bodyRan)
+                    statement._body.accept(this);
+                bodyRan = false;
+                if (_returned || _controlFlow.hasTransfer)
                     return;
                 if (_break) {
                     if (_breakLabel is null) {
@@ -1549,11 +1609,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto loopLabel = _pendingLoopLabel;
         _pendingLoopLabel = null;
 
-        while (true) {
+        bool bodyRan;
+        if (_controlFlow.seeking) {
             if (statement._body !is null)
                 statement._body.accept(this);
+            if (_controlFlow.seeking)
+                return;
+            bodyRan = true;
+        }
 
-            if (_returned || _gotoTarget !is null)
+        while (true) {
+            if (!bodyRan && statement._body !is null)
+                statement._body.accept(this);
+            bodyRan = false;
+
+            if (_returned || _controlFlow.hasTransfer)
                 return;
 
             if (_break) {
@@ -1580,6 +1650,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(ContinueStatement statement) {
+        if (_controlFlow.seeking)
+            return;
+
         _continued = true;
         _continueLabel = statement.ident;
     }
