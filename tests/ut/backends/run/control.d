@@ -84,8 +84,6 @@ static foreach (backend; Matrix!()) {
 // `goto` to a label inside the same catch skips the statements between,
 // so they have no effect.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("gotoSkipsToLabelInCatch." ~ backend.stringof)
     @Tags(backend.stringof)
