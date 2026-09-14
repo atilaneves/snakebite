@@ -1024,6 +1024,47 @@ static foreach (backend; Matrix!(
     }
 }
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not run this runtime slice mismatch check"),
+)) {
+    @("arrays.slice.lengthMismatch.isCaught." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3] storage = [1, 2, 3];
+                int* p = storage.ptr;
+                int[] source = p[0 .. 2];
+                int[] destination = p[0 .. 3];
+                bool caught;
+                try
+                    destination[] = source[];
+                catch (Throwable) {
+                    caught = true;
+                    assert(storage == [1, 2, 3]);
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arrays.slice.emptyCopy.succeeds." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] source;
+                int[] destination;
+                destination[] = source[];
+                assert(destination.length == 0);
+            }
+        });
+    }
+}
+
 // `~=` appending a whole slice lowers to `_d_arrayappendT` instead of
 // `_d_arrayappendcTX` - a different hook, over the same `lowering` field,
 // for a different `CatAssignExp.op` (`concatenateAssign` rather than
