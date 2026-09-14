@@ -87,6 +87,7 @@ private final class GuestException: Exception {
 }
 
 import snakebite.backends.loweringvisitor: LoweringVisitor;
+import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 
 // The evaluation context: executes statements and evaluates expressions,
@@ -2797,6 +2798,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // zero have different representations but compare equal in D.
     protected override void visitUnloweredEqual(EqualExp expression) {
         import core.stdc.string: memcmp;
+        import snakebite.nativelayout: arrayValueSize;
         import snakebite.nativelayout: storeIntegral;
         import dmd.typesem: toBasetype;
         import std.conv: text;
@@ -2978,30 +2980,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return true;
     }
 
-    // `is` on a struct is bitwise: dmd compares the whole object's raw
-    // bytes, padding included, the same as `memcmp(&a, &b, S.sizeof)`
-    // would. This differs from `==`, which recurses field by field and
-    // reads a dynamic array field by its contents - `is` reads that same
-    // field as its bare length and pointer, so two structs holding
-    // separately allocated but equal-content arrays are `==` but not
-    // `is`.
-    private bool identicalStruct(
-        StructDeclaration declaration,
-        const ubyte* left,
-        const ubyte* right,
+    // The shared identity plan has already resolved DMD's native operation.
+    protected override void visitIdentity(
+        IdentityExp expression, in IdentityPlan plan,
     ) {
         import core.stdc.string: memcmp;
-
-        const facts = factsOf(declaration.type);
-        return memcmp(left, right, facts.size) == 0;
-    }
-
-    // `is`/`!is`. Over most types it means the same thing `==`/`!=` does,
-    // but a pointer is not `isIntegral`, so `asIntegral` cannot read
-    // one - `ptr is null`, on the `~=` lowering's own chain, needs the
-    // pointer's own bits read instead.
-    override void visit(IdentityExp expression) {
-        import snakebite.nativelayout: storeIntegral;
+        import snakebite.nativelayout: arrayValueSize, storeIntegral;
         import std.conv: text;
 
         if (expression.op != EXP.identity && expression.op != EXP.notIdentity)
@@ -3010,43 +2994,30 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "` expression: `", expression.toString, "`"),
             );
 
-        auto type = expression.e1.type;
-        bool equal;
-        auto structType = type.isTypeStruct;
-        if (structType !is null) {
-            const facts = factsOf(type);
-            auto left = _frames.push(facts.size, facts.alignment);
-            auto right = _frames.push(facts.size, facts.alignment);
-            evaluate(expression.e1, type, facts, left.base);
-            evaluate(expression.e2, type, facts, right.base);
-            equal = identicalStruct(
-                structType.sym,
-                cast(const ubyte*) left.base,
-                cast(const ubyte*) right.base,
-            );
+        const facts = factsOf(expression.e1.type);
+        auto left = _frames.push(plan.staticArray
+            ? arrayValueSize : facts.size, facts.alignment);
+        auto right = _frames.push(plan.staticArray
+            ? arrayValueSize : facts.size, facts.alignment);
+        if (plan.staticArray) {
+            import snakebite.nativelayout:
+                arrayLengthOffset, arrayPointerOffset, arrayValueSize,
+                storeIntegral;
+            storeIntegral(left.base + arrayLengthOffset,
+                plan.length, size_t.sizeof);
+            storeIntegral(right.base + arrayLengthOffset,
+                plan.length, size_t.sizeof);
+            *cast(void**)(left.base + arrayPointerOffset) = addressOf(
+                expression.e1);
+            *cast(void**)(right.base + arrayPointerOffset) = addressOf(
+                expression.e2);
+        } else {
+            evaluate(expression.e1, expression.e1.type, facts, left.base);
+            evaluate(expression.e2, expression.e2.type, facts, right.base);
         }
-        else if (type.ty == Tclass)
-            equal = classReferenceOf(expression.e1)
-                == classReferenceOf(expression.e2);
-        else if (type.ty == Tarray) {
-            const a = evaluateArray(expression.e1, factsOf(type));
-            const b = evaluateArray(
-                expression.e2, factsOf(expression.e2.type));
-            equal = a.length == b.length && a.elements == b.elements;
-        }
-        else if (type.ty == Tpointer)
-            equal = asPointer(expression.e1) == asPointer(expression.e2);
-        else if (factsOf(type).isIntegral)
-            equal =
-                asIntegral(expression.e1) == asIntegral(expression.e2);
-        else
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: its operands are of type `", type.toString, "`"),
-            );
-
+        const equal = plan.width == 0
+            || memcmp(left.base, right.base, plan.width) == 0;
         const answer = expression.op == EXP.identity ? equal : !equal;
-
         storeIntegral(_place, answer ? 1 : 0, _facts.size);
     }
 

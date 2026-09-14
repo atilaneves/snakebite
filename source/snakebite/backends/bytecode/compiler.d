@@ -6,6 +6,7 @@ private:
 import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
+import snakebite.backends.identity: IdentityPlan;
 import snakebite.ffi:
     CallbackBridge, maxArguments, PlanCache, supportsBoolFunction;
 import snakebite.ffi.abi: Register;
@@ -1375,6 +1376,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         BinExp expression, in bool unsigned,
     ) {
         import dmd.tokens: EXP;
+        import snakebite.nativelayout: arrayValueSize;
+        import snakebite.nativelayout: arrayValueSize;
+        import snakebite.nativelayout: arrayValueSize;
 
         with (EXP) switch (expression.op) {
             case lessThan:
@@ -4025,9 +4029,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileComparison(expression, _destination);
     }
 
-    override void visit(IdentityExp expression) {
+    override protected void visitIdentity(
+        IdentityExp expression, in IdentityPlan plan,
+    ) {
         requireDestination(expression);
-        compileComparison(expression, _destination);
+        compileIdentity(expression, plan, _destination);
     }
 
     override void visit(NegExp expression) {
@@ -4390,6 +4396,51 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         evalInto(expression.e2, rightOffset, operandFacts.size);
         emit(handler, leftOffset, rightOffset, operandFacts.size);
 
+        if (destOffset != leftOffset)
+            emit(&opCopy, destOffset, leftOffset, 1);
+    }
+
+    // DMD's identity lowering is a native byte comparison.  The shared
+    // plan supplies its width, including the real's non-padding bytes.
+    private void compileIdentity(
+        IdentityExp expression, in IdentityPlan plan, in size_t destOffset,
+    ) {
+        import dmd.tokens: EXP;
+        import snakebite.nativelayout: arrayValueSize;
+
+        if (expression.op != EXP.identity && expression.op != EXP.notIdentity)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
+
+        const facts = TypeFacts.of(expression.e1.type);
+        const arrayFacts = TypeFacts(
+            arrayValueSize, size_t.alignof, false, false, true, 0);
+        const leftOffset = reserveTemp(plan.staticArray
+            ? arrayFacts
+            : facts);
+        const rightOffset = reserveTemp(plan.staticArray
+            ? arrayFacts
+            : facts);
+        if (plan.staticArray) {
+            import snakebite.nativelayout:
+                arrayLengthOffset, arrayPointerOffset;
+            const leftAddress = compileAddress(expression.e1);
+            const rightAddress = compileAddress(expression.e2);
+            emit(&opConstant, leftOffset + arrayLengthOffset,
+                addConstant(cast(long) plan.length), size_t.sizeof);
+            emit(&opConstant, rightOffset + arrayLengthOffset,
+                addConstant(cast(long) plan.length), size_t.sizeof);
+            emit(&opCopy, leftOffset + arrayPointerOffset, leftAddress,
+                size_t.sizeof);
+            emit(&opCopy, rightOffset + arrayPointerOffset, rightAddress,
+                size_t.sizeof);
+        } else {
+            evalInto(expression.e1, leftOffset, facts.size);
+            evalInto(expression.e2, rightOffset, facts.size);
+        }
+        emit(&opStaticArrayEqual, leftOffset, rightOffset, plan.width);
+        if (expression.op == EXP.notIdentity)
+            emit(&opLogicalNot, leftOffset, 0, 1);
         if (destOffset != leftOffset)
             emit(&opCopy, destOffset, leftOffset, 1);
     }
