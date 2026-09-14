@@ -2213,9 +2213,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileIndirectAssign(
         AssignExp expression, Expression target, in size_t destOffset,
     ) {
-        const facts = TypeFacts.of(expression.e1.type);
-
         const addressOffset = compileAddress(target);
+        compileAssignmentAt(expression, addressOffset, destOffset);
+    }
+
+    private void compileAssignmentAt(
+        AssignExp expression, in size_t addressOffset,
+        in size_t destOffset = discardResult,
+    ) {
+        const facts = TypeFacts.of(expression.e1.type);
         const valueOffset = reserveTemp(facts);
         evalInto(expression.e2, valueOffset, facts.size, expression.e1.type);
         emit(&opStoreIndirect, addressOffset, valueOffset, facts.size);
@@ -5701,131 +5707,133 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return addressOffset;
     }
 
-    // Where `expression`'s own storage lives, as a run-time pointer value
-    // left in a fresh temporary - the one operation `ref` binding (a `ref`
-    // parameter's argument, a `ref` local's initialiser, a `ref` return's
-    // own expression) and `~=`'s `ref` argument to druntime all reduce to.
-    //
-    // A plain variable's address is its frame slot's own address, computed
-    // fresh by `opFrameAddress` since the frame this compiled function runs
-    // in only exists at run time. A `ref` variable's slot already holds the
-    // address it is bound to - the same reach `visit(VarExp)` makes to read
-    // through it - so that slot's own offset already answers the question
-    // without a further instruction. An indexed element's address is
-    // `compileElementAddress`'s own job, already shared with a load and a
-    // store. A `ref`-returning call's result is likewise already an
-    // address once `compileCall` compiles it into a pointer-sized slot -
-    // see `_isRefReturn` in `compileReturn`.
-    private size_t compileAddress(Expression expression) {
-        import dmd.astenums: Tclass, Tpointer, Tsarray;
+    private struct StorageAdapter {
+        FunctionCompiler compiler;
 
-        if (auto varExp = expression.isVarExp) {
-            auto variable = varExp.var.isVarDeclaration;
-            if (variable !is null && variable.isDataseg)
-                return compileStaticAddress(variable);
-            if (variable !is null && !variable.isDataseg) {
-                if (isThisField(variable))
-                    return compileThisFieldAddress(variable);
-                return addressOfVariable(variable);
-            }
+        public size_t storageThis(ThisExp expression) {
+            return compiler.hiddenThisOffset(expression.var);
         }
 
-        // `SuperExp` is a `ThisExp` (`super(...)`'s own receiver is still
-        // `this`, only the constructor it calls differs) but carries its
-        // own `op`, so `isThisExp`'s exact-tag check misses it - `isSuperExp`
-        // is the other tag `accept()`'s own dispatch to `visit(ThisExp)`
-        // already treats identically.
-        if (auto thisExp = expression.isThisExp)
-            return hiddenThisOffset(thisExp.var);
-        if (auto superExp = expression.isSuperExp)
-            return hiddenThisOffset(superExp.var);
-
-        if (auto dot = expression.isDotVarExp) {
-            auto field = dot.var.isVarDeclaration;
-            if (field !is null && field.isBitFieldDeclaration is null
-                    && (dot.e1.type.ty == Tclass
-                        || dot.e1.type.isTypeStruct !is null))
-                return compileFieldAddress(dot);
+        public size_t storageSuper(SuperExp expression) {
+            return compiler.hiddenThisOffset(expression.var);
         }
 
-        if (auto indexExp = expression.isIndexExp) {
-            const arrayFacts = TypeFacts.of(indexExp.e1.type);
-            if (arrayFacts.isDynamicArray)
-                return compileElementAddress(indexExp, arrayFacts);
-            if (indexExp.e1.type.ty == Tsarray)
-                return compileStaticElementAddress(indexExp);
-            if (indexExp.e1.type.ty == Tpointer)
-                return compilePointerElementAddress(indexExp);
+        public size_t storageVariable(VarExp expression) {
+            auto variable = expression.var.isVarDeclaration;
+            if (variable is null)
+                return storageValue(expression);
+            if (variable.isDataseg)
+                return compiler.compileStaticAddress(variable);
+            if (compiler.isThisField(variable))
+                return compiler.compileThisFieldAddress(variable);
+            return compiler.addressOfVariable(variable);
         }
 
-        if (auto callExp = expression.isCallExp) {
-            auto callee = callExp.f;
-            if (callee is null) {
-                auto calleeExp = callExp.e1.isVarExp;
-                callee = calleeExp is null
-                    ? null : calleeExp.var.isFuncDeclaration;
-            }
-
-            // A constructor call as an rvalue receiver - `Adder(2).sum()`
-            // - needs the same treatment `visit(CallExp)` already gives a
-            // constructor at statement level: `destOffset` is the
-            // constructed struct's own storage, not an address the
-            // callee hands back. dmd's own `TypeFunction` for a
-            // constructor is `isRef` (a struct constructor conceptually
-            // returns its own instance by reference, for chaining), so
-            // without this check `isRefCall` below would reserve only a
-            // pointer-sized temporary and hand it to `compileCall` as if
-            // the constructor were about to fill it with a returned
-            // address - `receiverOffsetOf`'s own struct-literal shortcut
-            // then writes the whole struct through it instead, overrunning
-            // that pointer-sized slot into whatever else the frame put
-            // right after it.
-            const isCtorCall = callee !is null && callee.isCtorDeclaration !is null;
-
-            if (!isCtorCall && isRefCall(callExp)) {
-                const offset = reserveTemp(pointerFacts);
-                compileCall(callExp, offset);
-                return offset;
-            }
-
-            if (callee !is null) {
-                const facts = TypeFacts.of(callExp.type);
-                const offset = reserveTemp(facts);
-                compileCall(callExp, offset);
-                const address = reserveTemp(pointerFacts);
-                emit(&opFrameAddress, address, offset, size_t.sizeof);
-                return address;
-            }
+        public size_t storagePointer(PtrExp expression) {
+            const result = compiler.reserveTemp(compiler.pointerFacts);
+            compiler.evalInto(expression.e1, result, size_t.sizeof);
+            return result;
         }
 
-        // `*(cond ? &a : &b)`: dmd wraps a `ref` return's own conditional
-        // expression this way (see `_isRefReturn` in `compileReturn`) -
-        // `expression.e1` is itself a pointer-typed value (a ternary of
-        // addresses, an ordinary expression `evalInto` already knows how
-        // to compile through `visit(SymOffExp)`/`visit(CondExp)`), and the
-        // address `*p` names is exactly `p`'s own value, not a further
-        // indirection. Checked before the struct-rvalue fallback below,
-        // which would otherwise re-enter `visit(PtrExp)` on this very
-        // node when `*p`'s pointee is a struct - `evalInto(expression, ...)`
-        // dispatches straight back to `compileAddress(expression)`, an
-        // infinite recursion for every struct-typed `*p` rather than the
-        // one instruction this branch already resolves it to.
-        if (auto ptrExp = expression.isPtrExp) {
-            const offset = reserveTemp(pointerFacts);
-            evalInto(ptrExp.e1, offset, size_t.sizeof);
-            return offset;
+        public void storageEffect(Expression expression) {
+            compiler.compileEffect(expression);
         }
 
-        if (expression.type.isTypeStruct !is null) {
+        public extern(D) size_t storageConditional(
+            CondExp expression,
+            scope size_t delegate(Expression) resolve,
+        ) {
+            const conditionOffset = compiler.compileCondition(expression.econd);
+            const conditionWidth = compiler.conditionWidth(expression.econd);
+            const result = compiler.reserveTemp(compiler.pointerFacts);
+            const branchIndex = compiler._instructions.length;
+            compiler.emit(&opBranchFalse, conditionOffset, 0, conditionWidth);
+
+            const thenOffset = resolve(expression.e1);
+            compiler.emit(&opCopy, result, thenOffset, size_t.sizeof);
+            const jumpIndex = compiler._instructions.length;
+            compiler.emit(&opJump, 0, 0, 0);
+
+            compiler._instructions[branchIndex].source =
+                compiler._instructions.length;
+            const elseOffset = resolve(expression.e2);
+            compiler.emit(&opCopy, result, elseOffset, size_t.sizeof);
+            compiler._instructions[jumpIndex].destination =
+                compiler._instructions.length;
+            return result;
+        }
+
+        public size_t storageStructLiteral(StructLiteralExp expression) {
+            return storageValue(expression);
+        }
+
+        public size_t storageSlice(SliceExp expression) {
+            return storageValue(expression);
+        }
+
+        public size_t storageLowered(Expression expression) {
+            return storageValue(expression);
+        }
+
+        public void storageAssignment(
+            AssignExp expression, size_t target,
+        ) {
+            compiler.compileAssignmentAt(expression, target);
+        }
+
+        public size_t storageConstructorCall(CallExp expression) {
+            return storageValue(expression);
+        }
+
+        public size_t storageReferenceCall(CallExp expression) {
+            const result = compiler.reserveTemp(compiler.pointerFacts);
+            compiler.compileCall(expression, result);
+            return result;
+        }
+
+        public size_t storageValueCall(CallExp expression) {
+            return storageValue(expression);
+        }
+
+        public size_t storageArrayLength(
+            ArrayLengthExp expression, size_t base,
+        ) {
+            import snakebite.nativelayout: arrayLengthOffset;
+            return compiler.addPointerOffset(base, arrayLengthOffset);
+        }
+
+        public size_t storageDynamicIndex(IndexExp expression) {
+            return compiler.compileElementAddress(
+                expression, TypeFacts.of(expression.e1.type));
+        }
+
+        public size_t storageStaticIndex(IndexExp expression) {
+            return compiler.compileStaticElementAddress(expression);
+        }
+
+        public size_t storagePointerIndex(IndexExp expression) {
+            return compiler.compilePointerElementAddress(expression);
+        }
+
+        public size_t storageField(DotVarExp expression) {
+            return compiler.compileFieldAddress(expression);
+        }
+
+        public size_t storageValue(Expression expression) {
             const facts = TypeFacts.of(expression.type);
-            const offset = reserveTemp(facts);
-            evalInto(expression, offset, facts.size);
-            const address = reserveTemp(pointerFacts);
-            emit(&opFrameAddress, address, offset, size_t.sizeof);
-            return address;
+            const value = compiler.reserveTemp(facts);
+            compiler.evalInto(expression, value, facts.size);
+            const result = compiler.reserveTemp(compiler.pointerFacts);
+            compiler.emit(&opFrameAddress, result, value, size_t.sizeof);
+            return result;
         }
+    }
 
-        throw rejection(_function, expression.loc, expressionText(expression));
+    private size_t compileAddress(Expression expression) {
+        import snakebite.frontend.storage: StorageResolver;
+
+        return StorageResolver!(size_t, StorageAdapter)(StorageAdapter(this))
+            .resolve(expression);
     }
 
     // Calls druntime's allocator for `size` bytes and leaves the resulting

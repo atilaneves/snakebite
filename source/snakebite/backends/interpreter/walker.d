@@ -2165,6 +2165,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private void* assign(AssignExp expression) {
+        return assignAt(expression, addressOf(expression.e1));
+    }
+
+    private void* assignAt(AssignExp expression, void* target) {
         import core.stdc.string: memcpy;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
         import std.conv: text;
@@ -2178,10 +2182,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // outer element with the one dynamic-array value `b`.
         if (_type.ty == Tarray && expression.e1.isSliceExp !is null) {
             if (expression.memset == MemorySet.blockAssign)
-                return assignSliceScalar(expression);
+                return assignSliceScalar(expression, target);
 
             if (expression.e2.type.ty == Tarray)
-                return assignSlice(expression);
+                return assignSlice(expression, target);
         }
 
         // `ConstructExp` and `BlitExp` arrive as this same node. DMD emits
@@ -2222,7 +2226,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         // Naming `e1` rather than the whole expression: dmd lowers
         // `s.length = n` into a node whose `toString` is a bare `=`.
-        auto target = addressOf(expression.e1);
         if (isStruct) {
             auto scratch = _frames.push(_facts.size, _facts.alignment);
             evaluate(expression.e2, _type, _facts, scratch.base);
@@ -2239,7 +2242,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // with the old first value. DMD marks this shape with `blockAssign`,
     // including the static-array initialization lowering that reaches it as
     // a `T[]` slice despite the underlying storage being a `T[N]`.
-    private void* assignSliceScalar(AssignExp expression) {
+    private void* assignSliceScalar(AssignExp expression, void* target) {
         import core.stdc.string: memcpy;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, isNativeBytes,
@@ -2268,7 +2271,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
 
         auto destination = _frames.push(_facts.size, _facts.alignment);
-        evaluate(expression.e1, _type, _facts, destination.base);
+        // `addressOf` has already evaluated the slice bounds and left its
+        // descriptor at `target`. Reuse that value so each bound runs once.
+        memcpy(destination.base, target, _facts.size);
         auto value = _frames.push(sourceFacts.size, sourceFacts.alignment);
         evaluate(
             expression.e2, expression.e2.type, sourceFacts, value.base,
@@ -2290,12 +2295,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // `a[] = b[]`: both sides are evaluated as ordinary dynamic-array
     // values first, then handed to druntime so its length and overlap
     // checks stay authoritative.
-    private void* assignSlice(AssignExp expression) {
+    private void* assignSlice(AssignExp expression, void* target) {
         import core.stdc.string: memcpy;
         import snakebite.druntime.arraycopy: _d_arraycopy;
 
         auto destination = _frames.push(_facts.size, _facts.alignment);
-        evaluate(expression.e1, _type, _facts, destination.base);
+        // `addressOf` has already evaluated the slice bounds and left its
+        // descriptor at `target`. Reuse that value so each bound runs once.
+        memcpy(destination.base, target, _facts.size);
         auto source = _frames.push(_facts.size, _facts.alignment);
         evaluate(expression.e2, _type, _facts, source.base);
 
@@ -2325,159 +2332,142 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // argument's binding both need exactly this - "where does this
     // lvalue live" - so both come here rather than each walking the same
     // handful of node kinds on their own.
-    private void* addressOf(Expression target) {
-        import std.conv: text;
+    private struct StorageAdapter {
+        Evaluator evaluator;
 
-        // dmd's semantic pass resolves a `this` the guest wrote to the
-        // enclosing method's own `vthis` declaration; a constructor's
-        // implicit `return this;` is synthesised with no `var`, and the
-        // layout knows which declaration owns the frame's `this` slot,
-        // so the reach is the same either way.
-        // `cast()`: `_layout` is a const view, but dmd's own AST
-        // accessors (`isVarDeclaration` among them) are not
-        // const-correct, and `slotOf` only reads the declaration.
-        if (auto thisExp = target.isThisExp)
-        {
-            auto slot = slotOf(
-                thisExp,
-                thisExp.var is null
-                    ? cast() _layout.hiddenThis.variable
-                    : thisExp.var,
+        public void* storageThis(ThisExp expression) {
+            auto slot = evaluator.slotOf(
+                expression,
+                expression.var is null
+                    ? cast() evaluator._layout.hiddenThis.variable
+                    : expression.var,
             );
-            if (target.type.ty == Tclass) {
+            if (expression.type.ty == Tclass) {
                 import snakebite.nativelayout: loadIntegral;
 
-                return cast(void*) loadIntegral(
-                    slot, size_t.sizeof, false);
+                return cast(void*) loadIntegral(slot, size_t.sizeof, false);
             }
             return slot;
         }
 
-        if (auto variable = target.isVarExp)
-            return slotOf(variable);
-
-        if (auto cast_ = target.isCastExp) {
-            if (factsOf(cast_.e1.type).isIntegral
-                    && factsOf(target.type).isIntegral)
-                return addressOf(cast_.e1);
+        public void* storageSuper(SuperExp expression) {
+            return storageThis(cast(ThisExp) expression);
         }
 
-        if (auto deref = target.isPtrExp)
-            return asPointer(deref.e1);
-
-        // Only the branch taken is ever an lvalue this needs the address
-        // of - the other one, like an `if`'s untaken branch, never runs,
-        // so evaluating its address would be reaching into storage this
-        // call was never given.
-        if (auto cond = target.isCondExp)
-            return addressOf(truthOf(cond.econd) ? cond.e1 : cond.e2);
-
-        // DMD uses a comma expression when a scoped temporary needs setup
-        // before its initializer. The left side runs for its effects; only
-        // the right side names the resulting lvalue.
-        if (auto comma = target.isCommaExp) {
-            runForEffect(comma.e1);
-            return addressOf(comma.e2);
+        public void* storageVariable(VarExp expression) {
+            return evaluator.slotOf(expression);
         }
 
-        // A struct constructor call used as an rvalue - a temporary passed
-        // straight into a `ref`-taking parameter, with no variable of its
-        // own - is this node: dmd's lowering runs the constructor on it
-        // through the preceding `CommaExp.e1`, with this same node as the
-        // constructor's hidden `this`, before naming it here as the
-        // result. `_temporaries` is what makes both visits land on
-        // the same slot: the first one (whichever runs first, ordinarily
-        // the constructor's `this` binding) reserves it and default-
-        // initializes the literal's fields into it, and every later visit
-        // of the same node just returns that address, so the constructor's
-        // writes are still there when the `CommaExp` names the result.
-        if (auto literal = target.isStructLiteralExp)
-            return structLiteralAddress(literal);
+        public void* storagePointer(PtrExp expression) {
+            return evaluator.asPointer(expression.e1);
+        }
 
-        // An assignment used as an lvalue first performs the assignment,
-        // then names the storage on its left. DMD uses this form for a
-        // copied aggregate whose postblit is called on the new copy.
-        void* assignmentResultAddress(AssignExp assignment) {
-            const facts = factsOf(target.type);
-            auto result = _frames.push(facts.size, facts.alignment);
+        public void storageEffect(Expression expression) {
+            evaluator.runForEffect(expression);
+        }
 
-            auto savedType = _type;
-            auto savedFacts = _facts;
-            auto savedPlace = _place;
+        public extern(D) void* storageConditional(
+            CondExp expression,
+            scope void* delegate(Expression) resolve,
+        ) {
+            return resolve(evaluator.truthOf(expression.econd)
+                ? expression.e1 : expression.e2);
+        }
+
+        public void* storageStructLiteral(StructLiteralExp expression) {
+            return evaluator.structLiteralAddress(expression);
+        }
+
+        public void* storageSlice(SliceExp expression) {
+            return storageValue(expression);
+        }
+
+        public void* storageLowered(Expression expression) {
+            const facts = evaluator.factsOf(expression.type);
+            auto temporary = evaluator._temporaries.reserveValue(
+                facts.size, facts.alignment);
+            evaluator.evaluate(expression, expression.type, facts, temporary);
+            return temporary;
+        }
+
+        public void storageAssignment(AssignExp expression, void* target) {
+            auto savedType = evaluator._type;
+            auto savedFacts = evaluator._facts;
+            auto savedPlace = evaluator._place;
             scope(exit) {
-                _type = savedType;
-                _facts = savedFacts;
-                _place = savedPlace;
+                evaluator._type = savedType;
+                evaluator._facts = savedFacts;
+                evaluator._place = savedPlace;
             }
 
-            _type = target.type;
-            _facts = facts;
-            _place = result.base;
-            return assign(assignment);
+            evaluator._type = expression.type;
+            evaluator._facts = evaluator.factsOf(expression.type);
+            evaluator._place = target;
+            evaluator.assignAt(expression, target);
         }
 
-        if (auto blit = target.isBlitExp)
-            return assignmentResultAddress(blit);
-
-        if (auto construct = target.isConstructExp)
-            return assignmentResultAddress(construct);
-
-        if (auto assignment = target.isAssignExp)
-            return assignmentResultAddress(assignment);
-
-        // A call with no lvalue of its own - it returns its result by
-        // value, not by `ref` - still needs an address when its result is
-        // a struct passed on as another constructor's by-address argument.
-        // `refCallAddress` only applies to a `ref`-returning call, whose
-        // result already lives in the callee's own storage; a value
-        // return has no storage of its own until this makes one.
-        if (auto call = target.isCallExp) {
-            auto function_ = call.f;
-            auto type = function_ is null
-                ? null : function_.type.isTypeFunction;
-            return type !is null && !type.isRef
-                ? valueCallAddress(call, function_)
-                : refCallAddress(call);
+        public void* storageConstructorCall(CallExp expression) {
+            return evaluator.valueCallAddress(expression, expression.f);
         }
 
-        if (auto length = target.isArrayLengthExp) {
-            import snakebite.nativelayout: arrayLengthOffset;
+        public void* storageReferenceCall(CallExp expression) {
+            return evaluator.refCallAddress(expression);
+        }
 
-            if (length.e1.type.ty != Tarray)
+        public void* storageValueCall(CallExp expression) {
+            if (expression.f is null)
                 throw new SnakebiteException(
-                    text("interpreter cannot take the address of `",
-                        target.toString,
-                        "`: only a dynamic-array length is supported"),
+                    text("interpreter cannot call an unresolved function: `",
+                        expression.toString, "`"),
                 );
-
-            return cast(ubyte*) addressOf(length.e1) + arrayLengthOffset;
+            return evaluator.valueCallAddress(expression, expression.f);
         }
 
-        // `a[i] = x`: the address is the array's own element storage,
-        // found the same way a read (`visit(IndexExp)`) finds it - bounds
-        // checked the same way too, since writing past the array is the
-        // same fault reading past it already is. `_d_arrayappendcTX_`, on
-        // the `~=` lowering's own chain, writes the element it just grew
-        // room for this way.
-        if (auto index = target.isIndexExp)
-            return indexAddressOf(index).ptr;
+        public void* storageArrayLength(
+            ArrayLengthExp expression, void* base,
+        ) {
+            import snakebite.nativelayout: arrayLengthOffset;
+            return cast(ubyte*) base + arrayLengthOffset;
+        }
 
-        if (auto dot = target.isDotVarExp) {
-            auto field = dot.var.isVarDeclaration;
+        public void* storageDynamicIndex(IndexExp expression) {
+            return evaluator.indexAddressOf(expression).ptr;
+        }
+
+        public void* storageStaticIndex(IndexExp expression) {
+            return evaluator.indexAddressOf(expression).ptr;
+        }
+
+        public void* storagePointerIndex(IndexExp expression) {
+            return evaluator.indexAddressOf(expression).ptr;
+        }
+
+        public void* storageField(DotVarExp expression) {
+            auto field = expression.var.isVarDeclaration;
             if (field is null)
                 throw new SnakebiteException(
                     text("interpreter cannot take the address of `",
-                        target.toString,
+                        expression.toString,
                         "`: only a struct field is supported"),
                 );
-
-            return cast(ubyte*) fieldBaseAddress(dot.e1) + field.offset;
+            return cast(ubyte*) evaluator.fieldBaseAddress(expression.e1)
+                + field.offset;
         }
 
-        throw new SnakebiteException(
-            text("interpreter cannot take the address of `",
-                target.toString, "`: it is not an lvalue"),
-        );
+        public void* storageValue(Expression expression) {
+            const facts = evaluator.factsOf(expression.type);
+            auto temporary = evaluator._temporaries.reserveValue(
+                facts.size, facts.alignment);
+            evaluator.evaluate(expression, expression.type, facts, temporary);
+            return temporary;
+        }
+    }
+
+    private void* addressOf(Expression target) {
+        import snakebite.frontend.storage: StorageResolver;
+
+        return StorageResolver!(void*, StorageAdapter)(StorageAdapter(this))
+            .resolve(target);
     }
 
     // An element's address and its own type's stride, from the one

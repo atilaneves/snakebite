@@ -12,8 +12,6 @@ import ut.backends;
 
 
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.inexpressible,
-        "bytecode cannot compile an assignment to a ref-returning call"),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the call counters after evaluating the assignment"),
 )) {
