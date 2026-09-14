@@ -1067,6 +1067,31 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// A non-zero `SymOffExp` offset must not change a `ref` parameter's own
+// binding. Reading the parameter after taking the element address must still
+// use the original array.
+static foreach (backend; Matrix!()) {
+    @("pointers.addressOf.staticArrayElement.refParameter."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int read(ref int[3] values) {
+                int* second = &values[1];
+                assert(*second == 20);
+                assert(values[0] == 10);
+                return values[1];
+            }
+
+            void main() {
+                int[3] values = [10, 20, 30];
+                assert(read(values) == 20);
+            }
+        });
+    }
+}
+
+
 // `&s.get` on a struct method is dmd's `DelegateExp`: the delegate's context
 // is the struct's own storage, so calling it through the pointer must see
 // the same fields the struct held when the address was taken.
