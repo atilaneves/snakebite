@@ -1410,6 +1410,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // into a `null` place, the same convention `execute` already uses for
     // a discarded `void` return.
     private void runForEffect(Expression expression) {
+        if (expression.isTupleExp !is null) {
+            expression.accept(this);
+            return;
+        }
+
         auto type = expression.type;
         if (type.ty == Tvoid) {
             evaluate(expression, type, null);
@@ -1437,6 +1442,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // allocation.
         auto frame = _frames.push(facts.size, facts.alignment);
         evaluate(expression, type, facts, frame.base);
+    }
+
+    protected extern(C++) override void visitTupleElement(
+        Expression expression,
+    ) {
+        runForEffect(expression);
     }
 
     // Only the branch that runs is walked: the other one never executes,

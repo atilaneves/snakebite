@@ -1751,6 +1751,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         expression.accept(this);
     }
 
+    protected extern(C++) override void visitTupleElement(
+        Expression expression,
+    ) {
+        compileEffect(expression);
+    }
+
     // Whether `declaration` binds a name for the semantic pass with no
     // runtime action of its own: a struct/alias/template/function/enum
     // declared inside a function body, none of which this compiler ever

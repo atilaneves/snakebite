@@ -402,10 +402,7 @@ static foreach (backend; Matrix!(
 // `.tupleof` on both sides assigns field by field between the two field
 // lists, so it works across struct types that share a field layout even
 // though they share no other relationship.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("tupleofAssignsFieldwise." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
