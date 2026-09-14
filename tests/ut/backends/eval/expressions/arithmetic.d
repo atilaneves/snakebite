@@ -7,9 +7,7 @@ import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 
 
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("int.operators." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -22,9 +20,7 @@ static foreach (backend; Matrix!(
 }
 
 // The sign of `%` follows the dividend, not the divisor.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("int.moduloSignFollowsDividend." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -35,9 +31,7 @@ static foreach (backend; Matrix!(
 }
 
 // `>>` sign-extends, `>>>` zero-fills.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("int.shifts." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -48,9 +42,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("int.bitwise." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -63,9 +55,7 @@ static foreach (backend; Matrix!(
 }
 
 // Complement of an unsigned operand keeps the unsigned type.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("int.unsignedComplementStaysUnsigned." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -74,9 +64,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("int.relational." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -92,9 +80,7 @@ static foreach (backend; Matrix!(
 
 // An `int` operand converts to `uint` before the operation, so the result
 // is unsigned division, not division of the bit pattern as a negative int.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("int.unsignedDivisionAndModulo." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -105,9 +91,7 @@ static foreach (backend; Matrix!(
 }
 
 // Signed division truncates toward zero, whichever operand is negative.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("long.divisionTruncatesTowardZero." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -120,9 +104,7 @@ static foreach (backend; Matrix!(
 
 // Narrowing truncates; widening a negative signed value sign-extends and
 // widening an unsigned value zero-extends.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("int.casts." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -134,9 +116,7 @@ static foreach (backend; Matrix!(
 }
 
 // Character and boolean operands promote to integers.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("int.integerLikeOperands." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -145,9 +125,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("float.operators." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -161,7 +139,6 @@ static foreach (backend; Matrix!(
 // operand DMD folds the cast at `real` precision, so the operand comes from
 // a function call.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges, "CTFE keeps `cast(float)` at real precision"),
     Omit!(
         Interpreter,
@@ -200,9 +177,7 @@ unittest {
 
 // With a literal on each side DMD folds the expression before any backend
 // sees it; an operand behind a function call makes the backend do the work.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("int.runtimeShapedOperators." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -220,9 +195,7 @@ static foreach (backend; Matrix!(
 }
 
 // The signed operand converts to `uint`, so -1 compares as `uint.max`.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("int.signedUnsignedComparisonIsUnsigned." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -234,9 +207,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("int.wraparound." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -249,9 +220,7 @@ static foreach (backend; Matrix!(
 
 // The wrapped `uint` sum widens to `ulong` by zero-extension, not
 // sign-extension.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("int.unsignedWrapThenWidenZeroExtends." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -263,9 +232,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("int.assignmentAndIncrement." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

@@ -92,7 +92,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("assign.dynamicArrayStructFieldLength." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -136,7 +136,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("assign.dynamicArrayStructFieldCompound." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -162,7 +162,6 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
 }
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot call native memcpy"),
 )) {
     @("assign.cerealMemcpyThroughPointerAndRef." ~ backend.stringof)
@@ -207,7 +206,6 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot hold mutable static state across calls"),
 )) {

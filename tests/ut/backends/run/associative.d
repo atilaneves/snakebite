@@ -12,9 +12,7 @@ import ut.backends;
 // An associative array literal evaluates its key expressions and builds
 // the table from those run-time values, rather than from anything fixed
 // at compile time.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("assocArrayLiteralWithRuntimeKeys." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -69,9 +67,7 @@ static foreach (backend; Matrix!()) {
 
 // A struct key hashes and compares by its contents, so two separately
 // built strings with the same characters are the same key.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("structKeyedLookupComparesContents." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -130,7 +126,6 @@ static foreach (backend; Matrix!(
             ~ "bool-function bridge covers one specific signature, so the "
             ~ "call reaches native code with a function word `_d_aaApply2` "
             ~ "cannot actually invoke"),
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("stringKeyedIndexAssignmentAndForeach." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -163,7 +158,6 @@ static foreach (backend; Matrix!(
 // opposed to a struct) also yields every key/value pair.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("intKeyedForeach." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -193,9 +187,7 @@ static foreach (backend; Matrix!(
 // array's current contents, in whatever order the table itself holds
 // them - the pairing between a key and its value is what a test can
 // pin, not the order.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("assocArrayKeysAndValues." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -223,9 +215,7 @@ static foreach (backend; Matrix!(
 // assignment through the index, and a call to one of the struct's own
 // methods through the index, both mutate the value already in the
 // table rather than a copy of it.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("assocArrayIndexedValueFieldWriteAndMethodCall." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -258,9 +248,7 @@ static foreach (backend; Matrix!(
 // A key whose type holds a dynamic array hashes and compares by the
 // array's contents, the same as any other struct key, so two separately
 // built arrays with the same elements are the same key.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("arrayKeyedLookupComparesContents." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

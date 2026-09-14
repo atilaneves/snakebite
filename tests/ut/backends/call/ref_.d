@@ -47,7 +47,7 @@ static foreach (backend; Matrix!()) {
 // An `out` parameter starts as default-initialized caller storage. The
 // callee then writes that same storage, rather than a temporary parameter
 // slot, so the caller observes the result after the call.
-static foreach (backend; Matrix!(BytecodeUnconfirmed)) {
+static foreach (backend; Matrix!()) {
     @("out.param.initializesCallerStorage." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -192,8 +192,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 
 // Taking the address of a ref-returning call must evaluate the call once and
 // keep the returned alias, not a copy of its value.
-static foreach (backend; Matrix!(BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed))) {
+static foreach (backend; Matrix!(    Omit!(Ctfe, Because.unconfirmed))) {
     @("ref.return.addressEvaluatedOnce." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -224,7 +223,6 @@ static foreach (backend; Matrix!(BytecodeUnconfirmed,
 // `FrameLayout.offsetOf` never reserved it a slot to indirect through in
 // the first place.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "dmd's CTFE interpreter refuses to take the address of a " ~
         "thread-local variable at compile time"),

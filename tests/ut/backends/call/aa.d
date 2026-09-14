@@ -4,9 +4,7 @@ module ut.backends.call.aa;
 import ut.backends;
 
 
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("aa.index.static.nestedFunctionLookup." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

@@ -12,7 +12,6 @@ import ut.backends;
 // Every `shared static this` runs before any `static this`, and each group
 // runs in declaration order.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("sharedStaticCtorsRunFirst." ~ backend.stringof)
@@ -46,7 +45,6 @@ static foreach (backend; Matrix!(
 // the constructor, so `initialized` stays false and `main` returns the wrong
 // status.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("moduleConstructorRunsBeforeMain." ~ backend.stringof)
@@ -74,8 +72,6 @@ static foreach (backend; Matrix!(
 // its body. Its module constructor must call the host symbol through the FFI,
 // then make that result visible to `main`.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "Bytecode cannot call a root bodyless extern(C) declaration"),
     Omit!(Ctfe, Because.inexpressible, "Ctfe cannot call native functions"),
 )) {
     @("rootExternCModuleConstructor." ~ backend.stringof)
@@ -99,7 +95,6 @@ static foreach (backend; Matrix!(
 
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("rootTemplateStaticCtorRunsBeforeMain." ~ backend.stringof)
@@ -132,9 +127,7 @@ static foreach (backend; Matrix!(
 // declares that symbol directly; without `pragma(mangle)` the link fails
 // rather than the assertions.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("pragmaMangleCallsBySymbolName." ~ backend.stringof)
     @Tags(backend.stringof)

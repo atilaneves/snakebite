@@ -11,9 +11,7 @@ import ut.backends;
 
 // `with` on an enum type brings its members into scope, so they resolve
 // unqualified.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("withStatementScopesEnumMembers." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

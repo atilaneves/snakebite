@@ -9,9 +9,7 @@ module ut.backends.run.exceptions;
 import ut.backends;
 
 
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("catchMatchesGuestClassByBaseType." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -55,9 +53,7 @@ static foreach (backend; Matrix!(
 // base to a nearer well-known ancestor (`Error`) instead of the native
 // class actually named would make a `catch` naming that native class
 // silently stop matching.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("catchMatchesNativeGrandparentClass." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -90,9 +86,7 @@ static foreach (backend; Matrix!(
 // the middle guest class's own runtime type must appear in the thrown
 // leaf's base chain, not be skipped in favour of jumping straight to the
 // native `Exception` it eventually derives from.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("catchMatchesGuestGrandchildClassByBaseType." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -131,9 +125,7 @@ static foreach (backend; Matrix!(
 // base-class chain, not by exact type, so a `catch` naming a base class
 // catches a derived exception while a `catch` naming a sibling class does
 // not.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("catchMatchesThrownClassByBaseType." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -169,9 +161,7 @@ static foreach (backend; Matrix!(
 
 // `catch (Exception)` matches a thrown native `Exception` with no guest
 // subclass in its chain at all.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("catchMatchesBareNativeException." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -195,9 +185,6 @@ static foreach (backend; Matrix!(
 // branch has a value.
 static foreach (backend; Matrix!(
     BytecodeUnconfirmed,
-    Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed,
-        "DMD's native constructor ABI needs stack-word support"),
 )) {
     @("throwAsExpressionInTernary." ~ backend.stringof)
     @Tags(backend.stringof)

@@ -13,9 +13,7 @@ import ut.backends;
 // binding it to a delegate variable makes a (null, function) pair. Each
 // call binds the parameter afresh, so repeated calls see their own
 // argument, not a stale one.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("nonCapturingDelegateBindsItsParameterEachCall." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -69,9 +67,7 @@ static foreach (backend; Matrix!(
 // The alias-template form `check!F` hands the literal itself to the
 // template, so `F(value)` is a direct call of the literal - each
 // invocation must see the argument of that invocation.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("nonCapturingLambdaThroughAliasTemplate." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

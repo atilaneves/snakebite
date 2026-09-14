@@ -74,9 +74,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("classConstructionInitializesFieldsAndRunsConstructor."
         ~ backend.stringof)
     @Tags(backend.stringof)
@@ -132,9 +130,7 @@ static foreach (backend; Matrix!(
 }
 
 
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("interfaceDispatchFindsCovariantOverride." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -197,9 +193,7 @@ unittest {
     assert(value.toString.endsWith(".Plain"));
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("classConstructionBindsThisForDependentFieldAssignments."
         ~ backend.stringof)
     @Tags(backend.stringof)
@@ -229,9 +223,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("classConstructionCallsGuestBaseConstructor." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -258,7 +250,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(Omit!(Ctfe, Because.unconfirmed))) {
+static foreach (backend; Matrix!()) {
     @("classCastUsesGuestClassHierarchy." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -394,9 +386,7 @@ static foreach (backend; Matrix!(
 
 // A call through an interface reference finds the class's override, which
 // needs the interface's own offset rather than the class vtable.
-static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("interfaceDispatchFindsOverride." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

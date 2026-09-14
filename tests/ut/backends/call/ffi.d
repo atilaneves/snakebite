@@ -115,8 +115,6 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "pragma(mangle) native declarations are not routed through FFI"),
 )) {
     @("aggregateReturn.localDeclaration." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -158,8 +156,6 @@ static foreach (backend; Matrix!(
 // a void result, a discarded result, and narrow native-layout values.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "pragma(mangle) native declarations are not routed through FFI"),
 )) {
     @("signatures.arityAndDiscard." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -254,10 +250,7 @@ unittest {
 }
 
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "needs pointers, casts, slicing and slice assignment first"),
 )) {
     @("malloc.0." ~ backend.stringof)
     @Tags(backend.stringof)

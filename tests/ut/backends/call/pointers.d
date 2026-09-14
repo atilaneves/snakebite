@@ -368,8 +368,6 @@ static foreach (backend; Matrix!(
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "pragma(mangle) native declarations are not routed through FFI"),
 )) {
     @("pointers.null.classArgument." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -695,9 +693,6 @@ static foreach (backend; Matrix!(
 // A static array's whole-array assign and slice assign both copy a
 // pointer element the same way they copy any other fixed-size element.
 static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter cannot lay out a static array of pointers wider "
-            ~ "than one machine word as a single native integral"),
     Omit!(Ctfe, Because.unconfirmed,
         "the ctfe backend cannot assign a static array of pointers"),
 )) {
