@@ -75,14 +75,22 @@ snakebite_ffi_call_sysv_amd64:
     subq    %rax, %rsp
 
     /* Copy the stack words in order, word 0 at the lowest address.
-     * `rep movsq` with %rcx == 0 does nothing, so the empty case needs
-     * no separate branch. The SysV ABI guarantees the direction flag
-     * is clear on entry to any function; `cld` keeps that true. */
-    cld
+     * Almost every call has zero stack words; `rep movsq` still pays a
+     * fixed microcode startup cost even when %rcx == 0, which dominated
+     * the barrier cost measured for issue #334. A plain test-and-skip
+     * plus a movq loop avoids that cost in the common case. */
     movq    CF_STACK_WORDS(%r12), %rcx
+    testq   %rcx, %rcx
+    jz      1f
     movq    CF_STACK(%r12), %rsi
     movq    %rsp, %rdi
-    rep movsq
+0:  movq    (%rsi), %rax
+    movq    %rax, (%rdi)
+    addq    $8, %rsi
+    addq    $8, %rdi
+    decq    %rcx
+    jnz     0b
+1:
 
     /* Load the integer argument registers. Always all six; a callee
      * that takes fewer simply never reads the rest. */
