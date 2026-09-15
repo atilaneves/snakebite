@@ -45,3 +45,16 @@ _Avoid_: call descriptor, thunk
 The single component that turns a mangled symbol name into a host
 address.
 _Avoid_: symbol lookup, loader
+
+**Control transfer**:
+A return, break, continue, or goto that changes which guest statement
+executes next, after required cleanup. A control transfer from cleanup
+replaces the pending one.
+
+**Call selection**:
+The decision to execute a function as guest code or call its host body
+across the barrier, using root ownership and the call's requirements.
+
+**Call arguments**:
+The values supplied to a call: hidden context and type information,
+declared parameter values or references, and any variadic extra values.

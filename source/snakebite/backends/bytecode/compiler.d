@@ -13,7 +13,7 @@ import snakebite.backends.fullexpression:
 import snakebite.backends.controlflow:
     ScopeFrame, cleanupCount, scopePath;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
-import snakebite.ffi.abi: dVariadicArgumentsIsSlice, Register;
+import snakebite.ffi.abi: Register;
 
 
 // Whether `type` is `float`/`double`/`real` - `TypeFacts` has no notion of
@@ -40,6 +40,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
     import dmd.root.string: toDString;
     import snakebite.backends.backend: Program;
+    import snakebite.backends.calls: CallSelection;
     import snakebite.backends.classinfo;
     import snakebite.backends.bytecode.vm: Function, Vm;
     import snakebite.backends.layout: FrameLayout;
@@ -51,6 +52,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private Vm _vm;
     private NativeData _nativeData;
     private PlanCache _plans;
+    private CallSelection _callSelection;
     // Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
     // recursion - embeds this pointer in its `CallSite` before the body
@@ -306,13 +308,12 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
     private void* methodAddress(FuncDeclaration method, ptrdiff_t adjustment) {
         import dmd.dsymbolsem: isAbstract;
-        import snakebite.backends.calls: prefersGuestBody;
 
         if (method.isAbstract)
             return null;
         const(void)* word;
-        if (prefersGuestBody(method, isGuestFunction(method),
-                hasNativeSymbol(method))) {
+        if (_callSelection.usesGuestBody(method, null, &isGuestFunction,
+                hasNativeSymbol(method), "bytecode compiler")) {
             word = compileFunction(method);
             registerGuestWord(method, cast(const(Function)*) word);
         }
@@ -415,6 +416,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 // `_tempSize`/`_tempAlignment` past it; nothing about a temporary slot is
 // ever handed back through `FrameLayout` itself.
 extern(C++) private final class FunctionCompiler: LoweringVisitor {
+    import snakebite.ffi.call: CallAdapter;
     import dmd.declaration: VarDeclaration;
     import dmd.identifier: Identifier;
     import dmd.init: ExpInitializer;
@@ -5269,8 +5271,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        import snakebite.backends.calls:
-            arityMismatches, prefersGuestBody, usesGuestBody;
+        import snakebite.backends.calls: arityMismatches;
 
         size_t receiverOffset = size_t.max;
         if (hasThis)
@@ -5292,27 +5293,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         size_t destOffset,
     ) {
         import snakebite.frontend.dmd.functions: typeFunctionOf;
-        import snakebite.backends.calls:
-            arityMismatches, prefersGuestBody, usesGuestBody;
+        import snakebite.backends.calls: arityMismatches;
         const isConstructor = callee.isCtorDeclaration !is null;
 
-        import dmd.astenums: VarArg;
         auto type = typeFunctionOf(callee);
 
-
-
-        // A callee with an outer function reads that function's frame
-        // through the static chain, which only this compiler's own frame
-        // layout can supply - see `usesGuestBody`'s own doc. `Evaluator.
-        // executeRaw` makes the same choice for the interpreter.
-        const guest = (type.parameterList.varargs != VarArg.variadic
-                || (type.isDstyleVariadic && !_bytecode.hasNativeSymbol(callee)))
-            && usesGuestBody(
-                callee, arguments, &_bytecode.isGuestFunction,
-                prefersGuestBody(
-                    callee, _bytecode.isGuestFunction(callee),
-                    _bytecode.hasNativeSymbol(callee)),
-            );
+        const guest = _bytecode._callSelection.usesGuestBody(
+            callee, arguments, &_bytecode.isGuestFunction,
+            _bytecode.hasNativeSymbol(callee), "bytecode compiler",
+        );
         if (!guest) {
             Arg[] initialArgs;
             if (hasThis)
@@ -5408,141 +5397,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg[] initialArgs,
         in size_t destOffset,
     ) {
-        import dmd.astenums: STC, VarArg;
         import snakebite.backends.calls: arityMismatches;
+        import snakebite.ffi.call: CallAdapter;
 
-        const parameterCount = type.parameterList.length;
         if (arityMismatches(type.parameterList, arguments, true))
             throw rejection(_function, loc, exprText);
 
-        // An `extern(D)` untyped variadic call site carries one more
-        // argument the frontend itself inserted ahead of every declared
-        // parameter: `arguments[0]`, the call's own `_arguments` (`dmd.
-        // mtype.TypeFunction.isDstyleVariadic`'s own doc; ADR-0010's D
-        // variadic paragraph; issue #334 step 6). `declaredArgumentOffset`
-        // skips it below when compiling the declared parameters and when
-        // finding where the extra, variadic arguments start.
-        const isDVariadic = type.isDstyleVariadic;
-        const declaredArgumentOffset = isDVariadic ? 1 : 0;
-
-        // A `ref` return hands back its target's address in the
-        // return register, whatever the pointee's own facts are - the
-        // same convention `snakebite.ffi.plan` already prepares for a
-        // native callee (see `CallPlan.prepare`'s own `returnsRef`), and
-        // the same shape `CallAdapter` already decides once for
-        // `compileResolvedCall`'s guest branch and for `compileIndirectCall`.
-        import snakebite.ffi.call: CallAdapter;
-
         const returnShape = CallAdapter.ofType(type);
-        const isVoidCallee = returnShape.isVoid;
-        if (isVoidCallee && destOffset != discardResult)
+        if (returnShape.isVoid && destOffset != discardResult)
             throw rejection(_function, loc, exprText);
 
+        auto preparation = CallAdapter.Arguments.of(type, arguments);
+        const plan = preparation.prepare(_bytecode._plans, callee);
         Arg[] args = initialArgs;
-
-        // An `extern(D)` untyped variadic callee's own hidden
-        // `_arguments` (`declaredArgumentOffset`'s own doc above) is
-        // evaluated exactly like any other argument and placed right
-        // after any hidden `this` (`initialArgs`) and right before the
-        // declared parameters - `CallPlan.prepareVariadic`'s own
-        // `hasVArguments` places its `ArgumentPlan` at that same
-        // position, for the same ABI-ordering reason (its own doc).
-        if (isDVariadic) {
-            auto vArguments = (*arguments)[0];
-            const facts = TypeFacts.of(vArguments.type);
-            const argumentOffset = reserveTemp(facts);
-            evalInto(vArguments, argumentOffset, facts.size);
-            if (dVariadicArgumentsIsSlice) {
-                const sliceFacts = TypeFacts(
-                    2 * size_t.sizeof, size_t.sizeof, false, false);
-                const sliceOffset =
-                    dVariadicArgumentsSliceOffset(argumentOffset, sliceFacts);
-                args ~= Arg(sliceOffset, 0, sliceFacts.size);
-            } else
-                args ~= Arg(argumentOffset, 0, facts.size);
-        }
-
-        foreach (i; 0 .. parameterCount) {
-            auto parameter = type.parameterList[i];
-            auto declared = (*arguments)[declaredArgumentOffset + i];
-
-            // A function pointer or delegate argument is evaluated like
-            // any other value: its guest function word is swapped for a
-            // pool entry (ADR-0003) by the plan itself, at call time,
-            // since only then is the word known.
-
-            // `out` and `ref` are the same address-passing convention
-            // at the ABI boundary - a native callee zero-initialises
-            // an `out` argument itself, the same as compiled D's own
-            // caller never does, so this compiler need only hand over
-            // the argument's own address either way. The same fact,
-            // from the same `CallAdapter.Argument`, is what
-            // `Evaluator.bindArguments` reads to pick address over value
-            // for a guest-body callee's own parameter.
-            if (CallAdapter.Argument.of(parameter).isReference) {
-                const argumentOffset = compileAddress(declared);
-                args ~= Arg(argumentOffset, 0, size_t.sizeof);
-                continue;
-            }
-
-            // A `lazy` parameter's native ABI is dmd's own implicit
-            // delegate, two pointer-sized registers
-            // (`snakebite.ffi.plan.CallPlan.prepare` already plans it that
-            // way), not whatever plain type it appears to declare - dmd's
-            // own semantic pass already wrapped `declared` into that
-            // delegate (`expressionsem.d`'s `functionParameters` calls
-            // `toDelegate`), so only the destination slot's own facts
-            // need to widen to match it.
-            const facts = parameter.storageClass & STC.lazy_
-                ? TypeFacts.lazyArgument
-                : TypeFacts.of(parameter.type);
-            const argumentOffset = reserveTemp(facts);
-            evalInto(declared, argumentOffset, facts.size);
-            args ~= Arg(argumentOffset, 0, facts.size);
-        }
-
-        // A C-style variadic callee's extra arguments (issue #334 step
-        // 5), and an `extern(D)` untyped variadic callee's own extra
-        // arguments (issue #334 step 6), sit past the declared
-        // parameters in `arguments` - `arityMismatches` above already
-        // let them through, passed `allowExtra` `true`. Each extra
-        // argument's own dmd `Type` - a C-style call's frontend-promoted
-        // type (`float` to `double`, a narrower-than-`int` integral to
-        // `int`), or an `extern(D)` call's own argument type - is
-        // collected first, types only, and handed to `PlanCache.
-        // variadicOf` before any of them is compiled into a temp: the
-        // plan's own argument-count check is then what decides whether
-        // this call is refused, ahead of spending any temps or emitted
-        // code on it (issue #334 step 5 review finding 2 - the
-        // interpreter's own `callVariadicNative` orders its two matching
-        // steps the same way). This compiler visits one `CallExp`
-        // exactly once, so this is already that call site's own,
-        // one-time plan preparation - no further call-site cache is
-        // needed the way the interpreter keeps one (issue #96).
-        const totalCount = arguments is null ? 0 : arguments.length;
-        Type[] extraArgumentTypes;
-        if (type.parameterList.varargs == VarArg.variadic)
-            foreach (i; declaredArgumentOffset + parameterCount .. totalCount)
-                extraArgumentTypes ~= (*arguments)[i].type;
-
-        // `VarArg.typesafe` (`T t...`) needs neither a per-call-site
-        // plan nor an `_arguments` argument: the frontend has already
-        // packed its trailing arguments into one array-typed declared
-        // parameter, classified like any other above, so only `VarArg.
-        // variadic` (C-style or `extern(D)` untyped) routes through
-        // `variadicOf`.
-        auto plan = type.parameterList.varargs == VarArg.variadic
-            ? _bytecode._plans.variadicOf(callee, extraArgumentTypes)
-            : _bytecode._plans.of(callee);
-
-        if (type.parameterList.varargs == VarArg.variadic)
-            foreach (i; declaredArgumentOffset + parameterCount .. totalCount) {
-                auto argument = (*arguments)[i];
-                const facts = TypeFacts.of(argument.type);
-                const argumentOffset = reserveTemp(facts);
-                evalInto(argument, argumentOffset, facts.size);
-                args ~= Arg(argumentOffset, 0, facts.size);
-            }
+        preparation.each((value) {
+            args ~= compileBarrierArgument(value);
+        });
         _callSites ~= CallSite.native(
             cast(const(void)*) plan, args,
             returnShape.returnFacts.size,
@@ -5582,30 +5452,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             Arg(cursor, layout.variadicCursor, size_t.sizeof)];
     }
 
-    // On ldc (`dVariadicArgumentsIsSlice`), an `extern(D)` untyped
-    // variadic callee's own hidden `_arguments` is the `TypeInfo_Tuple`'s
-    // own `elements` field - a two-register `TypeInfo[]` slice, not the
-    // one pointer `tupleOffset` already holds (`compileNativeCall`'s own
-    // doc; `abi.dVariadicArgumentsIsSlice`'s own doc). `TypeInfo_Tuple.
-    // elements` is a real, host-compiled `object.d` class field, so its
-    // own `.offsetof`, read here by whichever compiler builds this file,
-    // is this exact host's own class layout - the same native-layout
-    // assumption every other field read this compiler emits already
-    // makes (`compileFieldAddress`'s own `field.offset`).
-    private size_t dVariadicArgumentsSliceOffset(
-        in size_t tupleOffset, in TypeFacts sliceFacts,
-    ) {
-        import object: TypeInfo_Tuple;
+    private Arg compileBarrierArgument(CallAdapter.Arguments.Value value) {
+        if (value.isReference)
+            return Arg(compileAddress(value.expression), 0, size_t.sizeof);
+
+        const offset = reserveTemp(value.facts);
+        evalInto(value.expression, offset, value.facts.size);
+        if (!value.readsField)
+            return Arg(offset, 0, value.facts.size);
 
         const addressOffset = reserveTemp(pointerFacts);
         emit(&opConstant, addressOffset,
-            addConstant(cast(long) TypeInfo_Tuple.elements.offsetof),
-            size_t.sizeof);
-        emit(&opAdd, addressOffset, tupleOffset, size_t.sizeof);
-
-        const sliceOffset = reserveTemp(sliceFacts);
-        emit(&opLoadIndirect, sliceOffset, addressOffset, sliceFacts.size);
-        return sliceOffset;
+            addConstant(cast(long) value.fieldOffset), size_t.sizeof);
+        emit(&opAdd, addressOffset, offset, size_t.sizeof);
+        const fieldOffset = reserveTemp(value.fieldFacts);
+        emit(&opLoadIndirect, fieldOffset, addressOffset, value.fieldFacts.size);
+        return Arg(fieldOffset, 0, value.fieldFacts.size);
     }
 
     // `fn(args)` where dmd left `expression.f` unresolved: a call through a
