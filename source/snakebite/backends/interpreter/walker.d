@@ -4782,7 +4782,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // `vthis` is dmd's one declaration for both hidden context
         // kinds: a method's `this`, and a nested function's static
         // chain. Which one this callee has is what `isThis` says.
-        if (function_.vthis !is null) {
+        // The shared layout excludes unused lambda contexts even when
+        // dmd retains their `vthis` declarations.
+        if (layout.hiddenThis.variable !is null) {
             if (function_.isThis !is null) {
                 auto dot = expression.e1.isDotVarExp;
                 const classDeclaration =
