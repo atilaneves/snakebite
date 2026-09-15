@@ -9,6 +9,8 @@ import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.fullexpression:
     FullExpressionKind, FullExpressionScope;
+import snakebite.backends.controlflow:
+    ScopeFrame, cleanupCount, scopePath;
 import snakebite.ffi:
     CallbackBridge, PlanCache, supportsBoolFunction;
 import snakebite.ffi.abi: Register;
@@ -392,8 +394,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import dmd.statement:
         BreakStatement, CaseStatement, CompoundStatement, ContinueStatement,
         DefaultStatement, DoStatement, ExpStatement, ForStatement,
-        GotoCaseStatement, GotoDefaultStatement, IfStatement, ImportStatement,
-        LabelStatement, ReturnStatement, ScopeStatement, Statement,
+        GotoCaseStatement, GotoDefaultStatement, GotoStatement, IfStatement,
+        ImportStatement, LabelStatement, ReturnStatement, ScopeStatement, Statement,
         SwitchErrorStatement, SwitchStatement, ThrowStatement,
         TryCatchStatement, TryFinallyStatement, UnrolledLoopStatement,
         WithStatement;
@@ -494,6 +496,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `_body` alone (see `visit(TryFinallyStatement)`): a `return` inside
     // `finalbody` itself must not re-run the `finally` it is already in.
     private Statement[] _pendingFinallyBodies;
+    // The resolved enclosing scopes while compiling a protected body. A
+    // `goto case`/`goto default` has no `tryBody` of its own, so its source
+    // scope uses this path while its destination uses the switch's resolved
+    // `tryBody`.
+    private ScopeFrame[] _activeScopePath;
     // How many `throw`/`break`/`continue`/`goto case`/`goto default`/
     // switch-error exits this compiler has compiled anywhere in the
     // program so far, since unlike `return` none of them run a
@@ -634,6 +641,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         SwitchStatement switch_;
     }
     private PendingDefaultJump[] _pendingDefaultJumps;
+    private size_t[LabelStatement] _labelTargets;
+    private struct PendingLabelJump {
+        size_t instructionIndex;
+        LabelStatement label;
+    }
+    private PendingLabelJump[] _pendingLabelJumps;
     private LoopContext[] _loops;
     private size_t _destination;
     private size_t _width;
@@ -967,6 +980,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `gotoTarget` is unset when dmd did not need to rewrite the labelled
     // statement, so the label names `statement.statement` itself then.
     override void visit(LabelStatement statement) {
+        const target = _instructions.length;
+        _labelTargets[statement] = target;
+        size_t remaining;
+        foreach (pending; _pendingLabelJumps)
+            if (pending.label is statement)
+                patchTarget(pending.instructionIndex, target);
+            else
+                _pendingLabelJumps[remaining++] = pending;
+        _pendingLabelJumps = _pendingLabelJumps[0 .. remaining];
+
         auto outerLabel = _pendingLabel; // auto: const(Identifier) will not implicitly convert back
         auto outerTarget = _pendingLabelTarget;
         _pendingLabel = statement.ident;
@@ -1005,7 +1028,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(TryCatchStatement statement) {
         const finallyDepthAtStart = _pendingFinallyBodies.length;
         const bodyStart = _instructions.length;
+        _activeScopePath ~= ScopeFrame(cast(void*) statement, false);
         compileStatement(statement._body);
+        _activeScopePath.length -= 1;
         const bodyFinished = _finished;
         const bodyEnd = _instructions.length;
 
@@ -1057,7 +1082,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(TryFinallyStatement statement) {
         _pendingFinallyBodies ~= statement.finalbody;
         const unflushedExitsBefore = _unflushedExitCount;
+        _activeScopePath ~= ScopeFrame(cast(void*) statement, true);
         compileStatement(statement._body);
+        _activeScopePath.length -= 1;
         _pendingFinallyBodies.length -= 1;
 
         // A `return` inside `_body` already inlined this `finally` on its
@@ -1214,22 +1241,69 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (statement.cs is null)
             throw rejection(_function, statement.loc, statementText(statement));
 
+        const cleanup = cleanupCount(
+            activeScopePath,
+            scopePath(_switchStack[$ - 1].tryBody),
+        );
+        if (cleanup == size_t.max)
+            throw rejection(_function, statement.loc, statementText(statement));
+        runPendingFinallyBodies(cleanup);
+
         const index = _instructions.length;
         emit(&opJump, 0, 0, 0);
         jumpToCase(statement.cs, index);
         _finished = true;
-        ++_unflushedExitCount;
     }
 
     override void visit(GotoDefaultStatement statement) {
         if (statement.sw is null)
             throw rejection(_function, statement.loc, statementText(statement));
 
+        const cleanup = cleanupCount(
+            activeScopePath,
+            scopePath(statement.sw.tryBody),
+        );
+        if (cleanup == size_t.max)
+            throw rejection(_function, statement.loc, statementText(statement));
+        runPendingFinallyBodies(cleanup);
+
         const index = _instructions.length;
         emit(&opJump, 0, 0, 0);
         jumpToDefault(statement.sw, index);
         _finished = true;
-        ++_unflushedExitCount;
+    }
+
+    override void visit(GotoStatement statement) {
+        if (statement.label is null || statement.label.statement is null)
+            throw rejection(_function, statement.loc, statementText(statement));
+
+        auto target = statement.label.statement;
+        const cleanup = cleanupCount(
+            scopePath(statement.tryBody), scopePath(target.tryBody),
+        );
+        if (cleanup == size_t.max)
+            throw rejection(_function, statement.loc, statementText(statement));
+
+        runPendingFinallyBodies(cleanup);
+        if (_finished)
+            return;
+
+        const index = _instructions.length;
+        emit(&opJump, 0, 0, 0);
+        if (auto known = target in _labelTargets)
+            patchTarget(index, *known);
+        else
+            _pendingLabelJumps ~= PendingLabelJump(index, target);
+
+        // A goto only leaves the path that reaches it. Other paths still
+        // fall through to the statements after it, including its target.
+    }
+
+    extern(D) private ScopeFrame[] activeScopePath() {
+        ScopeFrame[] result;
+        foreach_reverse (frame; _activeScopePath)
+            result ~= frame;
+        return result;
     }
 
     // dmd's own synthesised "no case matched" default (see
@@ -1322,8 +1396,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // instructions, the same way dmd's own codegen gives every exit out
     // of a `try/finally` its own copy of `finally` rather than a single
     // one every exit jumps through.
-    private void runPendingFinallyBodies() {
-        foreach_reverse (index, finalbody; _pendingFinallyBodies) {
+    private void runPendingFinallyBodies(
+        in size_t count = size_t.max,
+    ) {
+        const actualCount = count == size_t.max
+            ? _pendingFinallyBodies.length : count;
+        foreach (offset; 0 .. actualCount) {
+            const index = _pendingFinallyBodies.length - offset - 1;
+            auto finalbody = _pendingFinallyBodies[index];
             const start = _instructions.length;
             compileStatement(finalbody);
             _finallyHoles ~= FinallyHole(start, _instructions.length, index);
