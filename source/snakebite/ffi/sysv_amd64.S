@@ -18,7 +18,8 @@
  * ADR-0011 reserves for a measured need.
  *
  * This file is the only place that makes a forward call across the
- * barrier (ADR-0001).
+ * barrier (ADR-0001). It also holds the callback entry template and the
+ * common callback frame, at the end (ADR-0003).
  *
  * `CallFrame`'s D declaration, with the `static assert`s that keep the
  * offsets below in sync with the struct's real layout, lives in
@@ -270,5 +271,163 @@ snakebite_ffi_call_sysv_amd64_integer:
 
     .cfi_endproc
     .size   snakebite_ffi_call_sysv_amd64_integer, . - snakebite_ffi_call_sysv_amd64_integer
+
+
+
+/* Callback entries - ADR-0003.
+ *
+ * Host code calls a guest function through one of these entries. Each
+ * entry is position independent: it only ever computes its own address
+ * and its chunk's trailer address relative to `%rip`, so a byte-for-byte
+ * copy of the whole chunk works wherever it lands. `snakebite.ffi.
+ * callback` grows the pool that way when every slot in the chunks it has
+ * is taken: it copies this template chunk into a fresh read-write
+ * mapping, patches the two trailer words, and flips the mapping to
+ * read-execute. Nothing here embeds an absolute address.
+ *
+ * Chunk layout, matched by the D side (`snakebite.ffi.sysv`, which
+ * `static assert`s the sizes and offsets against the labels below):
+ *
+ *   entry 0 .. entry CB_ENTRIES_PER_CHUNK-1   CB_ENTRY_BYTES each
+ *   trailer                                    two words, see below
+ *   dispatch                                   shared by every entry
+ *
+ * An entry loads its own address into `%r10` and jumps to `dispatch`.
+ * `dispatch` loads the trailer's address into `%r11`, adds the trailer's
+ * first word to it - the signed distance from the trailer to
+ * `snakebite_ffi_callback_common` - and jumps there. The distance is a
+ * link-time constant for the chunk in this file, and is patched for a
+ * copied chunk. The trailer's second word is the copied chunk's slot
+ * table, null for the chunk in this file, which the handler maps to its
+ * own static table. `%r10`, `%r11` and `%rax` are scratch under the
+ * System V ABI, so touching them clobbers no argument.
+ *
+ * No entry ever has a frame on the stack: it is a `jmp`, not a `call`,
+ * so no unwind information is needed for a copied chunk either. The
+ * frame that does exist during a callback is `snakebite_ffi_callback_
+ * common`'s, below, which carries full CFI (ADR-0004).
+ *
+ * CB_ENTRIES_PER_CHUNK is 254 so the whole chunk - entries, trailer and
+ * dispatch together - is exactly one 4 KiB page: 254 * CB_ENTRY_BYTES
+ * (4064) + the 16-byte trailer + dispatch padded to one more
+ * CB_ENTRY_BYTES slot (16) = 4096. `allocateChunk`'s `mmap` already
+ * rounds a chunk's size up to a whole page, so this size wastes none of
+ * the page it maps; the D side (`snakebite.ffi.sysv.
+ * callbackEntriesPerChunk`) cannot derive the same 254 at compile time,
+ * since druntime's page size is a run-time value, so it repeats this
+ * same literal instead, and `shared static this` in `snakebite.ffi.
+ * callback` cross-checks the two against each other at start-up.
+ */
+
+#define CB_ENTRIES_PER_CHUNK 254
+#define CB_ENTRY_BYTES       16
+/* `CallFrame` is 168 bytes; rounded so `%rsp` stays 16-byte aligned. */
+#define CB_FRAME_BYTES       176
+
+    .globl  snakebite_ffi_callback_chunk
+    .type   snakebite_ffi_callback_chunk, @function
+    .balign 16
+snakebite_ffi_callback_chunk:
+    .rept   CB_ENTRIES_PER_CHUNK
+0:  leaq    0b(%rip), %r10
+    jmp     .Lsnakebite_ffi_callback_dispatch
+    .balign CB_ENTRY_BYTES, 0xcc
+    .endr
+
+    .globl  snakebite_ffi_callback_chunk_trailer
+    .type   snakebite_ffi_callback_chunk_trailer, @object
+snakebite_ffi_callback_chunk_trailer:
+    .quad   .Lsnakebite_ffi_callback_common - snakebite_ffi_callback_chunk_trailer
+    .quad   0
+
+.Lsnakebite_ffi_callback_dispatch:
+    leaq    snakebite_ffi_callback_chunk_trailer(%rip), %r11
+    movq    (%r11), %rax
+    addq    %r11, %rax
+    jmp     *%rax
+    /* Pads dispatch (15 bytes) up to one CB_ENTRY_BYTES slot, so the
+     * chunk's total size comes out to a whole number of pages - see
+     * this section's own comment above. */
+    .balign CB_ENTRY_BYTES, 0xcc
+
+    .globl  snakebite_ffi_callback_chunk_end
+    .type   snakebite_ffi_callback_chunk_end, @object
+snakebite_ffi_callback_chunk_end:
+    .size   snakebite_ffi_callback_chunk, . - snakebite_ffi_callback_chunk
+
+
+    .globl  snakebite_ffi_callback_common
+    .type   snakebite_ffi_callback_common, @function
+    .balign 16
+
+/* Reached by `jmp` from a chunk's dispatch with the host caller's return
+ * address still on top of the stack, `%r10` = the entry's address and
+ * `%r11` = the chunk's trailer address. Spills the argument registers
+ * into a `CallFrame` (the same struct the forward stub reads, so the
+ * handler can replay a plan's moves in reverse), records where the
+ * caller's stack arguments start, and calls
+ *
+ *     extern(C) void snakebite_ffi_callback_handler(
+ *         const void* entry,    -- %rdi
+ *         const void* trailer,  -- %rsi
+ *         CallFrame* frame,     -- %rdx
+ *     );
+ *
+ * which runs the guest function and leaves its result in the frame's
+ * result words. Those are loaded into the return registers exactly as a
+ * compiled callee would leave them (ADR-0002).
+ */
+snakebite_ffi_callback_common:
+.Lsnakebite_ffi_callback_common:
+    .cfi_startproc
+
+    pushq   %rbp
+    .cfi_def_cfa_offset 16
+    .cfi_offset rbp, -16
+    movq    %rsp, %rbp
+    .cfi_def_cfa_register rbp
+
+    subq    $CB_FRAME_BYTES, %rsp
+
+    movq    %rdi, CF_INTEGER+0(%rsp)
+    movq    %rsi, CF_INTEGER+8(%rsp)
+    movq    %rdx, CF_INTEGER+16(%rsp)
+    movq    %rcx, CF_INTEGER+24(%rsp)
+    movq    %r8, CF_INTEGER+32(%rsp)
+    movq    %r9, CF_INTEGER+40(%rsp)
+
+    movsd   %xmm0, CF_SSE+0(%rsp)
+    movsd   %xmm1, CF_SSE+8(%rsp)
+    movsd   %xmm2, CF_SSE+16(%rsp)
+    movsd   %xmm3, CF_SSE+24(%rsp)
+    movsd   %xmm4, CF_SSE+32(%rsp)
+    movsd   %xmm5, CF_SSE+40(%rsp)
+    movsd   %xmm6, CF_SSE+48(%rsp)
+    movsd   %xmm7, CF_SSE+56(%rsp)
+
+    /* The caller's stack arguments start right above its return address:
+     * `[%rbp]` is the saved `%rbp`, `[%rbp + 8]` the return address. */
+    leaq    16(%rbp), %rax
+    movq    %rax, CF_STACK(%rsp)
+
+    movq    %r10, %rdi
+    movq    %r11, %rsi
+    movq    %rsp, %rdx
+    call    snakebite_ffi_callback_handler@PLT
+
+    movq    CF_INTEGER_RESULT+0(%rsp), %rax
+    movq    CF_INTEGER_RESULT+8(%rsp), %rdx
+    movsd   CF_SSE_RESULT+0(%rsp), %xmm0
+    movsd   CF_SSE_RESULT+8(%rsp), %xmm1
+
+    movq    %rbp, %rsp
+    popq    %rbp
+    .cfi_def_cfa rsp, 8
+    .cfi_restore rbp
+
+    ret
+
+    .cfi_endproc
+    .size   snakebite_ffi_callback_common, . - snakebite_ffi_callback_common
 
     .section .note.GNU-stack,"",@progbits

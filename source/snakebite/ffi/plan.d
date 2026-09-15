@@ -1,6 +1,7 @@
 module snakebite.ffi.plan;
 
 
+import snakebite.ffi.callback: CallbackBridge;
 import snakebite.ffi.symbol: Resolver;
 
 
@@ -115,13 +116,28 @@ public struct CallPlan {
     // The moves `callAt` replays - see the module comment.
     private Move[] _moves;
     private size_t _moveCount;
-    private struct DelegateArgument {
+    // One parameter whose value can carry a guest function word across
+    // the barrier: a function pointer, a delegate, or a `lazy` parameter
+    // (dmd's own implicit delegate). `callWithCallbacks` swaps such a word
+    // for the guest function's pool entry (ADR-0003) before the call, and
+    // swaps it back after the call for a `ref`/`out` parameter the host
+    // could have written through.
+    private struct CallbackArgument {
         size_t index;
+        // `ref`/`out`: the argument slot holds the value's address, not
+        // the value.
         bool indirect;
+        // A delegate is two words with the function word second; a
+        // function pointer is the one word itself.
+        bool isDelegate;
     }
-    private DelegateArgument[] _delegateArguments;
-    private GuestDelegates* _guestDelegates;
-    private string _hostName;
+    private CallbackArgument[] _callbackArguments;
+    // The backend instance's own registry of guest function words - the
+    // one that knows which words are guest functions and owns their pool
+    // entries. Shared mutable state owned by the `PlanCache`, never part
+    // of this plan's own value: `callWithCallbacks` casts the `const`
+    // away to reserve an entry on first use.
+    private CallbackBridge* _callbacks;
 
     // `CallFrame.sseCount`: how many of the moves above land in an SSE
     // register, for a variadic callee's `%al`.
@@ -146,6 +162,13 @@ public struct CallPlan {
     // == 0` on every call.
     private bool _integerOnly;
     private uint _returnPointerOffset;
+    // Callback direction only (`ofCallback`): where each argument's own
+    // bytes land in the handler's scratch area when the moves above are
+    // replayed in reverse (`unpackArguments`), and where the result is
+    // built before `packResult` loads it into the return registers.
+    private size_t[] _argumentOffsets;
+    private size_t _returnOffset;
+    private size_t _scratchBytes;
 
     // Calls the function this plan was prepared for.
     //
@@ -181,9 +204,22 @@ public struct CallPlan {
             throwArgumentCountMismatch(_parameterCount, arguments.length);
         if (_hiddenReturnPointer && returnPlace is null)
             throwMissingReturnPlace;
-        if (_delegateArguments.length)
-            checkDelegates(arguments);
+        if (_callbackArguments.length) {
+            callWithCallbacks(address, returnPlace, arguments);
+            return;
+        }
 
+        callDirect(address, returnPlace, arguments);
+    }
+
+    // The second half of `callAt`, once every argument slot holds bytes the
+    // host can read as they are.
+    pragma(inline, true)
+    private void callDirect(
+        const(void)* address,
+        void* returnPlace,
+        scope const(void*)[] arguments,
+    ) const {
         // Calls without SSE or stack arguments need only the register frame.
         if (_integerOnly) {
             CallFrame frame = void;
@@ -210,24 +246,233 @@ public struct CallPlan {
         readResult(frameBytes, returnPlace);
     }
 
-    private void checkDelegates(scope const(void*)[] arguments) const {
-        import snakebite.nativelayout: delegateFunctionOffset;
-        import snakebite.exception: SnakebiteException;
-        import std.conv: text;
+    // `callAt` for a plan with at least one callback-typed parameter
+    // (`_callbackArguments`): every such argument's value is copied into
+    // scratch storage, a guest function word in it is replaced by the
+    // guest function's pool entry (ADR-0003), and the host is handed the
+    // copy - the guest's own storage keeps its own representation of the
+    // function, which is what guest code calls through. After the call, a
+    // `ref`/`out` copy is written back to the guest's storage, with a pool
+    // entry the host stored in it turned back into the guest word it
+    // stands for, so the guest never sees an address it cannot call.
+    pragma(inline, false)
+    private void callWithCallbacks(
+        const(void)* address,
+        void* returnPlace,
+        scope const(void*)[] arguments,
+    ) const {
+        import core.stdc.string: memcpy;
+        import snakebite.callarguments: CallArguments;
+        import snakebite.nativelayout:
+            delegateFunctionOffset, delegateValueSize;
 
-        foreach (argument; _delegateArguments) {
-            // auto would retain the slot's top-level const qualifier.
+        // See `_callbacks`'s own doc for why the `const` goes.
+        auto bridge = cast(CallbackBridge*) _callbacks;
+        if (bridge is null)
+            throw new Exception(
+                "ffi: this plan has a callback-typed parameter, but no " ~
+                    "callback bridge to give a guest function a pool entry",
+            );
+
+        auto shadow = CallArguments(arguments.length);
+        // `const` would make the address slots read-only.
+        auto values = shadow.values;
+        values[] = arguments[];
+
+        // One delegate-sized copy per callback argument, plus, for an
+        // indirect one, the pointer slot the host reads the copy's
+        // address from.
+        enum inlineCopies = 8;
+        align(16) ubyte[delegateValueSize * inlineCopies] inlineCopy = void;
+        void*[inlineCopies] inlinePointer = void;
+        const count = _callbackArguments.length;
+        // `new void[]`, not `new ubyte[]`: a `ubyte[]` block is NO_SCAN,
+        // and this copy briefly holds a callback argument's own bytes,
+        // which the collector must still be able to trace (ADR-0005).
+        auto copies = count <= inlineCopies
+            ? inlineCopy[0 .. delegateValueSize * count]
+            : cast(ubyte[]) new void[delegateValueSize * count];
+        auto pointers = count <= inlineCopies
+            ? inlinePointer[0 .. count] : new void*[count];
+
+        foreach (k, argument; _callbackArguments) {
             const(void)* place = arguments[argument.index];
             if (argument.indirect)
                 place = *cast(const(void*)*) place;
             if (place is null)
                 continue;
-            const address = *cast(const(void*)*)
-                (cast(const(ubyte)*) place + delegateFunctionOffset);
-            if (address in _guestDelegates.addresses)
-                throw new SnakebiteException(text("ffi cannot call `",
-                    _hostName, "`: guest delegate callbacks are not supported"));
+
+            const bytes = argument.isDelegate
+                ? delegateValueSize : size_t.sizeof;
+            const wordOffset =
+                argument.isDelegate ? delegateFunctionOffset : 0;
+            auto copy = copies.ptr + k * delegateValueSize;
+            memcpy(copy, place, bytes);
+            auto word = cast(const(void)**) (copy + wordOffset);
+            if (auto entry = bridge.entryOf(*word))
+                *word = entry;
+
+            if (argument.indirect) {
+                pointers[k] = copy;
+                values[argument.index] = &pointers[k];
+            } else
+                values[argument.index] = copy;
         }
+
+        callDirect(address, returnPlace, values);
+
+        foreach (k, argument; _callbackArguments) {
+            if (!argument.indirect)
+                continue;
+            auto place = cast(ubyte*) *cast(const(void*)*)
+                arguments[argument.index];
+            if (place is null)
+                continue;
+
+            const bytes = argument.isDelegate
+                ? delegateValueSize : size_t.sizeof;
+            const wordOffset =
+                argument.isDelegate ? delegateFunctionOffset : 0;
+            auto copy = copies.ptr + k * delegateValueSize;
+            auto word = cast(const(void)**) (copy + wordOffset);
+            if (auto guest = bridge.wordOf(*word))
+                *word = guest;
+            memcpy(place, copy, bytes);
+        }
+    }
+
+    // The number of arguments a callback through this plan receives,
+    // hidden context included - the length `unpackArguments` fills.
+    package size_t callbackArgumentCount() const {
+        return _parameterCount;
+    }
+
+    package bool hasHiddenContext() const {
+        return _hiddenContext;
+    }
+
+    // How many bytes of scratch storage `unpackArguments` and
+    // `callbackReturnPlace` need, together.
+    package size_t callbackScratchBytes() const {
+        return _scratchBytes;
+    }
+
+    // The forward moves replayed backwards, for a callback (ADR-0003):
+    // every eightbyte the host placed in a register or a stack word is
+    // read from `frame` - the registers spilled by
+    // `snakebite_ffi_callback_common`, the stack words through
+    // `frame.stack` - and written into the argument's own bytes in
+    // `scratch`, at the width the forward load would have read. `addresses`
+    // receives one entry per argument, hidden context included, pointing
+    // at those bytes in the same shape `call` takes its arguments in.
+    package void unpackArguments(
+        const(CallFrame)* frame,
+        ubyte* scratch,
+        scope void*[] addresses,
+    ) const {
+        import core.stdc.string: memcpy;
+
+        foreach (i; 0 .. _parameterCount)
+            addresses[i] = scratch + _argumentOffsets[i];
+
+        auto frameBytes = cast(const(ubyte)*) frame;
+        foreach (ref move; _moves[0 .. _moveCount]) {
+            const word = move.destinationOffset >= stackBase
+                ? frame.stack[
+                    (move.destinationOffset - stackBase) / size_t.sizeof]
+                : *cast(const(size_t)*)
+                    (frameBytes + move.destinationOffset);
+            memcpy(
+                scratch + _argumentOffsets[move.parameterIndex]
+                    + move.byteOffset,
+                &word,
+                widthOf(move),
+            );
+        }
+    }
+
+    // Where the backend writes a callback's result: through the hidden
+    // pointer the host passed, for a MEMORY-class return; into `scratch`,
+    // for a register-class one; nowhere, for `void`.
+    package void* callbackReturnPlace(
+        const(CallFrame)* frame, ubyte* scratch,
+    ) const {
+        if (_hiddenReturnPointer)
+            return *cast(void**)
+                (cast(const(ubyte)*) frame + _returnPointerOffset);
+        if (_resultCount == 0)
+            return null;
+        return scratch + _returnOffset;
+    }
+
+    // Loads the result a backend left at `returnPlace` into the frame's
+    // result words, which `snakebite_ffi_callback_common` moves into the
+    // return registers. A MEMORY-class result is already where the host
+    // expects it; the callee then returns the hidden pointer in `%rax`.
+    package void packResult(
+        CallFrame* frame, const(void)* returnPlace,
+    ) const {
+        if (_hiddenReturnPointer) {
+            frame.integerResult[0] = cast(size_t) returnPlace;
+            return;
+        }
+
+        auto frameBytes = cast(ubyte*) frame;
+        foreach (i; 0 .. _resultCount) {
+            const register = _return.registers[i];
+            const move = Move(
+                0, 0, loadOf(register), 0, copyBytesOf(register));
+            *cast(size_t*) (frameBytes + _resultMoves[i].sourceOffset) =
+                loadRare(
+                    move,
+                    cast(const(ubyte)*) returnPlace + i * size_t.sizeof,
+                );
+        }
+    }
+
+    // How many of an argument's own bytes one move carries - the width
+    // its forward `Load` reads.
+    private static size_t widthOf(in Move move) {
+        final switch (move.load) with (Load) {
+            case word64: return 8;
+            case zero8, sign8: return 1;
+            case zero16, sign16: return 2;
+            case zero32, sign32: return 4;
+            case copy: return move.copyBytes;
+        }
+    }
+
+    // Lays out the scratch area `unpackArguments` fills: each argument's
+    // own bytes at a 16-byte-aligned offset, then the result. Called once,
+    // from `ofCallback`, after `buildMoves`.
+    private void buildCallbackLayout() {
+        _argumentOffsets.length = _parameterCount;
+        size_t offset;
+        foreach (i, argument; _arguments) {
+            _argumentOffsets[i] = offset;
+            offset += alignScratch(bytesOf(argument));
+        }
+        _returnOffset = offset;
+        if (!_hiddenReturnPointer)
+            offset += alignScratch(bytesOf(_return));
+        _scratchBytes = offset;
+    }
+
+    private static size_t alignScratch(in size_t bytes) {
+        return (bytes + 15) & ~size_t(15);
+    }
+
+    // The byte size of the value an `ArgumentPlan` describes: a MEMORY
+    // value's own size, or the sum of its register widths - the last of
+    // which `abi.aggregatePlan` already trimmed to the bytes left.
+    private static size_t bytesOf(in ArgumentPlan argument) {
+        if (argument.memory)
+            return argument.memoryBytes;
+
+        size_t bytes;
+        foreach (register; argument.registers[0 .. argument.count])
+            bytes += register.size;
+        return bytes;
     }
 
     // Writes the hidden return pointer, when this plan has one, and every
@@ -715,24 +960,33 @@ public extern(C) void executeCallPlan(
 // resolve to. A call site is the finer key, and would let a plan be found
 // without hashing at all, but it needs somewhere on the call site to keep
 // it, which is the caller's business and not this package's.
-private struct GuestDelegates {
-    bool[const(void)*] addresses;
-}
-
-
 public struct PlanCache {
-    private GuestDelegates* _guestDelegates;
+    private CallbackBridge* _callbacks;
 
-    // Only addresses emitted by a backend are registered. Host code
-    // addresses must never be inspected as frontend or bytecode objects.
-    public void registerGuestDelegate(const(void)* address) {
-        guestDelegates.addresses[address] = true;
+    // The registry of this backend instance's guest function words, and
+    // the owner of their pool entries (ADR-0003). A backend installs one
+    // before it prepares any plan; every plan this cache prepares reads
+    // it at call time to swap a guest function word for its entry.
+    public void useCallbacks(CallbackBridge* callbacks) {
+        _callbacks = callbacks;
     }
 
-    private GuestDelegates* guestDelegates() {
-        if (_guestDelegates is null)
-            _guestDelegates = new GuestDelegates;
-        return _guestDelegates;
+    // Records that `word` is what this backend stores for the guest
+    // function `declaration` when guest code takes its address or makes
+    // a delegate to it. Only a word a backend itself emitted is ever
+    // registered: a host code address must never be inspected as a
+    // frontend or bytecode object, and an unregistered word crosses the
+    // barrier unchanged.
+    public void registerGuestFunction(
+        const(void)* word,
+        imported!"dmd.func".FuncDeclaration declaration,
+    ) {
+        if (_callbacks is null)
+            throw new Exception(
+                "ffi: a guest function was registered before the " ~
+                    "backend installed its callback bridge",
+            );
+        _callbacks.register(word, declaration);
     }
 
     private CallPlan*[imported!"dmd.func".FuncDeclaration] _plans;
@@ -807,7 +1061,7 @@ public struct PlanCache {
         ++_preparations;
         auto plan = new CallPlan;
         *plan = prepare(function_, _resolver);
-        plan._guestDelegates = guestDelegates;
+        plan._callbacks = _callbacks;
         _plans[function_] = plan;
         return plan;
     }
@@ -830,6 +1084,7 @@ public struct PlanCache {
         ++_preparations;
         auto plan = new CallPlan;
         *plan = prepareVariadic(function_, _resolver, extraArgumentTypes);
+        plan._callbacks = _callbacks;
         return plan;
     }
 
@@ -916,17 +1171,93 @@ private CallPlan prepareCommon(
     scope imported!"dmd.mtype".Type[] extraArgumentTypes,
     in bool isVariadicCall,
 ) {
-    import snakebite.frontend.dmd.delegates: hasHiddenThis;
     import snakebite.druntime.constructoratomic: nativeTarget;
+    import dmd.mangle: mangleExact;
+    import std.conv: text;
+    import std.string: fromStringz;
+
+    auto target = nativeTarget(function_);
+
+    // The symbol's calling convention comes from its declared linkage,
+    // and `extern(D)` code built by the host's own compiler can read
+    // its parameters out of the registers in reverse order - an ABI
+    // fact about this process, not a routing decision about the
+    // callee. `shapeOf`'s variadic checks need this fact too, to tell an
+    // `extern(C)` variadic callee from an `extern(D)` one.
+    const linkage = target.address is null
+        ? function_.resolvedLinkage : target.linkage;
+
+    auto plan = shapeOf(function_, linkage, extraArgumentTypes,
+        isVariadicCall);
+
+    auto name = mangleExact(function_);
+    void* address = target.address;
+    if (address is null)
+        address = resolver.resolve(name.fromStringz);
+    if (address is null)
+        throw new Exception(
+            text("ffi cannot resolve the symbol `", name.fromStringz,
+                "` declared by `", function_.toString,
+                "`: it is not in this process"),
+        );
+
+    plan._address = address;
+    return plan;
+}
+
+// The plan a pool entry (ADR-0003) replays backwards when host code calls
+// the guest function `function_`: the same classification a forward call
+// to a function of this signature would get, from the function's own
+// declared linkage, with no address to resolve - the guest function has
+// none. `snakebite.ffi.callback` keeps one per slot. A `ref` return has
+// no guest storage for the backend to hand back an address to, and a
+// variadic callee's own register save area is not something a backend
+// can fill, so both are refused here, once, when the slot is made.
+package CallPlan prepareCallback(
+    imported!"dmd.func".FuncDeclaration function_,
+) {
+    import dmd.astenums: VarArg;
+    import std.conv: text;
+
+    auto type = function_.type.isTypeFunction;
+    if (type is null)
+        throw new Exception(
+            text("ffi cannot make a callback entry for `",
+                function_.toString, "`: it is not a function"),
+        );
+    if (type.parameterList.varargs == VarArg.variadic)
+        throw new Exception(
+            text("ffi cannot make a callback entry for `",
+                function_.toString, "`: it is variadic"),
+        );
+    if (type.isRef)
+        throw new Exception(
+            text("ffi cannot make a callback entry for `",
+                function_.toString, "`: it returns by `ref`"),
+        );
+
+    auto plan = shapeOf(function_, function_.resolvedLinkage, null, false);
+    plan.buildCallbackLayout;
+    return plan;
+}
+
+// Everything `prepareCommon` and `prepareCallback` share: the plan's
+// whole shape, from `function_`'s signature and `linkage` alone, with
+// `_address` left unset.
+private CallPlan shapeOf(
+    imported!"dmd.func".FuncDeclaration function_,
+    in imported!"dmd.astenums".LINK linkage,
+    scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+    in bool isVariadicCall,
+) {
+    import snakebite.frontend.dmd.delegates: hasHiddenThis;
     import snakebite.ffi.abi:
         ArgumentPlan, Register, contextPrecedesHiddenReturnPointer,
         dVariadicArgumentsIsSlice, needsHiddenReturnPointer,
         reversedDParameters, supported;
     import dmd.astenums: LINK, STC, Tdelegate, VarArg;
-    import dmd.mangle: mangleExact;
     import dmd.typesem: nextOf, toBasetype;
     import std.conv: text;
-    import std.string: fromStringz;
 
     static if (!supported)
         throw new Exception(
@@ -939,19 +1270,6 @@ private CallPlan prepareCommon(
                 text("ffi cannot call `", function_.toString,
                     "`: it is not a function"),
             );
-
-        auto target = nativeTarget(function_);
-
-        // The symbol's calling convention comes from its declared linkage,
-        // and `extern(D)` code built by the host's own compiler can read
-        // its parameters out of the registers in reverse order - an ABI
-        // fact about this process, not a routing decision about the
-        // callee. `isVariadicCall` below needs this fact too, to tell an
-        // `extern(C)` variadic callee from an `extern(D)` one, so this
-        // moves ahead of that check instead of running only for
-        // `_reversedArguments` further down.
-        const linkage = target.address is null
-            ? function_.resolvedLinkage : target.linkage;
 
         // A variadic callee is handed its extra arguments differently -
         // on the System V AMD64 ABI the caller must also report how many
@@ -1103,14 +1421,15 @@ private CallPlan prepareCommon(
             // classify as.
             const storageClass = type.parameterList[i].storageClass;
             const isRef = (storageClass & (STC.ref_ | STC.out_)) != 0;
-            // An out parameter is initialized by the callee before use.
-            if ((storageClass & STC.out_) == 0
-                    && (type.parameterList[i].type.toBasetype.ty == Tdelegate
-                        || (storageClass & STC.lazy_) != 0)) {
-                plan._delegateArguments ~= CallPlan.DelegateArgument(
-                    argumentIndex, isRef);
-                plan._hostName = function_.toString.idup;
-            }
+            auto parameterType = type.parameterList[i].type.toBasetype;
+            auto pointer = parameterType.isTypePointer;
+            const isFunctionPointer =
+                pointer !is null && pointer.nextOf.isTypeFunction !is null;
+            const isDelegate = parameterType.ty == Tdelegate
+                || (storageClass & STC.lazy_) != 0;
+            if (isFunctionPointer || isDelegate)
+                plan._callbackArguments ~= CallPlan.CallbackArgument(
+                    argumentIndex, isRef, isDelegate);
             addArgument(isRef
                 ? pointerArgument
                 : storageClass & STC.lazy_
@@ -1133,39 +1452,21 @@ private CallPlan prepareCommon(
         // parameters left off, so `buildMoves` never has to know where
         // one group ends and the other begins.
         //
-        // A function pointer or delegate extra argument is refused
-        // instead: a *parameter* of that shape crosses through the
-        // callback pool's per-function slot (ADR-0003), which a named
-        // parameter's type gives a way to install ahead of the call, but
-        // a variadic extra argument has no parameter for that slot to
-        // attach to. Passing one through here would hand the callee the
-        // guest's own function value's bytes, not a callable address
-        // (issue #9).
+        // A function pointer or delegate extra argument gets the same
+        // pool-entry swap (`callWithCallbacks`) a declared parameter of
+        // that shape gets: its type is known at this call site, which is
+        // all the swap needs.
         foreach (extraType; extraArgumentTypes) {
             auto pointer = extraType.isTypePointer;
             const isFunctionPointer =
                 pointer !is null && pointer.nextOf.isTypeFunction !is null;
-            if (isFunctionPointer || extraType.ty == Tdelegate)
-                throw new Exception(
-                    text("ffi cannot pass a function pointer or delegate ",
-                        "as a variadic argument to `", function_.toString,
-                        "`: it has no callback pool entry (ADR-0003)"),
-                );
+            const isDelegate = extraType.ty == Tdelegate;
+            if (isFunctionPointer || isDelegate)
+                plan._callbackArguments ~= CallPlan.CallbackArgument(
+                    argumentIndex, false, isDelegate);
             addArgument(ArgumentPlan.of(extraType));
         }
 
-        auto name = mangleExact(function_);
-        void* address = target.address;
-        if (address is null)
-            address = resolver.resolve(name.fromStringz);
-        if (address is null)
-            throw new Exception(
-                text("ffi cannot resolve the symbol `", name.fromStringz,
-                    "` declared by `", function_.toString,
-                    "`: it is not in this process"),
-            );
-
-        plan._address = address;
         plan._parameterCount = argumentCount;
         if (returnsRef) {
             plan._return = ArgumentPlan(

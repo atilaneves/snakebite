@@ -85,3 +85,42 @@ public alias CallEntry = extern(C) void function(
     const(void)* address,
     CallFrame* frame,
 ) @system;
+
+
+// The callback entry template in `sysv_amd64.S` (ADR-0003): a chunk of
+// `callbackEntriesPerChunk` position-independent entries, one shared
+// dispatch, and a `CallbackTrailer`. `snakebite.ffi.callback` hands out
+// entries from this chunk first, and copies its bytes into a fresh
+// executable mapping when it needs more. The `static assert`s in
+// `snakebite.ffi.callback` check the label distances against these
+// constants at start-up, since the assembler's own `CB_*` defines cannot
+// be read from D.
+//
+// 254 makes one whole chunk (254 entries + the 16-byte trailer + the
+// dispatch code, padded to one more entry-sized slot) exactly one 4 KiB
+// page, so `allocateChunk`'s `mmap`, which already rounds a chunk's size
+// up to a whole page, never wastes part of the page it maps. This must
+// stay the same number `CB_ENTRIES_PER_CHUNK` names in `sysv_amd64.S`:
+// druntime's page size is a run-time value, not a compile-time one, so
+// this cannot derive 254 the way the comment there works it out, and
+// repeats the literal instead - `shared static this`, below, is the
+// cross-check that keeps the two in agreement.
+public enum callbackEntriesPerChunk = 254;
+public enum callbackEntryBytes = 16;
+
+// The two words at the end of every chunk. `commonDelta` is the signed
+// distance from the trailer itself to `snakebite_ffi_callback_common`,
+// which the dispatch adds to its own address to reach the common frame.
+// `slots` is the chunk's own slot table - null in the template chunk,
+// whose table is a static one in `snakebite.ffi.callback`.
+public struct CallbackTrailer {
+    public ptrdiff_t commonDelta;
+    public void* slots;
+}
+
+static assert(CallbackTrailer.sizeof == 16);
+
+public extern(C) void snakebite_ffi_callback_chunk() @system;
+public extern(C) void snakebite_ffi_callback_chunk_trailer() @system;
+public extern(C) void snakebite_ffi_callback_chunk_end() @system;
+public extern(C) void snakebite_ffi_callback_common() @system;

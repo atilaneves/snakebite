@@ -12,8 +12,7 @@ import snakebite.backends.fullexpression:
     FullExpressionKind, FullExpressionScope;
 import snakebite.backends.controlflow:
     ScopeFrame, cleanupCount, scopePath;
-import snakebite.ffi:
-    CallbackBridge, PlanCache, supportsBoolFunction;
+import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
 import snakebite.ffi.abi: dVariadicArgumentsIsSlice, Register;
 
 
@@ -43,6 +42,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.backends.backend: Program;
     import snakebite.backends.classinfo;
     import snakebite.backends.bytecode.vm: Function, Vm;
+    import snakebite.backends.layout: FrameLayout;
     import snakebite.exception: SnakebiteException;
     import snakebite.framestack: defaultFrameCapacity;
     import snakebite.nativelayout: NativeData, nativeSymbolName;
@@ -75,22 +75,29 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private size_t _compilationDepth;
     private size_t _cacheMisses;
     private imported!"core.time".Duration _compilationTime;
-    private CallbackBridge _callbacks;
+    // The frame layout of every guest function host code has called
+    // back into, built once per declaration: a callback fills the
+    // callee's parameter slots itself (`callGuestFromHost`), the way a
+    // compiled call site's `Arg`s would.
+    private FrameLayout[FuncDeclaration] _callbackLayouts;
+    // The thread that owns the VM's frame stack (issue #40) - set once
+    // at construction, the same way the interpreter's `Evaluator` does.
+    // `callGuestFromHost` rejects a call from any other thread before it
+    // touches `_vm`, instead of two such calls racing on it.
+    private imported!"core.thread".ThreadID _ownerThread;
 
     public this(const Program program) {
+        import core.thread: Thread;
+
         super(program);
         _nativeData = NativeData(&constantSymbolAddress);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
         _vm = Vm(defaultFrameCapacity);
-        _callbacks = new CallbackBridge(
-            &invokeBoolFunction,
-            cast(void*) this,
-            &isGuestForCallback,
-            cast(void*) this,
-            "bytecode",
-        );
+        _ownerThread = Thread.getThis.id;
+        _plans.useCallbacks(
+            new CallbackBridge(&invokeCallback, cast(void*) this));
     }
 
     private void* constantSymbolAddress(
@@ -100,11 +107,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             return cast(void*) compileFunction(function_);
 
         return _plans.resolve(nativeSymbolName(symbol));
-    }
-
-    public ~this() {
-        if (_callbacks !is null)
-            _callbacks.release;
     }
 
     public override imported!"snakebite.backends.backend".CompilationStatistics
@@ -138,7 +140,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         // backends serialise their own dmd-touching entry points on this
         // lock. `_vm.call` itself only runs already-compiled bytecode, but it
         // is kept inside the lock too so a lazily-compiled callee reached
-        // through a native callback (`invokeBoolFunction`) reenters the same,
+        // through a native callback (`invokeCallback`) reenters the same,
         // recursive mutex rather than a fresh one.
         withCompilerLock({
             _vm.call(*compileFunction(function_), returnPlace);
@@ -159,32 +161,94 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _program.isInterpreted(function_);
     }
 
-    package void* boolFunctionAddress(FuncDeclaration function_) {
-        return _callbacks.address(function_);
+    // Records that `compiled` is the word this backend stores for
+    // `function_`'s address - what the plan swaps for a pool entry
+    // (ADR-0003) when the word crosses to host code, and what
+    // `invokeCallback` gets back when host code calls that entry.
+    package void registerGuestWord(
+        FuncDeclaration function_, const(Function)* compiled,
+    ) {
+        if (isGuestFunction(function_))
+            _plans.registerGuestFunction(compiled, function_);
     }
 
-    extern(C) private static bool isGuestForCallback(
+    extern(C) private static void invokeCallback(
         void* context,
-        imported!"dmd.func".FuncDeclaration function_,
+        CallbackCall* call,
     ) {
-        return (cast(Bytecode) context)._program.isInterpreted(function_);
-    }
-
-    extern(C) private static bool invokeBoolFunction(
-        void* context,
-        void* functionAddress,
-    ) {
-        import snakebite.frontend.compiler: withCompilerLock;
-
         auto bytecode = cast(Bytecode) context;
-        auto function_ = cast(FuncDeclaration) functionAddress;
-        bool result;
-        // Same reasoning as `call`: this is a native callback into a guest
-        // callback, so it can compile a callee for the first time here.
+        auto function_ = cast(const(Function)*) call.function_;
+        bytecode.callGuestFromHost(function_, call);
+    }
+
+    // The re-entry a pool entry (ADR-0003) reaches when host code calls a
+    // guest function pointer or delegate: the callee's frame slots are
+    // filled from `call` - the delegate's own context word into the
+    // hidden context slot, each argument into its parameter slot - and
+    // the compiled body runs. A `Throwable` the body throws unwinds
+    // through the host frames untouched (ADR-0004).
+    private void callGuestFromHost(
+        const(Function)* function_, CallbackCall* call,
+    ) {
+        import core.thread: Thread;
+        import snakebite.frontend.compiler: withCompilerLock;
+        import std.conv: text;
+
+        // `_vm`'s frame stack belongs to `_ownerThread` alone. Without
+        // this check, a callback from another thread would wait on
+        // `withCompilerLock` forever whenever this thread already holds
+        // it for an outer `call` - the recursive mutex only lets the
+        // owner back in (issue #40).
+        if (Thread.getThis.id != _ownerThread)
+            throw new SnakebiteException(
+                "bytecode callback called on a thread that does not "
+                    ~ "own its compiler (see issue #40)",
+            );
+
+        // Same reasoning as `call`: a callback can reach a callee that
+        // is compiled for the first time here.
         withCompilerLock({
-            bytecode._vm.call(*bytecode.compileFunction(function_), &result);
+            auto layout = call.declaration in _callbackLayouts;
+            if (layout is null) {
+                _callbackLayouts[call.declaration] =
+                    FrameLayout.of(call.declaration);
+                layout = call.declaration in _callbackLayouts;
+            }
+
+            if (call.arguments.length != layout.parameters.length)
+                throw new SnakebiteException(
+                    text("bytecode callback `", call.declaration.toString,
+                        "` expected ", layout.parameters.length,
+                        " argument(s), got ", call.arguments.length),
+                );
+
+            Vm.HostArgument[16] inlineArguments = void;
+            const count = layout.parameters.length + 1;
+            auto arguments = count <= inlineArguments.length
+                ? inlineArguments[0 .. count] : new Vm.HostArgument[count];
+            size_t filled;
+
+            if (layout.hiddenThis.variable !is null) {
+                if (!call.hasContext)
+                    throw new SnakebiteException(
+                        text("bytecode cannot run `",
+                            call.declaration.toString,
+                            "` as a callback: the host passed no context "
+                            ~ "for its hidden `this`"),
+                    );
+                arguments[filled++] = Vm.HostArgument(
+                    layout.hiddenThis.parameter.offset,
+                    &call.context,
+                    size_t.sizeof,
+                );
+            }
+
+            foreach (i, parameter; layout.parameters)
+                arguments[filled++] = Vm.HostArgument(
+                    parameter.offset, call.arguments[i], parameter.facts.size);
+
+            _vm.call(*function_, call.returnPlace, arguments[0 .. filled]);
         });
-        return result;
     }
 
     // The prepared FFI plan for druntime's own `gc_malloc`, the real
@@ -3130,6 +3194,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // above: the compiled callee, not the literal's own
             // declaration.
             auto compiled = _bytecode.compileFunction(expression.fd);
+            _bytecode.registerGuestWord(expression.fd, compiled);
             emit(&opConstant, _destination,
                 addConstant(cast(long) cast(size_t) compiled), _width);
             return;
@@ -3183,7 +3248,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         auto compiled = _bytecode.compileFunction(target.function_);
-        _bytecode._plans.registerGuestDelegate(compiled);
+        _bytecode.registerGuestWord(target.function_, compiled);
         emit(&opConstant, _destination + delegateFunctionOffset,
             addConstant(cast(long) cast(size_t) compiled), size_t.sizeof);
     }
@@ -5263,6 +5328,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ));
         }
 
+        // A callee with an outer function reads that function's frame
+        // through the static chain, which only this compiler's own frame
+        // layout can supply - see `usesGuestBody`'s own doc. `Evaluator.
+        // executeRaw` makes the same choice for the interpreter.
         const guest = type.parameterList.varargs != VarArg.variadic
             && usesGuestBody(
                 callee, arguments, &_bytecode.isGuestFunction,
@@ -5418,29 +5487,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto parameter = type.parameterList[i];
             auto declared = (*arguments)[declaredArgumentOffset + i];
 
-            // The bool-function callback bridge only ever stands in
-            // for a plain function-pointer parameter (the one native
-            // shape `snakebite.ffi`'s shared bridge supports) - never
-            // a delegate one, whose own native layout
-            // (`visit(FuncExp)`/`visit(DelegateExp)` above already
-            // build it) `evalInto` below already knows how to fill in
-            // directly, context word included, with no native
-            // trampoline needed at all.
-            auto pointer = parameter.type.isTypePointer;
-            if (pointer !is null && pointer.next.isTypeFunction !is null) {
-                if (auto callback = guestFunctionPointer(declared)) {
-                    const argumentOffset = reserveTemp(pointerFacts);
-                    const address = _bytecode.boolFunctionAddress(callback);
-                    emit(&opConstant, argumentOffset,
-                        addConstant(cast(long) cast(size_t) address),
-                        size_t.sizeof);
-                    args ~= Arg(argumentOffset, 0, size_t.sizeof);
-                    continue;
-                }
-
-                if (declared.isNullExp is null)
-                    throw rejection(_function, loc, exprText);
-            }
+            // A function pointer or delegate argument is evaluated like
+            // any other value: its guest function word is swapped for a
+            // pool entry (ADR-0003) by the plan itself, at call time,
+            // since only then is the word known.
 
             // `out` and `ref` are the same address-passing convention
             // at the ABI boundary - a native callee zero-initialises
@@ -5661,30 +5711,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             calleeOffset, args, isVoidCallee ? 0 : returnShape.returnFacts.size,
         );
         emit(&opCall, destOffset, siteIndex, 0);
-    }
-
-    private FuncDeclaration guestFunctionPointer(Expression argument) {
-        // A guest function has no machine address. Keep its declaration as
-        // the bytecode value, but give native code an executable callback
-        // entry for the one signature the shared FFI layer supports.
-        auto expression = argument;
-        while (auto cast_ = expression.isCastExp)
-            expression = cast_.e1;
-
-        FuncDeclaration function_;
-        if (auto literal = expression.isFuncExp)
-            function_ = literal.fd;
-        else if (auto address = expression.isSymOffExp)
-            function_ = address.var.isFuncDeclaration;
-
-        if (function_ is null || !_bytecode.isGuestFunction(function_))
-            return null;
-
-        if (!supportsBoolFunction(function_))
-            throw rejection(_function, argument.loc,
-                expressionText(argument));
-
-        return function_;
     }
 
     private TypeFacts pointerFacts() {
@@ -6011,6 +6037,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 // A guest function pointer is the compiled callee's stable
                 // bytecode address, which is the value the VM call path uses.
                 auto compiled = compiler._bytecode.compileFunction(function_);
+                compiler._bytecode.registerGuestWord(function_, compiled);
                 compiler.emit(&opConstant, result,
                     compiler.addConstant(cast(long) cast(size_t) compiled),
                     size_t.sizeof);

@@ -25,11 +25,6 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         _evaluator = new Evaluator(program);
     }
 
-    public ~this() {
-        if (_evaluator !is null)
-            _evaluator.releaseCallbacks;
-    }
-
     public override void call(
         FuncDeclaration function_,
         void* returnPlace,
@@ -115,7 +110,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
     import snakebite.ffi:
-        CallAdapter, CallbackArguments, CallbackBridge, CallPlan, CallResult,
+        CallAdapter, CallbackBridge, CallbackCall, CallPlan, CallResult,
         PlanCache;
     import snakebite.ffi.abi: dVariadicArgumentsIsSlice, Register;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -238,7 +233,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // after it - the same cold-path-once shape as `_layouts`.
     private PlanCache _plans;
     private ThreadID _ownerThread;
-    private CallbackBridge _callbacks;
     // A call expression is one call site, even when a loop visits it many
     // times. The plan cache remains the cold path; this side cache keeps
     // the prepared plan with the AST call site that uses it.
@@ -338,18 +332,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _frames = FrameStack(defaultFrameCapacity);
         _temporaries = new TemporaryLifetime(&destroyTemporary);
         _ownerThread = Thread.getThis.id;
-        _callbacks = new CallbackBridge(
-            &invokeBoolFunction,
-            cast(void*) this,
-            &isGuestFunction,
-            cast(void*) this,
-            "interpreter",
-        );
-    }
-
-    extern(D) final void releaseCallbacks() {
-        if (_callbacks !is null)
-            _callbacks.release;
+        _plans.useCallbacks(
+            new CallbackBridge(&invokeCallback, cast(void*) this));
     }
 
     // Runs `function_` against a fresh top-level frame, mirroring the
@@ -697,7 +681,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             function_, callSite is null ? null : callSite.arguments,
             (callee) => _program.isInterpreted(callee),
             prefersGuestBodyOf(function_),
-            _function,
         );
         if (!interprets) {
             const plan = callSite is null
@@ -757,15 +740,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     // `visit(SymOffExp)`/`visit(FuncExp)` store a function pointer's value
-    // as the `FuncDeclaration` itself. `calleeOf` resolves this value when
-    // guest code calls it. Host code needs an executable address instead.
-    // CallbackBridge handles the supported signature, identity, lifetime,
-    // and argument adaptation; this evaluator supplies only re-entry.
-    //
-    // Only a function-pointer-typed parameter is inspected: any other
-    // parameter's bytes might legitimately contain the same bit pattern
-    // (an `int` happening to equal some declaration's address, say)
-    // without meaning a function pointer at all.
+    // as the `FuncDeclaration` itself, and register that word with the
+    // plan cache (`registerGuestWord`). `calleeOf` resolves the word when
+    // guest code calls it; the plan swaps it for a pool entry (ADR-0003)
+    // when it crosses to host code, and `invokeCallback` is the re-entry
+    // that entry reaches. This evaluator supplies only that re-entry.
     private void callHost(
         FuncDeclaration hostFunction,
         const(CallPlan)* plan,
@@ -773,12 +752,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const(void*)* arguments,
         size_t argumentCount,
     ) {
-        CallbackArguments adapted;
-        _callbacks.adaptArguments(
-            hostFunction, arguments[0 .. argumentCount], adapted,
-        );
+        callPlan(plan, returnPlace, arguments[0 .. argumentCount]);
+    }
 
-        callPlan(plan, returnPlace, adapted.values);
+    // Records that the word this evaluator stores for `function_`'s
+    // address is the declaration itself - only for a function this
+    // program interprets, since a host function's declaration is never
+    // what host code should call.
+    private void registerGuestWord(FuncDeclaration function_) {
+        if (function_ !is null && _program.isInterpreted(function_))
+            _plans.registerGuestFunction(cast(void*) function_, function_);
     }
 
     // Every crossing of the barrier through a `CallPlan` shares this catch
@@ -787,7 +770,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // guest `throw` or a failed native `assert` produces (`throwGuest`,
     // `visit(HaltStatement)`) - a guest `catch` only ever looks for that
     // wrapper (`visit(TryCatchStatement)`). A callback re-entering the
-    // interpreter (`callBoolFunction` and friends) can also unwind through
+    // interpreter (`callGuestFromHost`) can also unwind through
     // here with a `GuestException` already, or with a `SnakebiteException`
     // reporting that the interpreter itself could not run the callback -
     // both must reach the host exactly as thrown, not double-wrapped or
@@ -837,25 +820,29 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         callPlan(plan, null, arguments);
     }
 
-    extern(C) private static bool isGuestFunction(
+    extern(C) private static void invokeCallback(
         void* context,
-        imported!"dmd.func".FuncDeclaration function_,
-    ) {
-        return (cast(Evaluator) context)._program.isInterpreted(function_);
-    }
-
-    extern(C) private static bool invokeBoolFunction(
-        void* context,
-        void* functionAddress,
+        CallbackCall* call,
     ) {
         auto evaluator = cast(Evaluator) context;
-        auto function_ = cast(FuncDeclaration) functionAddress;
-        return evaluator.callBoolFunction(function_);
+        auto function_ = cast(FuncDeclaration) cast(void*) call.function_;
+        evaluator.callGuestFromHost(function_, call);
     }
 
-    extern(D) private bool callBoolFunction(FuncDeclaration function_) {
+    // The re-entry a pool entry (ADR-0003) reaches when host code calls a
+    // guest function pointer or delegate: the callee's frame is filled
+    // from `call` - the delegate's own context word into the hidden
+    // context slot, each argument into its parameter slot - and the body
+    // runs like any other call. A `Throwable` the body throws unwinds
+    // through the host frames untouched (ADR-0004).
+    extern(D) private void callGuestFromHost(
+        FuncDeclaration function_,
+        CallbackCall* call,
+    ) {
+        import core.stdc.string: memcpy;
         import core.thread: Thread;
         import snakebite.frontend.compiler: withCompilerLock;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
 
         if (Thread.getThis.id != _ownerThread)
             throw new SnakebiteException(
@@ -863,15 +850,48 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     ~ "own its evaluator (see issue #40)",
             );
 
-        bool result;
         withCompilerLock({
             auto layout = layoutOf(function_);
+            auto shape = callShapeOf(function_);
             auto frame = _frames.push(layout.size, layout.alignment);
+
+            if (layout.hiddenThis.variable !is null) {
+                if (!call.hasContext)
+                    throw new SnakebiteException(
+                        text("interpreter cannot run `", function_.toString,
+                            "` as a callback: the host passed no context "
+                            ~ "for its hidden `this`"),
+                    );
+                storeIntegral(
+                    frame.base + layout.hiddenThis.parameter.offset,
+                    cast(size_t) call.context,
+                    size_t.sizeof,
+                );
+            }
+
+            if (call.arguments.length != layout.parameters.length)
+                throw new SnakebiteException(
+                    text("interpreter callback `", function_.toString,
+                        "` expected ", layout.parameters.length,
+                        " argument(s), got ", call.arguments.length),
+                );
+
+            foreach (i, parameter; layout.parameters) {
+                auto argument = call.arguments[i];
+                shape.arguments[i].store(
+                    frame.base + parameter.offset,
+                    () => cast(void*) loadIntegral(
+                        argument, size_t.sizeof, false),
+                    (void* place) {
+                        memcpy(place, argument, parameter.facts.size);
+                    },
+                );
+            }
+
             _temporaries.withTemporaryLifetime({
-                executeCall(function_, &result, frame.base, layout);
+                executeCall(function_, call.returnPlace, frame.base, layout);
             });
         });
-        return result;
     }
 
     private void destroyTemporary(Expression expression) {
@@ -1943,6 +1963,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     text("interpreter cannot evaluate `", expression.toString,
                         "`: it has no destination"),
                 );
+            registerGuestWord(literal);
             storeIntegral(
                 bytes, cast(size_t) cast(void*) literal, size_t.sizeof);
             return;
@@ -2005,7 +2026,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
         storeIntegral(
             bytes + delegateContextOffset, context, size_t.sizeof);
-        _plans.registerGuestDelegate(cast(void*) target.function_);
+        registerGuestWord(target.function_);
         storeIntegral(
             bytes + delegateFunctionOffset,
             cast(size_t) cast(void*) target.function_,
@@ -2833,8 +2854,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         Evaluator evaluator;
 
         public void* symbolAddress(SymOffExp expression) {
-            if (auto function_ = expression.var.isFuncDeclaration)
+            if (auto function_ = expression.var.isFuncDeclaration) {
+                evaluator.registerGuestWord(function_);
                 return cast(void*) function_;
+            }
 
             if (auto typeInfo = expression.var.isTypeInfoDeclaration)
                 return cast(void*) evaluator._runtimeTypes.get(typeInfo.tinfo);
@@ -4932,10 +4955,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // own argument type - is what `variadicCallPlanOf` classifies it by.
     //
     // The plan is built first, from types alone, before anything is
-    // evaluated or bound: a refusal `variadicCallPlanOf` raises - a
-    // function pointer or delegate extra argument has no callback pool
-    // entry (`CallPlan.prepareCommon`'s own doc, issue #9) - then happens
-    // before this binds a frame or evaluates a single argument
+    // evaluated or bound: a refusal `variadicCallPlanOf` raises - an
+    // extra argument of a type the ABI cannot classify, say - then
+    // happens before this binds a frame or evaluates a single argument
     // expression, so a call about to be refused never runs any of the
     // guest code its own extra arguments would have evaluated (issue
     // #334 step 5 review finding 2).
