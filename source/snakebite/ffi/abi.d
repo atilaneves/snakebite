@@ -114,6 +114,9 @@ public struct ArgumentPlan {
     // the count `snakebite.ffi.plan.CallPlan.buildMoves` places on the
     // stack. Stays `0` unless `memory` is `true`.
     public size_t memoryBytes;
+    // MEMORY-class only: the value's ABI alignment in bytes. The stack
+    // planner uses this to insert padding before an aligned value.
+    public size_t memoryAlignment;
 
     public size_t memoryWords() const @safe @nogc nothrow pure scope {
         return (memoryBytes + 7) / 8;
@@ -141,27 +144,23 @@ public struct ArgumentPlan {
 }
 
 // The two ways a MEMORY-class parameter can be unsupported for now - see
-// `ArgumentPlan.maxMemoryBytes` and the alignment note below. Only called
-// for an explicit parameter (`ArgumentPlan.of`); a MEMORY-class *return*
-// still travels through a hidden pointer regardless of either limit (see
-// `needsHiddenReturnPointer`), so this never runs for one.
+// `ArgumentPlan.maxMemoryBytes` and the stack alignment limit below. Only
+// called for an explicit parameter (`ArgumentPlan.of`); a MEMORY-class
+// *return* still travels through a hidden pointer regardless of these
+// limits (see `needsHiddenReturnPointer`), so this never runs for one.
 private void validateMemoryParameter(
     imported!"dmd.mtype".Type type, in ArgumentPlan plan,
 ) {
     import dmd.typesem: alignsize;
     import std.conv: text;
 
-    // The stack area `buildMoves` places a MEMORY argument's eightbytes
-    // into is only 8-byte aligned, not 16 - a value whose own alignment
-    // is 16 (for example a struct containing `real`, whose x86-64 System
-    // V alignment is 16) needs padding this plan does not yet insert.
-    // Refused for now, with a clear message, rather than silently
-    // misaligning it.
-    if (type.alignsize > 8)
+    // The assembly stub aligns the stack argument area to 16 bytes. It
+    // cannot satisfy a greater alignment without a dynamic stack base.
+    if (type.alignsize > 16)
         throw new Exception(
             text("ffi cannot pass a value of type `", type.toString,
                 "`: its ABI alignment is ", type.alignsize, " bytes, and " ~
-                "only 8-byte-aligned MEMORY-class arguments are " ~
+                "only 16-byte-aligned MEMORY-class arguments are " ~
                 "supported"),
         );
 
@@ -188,7 +187,7 @@ public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type type) {
 private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
     import dmd.astenums:
         Taarray, Tclass, Tfloat32, Tfloat64, Tpointer, Tvoid;
-    import dmd.typesem: isIntegral, isUnsigned, size;
+    import dmd.typesem: alignsize, isIntegral, isUnsigned, size;
     import std.algorithm: min;
 
     ArgumentPlan plan;
@@ -233,6 +232,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
     if (count > 2) {
         plan.memory = true;
         plan.memoryBytes = bytes;
+        plan.memoryAlignment = type.alignsize;
         return plan;
     }
 
@@ -244,6 +244,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
     if (memory) {
         plan.memory = true;
         plan.memoryBytes = bytes;
+        plan.memoryAlignment = type.alignsize;
         return plan;
     }
 
