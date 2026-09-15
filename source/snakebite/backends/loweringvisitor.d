@@ -4,10 +4,12 @@ module snakebite.backends.loweringvisitor;
 private:
 
 import dmd.expression:
-    ArrayLiteralExp, AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp, EqualExp,
+    ArrayLiteralExp, AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp,
+    CmpExp, EqualExp,
     CatElemAssignExp, CatDcharAssignExp,
     ConstructExp, Expression, IdentityExp, LoweredAssignExp, NewExp, TupleExp;
 import snakebite.backends.identity: IdentityPlan, identityPlan;
+import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import dmd.visitor: Visitor;
 import dmd.mtype: Type;
 import snakebite.nativelayout: TypeFacts;
@@ -67,6 +69,13 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     final override void visit(IdentityExp expression) {
         visitIdentity(expression, identityPlan(expression));
     }
+
+    final override void visit(CmpExp expression) {
+        visitComparison(expression, comparisonPlan(expression));
+    }
+
+    protected abstract void visitComparison(
+        CmpExp expression, in ComparisonPlan plan);
 
     protected abstract void visitIdentity(
         IdentityExp expression, in IdentityPlan plan);

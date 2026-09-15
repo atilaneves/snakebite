@@ -88,6 +88,7 @@ private final class GuestException: Exception {
 
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
+import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.backends.controlflow: ControlFlowState,
     cleanupCount, scopePath;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
@@ -1830,6 +1831,24 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return *cast(void**) buffer.ptr;
     }
 
+    private void* asReference(Expression expression) {
+        import std.conv: text;
+
+        auto type = expression.type;
+        if (type.ty != Tpointer && type.ty != Tclass)
+            throw new SnakebiteException(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "` as a reference: its type is `", type.toString, "`"),
+            );
+
+        const facts = factsOf(type);
+        align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
+        assert(facts.size <= buffer.sizeof && facts.alignment <= buffer.alignof,
+            "a reference wider than a register reached the scratch buffer");
+        evaluate(expression, type, facts, buffer.ptr);
+        return *cast(void**) buffer.ptr;
+    }
+
     override void visit(Expression expression) {
         import std.conv: text;
 
@@ -3009,14 +3028,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         storeIntegral(_place, truthOf(expression.e1) ? 0 : 1, _facts.size);
     }
 
-    override void visit(CmpExp expression) {
+    protected override void visitComparison(
+        CmpExp expression, in ComparisonPlan plan,
+    ) {
         import std.conv: text;
 
         with (EXP) switch (expression.op) {
-            case lessThan: return storeCmpExp!"<"(expression);
-            case lessOrEqual: return storeCmpExp!"<="(expression);
-            case greaterThan: return storeCmpExp!">"(expression);
-            case greaterOrEqual: return storeCmpExp!">="(expression);
+            case lessThan: return storeCmpExp!"<"(expression, plan);
+            case lessOrEqual: return storeCmpExp!"<="(expression, plan);
+            case greaterThan: return storeCmpExp!">"(expression, plan);
+            case greaterOrEqual: return storeCmpExp!">="(expression, plan);
             default:
                 throw new SnakebiteException(
                     text("interpreter cannot evaluate a `", expression.op,
@@ -3028,17 +3049,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // An ordering answers differently depending on how the operands were
     // read, so both are read with the signedness their own types give and
     // the comparison is then made in the one signedness they share.
-    private extern(D) void storeCmpExp(string op)(CmpExp expression) {
+    private extern(D) void storeCmpExp(string op)(
+        CmpExp expression, in ComparisonPlan plan,
+    ) {
         import snakebite.nativelayout: storeIntegral;
 
-        // dmd's usual arithmetic conversions give both operands the same
-        // type, so testing either one for a floating type is enough. The
-        // comparison itself is made at `real`'s own width, wide enough to
-        // hold every operand exactly, since D's floating ordering follows
-        // IEEE 754 rather than any integral signedness rule.
-        auto type = expression.e1.type;
-        if (type.ty == Tfloat32 || type.ty == Tfloat64
-                || type.ty == Tfloat80) {
+        if (plan.kind == ComparisonPlan.Kind.floating) {
             const a = asFloating(expression.e1);
             const b = asFloating(expression.e2);
             const answer = mixin("a " ~ op ~ " b");
@@ -3046,11 +3062,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        const aFacts = factsOf(expression.e1.type);
-        const bFacts = factsOf(expression.e2.type);
-        const a = asIntegral(expression.e1, aFacts);
-        const b = asIntegral(expression.e2, bFacts);
-        const answer = sharedSignedness(aFacts, bFacts, expression)
+        const a = plan.kind == ComparisonPlan.Kind.reference
+            ? cast(long) asReference(expression.e1)
+            : asIntegral(expression.e1, plan.facts);
+        const b = plan.kind == ComparisonPlan.Kind.reference
+            ? cast(long) asReference(expression.e2)
+            : asIntegral(expression.e2, plan.facts);
+        const answer = plan.kind == ComparisonPlan.Kind.reference
+            ? mixin("cast(ulong) a " ~ op ~ " cast(ulong) b")
+            : sharedSignedness(plan.facts, plan.facts, expression)
             ? mixin("cast(ulong) a " ~ op ~ " cast(ulong) b")
             : mixin("a " ~ op ~ " b");
 

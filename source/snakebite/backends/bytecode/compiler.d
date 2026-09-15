@@ -7,6 +7,7 @@ import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
+import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.backends.fullexpression:
     FullExpressionKind, FullExpressionScope;
 import snakebite.backends.controlflow:
@@ -4067,9 +4068,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileTernary(expression, _destination, _width);
     }
 
-    override void visit(CmpExp expression) {
+    protected override void visitComparison(
+        CmpExp expression, in ComparisonPlan plan,
+    ) {
         requireDestination(expression);
-        compileComparison(expression, _destination);
+        compileComparison(expression, plan, _destination);
     }
 
     protected override void visitUnloweredEqual(EqualExp expression) {
@@ -4101,7 +4104,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        compileComparison(expression, _destination);
+        compileComparison(expression, comparisonPlan(expression), _destination);
     }
 
     override protected void visitIdentity(
@@ -4351,12 +4354,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `destOffset`'s own width, since the result is always a one-byte
     // `bool` - and the comparison opcode leaves its answer in the first
     // of those, copied out to `destOffset` only when it differs.
-    private void compileComparison(BinExp expression, in size_t destOffset) {
+    private void compileComparison(
+        BinExp expression, in ComparisonPlan plan, in size_t destOffset,
+    ) {
         import dmd.astenums: Tarray, Tclass, Tpointer, Tstruct;
         import dmd.typesem: toBasetype;
 
         auto operandType = expression.e1.type.toBasetype;
-        const operandFacts = TypeFacts.of(operandType);
+        const operandFacts = plan.facts;
 
         // `is`/`!is` on a struct or a dynamic array is always a raw byte
         // compare, over the operand's own native layout - dmd rewrites a
@@ -4394,7 +4399,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // `opEqual` already reads either way; only `is`/`!is` (`identity`/
         // `notIdentity`) are legal D syntax for a class reference, but the
         // handler map below already answers those the same as `==`/`!=`.
-        if (operandType.ty == Tpointer || operandType.ty == Tclass) {
+        if (plan.kind == ComparisonPlan.Kind.reference) {
             Instruction.Handler pointerHandler;
             with (EXP) switch (expression.op) {
                 case lessThan:
@@ -4432,7 +4437,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // semantics for equality and ordering. Integral equality instead
         // compares the stored bits, which would make a NaN equal itself and
         // positive and negative zero unequal.
-        if (isFloatingType(operandType)) {
+        if (plan.kind == ComparisonPlan.Kind.floating) {
             Instruction.Handler floatHandler;
             with (EXP) switch (expression.op) {
                 case lessThan: floatHandler = &opFloatLessThan; break;

@@ -81,10 +81,7 @@ static foreach (backend; Matrix!()) {
 // Pointers into the same allocation have the array element order. Keep the
 // four operators in one runtime expression so each pointer handler is
 // exercised without relying on the addresses of separate locals.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter does not order pointer values"),
-)) {
+static foreach (backend; Matrix!()) {
     @("compare.pointerOrdering." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

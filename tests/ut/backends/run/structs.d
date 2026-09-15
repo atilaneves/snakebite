@@ -333,7 +333,6 @@ static foreach (backend; Matrix!()) {
 // each one, rather than blitting the whole slice.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("sliceAssignRunsPostBlitPerElement." ~ backend.stringof)
     @Tags(backend.stringof)
