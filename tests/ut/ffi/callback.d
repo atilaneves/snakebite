@@ -10,6 +10,7 @@ import snakebite.ffi.sysv:
     snakebite_ffi_callback_chunk, snakebite_ffi_callback_chunk_end;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
+import std.conv: text;
 
 
 // These tests drive the callback pool (`snakebite.ffi.callback`, ADR-0003)
@@ -233,7 +234,7 @@ unittest {
 // kernel that refuses to make written memory executable; a kernel that
 // allows it never takes that path on its own, so this drives it directly.
 static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
-    @("chunk." ~ __traits(identifier, strategy) ~ "")
+    @("chunk." ~ text(strategy))
     unittest {
         auto function_ = declarationOf(
             q{ extern(C) int twice(int x); }, "twice");
