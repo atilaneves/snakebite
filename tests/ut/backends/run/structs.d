@@ -2226,10 +2226,7 @@ static foreach (backend; Matrix!(
 // exactly once - here while unwinding its own throw. The outer
 // temporary's constructor never returns, so its destructor never runs
 // at all.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "Bytecode cannot compile the constructor parameter cleanup finally"),
-)) {
+static foreach (backend; Matrix!()) {
     @("temporaryMovedIntoThrowingOuterCtorDestroyedOnceByCallee." ~
         backend.stringof)
     @Tags(backend.stringof)

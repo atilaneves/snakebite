@@ -485,15 +485,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // scope uses this path while its destination uses the switch's resolved
     // `tryBody`.
     private ScopeFrame[] _activeScopePath;
-    // How many `throw`/`break`/`continue`/`goto case`/`goto default`/
-    // switch-error exits this compiler has compiled anywhere in the
-    // program so far, since unlike `return` none of them run a
-    // `finally` on their way out (see `visit(TryFinallyStatement)`).
-    // Never decremented, so one nested inside a protected body still
-    // counts. Misses an exit reached only through the taken branch of
-    // an `if` with no `else`, since that clears `_finished` on the
-    // fall-through path before the check below ever runs.
-    private size_t _unflushedExitCount;
     // The loop or unrolled `foreach` this compiler is currently inside the
     // body of, innermost last - what a `continue` targets, labelled or
     // not. A `do` knows its own continue target (the condition it
@@ -507,6 +498,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Identifier label;
         size_t continueTarget = size_t.max;
         size_t[] pendingContinueJumps;
+        ScopeFrame[] scopePath;
     }
 
     private struct PendingExceptionHandler {
@@ -515,6 +507,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         private size_t _bodyEnd;
         private size_t _handler;
         private size_t _catchOffset;
+        private size_t _cleanupEnd = size_t.max;
     }
 
     // Where `runPendingFinallyBodies` last inlined a `finally` for a
@@ -583,6 +576,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private struct Breakable {
         Identifier label;
         size_t[] pendingBreakJumps;
+        ScopeFrame[] scopePath;
     }
     private Breakable[] _breakables;
 
@@ -685,7 +679,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         ExceptionHandler[] exceptionHandlers;
         foreach (pending; _exceptionHandlers) {
-            if (pending._handler >= _instructions.length)
+            if (pending._handler >= _instructions.length
+                    && pending._cleanupEnd == size_t.max)
                 throw rejection(_function, _function.loc,
                     "an empty catch handler");
 
@@ -695,6 +690,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 instructionAt(pending._bodyEnd),
                 instructionAt(pending._handler),
                 pending._catchOffset,
+                pending._cleanupEnd == size_t.max
+                    ? null : instructionAt(pending._cleanupEnd),
             );
         }
 
@@ -886,8 +883,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        _loops ~= LoopContext(label);
-        _breakables ~= Breakable(label);
+        _loops ~= LoopContext(label, size_t.max, null, activeScopePath);
+        _breakables ~= Breakable(label, null, activeScopePath);
 
         bool lastFinished;
         foreach (child; *statement.statements) {
@@ -923,8 +920,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
         const bodyStart = _instructions.length;
 
-        _loops ~= LoopContext(label);
-        _breakables ~= Breakable(label);
+        _loops ~= LoopContext(label, size_t.max, null, activeScopePath);
+        _breakables ~= Breakable(label, null, activeScopePath);
         compileStatement(statement._body);
         const bodyFinished = _finished;
         const breakable = _breakables[$ - 1];
@@ -1065,24 +1062,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     override void visit(TryFinallyStatement statement) {
         _pendingFinallyBodies ~= statement.finalbody;
-        const unflushedExitsBefore = _unflushedExitCount;
+        const finallyDepth = _pendingFinallyBodies.length;
+        const bodyStart = _instructions.length;
         _activeScopePath ~= ScopeFrame(cast(void*) statement, true);
         compileStatement(statement._body);
+        const bodyEnd = _instructions.length;
+        const bodyFinished = _finished;
         _activeScopePath.length -= 1;
         _pendingFinallyBodies.length -= 1;
 
-        // A `return` inside `_body` already inlined this `finally` on its
-        // way out (`compileReturn`/`runPendingFinallyBodies`); reject
-        // rather than skip `finalbody` silently if `_body`'s own last
-        // exit was one of the other kinds instead (see
-        // `_unflushedExitCount`'s own doc, including what this misses).
-        if (_finished && _unflushedExitCount != unflushedExitsBefore)
-            throw rejection(_function, statement.loc, statementText(statement));
-
-        if (_finished)
-            return;
-
-        compileStatement(statement.finalbody);
+        // Exceptional entry runs this range inside native try/finally so
+        // druntime owns exception chaining and Error precedence.
+        const handler = _instructions.length;
+        _finished = false;
+        compileFinallyBody(statement.finalbody);
+        const cleanupFinished = _finished;
+        const cleanupEnd = _instructions.length;
+        foreach (range; protectedRanges(bodyStart, bodyEnd, finallyDepth))
+            _exceptionHandlers ~= PendingExceptionHandler(
+                typeid(Throwable), range.start, range.end, handler,
+                size_t.max, cleanupEnd,
+            );
+        _finished = bodyFinished || cleanupFinished;
     }
 
     override void visit(ThrowStatement statement) {
@@ -1096,7 +1097,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         evalInto(statement.exp, offset, facts.size);
         emit(&opThrow, offset, 0, 0);
         _finished = true;
-        ++_unflushedExitCount;
     }
 
     override void visit(ReturnStatement statement) {
@@ -1178,7 +1178,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opJump, 0, 0, 0);
         jumpToDefault(statement, defaultJumpIndex);
 
-        _breakables ~= Breakable(label);
+        _breakables ~= Breakable(label, null, activeScopePath);
         _switchStack ~= statement;
         compileSwitchBody(statement._body);
         const bodyFinished = _finished;
@@ -1301,7 +1301,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             compileEffect(statement.exp);
 
         _finished = true;
-        ++_unflushedExitCount;
     }
 
     override void visit(BreakStatement statement) {
@@ -1312,11 +1311,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (target == size_t.max)
             throw rejection(_function, statement.loc, statementText(statement));
 
+        runPendingFinallyBodies(cleanupCount(
+            activeScopePath, _breakables[target].scopePath,
+        ));
+        if (_finished)
+            return;
+
         const index = _instructions.length;
         emit(&opJump, 0, 0, 0);
         _breakables[target].pendingBreakJumps ~= index;
         _finished = true;
-        ++_unflushedExitCount;
     }
 
     extern(D):
@@ -1346,6 +1350,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // is discarded the same way the interpreter discards it.
         if (_isVoidReturn || statement.exp is null) {
             runPendingFinallyBodies();
+            if (_finished)
+                return;
             emit(&opReturnVoid, 0, 0, 0);
             _finished = true;
             return;
@@ -1354,6 +1360,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (_isRefReturn) {
             const addressOffset = compileAddress(statement.exp);
             runPendingFinallyBodies();
+            if (_finished)
+                return;
             emit(&opReturn, 0, addressOffset, size_t.sizeof);
             _finished = true;
             return;
@@ -1367,31 +1375,55 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const offset = reserveTemp(_returnFacts);
         compileValue(statement.exp, offset, _returnFacts.size);
         runPendingFinallyBodies();
+        if (_finished)
+            return;
         emit(&opReturn, 0, offset, _returnFacts.size);
         _finished = true;
     }
 
-    // Runs every `try`'s `finally` block this `return` is nested inside,
-    // innermost first - the order a real stack unwind runs them in, and
-    // why `_pendingFinallyBodies` reads back to front. Each one is
-    // compiled again here, in addition to wherever
-    // `visit(TryFinallyStatement)` itself already placed it for that
-    // `try`'s own normal, fall-through exit: the two exits share no
-    // instructions, the same way dmd's own codegen gives every exit out
-    // of a `try/finally` its own copy of `finally` rather than a single
-    // one every exit jumps through.
+    // Each exit emits the shared scope plan's cleanup sequence. Temporarily
+    // leave each scope before compiling its cleanup: transfers and failures
+    // inside that cleanup must see only the scopes that still enclose it.
     private void runPendingFinallyBodies(
         in size_t count = size_t.max,
     ) {
         const actualCount = count == size_t.max
-            ? _pendingFinallyBodies.length : count;
-        foreach (offset; 0 .. actualCount) {
-            const index = _pendingFinallyBodies.length - offset - 1;
-            auto finalbody = _pendingFinallyBodies[index];
-            const start = _instructions.length;
-            compileStatement(finalbody);
-            _finallyHoles ~= FinallyHole(start, _instructions.length, index);
+            ? cleanupCount(activeScopePath, null) : count;
+        if (actualCount == 0)
+            return;
+
+        auto bodies = _pendingFinallyBodies.dup; // Restored to mutable compiler state.
+        auto scopes = _activeScopePath.dup; // Restored to mutable compiler state.
+        scope (exit) {
+            _pendingFinallyBodies = bodies;
+            _activeScopePath = scopes;
         }
+        auto scopeEnd = scopes.length;
+        foreach (offset; 0 .. actualCount) {
+            const index = bodies.length - offset - 1;
+            while (scopeEnd != 0 && !scopes[--scopeEnd].cleanup) {}
+            _pendingFinallyBodies = bodies[0 .. index].dup;
+            _activeScopePath = scopes[0 .. scopeEnd].dup;
+            const start = _instructions.length;
+            compileFinallyBody(bodies[index]);
+            _finallyHoles ~= FinallyHole(start, _instructions.length, index);
+            if (_finished)
+                return;
+        }
+    }
+
+    private void compileFinallyBody(Statement body_) {
+        // D forbids transfers across a finally boundary. Each emitted copy
+        // therefore owns its labels, independent of the surrounding code.
+        auto targets = _labelTargets; // Restored to mutable compiler state.
+        auto pending = _pendingLabelJumps; // Restored to mutable compiler state.
+        _labelTargets = null;
+        _pendingLabelJumps = null;
+        scope (exit) {
+            _labelTargets = targets;
+            _pendingLabelJumps = pending;
+        }
+        compileStatement(body_);
     }
 
     // The condition of an `if`, a `while`/`for`, or a ternary: read at its
@@ -1634,8 +1666,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (guarded)
             branchIndex = compileConditionBranch(statement.condition);
 
-        _loops ~= LoopContext(label);
-        _breakables ~= Breakable(label);
+        _loops ~= LoopContext(label, size_t.max, null, activeScopePath);
+        _breakables ~= Breakable(label, null, activeScopePath);
         compileStatement(statement._body);
         const breakable = _breakables[$ - 1];
         _breakables = _breakables[0 .. $ - 1];
@@ -1694,6 +1726,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (index == size_t.max)
             throw rejection(_function, statement.loc, statementText(statement));
 
+        runPendingFinallyBodies(cleanupCount(
+            activeScopePath, _loops[index].scopePath,
+        ));
+        if (_finished)
+            return;
+
         const target = _loops[index].continueTarget;
         if (target != size_t.max) {
             emit(&opJump, target, 0, 0);
@@ -1703,7 +1741,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         _finished = true;
-        ++_unflushedExitCount;
     }
 
     private void resolveContinues(in size_t target) {

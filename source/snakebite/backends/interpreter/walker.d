@@ -88,7 +88,7 @@ private final class GuestException: Exception {
 
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
-import snakebite.backends.controlflow: ControlFlowState, ScopeFrame,
+import snakebite.backends.controlflow: ControlFlowState,
     cleanupCount, scopePath;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.backends.fullexpression: FullExpressionKind;
@@ -1115,10 +1115,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (target is null)
             return false;
 
-        auto source = ScopeFrame(cast(void*) statement, true) ~
-            scopePath(statement.tryBody);
         return cleanupCount(
-            source,
+            scopePath(statement),
             scopePath(cast(Statement) _controlFlow.destinationScope),
         ) != 0;
     }
