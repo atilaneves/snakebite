@@ -4641,9 +4641,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // calls `_d_arrayappendcd` (`char[]`) or `_d_arrayappendwd` (`wchar[]`)
     // directly by linker symbol - never through an AST `CallExp` any visitor
     // could walk. This resolves and calls that same compiled hook a real
-    // build would, the same way `TypeidExp` resolves a symbol with no
-    // `FuncDeclaration` of its own, rather than reimplementing the
-    // UTF-8/UTF-16 encoding here.
+    // build would, rather than reimplementing the UTF-8/UTF-16 encoding
+    // here, through the same `rawPlanOf`/`callPlan` shape `throwArrayBounds`
+    // uses for a druntime hook with no `FuncDeclaration` of its own - the
+    // bytecode compiler's own `visitUnloweredCatDcharAssign` does the
+    // same. A plain cast of the resolved address to a function pointer
+    // would make the D compiler emit the call, and ADR-0001 keeps the
+    // assembly stub as the only place a forward call across the barrier
+    // is made (issue #334 step 7). The hook takes the array by `ref` and
+    // appends into it in place, so its own return value (that same
+    // `{length, pointer}` pair) is never read back - the plan declares no
+    // return register - and the updated pair is copied out of the array's
+    // own storage instead.
     override void visitUnloweredCatDcharAssign(CatDcharAssignExp expression) {
         import core.stdc.string: memcpy;
         import std.conv: text;
@@ -4660,18 +4669,26 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
 
         countForeignNameLookup;
-        auto hook = _plans.resolve(name);
-        if (hook is null)
+        auto plan = _plans.rawPlanOf(
+            name,
+            [
+                Register(Register.Kind.pointer, 8),
+                Register(Register.Kind.unsigned, 4),
+            ],
+        );
+        if (plan is null)
             throw new SnakebiteException(
                 text("interpreter cannot resolve the symbol `", name,
                     "` for `", expression.toString,
                     "`: it is not in this process"),
             );
 
-        alias ArrayAppendDchar = extern(C) void[] function(void*, dchar);
-        auto appendDchar = cast(ArrayAppendDchar) hook;
         auto array = addressOf(expression.e1);
-        appendDchar(array, cast(dchar) asIntegral(expression.e2));
+        const value = cast(dchar) asIntegral(expression.e2);
+        const(void*)[2] arguments = [
+            cast(const(void)*) &array, cast(const(void)*) &value,
+        ];
+        callPlan(plan, null, arguments[]);
 
         memcpy(_place, array, _facts.size);
     }
