@@ -812,9 +812,10 @@ public struct PlanCache {
         return plan;
     }
 
-    // As `.of`, but for one call site of an `extern(C)` C-style variadic
-    // callee (`prepareVariadic`'s own doc): the plan depends on that
-    // call's own extra argument types, not on `function_` alone, so this
+    // As `.of`, but for one call site of an `extern(C)` C-style or
+    // `extern(D)` untyped variadic callee (`prepareVariadic`'s own doc):
+    // the plan depends on that call's own extra argument types, not on
+    // `function_` alone, so this
     // never caches by declaration the way `_plans` does - it prepares a
     // fresh plan on every call. A caller keeps the returned plan itself,
     // alongside the call site it belongs to, to avoid paying that cost
@@ -882,20 +883,25 @@ private CallPlan prepare(
     return prepareCommon(function_, resolver, null, false);
 }
 
-// As `prepare`, for one call site of an `extern(C)` C-style variadic
-// callee: `extraArgumentTypes` are that call's own extra arguments'
-// types, in call order, after the frontend has already applied C's
-// default argument promotions (`float` widens to `double`, an integral
-// narrower than `int` widens to `int`) - exactly the types the callee's
-// own `va_arg` will read. `PlanCache.variadicOf` is the one caller.
+// As `prepare`, for one call site of an `extern(C)` C-style or
+// `extern(D)` untyped variadic callee: `extraArgumentTypes` are that
+// call's own extra arguments' types, in call order. For a C-style
+// callee, the frontend has already applied C's default argument
+// promotions (`float` widens to `double`, an integral narrower than
+// `int` widens to `int`) - exactly the types the callee's own `va_arg`
+// will read. An `extern(D)` untyped callee's own hidden `_arguments` is
+// not one of these - it is a whole extra argument in its own right,
+// added inside `prepareCommon` (`hasVArguments`'s own doc), since its
+// value comes from the call site's `TypeidExp`, not from a caller-
+// supplied type list. `PlanCache.variadicOf` is the one caller.
 //
 // The plan this builds is one call site's own shape, not `function_`'s
-// alone (ADR-0010's C-variadics paragraph; issue #334 step 5): two call
-// sites naming the same variadic function can pass different extra
-// arguments, and need different plans. This is never cached by
-// `function_` the way `PlanCache._plans` caches an ordinary plan - a
-// backend's own call-site cache (`PlanCache.of`'s own doc, issue #96) is
-// what makes a repeat call at the same site free instead.
+// alone (ADR-0010's C- and D-variadics paragraphs; issue #334 steps 5
+// and 6): two call sites naming the same variadic function can pass
+// different extra arguments, and need different plans. This is never
+// cached by `function_` the way `PlanCache._plans` caches an ordinary
+// plan - a backend's own call-site cache (`PlanCache.of`'s own doc,
+// issue #96) is what makes a repeat call at the same site free instead.
 package CallPlan prepareVariadic(
     imported!"dmd.func".FuncDeclaration function_,
     ref Resolver resolver,
@@ -914,8 +920,8 @@ private CallPlan prepareCommon(
     import snakebite.druntime.constructoratomic: nativeTarget;
     import snakebite.ffi.abi:
         ArgumentPlan, Register, contextPrecedesHiddenReturnPointer,
-        needsHiddenReturnPointer, reversedDParameters,
-        supported;
+        dVariadicArgumentsIsSlice, needsHiddenReturnPointer,
+        reversedDParameters, supported;
     import dmd.astenums: LINK, STC, Tdelegate, VarArg;
     import dmd.mangle: mangleExact;
     import dmd.typesem: nextOf, toBasetype;
@@ -950,35 +956,62 @@ private CallPlan prepareCommon(
         // A variadic callee is handed its extra arguments differently -
         // on the System V AMD64 ABI the caller must also report how many
         // SSE registers it used (`%al`) - so a fixed-arity plan would be
-        // the wrong call, not merely an incomplete one. Only an
-        // `extern(C)` callee (`VarArg.variadic` with C linkage) is
-        // supported, and only through `prepareVariadic`, one call site at
-        // a time (this function's own doc). Every other variadic kind -
-        // D's untyped `_arguments` (issue #334 step 6) and typesafe
-        // `T t...`, both always `extern(D)` - stays refused here, even
-        // when `isVariadicCall` is set: only a genuine C-style variadic
-        // callee can ever satisfy that call.
+        // the wrong call, not merely an incomplete one. Only `VarArg.
+        // variadic` (an `extern(C)` C-style variadic callee, or an
+        // `extern(D)` untyped one - issue #334 steps 5 and 6) needs a
+        // call site's own extra argument types, and only through
+        // `prepareVariadic`, one call site at a time (this function's own
+        // doc). `VarArg.typesafe` (`T t...`) needs neither: the frontend
+        // has already packed a typesafe call's trailing arguments into
+        // one array-typed argument by the time this ever runs
+        // (`snakebite.backends.calls.arityMismatches`'s own doc), so it
+        // classifies like any other declared parameter below, through the
+        // ordinary `prepare`/`.of` path.
         const isCVariadic = type.parameterList.varargs == VarArg.variadic
             && linkage == LINK.c;
+        // dmd's own frontend semantic (`dmd.expressionsem.
+        // functionParameters`) inserts `_arguments` - a `TypeInfo_Tuple`
+        // reference describing the call's own extra argument types - as
+        // an ordinary leading argument on every `extern(D)` untyped
+        // variadic call site, ahead of the declared parameters; nothing
+        // about that insertion is C-specific, so this ABI fact holds
+        // whichever host compiler built this process (ADR-0010's D
+        // variadic paragraph).
+        const isDVariadic = type.parameterList.varargs == VarArg.variadic
+            && linkage == LINK.d;
         if (isVariadicCall) {
-            if (!isCVariadic)
+            if (!isCVariadic && !isDVariadic)
                 throw new Exception(
                     text("ffi cannot call `", function_.toString,
                         "` as a variadic function: only an `extern(C)` ",
-                        "C-style variadic callee is supported"),
+                        "C-style or `extern(D)` untyped variadic callee ",
+                        "is supported"),
                 );
-        } else if (type.parameterList.varargs != VarArg.none)
+        } else if (type.parameterList.varargs == VarArg.variadic)
             throw new Exception(
                 text("ffi cannot call the variadic function `",
                     function_.toString, "`: only an `extern(C)` C-style ",
-                    "variadic callee is supported, and only at its own ",
-                    "call site"),
+                    "or `extern(D)` untyped variadic callee is supported, ",
+                    "and only at its own call site"),
             );
+
+        // An `extern(D)` untyped variadic callee's own hidden `_arguments`
+        // (this function's own doc above) is one more argument, alongside
+        // `hasContext`'s hidden `this` - `addArgument` below places it
+        // right after `this` and before every declared parameter, at
+        // index `firstExplicit` (`buildMoves`'s own doc), so it falls
+        // inside the very same reversed-or-forward group as the declared
+        // parameters and the extra arguments that follow it. Its own
+        // shape depends on the host compiler (`abi.
+        // dVariadicArgumentsIsSlice`'s own doc): one pointer register on
+        // dmd, a two-register `TypeInfo[]` slice on ldc.
+        const hasVArguments = isVariadicCall && isDVariadic;
 
         const count = type.parameterList.length;
         const hasContext = hasHiddenThis(function_);
-        const argumentCount =
-            count + hasContext + extraArgumentTypes.length;
+        const argumentCount = count + hasContext + hasVArguments
+            + extraArgumentTypes.length;
+
         CallPlan plan;
         plan._arguments.length = argumentCount;
         // A `ref` return hands back the *address* of the result in the
@@ -994,10 +1027,43 @@ private CallPlan prepareCommon(
         plan._contextPrecedesHiddenReturnPointer =
             contextPrecedesHiddenReturnPointer;
 
+        // An `extern(D)` untyped variadic callee never reverses its
+        // argument registers, even when `reversedDParameters` reverses
+        // every other `extern(D)` call this host compiler makes: the
+        // callee's own `_argptr`/register-save-area machinery (dmd's
+        // `semantic3.d`, this function's own `isDVariadic` doc) has to
+        // walk every parameter - `_arguments`, the declared ones, and
+        // the extra ones after it - in one consistent forward order to
+        // find where the register save area and the stack overflow area
+        // begin, so dmd's own codegen keeps ordinary declaration order
+        // for any `VarArg.variadic` callee (verified: disassembling a
+        // real `extern(D) int f(int a, int b, int c, ...)` call built by
+        // this exact dmd shows `%rdi`=`_arguments`, `%rsi`=`a`, `%rdx`=
+        // `b`, `%rcx`=`c`, `%r8`/`%r9`=the two extra arguments - plain
+        // declaration order, not reversed).
         plan._reversedArguments = reversedDParameters
-            && (linkage == LINK.d || linkage == LINK.default_);
+            && (linkage == LINK.d || linkage == LINK.default_)
+            && !isDVariadic;
 
         size_t argumentIndex;
+
+        // The shape of a bare pointer-sized argument - a hidden `this`,
+        // a `ref`/`out` parameter's own address, and, on dmd, (issue #334
+        // step 6) an `extern(D)` untyped variadic callee's hidden
+        // `_arguments` - all travel this same one-eightbyte-pointer way.
+        enum ArgumentPlan pointerArgument = ArgumentPlan(
+            [Register(Register.Kind.pointer, 8), Register.init], 1, false,
+        );
+
+        // On ldc, `_arguments` is a two-register `TypeInfo[]` slice
+        // instead (`abi.dVariadicArgumentsIsSlice`'s own doc) - the same
+        // shape `abi.classify`'s own `Tarray` case gives any other
+        // dynamic-array-typed argument, length then pointer, both
+        // integer-class.
+        enum ArgumentPlan sliceArgument = ArgumentPlan(
+            [Register(Register.Kind.integer, 8),
+                Register(Register.Kind.integer, 8)], 2, false,
+        );
 
         // Places one argument's `ArgumentPlan` in `plan`, at the next
         // available index - shared by the declared-parameter loop below
@@ -1012,11 +1078,19 @@ private CallPlan prepareCommon(
 
         if (hasContext) {
             plan._hiddenContext = true;
-            addArgument(ArgumentPlan(
-                [Register(Register.Kind.pointer, 8), Register.init], 1,
-                false,
-            ));
+            addArgument(pointerArgument);
         }
+
+        // An `extern(D)` untyped variadic callee's hidden `_arguments`
+        // (`hasVArguments`'s own doc above) is placed here, right after
+        // any hidden `this` and right before every declared parameter -
+        // exactly where the frontend itself puts it in `arguments[]`, and
+        // exactly `firstExplicit` in `buildMoves`, so it shares that
+        // function's reversed-or-forward group with the declared
+        // parameters and the extra arguments added after them.
+        if (hasVArguments)
+            addArgument(
+                dVariadicArgumentsIsSlice ? sliceArgument : pointerArgument);
 
         foreach (i; 0 .. count) {
             // A `ref` parameter occupies a pointer slot in the caller's
@@ -1038,10 +1112,7 @@ private CallPlan prepareCommon(
                 plan._hostName = function_.toString.idup;
             }
             addArgument(isRef
-                ? ArgumentPlan(
-                    [Register(Register.Kind.pointer, 8), Register.init], 1,
-                    false,
-                )
+                ? pointerArgument
                 : storageClass & STC.lazy_
                     ? ArgumentPlan(
                         [

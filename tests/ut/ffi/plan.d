@@ -1973,7 +1973,15 @@ private VariadicCallSite variadicCallSiteOf(FuncDeclaration wrapper) {
     assert(call !is null && call.f !is null,
         "Expected a resolved call in `" ~ wrapper.toString ~ "`");
 
-    const declaredCount = call.f.type.isTypeFunction.parameterList.length;
+    // An `extern(D)` untyped variadic call site (issue #334 step 6) has
+    // one more leading argument than its declaration's own parameter
+    // count: the frontend's own `_arguments` (`isDstyleVariadic`'s own
+    // doc), ahead of every declared parameter. The extra, variadic
+    // arguments this call site's own plan needs start past that, not
+    // past the declared parameter count alone.
+    auto calleeType = call.f.type.isTypeFunction;
+    const declaredOffset = calleeType.isDstyleVariadic ? 1 : 0;
+    const declaredCount = declaredOffset + calleeType.parameterList.length;
     Type[] extraTypes;
     foreach (i; declaredCount .. call.arguments.length)
         extraTypes ~= (*call.arguments)[i].type;
@@ -2222,22 +2230,263 @@ unittest {
 }
 
 
-// D's own variadic kinds - untyped `_arguments` here, always
-// `extern(D)` - stay refused (issue #334 step 6 is untyped D variadics;
-// typesafe D variadics remain unimplemented). `CallPlan.prepare`'s own
-// message says why, rather than merely that the call was refused.
-@("called.variadic.externDRefused")
+// D's own untyped variadic kind (issue #334 step 6): `extern(D)`
+// linkage, `...`. The frontend inserts the call's own `_arguments` - a
+// `TypeInfo_Tuple` reference - as a leading argument ahead of every
+// declared parameter (`dmd.mtype.TypeFunction.isDstyleVariadic`'s own
+// doc; ADR-0010's D variadic paragraph). Every host `extern(D)` variadic
+// function's own prologue reads `v_arguments.elements` at entry
+// regardless of whether its body ever names `_arguments` (dmd's
+// `semantic3.d` declares and initialises both hidden locals whenever
+// `f.parameterList.varargs == VarArg.variadic && f.linkage == LINK.d`,
+// unconditionally) - so even this plan-level test, which never inspects
+// `_arguments` itself, still has to hand the callee a real `TypeInfo_
+// Tuple`, never a dummy or null pointer, or the callee's own prologue
+// would dereference garbage. `snakebite_ut_dvariadic_count_sum` reads
+// its extra arguments through `core.stdc.stdarg` directly, the same way
+// the `extern(C)` variadic callees above do - `core.vararg` is the same
+// mechanism, re-exported (verified: `core.vararg` is `public import
+// core.stdc.stdarg;` plus one `TypeInfo`-driven overload this callee
+// does not need) - since only the leading `_arguments` argument and its
+// register-assignment position differ from a C-style variadic call, not
+// how `_argptr`/`va_arg` work on this ABI.
+pragma(mangle, "snakebite_ut_dvariadic_count_sum")
+private extern(D) int snakebite_ut_dvariadic_count_sum(int count, ...) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, count);
+    int total;
+    foreach (i; 0 .. count)
+        total += va_arg!int(args);
+    va_end(args);
+    return total;
+}
+
+
+// A real `TypeInfo_Tuple` naming `elements` - the shape `v_arguments.
+// elements` reads at every `extern(D)` variadic callee's own entry
+// (`snakebite_ut_dvariadic_count_sum`'s own doc above).
+private TypeInfo_Tuple typeInfoTupleOf(TypeInfo[] elements) {
+    auto info = new TypeInfo_Tuple;
+    info.elements = elements;
+    return info;
+}
+
+
+// Seven `int`s past `count`: six fill the integer register file and the
+// seventh spills - but `_arguments` and `count` themselves compete for
+// those same six registers too, so this is also the first test to
+// exercise `_arguments` actually sharing `CallPlan.buildMoves`'s
+// register-assignment loop with the declared parameters and the extra
+// arguments - a wrong `hasVArguments` position in `CallPlan.
+// prepareCommon` would either crash the real, compiled callee below or
+// return the wrong sum, not silently pass.
+@("called.variadic.externD.sevenIntsSpillTheIntegerFile")
 unittest {
-    auto guestModule = parseSnippet(q{
-        extern(D) int snakebite_ut_extern_d_variadic(int x, ...);
-    });
-    auto function_ =
-        findFunction(guestModule, "snakebite_ut_extern_d_variadic");
-    assert(function_ !is null,
-        "No `snakebite_ut_extern_d_variadic` in the guest program");
+    auto site = variadicCallSite(q{
+        pragma(mangle, "snakebite_ut_dvariadic_count_sum")
+        extern(D) int nativeCountSum(int count, ...);
+
+        int answer() {
+            return nativeCountSum(7, 1, 2, 3, 4, 5, 6, 7);
+        }
+    }, "answer");
 
     PlanCache cache;
-    const thrown = cache.of(function_).shouldThrow;
+    TypeInfo[7] elementTypes = [
+        typeid(int), typeid(int), typeid(int), typeid(int),
+        typeid(int), typeid(int), typeid(int),
+    ];
+    auto vArguments = typeInfoTupleOf(elementTypes[]);
 
-    thrown.msg.canFind("extern(C)").should == true;
+    int count = 7;
+    int[7] values = [1, 2, 3, 4, 5, 6, 7];
+    void*[9] arguments;
+    arguments[0] = &vArguments;
+    arguments[1] = &count;
+    foreach (i, ref value; values)
+        arguments[2 + i] = &value;
+
+    int result;
+    cache.variadicOf(site.function_, site.extraArgumentTypes)
+        .call(&result, arguments[]);
+
+    result.should == 28;
+}
+
+
+// The same `extern(D)` untyped variadic callee at two call sites that
+// pass a different number of extra arguments - as `called.variadic.
+// sameCalleeTwoCallSitesDifferentArgumentCounts` above, but for the D
+// kind: one plan per call site, never one plan shared by declaration.
+@("called.variadic.externD.sameCalleeTwoCallSitesDifferentArgumentCounts")
+unittest {
+    auto guestModule = parseSnippet(q{
+        pragma(mangle, "snakebite_ut_dvariadic_count_sum")
+        extern(D) int nativeCountSum(int count, ...);
+
+        int callWithOne() {
+            return nativeCountSum(1, 41);
+        }
+
+        int callWithThree() {
+            return nativeCountSum(3, 1, 2, 3);
+        }
+    });
+
+    auto oneWrapper = findFunction(guestModule, "callWithOne");
+    auto threeWrapper = findFunction(guestModule, "callWithThree");
+    assert(oneWrapper !is null && threeWrapper !is null,
+        "No `callWithOne`/`callWithThree` in the guest program");
+
+    auto siteOne = variadicCallSiteOf(oneWrapper);
+    auto siteThree = variadicCallSiteOf(threeWrapper);
+
+    PlanCache cache;
+
+    TypeInfo[1] oneElementTypes = [typeid(int)];
+    auto vArgumentsOne = typeInfoTupleOf(oneElementTypes[]);
+    int countOne = 1;
+    int valueOne = 41;
+    int resultOne;
+    cache.variadicOf(siteOne.function_, siteOne.extraArgumentTypes).call(
+        &resultOne,
+        [
+            cast(const void*) &vArgumentsOne,
+            cast(const void*) &countOne,
+            cast(const void*) &valueOne,
+        ],
+    );
+
+    TypeInfo[3] threeElementTypes = [typeid(int), typeid(int), typeid(int)];
+    auto vArgumentsThree = typeInfoTupleOf(threeElementTypes[]);
+    int countThree = 3;
+    int[3] valuesThree = [1, 2, 3];
+    int resultThree;
+    cache.variadicOf(siteThree.function_, siteThree.extraArgumentTypes).call(
+        &resultThree,
+        [
+            cast(const void*) &vArgumentsThree,
+            cast(const void*) &countThree,
+            cast(const void*) &valuesThree[0],
+            cast(const void*) &valuesThree[1],
+            cast(const void*) &valuesThree[2],
+        ],
+    );
+
+    resultOne.should == 41;
+    resultThree.should == 6;
+    cache.preparations.should == 2;
+}
+
+
+// D's typesafe variadic kind (`T t...`, `VarArg.typesafe`): the frontend
+// packs a call site's trailing arguments into one array-typed argument
+// before this plan ever sees them (`snakebite.backends.calls.
+// arityMismatches`'s own doc), so it needs no per-call-site plan and no
+// `_arguments` - it classifies like any other declared parameter,
+// through the ordinary `PlanCache.of`, and is no longer refused
+// (`CallPlan.prepareCommon`'s own refusal now names only `VarArg.
+// variadic`).
+pragma(mangle, "snakebite_ut_dvariadic_typesafe_sum")
+private extern(D) int snakebite_ut_dvariadic_typesafe_sum(int[] a...) {
+    int total;
+    foreach (value; a)
+        total += value;
+    return total;
+}
+
+
+@("called.variadic.externD.typesafeSlice")
+unittest {
+    auto guestModule = parseSnippet(q{
+        pragma(mangle, "snakebite_ut_dvariadic_typesafe_sum")
+        extern(D) int nativeSum(int[] a...);
+
+        int answer() {
+            return nativeSum(3, 4, 5);
+        }
+    });
+    auto function_ = findFunction(guestModule, "answer");
+    assert(function_ !is null, "No `answer` in the guest program");
+    auto call = returnStatementIn(function_.fbody).exp.isCallExp;
+    assert(call !is null && call.f !is null,
+        "Expected a resolved call in `answer`");
+
+    PlanCache cache;
+    int[3] values = [3, 4, 5];
+    int[] slice = values[];
+    int result;
+    cache.of(call.f).call(&result, [cast(const void*) &slice]);
+
+    result.should == 12;
+}
+
+
+// A struct extra argument, alongside a declared pointer parameter: the
+// SysV eightbyte classification for both has to agree with what the
+// real, compiled callee's own `_argptr`/register-save-area machinery
+// expects. `elementTypes` below is `typeid(PlanPoint)` - a real, host-
+// compiled `TypeInfo_Struct`, not the fabricated one `snakebite.
+// backends.runtimetypes.RuntimeTypes.structInfo`'s own `setSysVArgTypes`
+// builds for a *guest*-declared struct - so this plan-level test checks
+// only the ABI placement `CallPlan` itself computes, never that
+// fabrication; `ut.backends.call.ffi`'s own `variadic.externD.
+// guestStructTsizeAndBytes` is what exercises `setSysVArgTypes`, through
+// a guest-declared struct, end to end.
+pragma(mangle, "snakebite_ut_dvariadic_struct_sum")
+private extern(D) int snakebite_ut_dvariadic_struct_sum(
+    ubyte* dest, ...
+) {
+    import core.vararg;
+
+    auto info = _arguments[0];
+    va_arg(_argptr, info, dest);
+    return 0;
+}
+
+
+private struct PlanPoint {
+    int x;
+    int y;
+}
+
+
+@("called.variadic.externD.structArgumentPlacement")
+unittest {
+    auto site = variadicCallSite(q{
+        struct GuestPoint {
+            int x;
+            int y;
+        }
+
+        pragma(mangle, "snakebite_ut_dvariadic_struct_sum")
+        extern(D) int copyStruct(ubyte* dest, ...);
+
+        int answer() {
+            ubyte[8] buffer;
+            GuestPoint point;
+            point.x = 3;
+            point.y = 4;
+            return copyStruct(buffer.ptr, point);
+        }
+    }, "answer");
+
+    PlanCache cache;
+    TypeInfo[1] elementTypes = [typeid(PlanPoint)];
+    auto vArguments = typeInfoTupleOf(elementTypes[]);
+
+    ubyte[8] destBuffer;
+    ubyte* destPtr = destBuffer.ptr;
+    PlanPoint point = PlanPoint(3, 4);
+
+    int result;
+    cache.variadicOf(site.function_, site.extraArgumentTypes).call(&result, [
+        cast(const void*) &vArguments,
+        cast(const void*) &destPtr,
+        cast(const void*) &point,
+    ]);
+
+    (cast(int[]) destBuffer[]).should == [3, 4];
 }
