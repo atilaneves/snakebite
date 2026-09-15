@@ -44,12 +44,21 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.backends.classinfo;
     import snakebite.backends.bytecode.vm: Function, Vm;
     import snakebite.backends.layout: FrameLayout;
+    import snakebite.sharedtable: SharedTable;
     import snakebite.exception: SnakebiteException;
     import snakebite.framestack: defaultFrameCapacity;
+    import snakebite.hostthreads: PerThread;
     import snakebite.nativelayout: NativeData, nativeSymbolName;
     import snakebite.backends.runtimetypes: RuntimeTypes;
 
-    private Vm _vm;
+    // One VM per thread: it owns that thread's frame stack (ADR-0006).
+    // Every thread, including the one that constructed this backend,
+    // gets its VM through the same lookup, on its first entry, and
+    // keeps it until it ends (finding 2.1: compiled D gives the
+    // constructing thread no special path either). Everything else in
+    // this class is built under the compiler lock and read without it
+    // after.
+    private PerThread!(Vm*) _vms;
     private NativeData _nativeData;
     private PlanCache _plans;
     private CallSelection _callSelection;
@@ -80,23 +89,18 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // The frame layout of every guest function reached through
     // `runHostToGuest`, built once per declaration and shared by the
     // program runner's top-level call and a callback's re-entry.
-    private FrameLayout[FuncDeclaration] _hostLayouts;
-    // The thread that owns the VM's frame stack (issue #40) - set once
-    // at construction, the same way the interpreter's `Evaluator` does.
-    // `callGuestFromHost` rejects a call from any other thread before it
-    // touches `_vm`, instead of two such calls racing on it.
-    private imported!"core.thread".ThreadID _ownerThread;
+    // `SharedTable` (not a plain AA): several threads reach this cache
+    // through the same object, one thread's call and another thread's
+    // callback among them (ADR-0006).
+    private SharedTable!(FuncDeclaration, FrameLayout) _hostLayouts;
 
     public this(const Program program) {
-        import core.thread: Thread;
-
         super(program);
         _nativeData = NativeData(&constantSymbolAddress);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
-        _vm = Vm(defaultFrameCapacity);
-        _ownerThread = Thread.getThis.id;
+        _vms = PerThread!(Vm*)(() => new Vm(defaultFrameCapacity));
         _plans.useCallbacks(
             new CallbackBridge(&invokeCallback, cast(void*) this));
     }
@@ -124,7 +128,19 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         void* returnPlace,
         void*[] args,
     ) {
-        runHostToGuest(function_, returnPlace, args);
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        // `compileFunction` walks dmd's AST and calls dmd frontend semantic
+        // helpers (`Type.size`, `toInteger`, `defaultInit`, ...) that
+        // memoise onto process-global, dmd-owned objects (e.g. `Type`
+        // singletons shared across every module). Two `bin/ut` threads
+        // compiling unrelated guest functions at once can race on that
+        // shared state, corrupting it for both - the same reason the CTFE
+        // and interpreter backends serialise their own dmd-touching entry
+        // points on this lock.
+        const(Function)* compiled;
+        withCompilerLock({ compiled = compileFunction(function_); });
+        runHostToGuest(compiled, function_, returnPlace, args);
     }
 
     // The bytecode backend's one host-to-guest entry. The program
@@ -142,65 +158,69 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     //
     // A `ref`-returning callee hands back the result's own address, not
     // its value - the same word compiled D returns in `rax`.
+    //
+    // `compiled` is already built, and `function_`'s frame layout below
+    // is read from a cache built under the compiler lock the first time
+    // any thread needs it (`hostLayoutOf`): binding `args` into
+    // `Vm.HostArgument`s and running the compiled body touch no dmd
+    // state, so this takes no lock of its own. A thread that held the
+    // compiler lock here while it waited for another thread's callback -
+    // the way `Thread.join` waits in `otherThread`/`concurrentThreads`
+    // guest code - would never see that callback return, since the
+    // callback's own slow path (`hostLayoutOf`'s miss branch) needs that
+    // same, recursive lock to build a layout the first time (ADR-0006).
     private void runHostToGuest(
+        const(Function)* compiled,
         FuncDeclaration function_,
         void* returnPlace,
         scope const(void*)[] args,
     ) {
-        import snakebite.frontend.compiler: withCompilerLock;
+        const layout = hostLayoutOf(function_);
+        layout.checkHostArgumentCount(args.length, function_, "bytecode");
 
-        withCompilerLock({
-            auto layout = hostLayoutOf(function_);
-            layout.checkHostArgumentCount(args.length, function_, "bytecode");
+        Vm.HostArgument[16] inlineArguments = void;
+        const count = layout.parameters.length
+            + (layout.hiddenThis.variable !is null);
+        auto arguments = count <= inlineArguments.length
+            ? inlineArguments[0 .. count] : new Vm.HostArgument[count];
+        size_t filled;
 
-            // `compileFunction` walks dmd's AST and calls dmd frontend
-            // semantic helpers (`Type.size`, `toInteger`, `defaultInit`,
-            // ...) that memoise onto process-global, dmd-owned objects
-            // (e.g. `Type` singletons shared across every module). Two
-            // `bin/ut` threads compiling unrelated guest functions at
-            // once can race on that shared state, corrupting it for both
-            // - the same reason the CTFE and interpreter backends
-            // serialise their own dmd-touching entry points on this
-            // lock. `_vm.call` itself only runs already-compiled
-            // bytecode, but it is kept inside the lock too so a
-            // lazily-compiled callee reached through a native callback
-            // (`invokeCallback`) reenters the same, recursive mutex
-            // rather than a fresh one.
-            auto compiled = compileFunction(function_);
+        scope const(void*)[] declaredArguments = args;
+        if (layout.hiddenThis.variable !is null) {
+            arguments[filled++] = Vm.HostArgument(
+                layout.hiddenThis.parameter.offset, args[0],
+                size_t.sizeof,
+            );
+            declaredArguments = args[1 .. $];
+        }
 
-            Vm.HostArgument[16] inlineArguments = void;
-            const count = layout.parameters.length
-                + (layout.hiddenThis.variable !is null);
-            auto arguments = count <= inlineArguments.length
-                ? inlineArguments[0 .. count] : new Vm.HostArgument[count];
-            size_t filled;
+        foreach (i, parameter; layout.parameters)
+            arguments[filled++] = Vm.HostArgument(
+                parameter.offset, declaredArguments[i],
+                parameter.facts.size);
 
-            scope const(void*)[] declaredArguments = args;
-            if (layout.hiddenThis.variable !is null) {
-                arguments[filled++] = Vm.HostArgument(
-                    layout.hiddenThis.parameter.offset, args[0],
-                    size_t.sizeof,
-                );
-                declaredArguments = args[1 .. $];
-            }
-
-            foreach (i, parameter; layout.parameters)
-                arguments[filled++] = Vm.HostArgument(
-                    parameter.offset, declaredArguments[i],
-                    parameter.facts.size);
-
-            _vm.call(*compiled, returnPlace, arguments[0 .. filled]);
-        });
+        _vms.current.call(*compiled, returnPlace, arguments[0 .. filled]);
     }
 
-    // `function_`'s frame layout, cached: both host-to-guest entries
-    // share this cache instead of each keeping its own.
+    // `function_`'s frame layout, read without a lock once built
+    // (ADR-0006): both host-to-guest entries share this cache instead of
+    // each keeping its own, and its value is a pure function of the
+    // declaration, worked out under the compiler lock the first time any
+    // thread needs it.
     private const(FrameLayout)* hostLayoutOf(FuncDeclaration function_) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
         if (auto found = function_ in _hostLayouts)
             return found;
 
-        _hostLayouts[function_] = FrameLayout.of(function_);
-        return function_ in _hostLayouts;
+        const(FrameLayout)* layout;
+        withCompilerLock({
+            layout = function_ in _hostLayouts;
+            if (layout is null)
+                layout = _hostLayouts.insert(
+                    function_, FrameLayout.of(function_));
+        });
+        return layout;
     }
 
     public override string eval(FuncDeclaration function_) {
@@ -238,23 +258,14 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // The re-entry a pool entry (ADR-0003) reaches when host code calls a
     // guest function pointer or delegate. It shares `runHostToGuest` with
     // the program runner's top-level call: neither binds arguments on its
-    // own. A `Throwable` the body throws unwinds through the host frames
-    // untouched (ADR-0004).
+    // own, and `call.function_` - the word `registerGuestWord` recorded
+    // when the callee was first compiled - is already built, so this
+    // takes no compiler lock of its own, on whichever thread's VM is
+    // calling (ADR-0006). A `Throwable` the body throws unwinds through
+    // the host frames untouched (ADR-0004).
     private void callGuestFromHost(CallbackCall* call) {
-        import core.thread: Thread;
-
-        // `_vm`'s frame stack belongs to `_ownerThread` alone. Without
-        // this check, a callback from another thread would wait on
-        // `withCompilerLock` forever whenever this thread already holds
-        // it for an outer `call` - the recursive mutex only lets the
-        // owner back in (issue #40).
-        if (Thread.getThis.id != _ownerThread)
-            throw new SnakebiteException(
-                "bytecode callback called on a thread that does not "
-                    ~ "own its compiler (see issue #40)",
-            );
-
-        runHostToGuest(call.declaration, call.returnPlace, call.arguments);
+        runHostToGuest(cast(const(Function)*) call.function_,
+            call.declaration, call.returnPlace, call.arguments);
     }
 
     // The prepared FFI plan for druntime's own `gc_malloc`, the real
@@ -264,24 +275,32 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // signature this module hardcodes: the VM that runs the plan reads
     // it back only as an opaque `CallSite.native` payload.
     package const(void)* allocatorPlan() {
-        if (_allocatorPlan is null) {
-            _allocatorPlan = _plans.rawPlanOf(
-                "gc_malloc",
-                [
-                    Register(Register.Kind.unsigned, 8),
-                    Register(Register.Kind.unsigned, 4),
-                    Register(Register.Kind.pointer, 8),
-                ],
-                Register(Register.Kind.pointer, 8),
-            );
-            if (_allocatorPlan is null)
-                throw new SnakebiteException(
-                    "bytecode compiler cannot resolve druntime's " ~
-                        "`gc_malloc`",
-                );
-        }
+        import core.atomic: atomicLoad, atomicStore, MemoryOrder;
 
-        return _allocatorPlan;
+        if (auto found = atomicLoad!(MemoryOrder.acq)(_allocatorPlan))
+            return found;
+
+        // `rawPlanOf` hands back the same address for "gc_malloc" no
+        // matter which thread asks (`PlanCache._rawPlans` is a
+        // `SharedTable`, ADR-0006), so two threads racing here store the
+        // same value; the store just needs to be visible to a later
+        // reader.
+        auto plan = _plans.rawPlanOf(
+            "gc_malloc",
+            [
+                Register(Register.Kind.unsigned, 8),
+                Register(Register.Kind.unsigned, 4),
+                Register(Register.Kind.pointer, 8),
+            ],
+            Register(Register.Kind.pointer, 8),
+        );
+        if (plan is null)
+            throw new SnakebiteException(
+                "bytecode compiler cannot resolve druntime's " ~
+                    "`gc_malloc`",
+            );
+        atomicStore!(MemoryOrder.rel)(_allocatorPlan, plan);
+        return plan;
     }
 
     // The native metadata a guest class needs at run time: an instance
@@ -297,7 +316,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         import snakebite.backends.classinfo:
             classRuntimeInfo_ = classRuntimeInfo, Hooks;
 
-        return classRuntimeInfo_(
+        if (auto found = _classRuntime.find(declaration))
+            return *found;
+
+        return _classRuntime.build(() => classRuntimeInfo_(
             declaration,
             _classRuntime,
             Hooks(
@@ -305,7 +327,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 &fillFieldInits,
                 &_runtimeTypes.linkedClassInfo,
             ),
-        );
+        ));
     }
 
     private void* methodAddress(FuncDeclaration method, ptrdiff_t adjustment) {
@@ -468,7 +490,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opTemporaryRegister, opTemporarySuspend,
         opSliceCopy, opSliceFill,
         opStaticAddress, opStaticArrayEqual, opStaticLoad, opStaticStore,
-        opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero;
+        opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero,
+        opTlsAddress, opTlsLoad, opTlsStore;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf;
     import snakebite.frontend.dmd.delegates:
@@ -2128,8 +2151,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         );
     }
 
+    // For a `shared`/`__gshared` variable, the storage address itself -
+    // stable for the process, so a compile-time constant. For a
+    // thread-local variable, the address of its `TlsDescriptor` instead
+    // (finding 1.3): `opTls*` resolves that, on every access, to
+    // whichever thread is running - never this compiling thread's own
+    // storage, which is what a resolved address here would bake in.
     private size_t staticAddressOf(VarDeclaration variable) {
+        if (variable.isThreadlocal)
+            return cast(size_t) _bytecode._nativeData.tlsDescriptorOf(variable);
         return cast(size_t) _bytecode._nativeData.storageOf(variable).ptr;
+    }
+
+    private Instruction.Handler staticLoadHandler(VarDeclaration variable) {
+        return variable.isThreadlocal ? &opTlsLoad : &opStaticLoad;
+    }
+
+    private Instruction.Handler staticStoreHandler(VarDeclaration variable) {
+        return variable.isThreadlocal ? &opTlsStore : &opStaticStore;
+    }
+
+    private Instruction.Handler staticAddressHandler(VarDeclaration variable) {
+        return variable.isThreadlocal ? &opTlsAddress : &opStaticAddress;
     }
 
     // A plain `=` to a local or parameter. `destOffset` is where the
@@ -2159,7 +2202,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t sourceOffset,
         in size_t width,
     ) {
-        emit(&opStaticStore, staticAddressOf(variable), sourceOffset, width);
+        emit(staticStoreHandler(variable), staticAddressOf(variable), sourceOffset, width);
     }
 
     // Whether a bare identifier names a field reached implicitly through
@@ -2956,7 +2999,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destinationOffset,
         in size_t width,
     ) {
-        emit(&opStaticLoad, destinationOffset, staticAddressOf(variable), width);
+        emit(staticLoadHandler(variable), destinationOffset, staticAddressOf(variable), width);
     }
 
     private Instruction.Handler compoundHandler(
@@ -3282,7 +3325,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private size_t compileStaticAddress(VarDeclaration variable) {
         const addressOffset = reserveTemp(pointerFacts);
-        emit(&opStaticAddress, addressOffset,
+        emit(staticAddressHandler(variable), addressOffset,
             staticAddressOf(variable), size_t.sizeof);
         return addressOffset;
     }

@@ -13,16 +13,26 @@ import snakebite.callarguments: CallArguments;
 public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.backends.backend: Program;
+    import snakebite.ffi: CallbackBridge, CallbackCall;
+    import snakebite.hostthreads: PerThread;
 
-    // The one evaluator this backend ever creates: it owns the frame
-    // stack and the per-function layout cache, both of which must
-    // outlive any single call to stay warm across calls. `call` is a
-    // thin adapter onto it.
-    private Evaluator _evaluator;
+    // What every thread that runs this program shares: the caches that
+    // are filled once per key, and the plan cache with its callback
+    // bridge (ADR-0006).
+    private Shared* _shared;
+    // One evaluator per thread: it owns that thread's frame stack and
+    // execution state. Every thread, including the one that constructed
+    // this backend, gets its evaluator through the same lookup, on its
+    // first entry, and keeps it until it ends (ADR-0006, finding 2.1:
+    // compiled D gives the constructing thread no special path either).
+    private PerThread!Evaluator _evaluators;
 
     public this(const Program program) {
         super(program);
-        _evaluator = new Evaluator(program);
+        _shared = new Shared(program);
+        _shared.plans.useCallbacks(
+            new CallbackBridge(&invokeCallback, cast(void*) this));
+        _evaluators = PerThread!Evaluator(() => new Evaluator(_shared));
     }
 
     public override void call(
@@ -30,7 +40,23 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         void* returnPlace,
         void*[] args,
     ) {
-        _evaluator.call(function_, returnPlace, args);
+        evaluator.call(function_, returnPlace, args);
+    }
+
+    // The evaluator of the calling thread: made on its first entry, and
+    // kept until it ends.
+    private Evaluator evaluator() {
+        return _evaluators.current;
+    }
+
+    // The re-entry a pool entry (ADR-0003) reaches when host code calls
+    // a guest function pointer or delegate, from any thread (ADR-0006).
+    extern(C) private static void invokeCallback(
+        void* context,
+        CallbackCall* call,
+    ) {
+        auto interpreter = cast(Interpreter) context;
+        interpreter.evaluator.callGuestFromHost(call);
     }
 
     public override string eval(FuncDeclaration function_) {
@@ -39,19 +65,22 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         return result;
     }
 
+    // These read the calling thread's own evaluator: correct for a
+    // `version(unittest)` caller, which reads its own counters on the
+    // same thread that made the calls being counted.
     version(unittest)
-    public size_t nameLookups() @safe @nogc nothrow pure const scope {
-        return _evaluator.nameLookups();
+    public size_t nameLookups() {
+        return _evaluators.current.nameLookups();
     }
 
     version(unittest)
-    public size_t typeLookups() @safe @nogc nothrow pure const scope {
-        return _evaluator.typeLookups();
+    public size_t typeLookups() {
+        return _evaluators.current.typeLookups();
     }
 
     version(unittest)
-    public size_t symbolLookups() @safe @nogc nothrow pure const scope {
-        return _evaluator.symbolLookups();
+    public size_t symbolLookups() {
+        return _evaluators.current.symbolLookups();
     }
 
     // Frame layouts built on this thread - by this evaluator or by any
@@ -89,17 +118,180 @@ import snakebite.backends.controlflow: ControlFlowState,
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.backends.fullexpression: FullExpressionKind;
 
+// The state one program's evaluators share, whichever thread they run
+// on (ADR-0006). Every table here is filled once per key under the
+// compiler lock and read without a lock after that, so the only thing an
+// evaluator keeps for itself is its own execution state.
+private struct Shared {
+    import dmd.dclass: ClassDeclaration;
+    import dmd.declaration: Declaration;
+    import dmd.func: FuncDeclaration;
+    import dmd.mtype: Type;
+    import dmd.statement: Catch;
+    import snakebite.backends.backend: Program;
+    import snakebite.backends.calls: CallSelection;
+    import snakebite.backends.classinfo: ClassRuntimeCache;
+    import snakebite.backends.layout: ClosureLayout, FrameLayout;
+    import snakebite.backends.runtimetypes: RuntimeTypes;
+    import snakebite.backends.staticchain: Hop;
+    import snakebite.ffi: PlanCache;
+    import snakebite.nativelayout: NativeData, TypeFacts;
+    import snakebite.sharedtable: SharedTable;
+
+    // The program being run: its `isInterpreted` is the one decision for
+    // whether a callee is walked or called natively.
+    const Program program;
+    NativeData nativeData;
+    RuntimeTypes runtimeTypes;
+    // How to reach each already-compiled function this guest calls,
+    // worked out on that function's first call and reused by every call
+    // after it.
+    PlanCache plans;
+    // Whether a callee's own body is preferred does not change while a
+    // program runs. Call-site decisions stay with the evaluator: delegate
+    // arguments and the active nesting context are checked per call.
+    CallSelection callSelection;
+    ClassRuntimeCache classRuntime;
+    // The reverse of `classRuntime`: which declaration a generated
+    // `TypeInfo_Class` stands for. An object's own dynamic type is read
+    // straight out of its native layout (word 0's vtable, slot 0 - the
+    // same place a real compiled object keeps its `classinfo`), the same
+    // way the bytecode VM reads it; this is the one place that answer
+    // needs to travel back to the `ClassDeclaration` this backend still
+    // dispatches virtual calls and `DeleteExp`'s destructor through. A
+    // native object's own dynamic type is never a key here, since only
+    // `classRuntimeInfo` below ever inserts one - that absence is how a
+    // native receiver is told apart from a guest one. Keyed by the
+    // `TypeInfo_Class` object's own address: `TypeInfo` compares and
+    // hashes by name, and a native class can share a guest class's fully
+    // qualified name (a root module also linked into this process), so a
+    // name-keyed table would answer a native object with the guest
+    // declaration.
+    SharedTable!(const(void)*, ClassDeclaration) declarationOf;
+    // Each guest function's frame layout, computed on that function's
+    // first call and reused by every call after it.
+    SharedTable!(FuncDeclaration, FrameLayout) layouts;
+    // The FFI call adapter for a guest callee's own signature: whether it
+    // returns by `ref`, and whether each declared parameter passes an
+    // address or a value. `FrameLayout` describes storage, not the
+    // calling convention layered on top of it, so this stays its own
+    // table beside `layouts` - the bytecode compiler never reads a
+    // `FuncDeclaration`'s call adapter at all, only an evaluator does,
+    // on every call.
+    SharedTable!(FuncDeclaration, CallShape) calls;
+    // Storage for locals that dmd moves out of an activation frame when
+    // it decides that the frame must survive its call.
+    SharedTable!(FuncDeclaration, ClosureLayout) closures;
+    // DMD's closure analysis is stable after semantic analysis. Keep both
+    // answers so execution does not repeat the same AST walk for
+    // functions that stay in this program.
+    SharedTable!(FuncDeclaration, bool) needsClosure;
+    // The static-chain hops from one function's frame to an enclosing
+    // function's context, keyed by that pair. Working the hops out builds
+    // the frame layout of every function on the way, so it is done once
+    // per pair and read back on every reach of a captured variable.
+    SharedTable!(StaticChainKey, Hop[]) staticChains;
+    // Each catch clause's own runtime type, resolved the first time
+    // `visit(TryCatchStatement)` reaches it and reused by every throw
+    // that later unwinds through it.
+    SharedTable!(Catch, TypeInfo_Class) catchTypes;
+    // Every dmd `Type` any evaluator has ever asked dmd about, keyed by
+    // the `Type` node itself: `Type.size`/`alignsize`/`isIntegral`/
+    // `isUnsigned` are pure functions of the type, re-entering dmd's
+    // semantic-analysis machinery every call, so this asks each of them
+    // once per distinct `Type`. Not per-function like `layouts`: a `Type`
+    // such as `int` is dmd's own shared, interned instance, so the same
+    // entry serves every function that mentions it.
+    SharedTable!(Type, TypeFacts) typeFacts;
+
+    this(const Program program) {
+        this.program = program;
+        nativeData = NativeData(&constantSymbolAddress);
+        runtimeTypes = RuntimeTypes(&this.program.isRootOwned,
+            (name) => plans.resolve(name),
+            &classRuntimeInfo,
+            (type, loc) => nativeData.initialValue(type, loc));
+    }
+
+    private void* constantSymbolAddress(Declaration symbol) {
+        import snakebite.nativelayout: nativeSymbolName;
+
+        if (auto function_ = symbol.isFuncDeclaration) {
+            plans.registerGuestFunction(cast(void*) function_, function_);
+            return cast(void*) function_;
+        }
+
+        return plans.resolve(nativeSymbolName(symbol));
+    }
+
+    // A guest class's native metadata. This vtable is real native layout
+    // that native code reaching a guest object can call through directly
+    // (an unoverridden base method, a template instantiated natively
+    // over a guest type, ...), and that an evaluator's own virtual call
+    // also reads directly, so every slot stays a real callable address,
+    // never a `FuncDeclaration` only an evaluator knows how to walk.
+    TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
+        import snakebite.backends.classinfo:
+            classRuntimeInfo_ = classRuntimeInfo, Hooks;
+
+        if (auto found = classRuntime.find(declaration))
+            return *found;
+
+        return classRuntime.build(() => classRuntimeInfo_(
+            declaration,
+            classRuntime,
+            Hooks(
+                &methodAddress,
+                (decl, base) => nativeData.fillFields(decl, base),
+                &runtimeTypes.linkedClassInfo,
+                (decl, info) {
+                    declarationOf.insert(cast(const(void)*) info, decl);
+                },
+            ),
+        ));
+    }
+
+    // A guest method's callable address for a class vtable slot: the
+    // callback pool entry for its own guest body, adjusted for the
+    // interface offset the vtable slot carries, or null for an abstract
+    // method. Program-wide, like the vtable slot itself (ADR-0006): a
+    // guest method's own callability does not depend on which thread
+    // asks for it.
+    private void* methodAddress(FuncDeclaration method, ptrdiff_t adjustment) {
+        import dmd.dsymbolsem: isAbstract;
+
+        if (method.isAbstract)
+            return null;
+        const(void)* word;
+        if (callSelection.usesGuestBody(method, null,
+                (callee) => program.isInterpreted(callee),
+                plans.hasNativeSymbol(method), "interpreter")) {
+            plans.registerGuestFunction(cast(void*) method, method);
+            word = cast(void*) method;
+        }
+        return plans.callableAddress(word, method, adjustment);
+    }
+}
+
+// `CallAdapter` paired with one `CallAdapter.Argument` per declared
+// parameter, parallel to `FrameLayout.parameters` - both are pure
+// functions of the same `FuncDeclaration`'s type, so both are worked
+// out from it together and kept in one table.
+private struct CallShape {
+    private imported!"snakebite.ffi".CallAdapter adapter;
+    private imported!"snakebite.ffi".CallAdapter.Argument[] arguments;
+}
+
 // The evaluation context: executes statements and evaluates expressions,
 // always into the current destination (`_type` bytes at `_place`),
 // resolving parameter reads against the currently executing function's
 // frame. One class covers statement and expression nodes both, so the
 // (type, place, frame) context lives in one spot instead of being copied
 // between visitor types. Any node kind it does not know throws, naming
-// the node, instead of silently doing nothing. It also owns the frame
-// stack and the per-function layout cache: both need to outlive any one
-// call to stay warm across calls, and this is the only place that ever
-// walks a call's frames, so there is nothing left for a separate
-// `Interpreter`-side cache to hold.
+// the node, instead of silently doing nothing. One evaluator serves one
+// thread (ADR-0006): it owns that thread's frame stack and execution
+// state, and reads every per-function answer from the `Shared` tables
+// the program's evaluators fill together.
 extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.backend: Program;
@@ -111,8 +303,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
     import snakebite.ffi:
-        CallAdapter, CallbackBridge, CallbackCall, CallPlan, CallResult,
-        PlanCache;
+        CallAdapter, CallbackCall, CallPlan, CallResult, PlanCache;
     import snakebite.ffi.abi: Register;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
@@ -145,74 +336,33 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         TryFinallyStatement, UnrolledLoopStatement, WithStatement;
     import dmd.tokens: EXP;
     import dmd.typesem: isIntegral, nextOf, toBasetype;
-    import core.thread: ThreadID;
     import snakebite.nativelayout: NativeData, nativeSymbolName;
     import snakebite.backends.runtimetypes: RuntimeTypes;
 
     alias visit = LoweringVisitor.visit;
 
-    // Every guest frame lives in this one frame stack, bump-allocated on
-    // call and popped on return. Frames never move; overflow throws
-    // loudly.
+    private Shared* _shared;
+    // Every guest frame this thread runs lives in this one frame stack,
+    // bump-allocated on call and popped on return. Frames never move;
+    // overflow throws loudly.
     private FrameStack _frames;
-    private NativeData _nativeData;
-    // Each guest function's frame layout, computed once on that
-    // function's first call (the cold path) and reused by every call
-    // after it.
+    private NativeData* _nativeData;
+    // This thread's reads of the shared tables, counted.
     private Cache!(FuncDeclaration, FrameLayout) _layouts;
-    // The FFI call adapter for a guest callee's own signature: whether it
-    // returns by `ref`, and whether each declared parameter passes an
-    // address or a value. `FrameLayout` describes storage, not the calling
-    // convention layered on top of it, so this stays its own cache beside
-    // `_layouts` rather than a field of it - the bytecode compiler never
-    // reads a `FuncDeclaration`'s call adapter at all, only this evaluator
-    // does, on every call.
     private Cache!(FuncDeclaration, CallShape) _calls;
-    // Storage for locals that dmd moves out of an activation frame when it
-    // decides that the frame must survive its call. The backing bytes are
-    // kept in `_allocations`, so a delegate can retain this context after
-    // the frame stack has popped the call.
+    // The backing bytes of a closure are kept in `_allocations`, so a
+    // delegate can retain this context after the frame stack has popped
+    // the call.
     private Cache!(FuncDeclaration, ClosureLayout) _closures;
-    // DMD's closure analysis is stable after semantic analysis. Keep both
-    // answers so execution does not repeat the same AST walk for functions
-    // that stay in this evaluator's program.
     private Cache!(FuncDeclaration, bool) _needsClosure;
-    // The static-chain hops from one function's frame to an enclosing
-    // function's context, keyed by that pair. Working the hops out builds
-    // the frame layout of every function on the way, so it is done once
-    // per pair and read back on every reach of a captured variable.
     private Cache!(StaticChainKey, Hop[]) _staticChains;
-    // Whether a callee's own body is preferred does not change while an
-    // evaluator runs. Keep it apart from call-site decisions: delegate
-    // arguments and the active nesting context still need to be checked
-    // for every call.
-    private CallSelection _callSelection;
+    private CallSelection* _callSelection;
     version(unittest) private size_t _staticLookups;
     // A guest pointer can live in an unscanned frame, so the evaluator keeps
     // each backing allocation reachable for as long as guest state can be.
     private ubyte[][] _allocations;
-    private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
-    // The reverse of `_classRuntime`: which declaration a generated
-    // `TypeInfo_Class` stands for. An object's own dynamic type is read
-    // straight out of its native layout (word 0's vtable, slot 0 - the
-    // same place a real compiled object keeps its `classinfo`), the same
-    // way the bytecode VM reads it; this is the one place that answer
-    // needs to travel back to the `ClassDeclaration` this backend still
-    // dispatches virtual calls and `DeleteExp`'s destructor through. A
-    // native object's own dynamic type is never a key here, since only
-    // `classRuntimeInfo` below ever inserts one - that absence is how a
-    // native receiver is told apart from a guest one. Keyed by the
-    // `TypeInfo_Class` object's own address: `TypeInfo` compares and
-    // hashes by name, and a native class can share a guest class's fully
-    // qualified name (a root module also linked into this process), so a
-    // name-keyed table would answer a native object with the guest
-    // declaration.
-    private ClassDeclaration[const(void)*] _declarationOf;
-    // Each catch clause's own runtime type, resolved once the first time
-    // `visit(TryCatchStatement)` reaches it and reused by every throw that
-    // later unwinds through it.
     private Cache!(Catch, TypeInfo_Class) _catchTypes;
-    private RuntimeTypes _runtimeTypes;
+    private RuntimeTypes* _runtimeTypes;
     // dmd gives every `arr[... $ ...]` a `lengthVar` declaration for its
     // `$`, which no statement declares and which therefore has no frame
     // slot - and needs none, since the length is a value `visit(IndexExp)`
@@ -229,11 +379,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // whether a callee is walked here or called natively, made on every
     // call this evaluator makes.
     private const Program _program;
-    // How to reach each already-compiled function this guest calls,
-    // worked out on that function's first call and reused by every call
-    // after it - the same cold-path-once shape as `_layouts`.
-    private PlanCache _plans;
-    private ThreadID _ownerThread;
+    private PlanCache* _plans;
     // A call expression is one call site, even when a loop visits it many
     // times. The plan cache remains the cold path; this side cache keeps
     // the prepared plan with the AST call site that uses it.
@@ -246,14 +392,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private CallSitePlan[] _callPlans;
     private CallSitePlan _lastCallSitePlan;
 
-    // Every dmd `Type` this evaluator has ever asked dmd about, keyed by
-    // the `Type` node itself: `Type.size`/`alignsize`/`isIntegral`/
-    // `isUnsigned` are pure functions of the type, re-entering dmd's
-    // semantic-analysis machinery every call, so this asks each of them
-    // once per distinct `Type` and every later visit of the same node
-    // reads the answer back out instead. Not per-function like
-    // `_layouts`: a `Type` such as `int` is dmd's own shared, interned
-    // instance, so the same entry serves every function that mentions it.
     private Cache!(Type, TypeFacts) _typeFacts;
     // Expression-scoped rvalues and temporary destructors have one owner.
     private TemporaryLifetime _temporaries;
@@ -300,22 +438,25 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // so every enclosing visitor can continue its normal statement sequence.
     private ControlFlowState _controlFlow;
     private SwitchStatement[] _switchStack;
-    // `extern(D)`: `Program` holds a dynamic array, which is not a valid
-    // member of an `extern(C++)` signature, and only `Visitor`'s `visit`
-    // overloads need that linkage.
-    extern(D) public this(const Program program) {
-        import core.thread: Thread;
-
-        _program = program;
-        _nativeData = NativeData(&constantSymbolAddress);
-        _runtimeTypes = RuntimeTypes(&_program.isRootOwned, &resolveTypeInfo,
-            (declaration) => classRuntimeInfo(declaration),
-            (type, loc) => _nativeData.initialValue(type, loc));
+    // `extern(D)`: only `Visitor`'s `visit` overloads need the C++
+    // linkage.
+    extern(D) public this(Shared* shared_) {
+        _shared = shared_;
+        _program = shared_.program;
+        _nativeData = &shared_.nativeData;
+        _runtimeTypes = &shared_.runtimeTypes;
+        _plans = &shared_.plans;
+        _callSelection = &shared_.callSelection;
+        _layouts = Cache!(FuncDeclaration, FrameLayout)(&shared_.layouts);
+        _calls = Cache!(FuncDeclaration, CallShape)(&shared_.calls);
+        _closures = Cache!(FuncDeclaration, ClosureLayout)(&shared_.closures);
+        _needsClosure = Cache!(FuncDeclaration, bool)(&shared_.needsClosure);
+        _staticChains =
+            Cache!(StaticChainKey, Hop[])(&shared_.staticChains);
+        _catchTypes = Cache!(Catch, TypeInfo_Class)(&shared_.catchTypes);
+        _typeFacts = Cache!(Type, TypeFacts)(&shared_.typeFacts);
         _frames = FrameStack(defaultFrameCapacity);
         _temporaries = new TemporaryLifetime(&destroyTemporary);
-        _ownerThread = Thread.getThis.id;
-        _plans.useCallbacks(
-            new CallbackBridge(&invokeCallback, cast(void*) this));
     }
 
     // Runs `function_` against a fresh top-level frame, mirroring the
@@ -326,31 +467,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // never called from C++ - only `Visitor`'s `visit` overloads need
     // that linkage.
     //
-    // Held for the whole call, not just the parts that reach into dmd's
-    // own state directly: a guest call can walk into a druntime hook
-    // (`~=`'s lowering, among others) whose body dmd has not finished
-    // analysing yet, and forcing that analysis (`layoutOf`) mutates
-    // `FuncDeclaration`/`Type` nodes another interpreter running on
-    // another thread can be reading at the very same moment, since those
-    // nodes are shared process-wide, not copied per snippet. The
-    // frontend has exactly one lock for exactly this reason - every
-    // other reach into it already goes through this same one - so a
-    // guest call, once it can reach dmd's own forward-reference
-    // machinery, joins that same one lock rather than adding a second
-    // one dmd's other callers do not know to take.
-    //
-    // This serialises every interpreted call in the process against
-    // every other one - accepted for now, not measured away: `bench/`
-    // runs one backend on one thread, so it cannot see the cost of two
-    // `Interpreter`s contending for this lock, only an uncontended
-    // mutex round trip per top-level call. The place this cost is real
-    // is concurrent guest execution - the test suite's own parallel
-    // runner is already that today, and a program's unittests running
-    // in parallel would be more of it. What would lift it: a pre-pass
-    // that walks the callee graph reachable from `function_` and forces
-    // `functionSemantic3` on all of it once, under the lock, before
-    // `execute` runs the body unlocked - not attempted here, since nothing
-    // has measured whether it is worth the surgery.
+    // The compiler lock is not held across the call (ADR-0006): every
+    // answer that needs dmd's own analysis is worked out on its own slow
+    // path, under that lock, and read back without it after
+    // (`Cache.build`). A thread that held the lock while it waited for
+    // another thread's callback would otherwise never see that callback
+    // return, since the callback's own slow paths need the same lock.
     extern(D) final void call(
         FuncDeclaration function_,
         void* returnPlace,
@@ -394,42 +516,48 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void* returnPlace,
         scope const(void*)[] args,
     ) {
-        import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
 
-        withCompilerLock({
-            auto layout = layoutOf(function_);
-            auto shape = callShapeOf(function_);
-            layout.checkHostArgumentCount(
-                args.length, function_, "interpreter");
-            auto frame = _frames.push(layout.size, layout.alignment);
+        // `layoutOf`/`callShapeOf` build under the compiler lock only on
+        // a cache miss (`Cache.build`) and are read without it after;
+        // `checkHostArgumentCount` and the binding below touch no dmd
+        // state. Nothing from here to the end of this function takes the
+        // compiler lock: a thread that held it while it waited for
+        // another thread's callback - the way `Thread.join` waits here in
+        // `otherThread`/`concurrentThreads` guest code - would never see
+        // that callback return, since the callback's own slow paths need
+        // this same lock (ADR-0006).
+        auto layout = layoutOf(function_);
+        auto shape = callShapeOf(function_);
+        layout.checkHostArgumentCount(
+            args.length, function_, "interpreter");
+        auto frame = _frames.push(layout.size, layout.alignment);
 
-            scope const(void*)[] declaredArguments = args;
-            if (layout.hiddenThis.variable !is null) {
-                storeIntegral(
-                    frame.base + layout.hiddenThis.parameter.offset,
-                    loadIntegral(args[0], size_t.sizeof, false),
-                    size_t.sizeof,
-                );
-                declaredArguments = args[1 .. $];
-            }
+        scope const(void*)[] declaredArguments = args;
+        if (layout.hiddenThis.variable !is null) {
+            storeIntegral(
+                frame.base + layout.hiddenThis.parameter.offset,
+                loadIntegral(args[0], size_t.sizeof, false),
+                size_t.sizeof,
+            );
+            declaredArguments = args[1 .. $];
+        }
 
-            try
-                _temporaries.withTemporaryLifetime({
-                    bindHostArguments(
-                        declaredArguments, frame.base, layout, shape);
-                    auto arguments = argumentSlots(frame.base, layout);
-                    _temporaries.withNestedCall({
-                        executeRaw(
-                            function_, returnPlace, frame.base, layout,
-                            null, arguments.values.ptr,
-                            arguments.values.length,
-                        );
-                    });
+        try
+            _temporaries.withTemporaryLifetime({
+                bindHostArguments(
+                    declaredArguments, frame.base, layout, shape);
+                auto arguments = argumentSlots(frame.base, layout);
+                _temporaries.withNestedCall({
+                    executeRaw(
+                        function_, returnPlace, frame.base, layout,
+                        null, arguments.values.ptr,
+                        arguments.values.length,
+                    );
                 });
-            catch (GuestException exception)
-                throw exception._guest;
-        });
+            });
+        catch (GuestException exception)
+            throw exception._guest;
     }
 
     extern(D) private void bindHostArguments(
@@ -487,13 +615,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return _plans.hasNativeSymbol(function_);
     }
 
-    // `function_`'s frame layout, from the cache; computed on its first
-    // call. The returned pointer aims into the cache and stays valid: AA
-    // entries do not move.
+    // `function_`'s frame layout, from the shared table; computed on its
+    // first call on any thread. The returned pointer stays valid and is
+    // the same on every thread.
     private const(FrameLayout)* layoutOf(FuncDeclaration function_) {
         if (auto cached = function_ in _layouts)
             return cached;
 
+        return _layouts.build(function_, () => buildLayout(function_));
+    }
+
+    extern(D) private FrameLayout buildLayout(FuncDeclaration function_) {
         // dmd only runs semantic3 - the pass that resolves a function
         // body's own locals, `newCapacity` and the rest of druntime's
         // append hooks among them - on a module passed to it as a *root*
@@ -516,39 +648,32 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // programs share the very same `FuncDeclaration` for - dmd's
         // frontend is one process-global mutable structure, not one
         // instance per snippet. Mutating its semantic state this way is
-        // safe only because `call` holds the frontend-wide compiler lock
-        // for the whole of a top-level call, the same lock every other
-        // reach into that structure already goes through - without it, a
-        // second interpreter forcing the same forward reference on
-        // another thread would race this one.
+        // safe only because `Cache.build` holds the frontend-wide
+        // compiler lock while this runs, the same lock every other reach
+        // into that structure already goes through - without it, a
+        // second thread forcing the same forward reference would race
+        // this one.
         import dmd.funcsem: functionSemantic3;
         functionSemantic3(function_);
 
-        _layouts[function_] = FrameLayout.of(function_);
-        return function_ in _layouts;
-    }
-
-    // `CallAdapter` paired with one `CallAdapter.Argument` per declared
-    // parameter, parallel to `FrameLayout.parameters` - both are pure
-    // functions of the same `FuncDeclaration`'s type, so both are worked
-    // out from it together and kept in this evaluator's own cache.
-    private static struct CallShape {
-        private CallAdapter adapter;
-        private CallAdapter.Argument[] arguments;
+        return FrameLayout.of(function_);
     }
 
     private const(CallShape)* callShapeOf(FuncDeclaration function_) {
         if (auto cached = function_ in _calls)
             return cached;
 
+        return _calls.build(function_, () => buildCallShape(function_));
+    }
+
+    extern(D) private CallShape buildCallShape(FuncDeclaration function_) {
         auto parameterList = typeFunctionOf(function_).parameterList;
         CallAdapter.Argument[] arguments;
         arguments.length = parameterList.length;
         foreach (i; 0 .. parameterList.length)
             arguments[i] = CallAdapter.Argument.of(parameterList[i]);
 
-        _calls[function_] = CallShape(CallAdapter.of(function_), arguments);
-        return function_ in _calls;
+        return CallShape(CallAdapter.of(function_), arguments);
     }
 
     private const(ClosureLayout)* closureLayoutOf(
@@ -557,8 +682,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (auto cached = function_ in _closures)
             return cached;
 
-        _closures[function_] = ClosureLayout.of(function_);
-        return function_ in _closures;
+        return _closures.build(function_, () => ClosureLayout.of(function_));
     }
 
     private ubyte* allocateClosure(
@@ -610,8 +734,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return _cachedFacts;
         }
 
-        const facts = TypeFacts.of(type);
-        _typeFacts[type] = facts;
+        const facts = *_typeFacts.build(type, () => TypeFacts.of(type));
         _cachedType = type;
         _cachedFacts = facts;
         return facts;
@@ -810,28 +933,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         callPlan(plan, null, arguments);
     }
 
-    extern(C) private static void invokeCallback(
-        void* context,
-        CallbackCall* call,
-    ) {
-        auto evaluator = cast(Evaluator) context;
-        evaluator.callGuestFromHost(call);
-    }
-
     // The re-entry a pool entry (ADR-0003) reaches when host code calls a
     // guest function pointer or delegate. It shares `runHostToGuest` with
     // the program runner's top-level call: neither binds arguments on its
-    // own. A `Throwable` the body throws unwinds through the host frames
+    // own. Runs on the calling thread's own evaluator, whichever thread
+    // that is (ADR-0006), and holds no lock: see `runHostToGuest`. A
+    // `Throwable` the body throws unwinds through the host frames
     // untouched (ADR-0004).
-    extern(D) private void callGuestFromHost(CallbackCall* call) {
-        import core.thread: Thread;
-
-        if (Thread.getThis.id != _ownerThread)
-            throw new SnakebiteException(
-                "interpreter callback called on a thread that does not "
-                    ~ "own its evaluator (see issue #40)",
-            );
-
+    extern(D) final void callGuestFromHost(CallbackCall* call) {
         runHostToGuest(call.declaration, call.returnPlace, call.arguments);
     }
 
@@ -1097,7 +1206,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     // Whether `catch_`'s own declared type accepts `exception`'s actual
     // thrown object. A guest throwable's actual declaration is already
-    // known (`_declarationOf`, the reverse of `classRuntimeInfo`'s own
+    // known (`declarationOf`, the reverse of `classRuntimeInfo`'s own
     // cache), so this stays the AST-level comparison it always was for
     // that case - no runtime metadata to build while unwinding a guest
     // `throw`, the hot path every guest exception takes. A native
@@ -1125,9 +1234,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (auto cached = catch_ in _catchTypes)
             return *cached;
 
-        auto info = cast(TypeInfo_Class) _runtimeTypes.get(catch_.type);
-        _catchTypes[catch_] = info;
-        return info;
+        return *_catchTypes.build(catch_,
+            () => cast(TypeInfo_Class) _runtimeTypes.get(catch_.type));
     }
 
     private void bindCatchVariable(Catch catch_, Throwable guest) {
@@ -2017,9 +2125,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (auto cached = key in _staticChains)
             return *cached;
 
-        auto path = staticChainPath(_function, owner);
-        _staticChains[key] = path;
-        return path;
+        return *_staticChains.build(key,
+            () => staticChainPath(_function, owner));
     }
 
     // The answer shared with the bytecode compiler
@@ -2034,9 +2141,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.frontend.dmd.delegates:
             sharedFunctionNeedsClosure = functionNeedsClosure;
 
-        const result = sharedFunctionNeedsClosure(function_);
-        _needsClosure[function_] = result;
-        return result;
+        return *_needsClosure.build(function_,
+            () => sharedFunctionNeedsClosure(function_));
     }
 
     // Where the variable read or written by `expression` lives: the
@@ -2167,15 +2273,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     extern(D) private ubyte* staticSlotOf(VarDeclaration variable) {
         version(unittest) ++_staticLookups;
         return cast(ubyte*) _nativeData.storageOf(variable).ptr;
-    }
-
-    extern(D) private void* constantSymbolAddress(Declaration symbol) {
-        if (auto function_ = symbol.isFuncDeclaration) {
-            registerGuestWord(function_);
-            return cast(void*) function_;
-        }
-
-        return _plans.resolve(nativeSymbolName(symbol));
     }
 
     // Runs a local's initializer into the frame slot `layoutOf` already
@@ -3822,11 +3919,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         storeIntegral(_place, cast(size_t) cast(void*) info, _facts.size);
     }
 
-    extern(D) private void* resolveTypeInfo(const(char)[] name) {
-        countForeignNameLookup;
-        return _plans.resolve(name);
-    }
-
     // Only the branch the condition selects is evaluated, the same way
     // `if` only walks the branch it takes: D specifies the other one
     // never runs, so nothing in it can have an effect.
@@ -4277,57 +4369,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _d_callfinalizer(object);
     }
 
+    // Parsed guest classes have no emitted native ClassInfo. `Shared`
+    // builds the native TypeInfo_Class metadata druntime needs for
+    // allocation and classinfo, once per program.
     private TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
-        import snakebite.backends.classinfo:
-            classRuntimeInfo_ = classRuntimeInfo, Hooks;
-
-        return classRuntimeInfo_(
-            declaration,
-            _classRuntime,
-            Hooks(
-                &methodAddress,
-                (decl, base) => fillFieldInits(decl, base),
-                &_runtimeTypes.linkedClassInfo,
-                (decl, info) {
-                    _declarationOf[cast(const(void)*) info] = decl;
-                },
-            ),
-        );
-    }
-
-    extern(D) private void* methodAddress(
-        FuncDeclaration method, ptrdiff_t adjustment,
-    ) {
-        import dmd.dsymbolsem: isAbstract;
-
-        if (method.isAbstract)
-            return null;
-        const(void)* word;
-        if (_callSelection.usesGuestBody(method, null,
-                (callee) => _program.isInterpreted(callee),
-                hasNativeSymbol(method), "interpreter")) {
-            registerGuestWord(method);
-            word = cast(void*) method;
-        }
-        return _plans.callableAddress(word, method, adjustment);
+        return _shared.classRuntimeInfo(declaration);
     }
 
     // The guest declaration `info` was generated for, or `null` for a
     // native class's own linked `TypeInfo_Class`.
     private ClassDeclaration* declarationOf(const TypeInfo_Class info) {
-        return cast(const(void)*) info in _declarationOf;
-    }
-
-    // Every field's own default value, written once into `classRuntimeInfo`'s
-    // own `.init` image rather than run fresh on every `new` - real
-    // compiled D bakes the same values into the class's linked `.init`
-    // data at compile time, which is exactly what `_d_newclassT`'s own
-    // lowering (`core/lifetime.d`) then blits into a freshly allocated
-    // object. Base-class fields are already present in `base` by the time
-    // this runs (`classRuntimeInfo` copies the base's own `.init` image
-    // in first), so only `declaration`'s own fields are walked here.
-    private void fillFieldInits(ClassDeclaration declaration, ubyte* base) {
-        _nativeData.fillFields(declaration, base);
+        return _shared.declarationOf.find(cast(const(void)*) info);
     }
 
     // A class and a struct constructor call bind `object` to the hidden
@@ -4757,7 +4809,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             funcType, expression.arguments,
         );
         const plan = cachedCallPlan(expression, function_,
-            () => preparation.prepare(_plans, function_));
+            () => preparation.prepare(*_plans, function_));
         auto layout = layoutOf(function_);
         auto frame = bindFrame(expression, function_, layout, true);
         bindArguments(function_, expression.arguments, expression.loc,
@@ -4791,8 +4843,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         memcpy(result, field, value.fieldFacts.size);
         return result;
     }
-
-
 
     private void* _virtualAddress(
         FuncDeclaration method, void* receiver,
@@ -5246,40 +5296,50 @@ private struct StaticChainKey {
     const(void)* to;
 }
 
-// One of the evaluator's caches: an answer worked out on a cold path,
-// kept for the life of the evaluator, and read back by key on a hot one.
-// A plain associative array, and the number of times it has been probed.
+// One evaluator's view of a shared table (ADR-0006): an answer worked
+// out on a cold path, under the compiler lock, kept for the life of the
+// program, and read back by key on a hot one without a lock. The number
+// of times this evaluator has probed it is counted.
 //
-// The count is what makes it a type rather than an associative array
-// declaration. Every probe of one of these is a hash of a pointer on a
-// path the evaluator takes per node it visits, so how many of them a
-// guest construct needs is a property worth asserting on, and a probe of
-// a table that is already a `Cache` is counted without whoever adds it
+// The count is what makes it a type rather than a table declaration.
+// Every probe of one of these is a hash of a pointer on a path the
+// evaluator takes per node it visits, so how many of them a guest
+// construct needs is a property worth asserting on, and a probe of a
+// table that is already a `Cache` is counted without whoever adds it
 // having to know the count exists.
 //
 // That is the whole of what the count covers: reads of the tables that
-// are `Cache`s. A plain associative array declared beside them, a probe
-// made inside `FrameLayout` or `PlanCache` to answer one query, and
-// `opIndexAssign` below - itself a hash lookup, though only ever on a
-// cold path - are all outside it, as is any read of `_entries` from
-// elsewhere in this module, since `private` in D is module-scoped. What
-// this feeds is a budget on the paths it does cover, not a fence around
-// the evaluator.
+// are `Cache`s. A probe made inside `FrameLayout` or `PlanCache` to
+// answer one query, and `build` below - itself a probe, though only ever
+// on a cold path - are outside it. What this feeds is a budget on the
+// paths it does cover, not a fence around the evaluator.
 //
 // The count itself is `bin/ut` only: an unconditional increment here
 // would be exactly the per-node cost it exists to measure.
 private struct Cache(Key, Value) {
-    private Value[Key] _entries;
+    import snakebite.sharedtable: SharedTable;
+
+    private SharedTable!(Key, Value)* _table;
     version(unittest) private size_t _lookups;
 
     public Value* opBinaryRight(string op: "in")(Key key) {
         version(unittest) ++_lookups;
 
-        return key in _entries;
+        return key in *_table;
     }
 
-    public void opIndexAssign(Value value, Key key) @safe nothrow pure {
-        _entries[key] = value;
+    // The slow path: runs `make` under the compiler lock, unless another
+    // thread stored the answer first, and returns the stored answer.
+    public Value* build(Key key, scope Value delegate() make) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        Value* stored;
+        withCompilerLock({
+            stored = key in *_table;
+            if (stored is null)
+                stored = _table.insert(key, make());
+        });
+        return stored;
     }
 
     version(unittest)
