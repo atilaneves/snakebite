@@ -101,6 +101,7 @@ import snakebite.backends.fullexpression: FullExpressionKind;
 // walks a call's frames, so there is nothing left for a separate
 // `Interpreter`-side cache to hold.
 extern(C++) private final class Evaluator: LoweringVisitor {
+    import snakebite.backends.calls: CallSelection;
     import snakebite.backends.backend: Program;
     import snakebite.frontend.dmd.delegates: DelegateTarget, outerFunctionOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
@@ -112,7 +113,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.ffi:
         CallAdapter, CallbackBridge, CallbackCall, CallPlan, CallResult,
         PlanCache;
-    import snakebite.ffi.abi: dVariadicArgumentsIsSlice, Register;
+    import snakebite.ffi.abi: Register;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
         initializerValueOf, isIntegralSize, TypeFacts;
@@ -185,7 +186,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // evaluator runs. Keep it apart from call-site decisions: delegate
     // arguments and the active nesting context still need to be checked
     // for every call.
-    private Cache!(FuncDeclaration, bool) _prefersGuestBody;
+    private CallSelection _callSelection;
     version(unittest) private size_t _staticLookups;
     // A guest pointer can live in an unscanned frame, so the evaluator keeps
     // each backing allocation reachable for as long as guest state can be.
@@ -291,25 +292,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // execution currently is, one hop of `outerVars`' own reasoning per
     // level of nesting.
     private FuncDeclaration _function;
-    // Set by `visit(ReturnStatement)`; checked by `visit(CompoundStatement)`
-    // to stop walking sibling statements once one has run. dmd accepts
-    // unreachable statements after a `return` (it only warns with `-w`),
-    // so without this flag a statement after `return` would still
-    // execute and silently overwrite an already-computed result.
-    private bool _returned;
-    // Set until the nearest loop consumes it, so enclosing compounds stop
-    // before they execute the statements that `continue` skips.
-    private bool _continued;
-    // The label named by the pending continue, or null for an unlabelled
-    // continue. A labelled continue stays set while it crosses loops until
-    // the loop with that label consumes it.
-    private Identifier _continueLabel;
-    // Set until the nearest loop or switch consumes it. A switch needs the
-    // same transfer as a loop because `break` exits either construct.
-    private bool _break;
-    // The label named by the pending break, or null for an unlabelled break.
-    // Labelled breaks stay set until their LabelStatement consumes them.
-    private Identifier _breakLabel;
     // A label stays pending while its wrapped statement is entered. The
     // wrapped loop takes it, even when dmd put a scope block between them.
     private Identifier _pendingLoopLabel;
@@ -452,19 +434,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     private bool hasNativeSymbol(FuncDeclaration function_) {
         return _plans.hasNativeSymbol(function_);
-    }
-
-    private bool prefersGuestBodyOf(FuncDeclaration function_) {
-        import snakebite.backends.calls: prefersGuestBody;
-
-        if (auto cached = function_ in _prefersGuestBody)
-            return *cached;
-
-        const prefers = prefersGuestBody(
-            function_, _program.isInterpreted(function_),
-            hasNativeSymbol(function_));
-        _prefersGuestBody[function_] = prefers;
-        return prefers;
     }
 
     // `function_`'s frame layout, from the cache; computed on its first
@@ -675,12 +644,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // A declaration without a body can only describe a host call,
         // regardless of which module owns it.
         auto body_ = function_.fbody;
-        import snakebite.backends.calls: usesGuestBody;
-
-        const interprets = usesGuestBody(
+        const interprets = _callSelection.usesGuestBody(
             function_, callSite is null ? null : callSite.arguments,
             (callee) => _program.isInterpreted(callee),
-            prefersGuestBodyOf(function_),
+            hasNativeSymbol(function_), "interpreter",
         );
         if (!interprets) {
             const plan = callSite is null
@@ -722,17 +689,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _frameBase = frameBase;
         _layout = layout;
         _function = function_;
-        _returned = false;
-        _continued = false;
-        _continueLabel = null;
-        _break = false;
-        _breakLabel = null;
         _pendingLoopLabel = null;
         _controlFlow = ControlFlowState.init;
         _switchStack = null;
         while (true) {
             body_.accept(this);
-            if (!_controlFlow.hasTransfer)
+            if (!_controlFlow.hasGoto)
                 break;
 
             _controlFlow.resume;
@@ -906,33 +868,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             callSite, function_, () => _plans.of(function_));
     }
 
-    // As `callPlanOf`, for one call site of an `extern(C)` C-style or
-    // `extern(D)` untyped variadic callee: `extraArgumentTypes`, called
-    // lazily, builds that call's own extra arguments' types (`CallPlan.
-    // prepareVariadic`'s own doc). The AST fixes a `CallExp`'s argument
-    // expressions, and so their types, once - `callSite` always names
-    // the same extra argument types on every visit - so keying this the
-    // same way `callPlanOf` keys an ordinary plan, by `(callSite,
-    // function_)` identity, is exactly right: `_plans.variadicOf` never
-    // has to run twice for the same call site. Laziness matters beyond
-    // that single `_plans.variadicOf` call: `cachedCallPlan`'s own
-    // `build` only ever runs on a cache miss, so a repeat call at an
-    // already-cached site never invokes `extraArgumentTypes` either,
-    // never re-walking `expression.arguments` or reallocating the array
-    // its own caller (`callVariadicNative`) would otherwise build afresh
-    // every call (issue #334 step 6's own
-    // `noAllocationOnRepeatedCall` regression test).
-    extern(D) private const(CallPlan)* variadicCallPlanOf(
-        CallExp callSite,
-        FuncDeclaration function_,
-        scope Type[] delegate() extraArgumentTypes,
-    ) {
-        return cachedCallPlan(callSite, function_,
-            () => _plans.variadicOf(function_, extraArgumentTypes()));
-    }
-
-    // The call-site cache (issue #96) shared by `callPlanOf` and
-    // `variadicCallPlanOf`: a call expression is one call site, even when
+    // The call-site cache (issue #96) serves ordinary and variadic calls:
+    // a call expression is one call site, even when
     // a loop visits it many times, so the plan cache proper
     // (`PlanCache._plans`/`.of`) stays the cold path, reached only once
     // per site through `build`.
@@ -975,11 +912,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         private ubyte* _closureBase;
         private const(FrameLayout)* _layout;
         private FuncDeclaration _function;
-        private bool _returned;
-        private bool _continued;
-        private Identifier _continueLabel;
-        private bool _break;
-        private Identifier _breakLabel;
         private Identifier _pendingLoopLabel;
         private ControlFlowState _controlFlow;
         private SwitchStatement[] _switchStack;
@@ -996,11 +928,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _closureBase = evaluator._closureBase;
             _layout = evaluator._layout;
             _function = evaluator._function;
-            _returned = evaluator._returned;
-            _continued = evaluator._continued;
-            _continueLabel = evaluator._continueLabel;
-            _break = evaluator._break;
-            _breakLabel = evaluator._breakLabel;
             _pendingLoopLabel = evaluator._pendingLoopLabel;
             _controlFlow = evaluator._controlFlow;
             _switchStack = evaluator._switchStack;
@@ -1014,11 +941,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _evaluator._closureBase = _closureBase;
             _evaluator._layout = _layout;
             _evaluator._function = _function;
-            _evaluator._returned = _returned;
-            _evaluator._continued = _continued;
-            _evaluator._continueLabel = _continueLabel;
-            _evaluator._break = _break;
-            _evaluator._breakLabel = _breakLabel;
             _evaluator._pendingLoopLabel = _pendingLoopLabel;
             _evaluator._controlFlow = _controlFlow;
             _evaluator._switchStack = _switchStack;
@@ -1028,36 +950,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // Where the hidden context and each explicit parameter's bytes sit in
     // the frame the caller just filled: what the FFI needs to hand them
     // over, built from the layout this interpreter already computed.
-    // `extraCount` reserves that many more trailing slots, left unfilled,
-    // for a variadic call site's own extra arguments
-    // (`callVariadicNative`'s own doc) - zero for every ordinary call.
-    // `hasVArguments` reserves one more slot, also left unfilled, right
-    // after any hidden `this` and before the declared parameters, for an
-    // `extern(D)` untyped variadic callee's own hidden `_arguments`
-    // (`callVariadicNative`'s own doc; `CallPlan.prepareCommon`'s own
-    // `hasVArguments` places its `ArgumentPlan` at that same position).
     extern(D) private CallArguments argumentSlots(
         ubyte* frameBase,
         const(FrameLayout)* layout,
-        in size_t extraCount = 0,
-        in bool hasVArguments = false,
     ) {
         auto arguments = CallArguments(layout.parameters.length
-            + (layout.hiddenThis.variable !is null) + hasVArguments
-            + extraCount);
-        // const would make the address slots read-only.
-        auto values = arguments.values;
+            + (layout.hiddenThis.variable !is null));
+        auto values = arguments.values; // The address slots must stay mutable.
         size_t count;
         if (layout.hiddenThis.variable !is null)
-            values[count++] =
-                frameBase + layout.hiddenThis.parameter.offset;
-
-        if (hasVArguments)
-            ++count;
-
-        foreach (i, parameter; layout.parameters)
+            values[count++] = frameBase + layout.hiddenThis.parameter.offset;
+        foreach (parameter; layout.parameters)
             values[count++] = frameBase + parameter.offset;
-
         return arguments;
     }
 
@@ -1159,7 +1063,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (!bodyRan && statement._body !is null)
                 statement._body.accept(this);
 
-            while (_controlFlow.hasTransfer && !exitsFinally(statement)) {
+            while (_controlFlow.hasGoto && !exitsFinally(statement)) {
                 _controlFlow.resume;
                 if (statement._body !is null)
                     statement._body.accept(this);
@@ -1167,34 +1071,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         } catch (GuestException exception) {
             pendingException = exception._guest;
         } finally {
-            auto returned = _returned;
-            auto continued = _continued;
-            auto continueLabel = _continueLabel;
-            auto broken = _break;
-            auto breakLabel = _breakLabel;
-            auto transfer = _controlFlow;
-
-            // A control transfer exits the try body before its finally body,
-            // but it must not stop the finally body itself. A transfer from
-            // finally replaces the one that was already pending.
-            _returned = false;
-            _continued = false;
-            _continueLabel = null;
-            _break = false;
-            _breakLabel = null;
-            _controlFlow.clearTransfer;
-
-            runFinallyBody(statement.finalbody, pendingException);
-
-            if (!_returned && !_continued && !_break
-                    && !_controlFlow.hasTransfer) {
-                _returned = returned;
-                _continued = continued;
-                _continueLabel = continueLabel;
-                _break = broken;
-                _breakLabel = breakLabel;
-                _controlFlow = transfer;
-            }
+            _controlFlow.withCleanup({
+                runFinallyBody(statement.finalbody, pendingException);
+            });
         }
     }
 
@@ -1231,7 +1110,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
 
         finalbody.accept(this);
-        while (_controlFlow.hasTransfer) {
+        while (_controlFlow.hasGoto) {
             _controlFlow.resume;
             finalbody.accept(this);
         }
@@ -1289,8 +1168,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         foreach (child; *statement.statements) {
             if (child !is null) {
                 child.accept(this);
-                if (_returned || _continued || _break
-                        || _controlFlow.hasTransfer)
+                if (_controlFlow.hasTransfer)
                     return;
             }
         }
@@ -1303,15 +1181,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         foreach (child; *statement.statements) {
             if (child !is null) {
                 child.accept(this);
-                if (_returned || _break || _controlFlow.hasTransfer)
+                if (!_controlFlow.continuesLoop)
                     return;
-
-                if (_continued) {
-                    if (_continueLabel !is null)
-                        return;
-
-                    _continued = false;
-                }
             }
         }
     }
@@ -1322,7 +1193,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // introducing it. There is no separate scope to enter here: `layoutOf`
     // already gave every local inside it a slot in the function's one
     // frame (see `LocalsCollector` in `framelayout`), so running it is
-    // just running whatever it wraps, honouring `_returned` the same way
+    // just running whatever it wraps, honouring pending transfers the same way
     // `visit(CompoundStatement)` does for its own children.
     override void visit(ScopeStatement statement) {
         if (statement.statement is null)
@@ -1365,7 +1236,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (_controlFlow.seeking)
             return;
 
-        _returned = true;
+        _controlFlow.returnFromFunction;
 
         // `return f();` in a `void` function never reaches here with
         // `statement.exp` set to `f()`: dmd's own semantic pass desugars
@@ -1447,8 +1318,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (_controlFlow.seeking)
             return;
 
-        _break = true;
-        _breakLabel = statement.ident;
+        _controlFlow.breakTo(statement.ident);
     }
 
     override void visit(LabelStatement statement) {
@@ -1463,10 +1333,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (statement.statement !is null)
             statement.statement.accept(this);
 
-        if (_breakLabel is statement.ident) {
-            _break = false;
-            _breakLabel = null;
-        }
+        _controlFlow.finishLabel(statement.ident);
     }
 
     override void visit(SwitchStatement statement) {
@@ -1504,17 +1371,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _controlFlow.seek(cast(void*) selected);
             statement._body.accept(this);
 
-            if (_returned || _continued)
+            if (_controlFlow.leavesSwitch)
                 return;
-
-            if (_break) {
-                if (_breakLabel is null) {
-                    _break = false;
-                    return;
-                }
-
-                return;
-            }
 
             auto target = controlTarget;
             if (target is null)
@@ -1706,24 +1564,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 if (!bodyRan)
                     statement._body.accept(this);
                 bodyRan = false;
-                if (_returned || _controlFlow.hasTransfer)
+                if (_controlFlow.leavesLoop(loopLabel))
                     return;
-                if (_break) {
-                    if (_breakLabel is null) {
-                        _break = false;
-                        return;
-                    }
-
-                    return;
-                }
-                if (_continued) {
-                    if (_continueLabel !is null
-                            && _continueLabel !is loopLabel)
-                        return;
-
-                    _continued = false;
-                    _continueLabel = null;
-                }
             }
 
             if (statement.increment !is null)
@@ -1749,26 +1591,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 statement._body.accept(this);
             bodyRan = false;
 
-            if (_returned || _controlFlow.hasTransfer)
+            if (_controlFlow.leavesLoop(loopLabel))
                 return;
-
-            if (_break) {
-                if (_breakLabel is null) {
-                    _break = false;
-                    return;
-                }
-
-                return;
-            }
-
-            if (_continued) {
-                if (_continueLabel !is null
-                        && _continueLabel !is loopLabel)
-                    return;
-
-                _continued = false;
-                _continueLabel = null;
-            }
 
             if (!conditionHolds(statement.condition))
                 return;
@@ -1779,8 +1603,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (_controlFlow.seeking)
             return;
 
-        _continued = true;
-        _continueLabel = statement.ident;
+        _controlFlow.continueTo(statement.ident);
     }
 
     private bool truthOf(Expression expression) {
@@ -4544,7 +4367,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         ubyte* frameBase,
         const(FrameLayout)* layout,
         in bool allowExtra = false,
-        in size_t argumentOffset = 0,
     ) {
         import dmd.astenums: STC;
         import snakebite.backends.calls: arityMismatches;
@@ -4560,14 +4382,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto shape = callShapeOf(function_);
 
-        // `argumentOffset` skips an `extern(D)` untyped variadic call
-        // site's own leading `_arguments` (issue #334 step 6,
-        // `callVariadicNative`'s own doc): the frontend inserts it ahead
-        // of every declared parameter in `arguments[]`, so this callee's
-        // own first *declared* parameter is `arguments[argumentOffset]`,
-        // not `arguments[0]`, whenever that leading argument is present.
-        foreach (i; 0 .. parameterList.length) {
-            auto argument = (*arguments)[argumentOffset + i];
+        auto preparation = CallAdapter.Arguments.of(
+            typeFunctionOf(function_), arguments,
+        );
+        foreach (i, argument; preparation.declared) {
             auto parameter = layout.parameters[i];
             auto slot = frameBase + parameter.offset;
 
@@ -4896,179 +4714,56 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         );
     }
 
-    // Calls a `VarArg.variadic` callee - `extern(C)` C-style, or
-    // `extern(D)` untyped (issue #334 step 6) - always a native symbol,
-    // so this never checks `usesGuestBody` the way `executeRaw` does. A
-    // root-owned callee whose own body is meant to *run* - has a body,
-    // and (`PlanCache.hasNativeSymbol`, the same check `prepareCommon`'s
-    // own resolver makes) no real host address - is refused below with a
-    // clearer message than that resolver's own "cannot resolve the
-    // symbol" would give: nothing is missing from this process, this
-    // backend simply does not walk a `VarArg.variadic` body yet (ADR-
-    // 0010's own D-variadic paragraph narrows its "every shape" claim
-    // for exactly this case). A root-owned declaration can still carry a
-    // `pragma(mangle)` naming a real, separately linked native symbol
-    // (`DVariadicMethodHost.sum`'s own shape, `ut.backends.call.ffi`'s
-    // own `variadic.externD.method`) - its body exists only so dmd's own
-    // `semantic3` populates its hidden `_arguments`/`_argptr` locals, and
-    // `hasNativeSymbol` is true for it, so it reaches the ordinary native
-    // call below same as any other native callee, no refusal.
-    // Interpreting a guest body that really does need `_arguments`/
-    // `_argptr` bound from the call site would mean building a SysV
-    // register-save-area for this backend's own callee to read `_argptr`
-    // over, *and* interpreting whatever `core.vararg`/`core.internal.
-    // vararg.sysv_x64` template instantiation its own body's `va_arg`
-    // calls resolve to - ADR-0009 rule 1 makes a root-instantiated
-    // druntime template root-owned too, so that call would need walking,
-    // not a native `va_arg`, the same way this callee itself would be.
-    //
-    // `funcType.parameterList`'s own, declared parameters bind into a
-    // frame exactly as any other call (`bindFrame`, passed `allowExtra`
-    // `true` below), so `expression.arguments` running longer than that
-    // declared list does not reject the call - the only caller of
-    // `arityMismatches` that opts into that (`snakebite.backends.calls`'s
-    // own doc). The hidden-`this`/declared-parameter portion of `slots`
-    // below comes from `argumentSlots`, the same helper an ordinary call
-    // uses.
-    //
-    // An `extern(D)` untyped variadic call site carries one more
-    // argument the frontend itself inserted ahead of every declared
-    // parameter: `expression.arguments[0]`, the call's own `_arguments`
-    // (`dmd.mtype.TypeFunction.isDstyleVariadic`'s own doc; ADR-0010's D
-    // variadic paragraph). `declaredArgumentOffset` skips it when binding
-    // the declared parameters (`bindFrame`) and when finding where the
-    // extra, variadic arguments start; `argumentSlots`'s own
-    // `hasVArguments` reserves its slot in `slots`, right after any
-    // hidden `this` and before the declared parameters -
-    // `CallPlan.prepareVariadic`'s own `hasVArguments` places its
-    // `ArgumentPlan` at that same position, for the same ABI-ordering
-    // reason (its own doc) - and its own value is evaluated below, into
-    // scratch storage, exactly like `visit(TypeidExp)` would evaluate any
-    // other `typeid` expression.
-    //
-    // Every argument past the declared parameters is this call's own
-    // extra, variadic argument: it has no frame slot; each is evaluated
-    // here, in call order, into its own scratch storage past what
-    // `argumentSlots` already filled, and its own dmd `Type` - a C-style
-    // call's frontend-promoted type (`float` to `double`, a
-    // narrower-than-`int` integral to `int`), or an `extern(D)` call's
-    // own argument type - is what `variadicCallPlanOf` classifies it by.
-    //
-    // The plan is built first, from types alone, before anything is
-    // evaluated or bound: a refusal `variadicCallPlanOf` raises - an
-    // extra argument of a type the ABI cannot classify, say - then
-    // happens before this binds a frame or evaluates a single argument
-    // expression, so a call about to be refused never runs any of the
-    // guest code its own extra arguments would have evaluated (issue
-    // #334 step 5 review finding 2).
+    // Build the plan before evaluating arguments, so an unsupported call
+    // cannot run guest argument effects before its refusal.
     private void callVariadicNative(
         CallExp expression,
         FuncDeclaration function_,
         TypeFunction funcType,
     ) {
-        if (function_.fbody !is null && _program.isInterpreted(function_)
-                && !_plans.hasNativeSymbol(function_)) {
-            import std.conv: text;
+        _callSelection.usesGuestBody(
+            function_, expression.arguments,
+            (callee) => _program.isInterpreted(callee),
+            hasNativeSymbol(function_), "interpreter",
+        );
 
-            throw new SnakebiteException(
-                text("interpreter cannot call `", function_.toString,
-                    "`: guest-bodied D variadic functions are not ",
-                    "interpreted yet"),
-            );
-        }
-
-        const isDVariadic = funcType.isDstyleVariadic;
-        const declaredArgumentOffset = isDVariadic ? 1 : 0;
-
-        const declaredCount = funcType.parameterList.length;
-        auto arguments = expression.arguments;
-        const totalCount = arguments is null ? 0 : arguments.length;
-
-        // Only built on a cache miss - `variadicCallPlanOf`'s own doc -
-        // so a repeat call at the same site never re-walks `arguments`
-        // or reallocates this array.
-        Type[] extraTypes() {
-            Type[] types;
-            foreach (i; declaredArgumentOffset + declaredCount .. totalCount)
-                types ~= (*arguments)[i].type;
-            return types;
-        }
-
-        auto plan = variadicCallPlanOf(expression, function_, &extraTypes);
-
+        auto preparation = CallAdapter.Arguments.of(
+            funcType, expression.arguments,
+        );
+        const plan = cachedCallPlan(expression, function_,
+            () => preparation.prepare(_plans, function_));
         auto layout = layoutOf(function_);
-        auto frame = bindFrame(
-            expression, function_, layout, true,
-            null, false, null, false, declaredArgumentOffset,
-        );
-        bindArguments(function_, arguments, expression.loc,
-            frame.base, layout, true, declaredArgumentOffset);
+        auto frame = bindFrame(expression, function_, layout, true);
+        bindArguments(function_, expression.arguments, expression.loc,
+            frame.base, layout, true);
 
-        // `slots` holds the hidden context, an `extern(D)` untyped
-        // variadic callee's own hidden `_arguments` if present, the
-        // declared parameters, and every extra argument, in that order -
-        // `argumentSlots` fills the first and third (and, when
-        // `isDVariadic`, reserves the second's own slot for the fill
-        // below), the same helper an ordinary call uses, reserving
-        // `totalCount - declaredArgumentOffset - declaredCount` trailing
-        // slots for the extra arguments filled below. `CallArguments`
-        // keeps every slot inline for the common, small call and only
-        // reaches the heap once a call runs past its inline capacity
-        // (see its own doc), the same fallback the FFI plan itself
-        // relies on.
-        auto slots = argumentSlots(
-            frame.base, layout,
-            totalCount - declaredArgumentOffset - declaredCount,
-            isDVariadic,
-        );
-        auto values = slots.values;
-        size_t count = layout.parameters.length
-            + (layout.hiddenThis.variable !is null) + isDVariadic;
-
-        // One mark for every extra argument's own scratch storage
-        // (`_arguments` itself included, for an `extern(D)` call): they
-        // are read by `callPlan` below and done with before this method
-        // returns, so LIFO release here, rather than each argument
-        // keeping its own `Frame`, is enough.
         const mark = _frames.mark;
         scope(exit) _frames.release(mark);
-
-        if (isDVariadic) {
-            auto vArguments = (*arguments)[0];
-            const facts = factsOf(vArguments.type);
-            auto storage = _frames.reserve(facts.size, facts.alignment);
-            evaluate(vArguments, vArguments.type, facts, storage);
-            values[layout.hiddenThis.variable !is null] =
-                dVariadicArgumentsIsSlice
-                    ? dVariadicArgumentsSliceStorage(storage)
-                    : storage;
-        }
-
-        foreach (i; declaredArgumentOffset + declaredCount .. totalCount) {
-            auto argument = (*arguments)[i];
-            const facts = factsOf(argument.type);
-            auto storage = _frames.reserve(facts.size, facts.alignment);
-            evaluate(argument, argument.type, facts, storage);
-            values[count++] = storage;
-        }
-
-        callPlan(plan, _place, values);
+        auto slots = preparation.bind(
+            layout.hiddenThis.variable is null ? null
+                : frame.base + layout.hiddenThis.parameter.offset,
+            (i) => frame.base + layout.parameters[i].offset,
+            &evaluateBarrierArgument,
+        );
+        callPlan(plan, _place, slots.values);
     }
 
-    // On ldc (`dVariadicArgumentsIsSlice`), `_arguments` travels as the
-    // `TypeInfo_Tuple` reference's own `elements` field - a two-register
-    // `TypeInfo[]` slice, not the one pointer `tupleStorage` already
-    // holds (`callVariadicNative`'s own doc; `abi.
-    // dVariadicArgumentsIsSlice`'s own doc). `tupleStorage` still has to
-    // be evaluated first, exactly as on dmd, since it is the only place
-    // the fabricated (or host) `TypeInfo_Tuple` this reads `elements` off
-    // comes from.
-    private void* dVariadicArgumentsSliceStorage(void* tupleStorage) {
-        auto tuple = *cast(TypeInfo_Tuple*) tupleStorage;
-        auto slice = _frames.reserve(
-            (TypeInfo[]).sizeof, (TypeInfo[]).alignof);
-        *cast(TypeInfo[]*) slice = tuple.elements;
-        return slice;
+    extern(D) private void* evaluateBarrierArgument(
+        CallAdapter.Arguments.Value value,
+    ) {
+        auto storage = _frames.reserve(value.facts.size, value.facts.alignment);
+        evaluate(value.expression, value.expression.type, value.facts, storage);
+        if (!value.readsField)
+            return storage;
+
+        import core.stdc.string: memcpy;
+
+        const field = *cast(ubyte**) storage + value.fieldOffset;
+        auto result = _frames.reserve(
+            value.fieldFacts.size, value.fieldFacts.alignment,
+        );
+        memcpy(result, field, value.fieldFacts.size);
+        return result;
     }
 
     // `receiver`'s own dynamic `TypeInfo_Class`, read the same way `visit
@@ -5243,7 +4938,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         bool hasClassReceiver = false,
         void* delegateContext = null,
         bool fromDelegate = false,
-        in size_t argumentOffset = 0,
     ) {
         import snakebite.nativelayout: storeIntegral;
         import snakebite.backends.calls: arityMismatches;
