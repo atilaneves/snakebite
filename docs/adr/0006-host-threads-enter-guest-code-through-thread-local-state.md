@@ -7,9 +7,12 @@ status: accepted
 Host code, such as unit-threaded's task pool, calls guest delegates
 from threads a backend never entered before (#40). The evaluator and
 the frame stack are per-context state, and they are not thread-safe.
-The interim workaround forces unit-threaded's single-threaded flag.
-#35 and #40 call this a restriction, not a solution. Callbacks must
-work from any thread, the same as they do for compiled D.
+Before this decision, the interim workaround was to force
+unit-threaded's single-threaded flag; #35 and #40 call that a
+restriction, not a solution. Callbacks must work from any thread, the
+same as they do for compiled D. `runMain` (`backends/backend.d`)
+passes the host's own arguments unchanged - nothing in this project
+appends the single-threaded flag any more.
 
 Every backend keeps its mutable execution state, such as the
 evaluator, the frame stack, and per-thread caches, in thread-local

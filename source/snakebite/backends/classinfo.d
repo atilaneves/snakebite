@@ -22,7 +22,77 @@ public struct Hooks {
         registerGenerated;
 }
 
-public alias ClassRuntimeCache = TypeInfo_Class[ClassDeclaration];
+// The `TypeInfo_Class` built for each guest class. Every thread that
+// runs guest code reads a complete entry without a lock (`find`,
+// ADR-0006). An entry under construction is visible only through `in`,
+// to the one thread that builds it while it holds the compiler lock:
+// `classRuntimeInfo` registers a class before its vtable and fields are
+// filled, so a class that reaches itself again through a base or an
+// interface finds the same object. `build` runs one construction and
+// publishes everything it registered once the outermost construction
+// on this thread is complete.
+public struct ClassRuntimeCache {
+    // Holds a `SharedTable` (finding 2.4): a copy would share its
+    // storage with the original until one side grows.
+    @disable this(this);
+
+    import snakebite.sharedtable: SharedTable;
+
+    private SharedTable!(ClassDeclaration, TypeInfo_Class) _published;
+    private TypeInfo_Class[ClassDeclaration] _pending;
+    private size_t _depth;
+
+    // A complete entry, or null.
+    public TypeInfo_Class* find(ClassDeclaration declaration) {
+        return declaration in _published;
+    }
+
+    // Runs `make` under the compiler lock and returns its result.
+    public TypeInfo_Class build(
+        scope TypeInfo_Class delegate() make,
+    ) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        TypeInfo_Class info;
+        withCompilerLock({
+            ++_depth;
+            scope(exit) --_depth;
+            // A partial entry `make` registered (`classRuntimeInfo`
+            // registers before it resolves methods and fields, so a
+            // class that reaches itself finds it) must not survive a
+            // throw out of the outermost construction: a later `in`
+            // would then hand back an object whose vtable and fields
+            // were never filled in (finding 2.6).
+            scope (failure)
+                if (_depth == 1)
+                    _pending = null;
+            info = make();
+            if (_depth == 1)
+                publish;
+        });
+        return info;
+    }
+
+    public TypeInfo_Class* opBinaryRight(string op: "in")(
+        ClassDeclaration declaration,
+    ) {
+        if (auto pending = declaration in _pending)
+            return pending;
+        return find(declaration);
+    }
+
+    public void opIndexAssign(
+        TypeInfo_Class info, ClassDeclaration declaration,
+    ) {
+        _pending[declaration] = info;
+    }
+
+    private void publish() {
+        foreach (declaration, info; _pending)
+            _published.insert(declaration, info);
+        _pending = null;
+    }
+}
 
 public TypeInfo_Class classRuntimeInfo(
     imported!"dmd.dclass".ClassDeclaration declaration,

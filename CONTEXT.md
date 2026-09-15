@@ -58,3 +58,16 @@ across the barrier, using root ownership and the call's requirements.
 **Call arguments**:
 The values supplied to a call: hidden context and type information,
 declared parameter values or references, and any variadic extra values.
+
+**Thread state**:
+The evaluator or VM, with its frame stack, that one host thread uses to
+run guest code on one backend, and that thread's own copies of any
+thread-local guest variable it has touched. Created on the thread's
+first entry into guest code, released when the thread ends. A guest
+module-level variable or `static` local with no `shared` or
+`__gshared` is thread-local, the same as in compiled D: each thread's
+copy starts from the init image on that thread's own first use, so it
+is thread state too, not a program-wide structure. Everything else a
+backend keeps outside it is shared by every thread and is built once,
+under a lock, then read without one.
+_Avoid_: per-thread evaluator, thread context

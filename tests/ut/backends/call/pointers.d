@@ -50,21 +50,164 @@ public extern(C) bool snakebite_ut_collect_then_call_bool_callback(
 }
 
 
-public extern(C) string snakebite_ut_call_bool_callback_on_thread(
+public extern(C) bool snakebite_ut_call_bool_callback_on_thread(
     BoolCallback callback,
 ) {
     import core.thread: Thread;
 
-    string message;
+    bool result;
+    auto thread = new Thread({ result = callback(); });
+    thread.start;
+    thread.join;
+    return result;
+}
+
+
+private alias IntOfIntDelegate = extern(D) int delegate(int);
+private alias IntDelegate = extern(D) int delegate();
+private alias VoidDelegate = extern(D) void delegate();
+
+
+// `threads` host threads call `callback` `rounds` times each, at the same
+// time, with a distinct argument per call, and the results are summed.
+public extern(C) long snakebite_ut_sum_on_threads(
+    IntOfIntDelegate callback, int threads, int rounds,
+) {
+    import core.thread: Thread;
+    import std.algorithm: sum;
+
+    auto sums = new long[threads];
+    Thread worker(int index) {
+        return new Thread({
+            foreach (round; 0 .. rounds)
+                sums[index] += callback(index * rounds + round);
+        });
+    }
+
+    Thread[] workers;
+    foreach (index; 0 .. threads)
+        workers ~= worker(index);
+    foreach (thread; workers)
+        thread.start;
+    foreach (thread; workers)
+        thread.join;
+    return sums.sum;
+}
+
+
+// The message of the exception `callback` throws on a host thread, caught
+// on that same thread by host code.
+public extern(C) string snakebite_ut_message_on_thread(
+    VoidDelegate callback,
+) {
+    import core.thread: Thread;
+
+    string message = "no throw";
     auto thread = new Thread({
         try
             callback();
-        catch (Throwable throwable)
-            message = throwable.msg;
+        catch (Exception exception)
+            message = exception.msg;
     });
     thread.start;
     thread.join;
     return message;
+}
+
+
+private alias IntOfBoolDelegate = extern(D) int delegate(bool);
+
+// Calls `callback(true)` and `callback(false)` on the same host thread,
+// in that order, joining only after both: `true` throws and is caught
+// on that thread, `false` does not, and this returns its result -
+// whatever state a thrown-through worker leaves behind (finding 3.4)
+// must still let that same worker make another call correctly.
+public extern(C) int snakebite_ut_call_twice_on_same_thread_after_throw(
+    IntOfBoolDelegate callback,
+) {
+    import core.thread: Thread;
+
+    int result;
+    auto thread = new Thread({
+        try
+            callback(true);
+        catch (Exception exception) {}
+        result = callback(false);
+    });
+    thread.start;
+    thread.join;
+    return result;
+}
+
+
+// Runs `callback` on a host thread and joins it: `Thread.join` throws
+// what the callback threw, on the joining thread.
+public extern(C) void snakebite_ut_join_thread(VoidDelegate callback) {
+    import core.thread: Thread;
+
+    auto thread = new Thread(callback);
+    thread.start;
+    thread.join;
+}
+
+
+public extern(C) int snakebite_ut_int_callback_on_thread(
+    IntDelegate callback,
+) {
+    import core.thread: Thread;
+
+    int result;
+    auto thread = new Thread({ result = callback(); });
+    thread.start;
+    thread.join;
+    return result;
+}
+
+
+private struct ForeignCall {
+    IntDelegate callback;
+    int result;
+    Throwable thrown;
+}
+
+private extern(C) void* runForeign(void* argument) {
+    auto call = cast(ForeignCall*) argument;
+    try
+        call.result = call.callback();
+    catch (Throwable throwable)
+        call.thrown = throwable;
+    return null;
+}
+
+// Runs `callback` on a thread druntime does not know: one `pthread_create`
+// made, the way a C library would.
+public extern(C) int snakebite_ut_int_callback_on_foreign_thread(
+    IntDelegate callback,
+) {
+    import core.sys.posix.pthread: pthread_create, pthread_join, pthread_t;
+
+    auto call = new ForeignCall(callback);
+    pthread_t thread;
+    if (pthread_create(&thread, null, &runForeign, call) != 0)
+        throw new Exception("pthread_create failed");
+    pthread_join(thread, null);
+    if (call.thrown !is null)
+        throw call.thrown;
+    return call.result;
+}
+
+
+// A full collection, run on a thread other than the caller's.
+public extern(C) void snakebite_ut_collect_on_other_thread() {
+    import core.memory: GC;
+    import core.thread: Thread;
+
+    auto thread = new Thread({
+        GC.collect;
+        GC.minimize;
+    });
+    thread.start;
+    thread.join;
 }
 
 
@@ -82,9 +225,24 @@ private enum hostCallbackDeclarations = q{
     extern(C) bool snakebite_ut_collect_then_call_bool_callback(
         BoolCallback,
     );
-    extern(C) string snakebite_ut_call_bool_callback_on_thread(
+    extern(C) bool snakebite_ut_call_bool_callback_on_thread(
         BoolCallback,
     );
+    alias IntOfIntDelegate = extern(D) int delegate(int);
+    alias IntDelegate = extern(D) int delegate();
+    alias VoidDelegate = extern(D) void delegate();
+    extern(C) long snakebite_ut_sum_on_threads(
+        IntOfIntDelegate, int, int,
+    );
+    extern(C) string snakebite_ut_message_on_thread(VoidDelegate);
+    alias IntOfBoolDelegate = extern(D) int delegate(bool);
+    extern(C) int snakebite_ut_call_twice_on_same_thread_after_throw(
+        IntOfBoolDelegate,
+    );
+    extern(C) void snakebite_ut_join_thread(VoidDelegate);
+    extern(C) int snakebite_ut_int_callback_on_thread(IntDelegate);
+    extern(C) int snakebite_ut_int_callback_on_foreign_thread(IntDelegate);
+    extern(C) void snakebite_ut_collect_on_other_thread();
 };
 
 
@@ -457,22 +615,7 @@ static foreach (backend; Matrix!(
 }
 
 
-// The message a backend that owns per-thread call state rejects a
-// foreign-thread callback with. Compiled D keeps no such state, so
-// `Native`'s worker thread calls `yes` like any other thread and no
-// message is ever set.
-private string wrongThreadMessage(B)() {
-    static if (is(B == Interpreter))
-        return "interpreter callback called on a thread that does not "
-            ~ "own its evaluator (see issue #40)";
-    else static if (is(B == Bytecode))
-        return "bytecode callback called on a thread that does not "
-            ~ "own its compiler (see issue #40)";
-    else
-        return "";
-}
-
-private enum wrongThreadCode = q{
+private enum otherThreadCode = q{
     import ut.backends.call.pointers:
         snakebite_ut_call_bool_callback_on_thread;
 
@@ -480,40 +623,561 @@ private enum wrongThreadCode = q{
         return true;
     }
 
-    string message() {
+    bool answer() {
         return snakebite_ut_call_bool_callback_on_thread(&yes);
     }
 };
 
-// Worker-thread execution is owned by issue #40. The callback rejects the
-// worker before it reads or writes the state its creator thread owns, so
-// an unsupported call is a diagnostic instead of a data race (Interpreter)
-// or a hang (Bytecode: the worker would otherwise wait forever on the
-// recursive lock its creator thread already holds).
+// A callback from a host thread the backend never entered before works
+// like it does in compiled D (ADR-0006): the thread gets its own guest
+// state on its first entry.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't call host code"),
 )) {
-    @("pointers.functionPointer.boolCallback.wrongThread." ~ backend.stringof)
+    @("pointers.functionPointer.boolCallback.otherThread." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        enum expected = wrongThreadMessage!backend;
-
         static if (is(backend == Native)) {
-            mixin(wrongThreadCode);
-            message().should == expected;
+            mixin(otherThreadCode);
+            answer().should == true;
         } else {
             auto modules = parseSnippets([
-                "module bool_callback_thread_root;\n" ~ wrongThreadCode,
+                "module bool_callback_thread_root;\n" ~ otherThreadCode,
                 hostCallbackDeclarations,
             ]);
-            auto function_ = findFunction(modules[0], "message");
+            auto function_ = findFunction(modules[0], "answer");
+            auto backend_ = new backend(Program([modules[0]]));
+
+            bool result;
+            backend_.call(function_, &result, []);
+
+            result.should == true;
+        }
+    }
+}
+
+
+// Several host threads call one guest delegate at the same time. Each
+// call reads a captured variable, allocates, loops and calls another
+// guest function, so the threads share every per-function answer the
+// backend keeps while each runs on its own frames. The sum only comes
+// out right when every call on every thread computed its own result.
+private enum concurrentThreadsCode = q{
+    import ut.backends.call.pointers: snakebite_ut_sum_on_threads;
+
+    int total(int[] values) {
+        int sum;
+        foreach (value; values)
+            sum += value;
+        return sum;
+    }
+
+    long answer() {
+        int base = 3;
+
+        int work(int x) {
+            auto values = new int[](x % 7 + 1);
+            foreach (i, ref value; values)
+                value = cast(int) i + base + x;
+            return total(values);
+        }
+
+        return snakebite_ut_sum_on_threads(&work, 8, 500);
+    }
+};
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't call host code"),
+)) {
+    @("pointers.delegate.concurrentThreads." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        long expected;
+        {
+            mixin(concurrentThreadsCode);
+            expected = answer();
+        }
+
+        static if (!is(backend == Native)) {
+            auto modules = parseSnippets([
+                "module concurrent_threads_root;\n" ~ concurrentThreadsCode,
+                hostCallbackDeclarations,
+            ]);
+            auto function_ = findFunction(modules[0], "answer");
+            auto backend_ = new backend(Program([modules[0]]));
+
+            long result;
+            backend_.call(function_, &result, []);
+
+            result.should == expected;
+        }
+    }
+}
+
+
+// A guest exception thrown by a callback on a worker thread unwinds
+// through that thread's host frames untouched (ADR-0004): the host code
+// on the worker catches the guest's own `Exception`.
+private enum throwOnThreadCode = q{
+    import ut.backends.call.pointers: snakebite_ut_message_on_thread;
+
+    string answer() {
+        void boom() {
+            throw new Exception("thrown on the worker");
+        }
+
+        return snakebite_ut_message_on_thread(&boom);
+    }
+};
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't call host code"),
+)) {
+    @("pointers.delegate.throwOnThread.hostCatches." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        static if (is(backend == Native)) {
+            mixin(throwOnThreadCode);
+            answer().should == "thrown on the worker";
+        } else {
+            auto modules = parseSnippets([
+                "module throw_on_thread_root;\n" ~ throwOnThreadCode,
+                hostCallbackDeclarations,
+            ]);
+            auto function_ = findFunction(modules[0], "answer");
             auto backend_ = new backend(Program([modules[0]]));
 
             string result;
             backend_.call(function_, &result, []);
 
-            result.should == expected;
+            result.should == "thrown on the worker";
         }
+    }
+}
+
+
+// State after a throw on a worker (finding 3.4): frame pops are RAII
+// (`snakebite.framestack.FrameStack`), so a worker that a guest
+// exception unwound through, caught by host code on that same worker,
+// must still be able to make a normal call afterwards - the same
+// worker's frame stack is left exactly as it was before the throwing
+// call, not still holding frames the throw's unwind should have
+// popped.
+private enum throwThenCallSameThreadCode = q{
+    import ut.backends.call.pointers:
+        snakebite_ut_call_twice_on_same_thread_after_throw;
+
+    int answer() {
+        int callTwice(bool shouldThrow) {
+            if (shouldThrow)
+                throw new Exception("thrown on the worker");
+            return 42;
+        }
+
+        return snakebite_ut_call_twice_on_same_thread_after_throw(
+            &callTwice);
+    }
+};
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't call host code"),
+)) {
+    @("pointers.delegate.throwOnThread.sameWorkerCallsAgainAfterThrow."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        static if (is(backend == Native)) {
+            mixin(throwThenCallSameThreadCode);
+            answer().should == 42;
+        } else {
+            auto modules = parseSnippets([
+                "module throw_then_call_same_thread_root;\n"
+                    ~ throwThenCallSameThreadCode,
+                hostCallbackDeclarations,
+            ]);
+            auto function_ = findFunction(modules[0], "answer");
+            auto backend_ = new backend(Program([modules[0]]));
+
+            int result;
+            backend_.call(function_, &result, []);
+
+            result.should == 42;
+        }
+    }
+}
+
+
+// The same guest exception, rethrown by `Thread.join` on the thread that
+// started the worker, reaches the guest `catch` around the host call
+// that started it.
+private enum joinRethrowsCode = q{
+    import ut.backends.call.pointers: snakebite_ut_join_thread;
+
+    string answer() {
+        void boom() {
+            throw new Exception("thrown on the worker");
+        }
+
+        try
+            snakebite_ut_join_thread(&boom);
+        catch (Exception exception)
+            return "caught: " ~ exception.msg;
+        return "no throw";
+    }
+};
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't call host code"),
+)) {
+    @("pointers.delegate.throwOnThread.guestCatches." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        static if (is(backend == Native)) {
+            mixin(joinRethrowsCode);
+            answer().should == "caught: thrown on the worker";
+        } else {
+            auto modules = parseSnippets([
+                "module join_rethrows_root;\n" ~ joinRethrowsCode,
+                hostCallbackDeclarations,
+            ]);
+            auto function_ = findFunction(modules[0], "answer");
+            auto backend_ = new backend(Program([modules[0]]));
+
+            string result;
+            backend_.call(function_, &result, []);
+
+            result.should == "caught: thrown on the worker";
+        }
+    }
+}
+
+
+// A guest object allocated on a worker thread, held only in that
+// thread's guest frame, survives a collection another thread runs
+// (ADR-0005): the worker's frame stack is registered with the GC the
+// same way the main thread's is.
+private enum collectOnOtherThreadCode = q{
+    import ut.backends.call.pointers:
+        snakebite_ut_collect_on_other_thread,
+        snakebite_ut_int_callback_on_thread;
+
+    class Box {
+        int value;
+        this(int value) { this.value = value; }
+    }
+
+    int answer() {
+        int work() {
+            auto box = new Box(41);
+            snakebite_ut_collect_on_other_thread();
+            return box.value + 1;
+        }
+
+        return snakebite_ut_int_callback_on_thread(&work);
+    }
+};
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't call host code"),
+)) {
+    @("pointers.delegate.allocationSurvivesCollection." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        static if (is(backend == Native)) {
+            mixin(collectOnOtherThreadCode);
+            answer().should == 42;
+        } else {
+            auto modules = parseSnippets([
+                "module collect_on_other_thread_root;\n"
+                    ~ collectOnOtherThreadCode,
+                hostCallbackDeclarations,
+            ]);
+            auto function_ = findFunction(modules[0], "answer");
+            auto backend_ = new backend(Program([modules[0]]));
+
+            int result;
+            backend_.call(function_, &result, []);
+
+            result.should == 42;
+        }
+    }
+}
+
+
+// The same, on a bare `pthread` druntime does not know: the backend
+// attaches it to druntime on its first entry (ADR-0006), so the
+// collection sees its stack too.
+private enum collectOnForeignThreadCode = q{
+    import ut.backends.call.pointers:
+        snakebite_ut_collect_on_other_thread,
+        snakebite_ut_int_callback_on_foreign_thread;
+
+    class Box {
+        int value;
+        this(int value) { this.value = value; }
+    }
+
+    int answer() {
+        int work() {
+            auto box = new Box(41);
+            snakebite_ut_collect_on_other_thread();
+            return box.value + 1;
+        }
+
+        return snakebite_ut_int_callback_on_foreign_thread(&work);
+    }
+};
+
+// The native oracle for the same scenario cannot run `collectOnForeign
+// ThreadCode` unchanged (finding 3.2): a backend attaches a bare
+// `pthread` to druntime itself, on that thread's first entry
+// (ADR-0006), but compiled D gives such a thread no such automatic
+// entry - a caller across the barrier, here the raw `pthread` this
+// test's own C-like helper starts, has to attach it itself before any
+// D code on it allocates. This is that same attach, done by hand, so
+// the oracle's expected answer (42) is still backed by compiled D
+// rather than left unchecked.
+private enum collectOnForeignThreadNativeCode = q{
+    import ut.backends.call.pointers:
+        snakebite_ut_collect_on_other_thread,
+        snakebite_ut_int_callback_on_foreign_thread;
+    import core.thread: thread_attachThis, thread_detachThis;
+
+    class Box {
+        int value;
+        this(int value) { this.value = value; }
+    }
+
+    int answer() {
+        int work() {
+            thread_attachThis();
+            scope(exit) thread_detachThis();
+
+            auto box = new Box(41);
+            snakebite_ut_collect_on_other_thread();
+            return box.value + 1;
+        }
+
+        return snakebite_ut_int_callback_on_foreign_thread(&work);
+    }
+};
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't call host code"),
+)) {
+    @("pointers.delegate.allocationSurvivesCollection.foreignThread."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        static if (is(backend == Native)) {
+            mixin(collectOnForeignThreadNativeCode);
+            answer().should == 42;
+        } else {
+            auto modules = parseSnippets([
+                "module collect_on_foreign_thread_root;\n"
+                    ~ collectOnForeignThreadCode,
+                hostCallbackDeclarations,
+            ]);
+            auto function_ = findFunction(modules[0], "answer");
+            auto backend_ = new backend(Program([modules[0]]));
+
+            int result;
+            backend_.call(function_, &result, []);
+
+            result.should == 42;
+        }
+    }
+}
+
+
+// A module-level variable with neither `shared` nor `__gshared` is
+// thread-local, the same as in compiled D (finding 1.3): each thread
+// gets its own copy, initialised from the init image on its first use
+// on that thread. Two threads that each call `bumpTls` five times, at
+// the same time, on no lock of their own, only ever see their own five
+// increments starting from zero - 1+2+3+4+5 each - never the other
+// thread's. A shared cell every thread raced on instead would lose
+// updates to the unsynchronised `++`, so the sum would almost certainly
+// come out below 30 (or, on the rare perfectly-serialised interleaving,
+// as high as 55 - one thread's five running on top of the other's) -
+// either way, essentially never exactly 30.
+private enum tlsVariableCode = q{
+    import ut.backends.call.pointers: snakebite_ut_sum_on_threads;
+
+    static int counter;
+
+    long answer() {
+        int bumpTls(int ignored) {
+            return ++counter;
+        }
+
+        return snakebite_ut_sum_on_threads(&bumpTls, 2, 5);
+    }
+};
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't call host code"),
+)) {
+    @("pointers.staticVariable.threadLocal.separateCopyPerThread."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        static if (is(backend == Native)) {
+            mixin(tlsVariableCode);
+            answer().should == 30;
+        } else {
+            auto modules = parseSnippets([
+                "module tls_variable_root;\n" ~ tlsVariableCode,
+                hostCallbackDeclarations,
+            ]);
+            auto function_ = findFunction(modules[0], "answer");
+            auto backend_ = new backend(Program([modules[0]]));
+
+            long result;
+            backend_.call(function_, &result, []);
+
+            result.should == 30;
+        }
+    }
+}
+
+
+// `__gshared` (and, the same way, `shared`) keeps one copy for every
+// thread, the same as in compiled D: three host threads, one after
+// another (each joined before the next starts, so this never races),
+// each call `bumpShared` once and see the previous thread's increment,
+// not a fresh copy of their own.
+private enum gsharedVariableCode = q{
+    import ut.backends.call.pointers: snakebite_ut_int_callback_on_thread;
+
+    __gshared int counter;
+
+    int answer() {
+        int bumpShared() {
+            return ++counter;
+        }
+
+        snakebite_ut_int_callback_on_thread(&bumpShared);
+        snakebite_ut_int_callback_on_thread(&bumpShared);
+        return snakebite_ut_int_callback_on_thread(&bumpShared);
+    }
+};
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't call host code"),
+)) {
+    @("pointers.staticVariable.gshared.oneCopySharedByEveryThread."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        static if (is(backend == Native)) {
+            mixin(gsharedVariableCode);
+            answer().should == 3;
+        } else {
+            auto modules = parseSnippets([
+                "module gshared_variable_root;\n" ~ gsharedVariableCode,
+                hostCallbackDeclarations,
+            ]);
+            auto function_ = findFunction(modules[0], "answer");
+            auto backend_ = new backend(Program([modules[0]]));
+
+            int result;
+            backend_.call(function_, &result, []);
+
+            result.should == 3;
+        }
+    }
+}
+
+
+// ADR-0006's first test (finding 3.1, partial): a real task pool -
+// `std.parallelism`'s, the same kind unit-threaded's own runner uses,
+// with no single-threaded setting anywhere - calls many distinct guest
+// functions of the one backend at once, none compiled yet. Two workers
+// reaching a cold `Program.call` for two different functions at the
+// same time is exactly the race finding 1.2 is about; a wrong answer
+// (not only a crash) is how a corrupted compile would show up here,
+// the same as in `ut.backends.bytecode.concurrency` (`@HiddenTest`
+// there; this one is not, and stays small enough that it need not be).
+private enum parallelismFunctionCount = 24;
+
+// Just the functions, shared between the guest snippet (prefixed with
+// its own `module` line below) and the native oracle (`mixin`ed
+// straight into the unittest body, CTFE-evaluated, since this is a
+// runtime `string`-returning function, not a `q{}` literal).
+private string parallelismFunctionsSource() {
+    import std.conv: text;
+
+    string source;
+    foreach (i; 0 .. parallelismFunctionCount)
+        source ~= text(
+            "long test", i, "() { long sum; ",
+            "foreach (j; 0 .. ", i, " + 1) sum += j; return sum; }\n",
+        );
+    return source;
+}
+
+// `&test0`, `&test1`, ...: nested functions that capture nothing become
+// plain function pointers, not delegates (unlike a captured nested
+// function elsewhere in this module), so `auto` picks that up rather
+// than a hardcoded delegate type.
+private string parallelismFunctionArraySource() {
+    import std.conv: text;
+
+    string source = "auto parallelismTestFunctions = [";
+    foreach (i; 0 .. parallelismFunctionCount)
+        source ~= text("&test", i, ", ");
+    return source ~ "];\n";
+}
+
+private long expectedParallelismResult(in size_t index) {
+    return index * (index + 1) / 2;
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE has no notion of a call from any thread but the one " ~
+        "that owns its interpreter state"),
+)) {
+    @("pointers.parallelism.taskPoolCallsManyGuestFunctionsAtOnce."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import std.algorithm: equal, map;
+        import std.parallelism: taskPool;
+        import std.range: iota;
+
+        static if (is(backend == Native)) {
+            mixin(parallelismFunctionsSource);
+            mixin(parallelismFunctionArraySource);
+
+            auto results = taskPool.amap!(
+                (i) => parallelismTestFunctions[i]())(
+                parallelismFunctionCount.iota);
+        } else {
+            auto modules = parseSnippets([
+                "module ut.backends.call.parallelism_guest;\n"
+                    ~ parallelismFunctionsSource,
+            ]);
+            auto functions = new typeof(findFunction(modules[0], "test0"))[
+                parallelismFunctionCount];
+            foreach (i; 0 .. parallelismFunctionCount) {
+                import std.conv: text;
+
+                functions[i] = findFunction(modules[0], text("test", i));
+            }
+            auto backend_ = new backend(Program([modules[0]]));
+
+            auto results = taskPool.amap!((i) {
+                long result;
+                backend_.call(functions[i], &result, []);
+                return result;
+            })(parallelismFunctionCount.iota);
+        }
+
+        results.equal(
+            parallelismFunctionCount.iota.map!expectedParallelismResult,
+        ).should == true;
     }
 }
 

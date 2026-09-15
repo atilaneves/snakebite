@@ -4,6 +4,7 @@ module snakebite.framestack;
 private:
 
 import snakebite.backends.temporarystack: TemporaryStack;
+import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
 
 
 public enum defaultFrameCapacity = 1024 * 1024;
@@ -43,6 +44,13 @@ public struct FrameStack {
     private size_t _used;
     private ubyte[][] _allocations;
     private TemporaryStack _cleanups;
+    // This thread's own copies of the thread-local guest variables the
+    // bytecode VM has touched (finding 1.3): a `FrameStack` already
+    // belongs to exactly one thread (ADR-0006), so `tlsSlotFor` needs no
+    // lock. `opTls*` (`snakebite.backends.bytecode.vm`) bakes a
+    // `TlsDescriptor*` into its instruction operand instead of a
+    // resolved address, and resolves it through this on every access.
+    private TlsSlots _tls;
 
     @disable this(this);
 
@@ -203,6 +211,14 @@ public struct FrameStack {
     // bytes: a `push`ed `Frame` gives its own back.
     public void release(in Mark mark) {
         popTo(mark);
+    }
+
+    // This thread's own storage for a thread-local guest variable,
+    // starting from `descriptor`'s template on this thread's own first
+    // touch of it (finding 1.3). No lock: this `FrameStack`, like the
+    // `Vm` that owns it, belongs to exactly one thread.
+    public void[] tlsSlotFor(const(TlsDescriptor)* descriptor) {
+        return _tls.slotFor(descriptor);
     }
 
     // Allocates aligned storage whose lifetime is the lifetime of this

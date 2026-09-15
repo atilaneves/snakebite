@@ -703,6 +703,61 @@ private const(Instruction)* runStaticAddress(Decoded)(
 }
 
 
+// A thread-local guest variable's own storage differs by thread, so its
+// address is never a compile-time constant (finding 1.3, ADR-0006) the
+// way a `shared`/`__gshared` variable's is: `opStatic*`'s `source`/
+// `destination` immediate holds a resolved address directly, but
+// `opTls*`'s holds a `snakebite.tlsstorage.TlsDescriptor*` instead,
+// resolved through `frames.tlsSlotFor` - this thread's own storage, on
+// this thread's own frame stack - on every access, never cached in the
+// instruction itself.
+package alias opTlsLoad =
+    execute!(runTlsLoad, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runTlsLoad(Decoded)(
+    ref Decoded execution,
+) {
+    import core.stdc.string: memcpy;
+    import snakebite.tlsstorage: TlsDescriptor;
+
+    auto slot = execution.frames.tlsSlotFor(
+        cast(const(TlsDescriptor)*) execution.source);
+    memcpy(execution.destination, slot.ptr, execution.width);
+    return execution.next;
+}
+
+
+package alias opTlsStore =
+    execute!(runTlsStore, OperandKind.immediate, OperandKind.storage);
+
+private const(Instruction)* runTlsStore(Decoded)(
+    ref Decoded execution,
+) {
+    import core.stdc.string: memcpy;
+    import snakebite.tlsstorage: TlsDescriptor;
+
+    auto slot = execution.frames.tlsSlotFor(
+        cast(const(TlsDescriptor)*) execution.destination);
+    memcpy(slot.ptr, execution.source, execution.width);
+    return execution.next;
+}
+
+
+package alias opTlsAddress =
+    execute!(runTlsAddress, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runTlsAddress(Decoded)(
+    ref Decoded execution,
+) {
+    import snakebite.tlsstorage: TlsDescriptor;
+
+    auto slot = execution.frames.tlsSlotFor(
+        cast(const(TlsDescriptor)*) execution.source);
+    *cast(void**) (execution.destination) = slot.ptr;
+    return execution.next;
+}
+
+
 // `assert(cond)`: when the `execution.width` bytes at
 // `execution.destination` are
 // nonzero, execution just continues. Otherwise this throws a real

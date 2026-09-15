@@ -394,28 +394,34 @@ private void invoke(ref Slot slot, CallFrame* frame) {
 // an entry for as long as it likes, and this bridge keeps its owner
 // reachable for the same reason.
 //
-// Not thread-safe on its own: registration and first use both happen on
-// the thread that runs this backend instance. ADR-0006 moves per-thread
-// state out of the backend; the pool's own reservation already takes a
-// lock.
+// Any thread that runs guest code registers words and crosses the
+// barrier with them (ADR-0006): a registered word is found without a
+// lock, and only the first crossing of a word, which reserves its
+// entry, takes this bridge's lock.
 //
 // A struct, not a class (ai/CODING.md): no base, no children, no virtual
 // methods. `PlanCache` and every plan it prepares share one instance by
 // reference, so it is always reached through a heap-allocated
 // `CallbackBridge*`, the same way a class reference would be shared.
 public struct CallbackBridge {
+    import snakebite.sharedtable: SharedTable;
+
     private struct Registered {
         FuncDeclaration declaration;
         const(void)* entry;
     }
 
-    private Registered[const(void)*] _words;
     private struct Adjusted {
         const(void)* word;
         ptrdiff_t offset;
     }
-    private const(void)*[Adjusted] _adjustedEntries;
-    private const(void)*[const(void)*] _wordOfEntry;
+
+    private SharedTable!(const(void)*, Registered) _words;
+    // Read without a lock the same way as `_words` (ADR-0006); an
+    // adjusted entry is reserved once, under this bridge's lock, the
+    // same as an unadjusted one.
+    private SharedTable!(Adjusted, const(void)*) _adjustedEntries;
+    private SharedTable!(const(void)*, const(void)*) _wordOfEntry;
     private CallbackHandler _handler;
     private void* _owner;
 
@@ -433,24 +439,38 @@ public struct CallbackBridge {
     ) {
         if (word is null || word in _words)
             return;
-        _words[word] = Registered(declaration, null);
+        _words.insert(word, Registered(declaration, null));
     }
 
     // The pool entry for `word`, reserved on first use, or null when
     // `word` is not a guest function this backend registered - a host
     // address, or already an entry - and so crosses the barrier as it is.
     public const(void)* entryOf(const(void)* word) {
+        import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+
         auto registered = word in _words;
         if (registered is null)
             return null;
 
-        if (registered.entry is null) {
-            auto plan = new CallPlan;
-            *plan = prepareCallback(registered.declaration);
-            registered.entry = reserve(Slot(
-                _handler, _owner, word, registered.declaration, plan));
-            _wordOfEntry[registered.entry] = word;
-        }
+        if (auto entry = atomicLoad!(MemoryOrder.acq)(registered.entry))
+            return entry;
+
+        // `prepareCallback` touches dmd (finding 1.2), so this takes the
+        // compiler lock in place of a bridge-only mutex: one lock order
+        // everywhere - the compiler lock, then the pool (ADR-0003) -
+        // instead of two locks a caller could take in either order.
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        withCompilerLock({
+            if (registered.entry is null) {
+                auto plan = new CallPlan;
+                *plan = prepareCallback(registered.declaration);
+                const entry = reserve(Slot(
+                    _handler, _owner, word, registered.declaration, plan));
+                _wordOfEntry.insert(entry, word);
+                atomicStore!(MemoryOrder.rel)(registered.entry, entry);
+            }
+        });
 
         return registered.entry;
     }
@@ -462,7 +482,7 @@ public struct CallbackBridge {
     }
 
     public bool contains(const(void)* word) const {
-        return (word in _words) !is null;
+        return _words.contains(word);
     }
 
     // A native ABI thunk owns the receiver adjustment. Callers keep the
@@ -478,14 +498,24 @@ public struct CallbackBridge {
         const key = Adjusted(word, adjustment);
         if (auto entry = key in _adjustedEntries)
             return *entry;
-        auto plan = new CallPlan;
-        *plan = prepareCallback(declaration);
-        assert(plan.hasHiddenContext);
-        const entry = reserve(Slot(
-            _handler, _owner, word, declaration, plan, adjustment,
-            contains(word) ? null : word,
-        ));
-        _adjustedEntries[key] = entry;
+
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        const(void)* entry;
+        withCompilerLock({
+            if (auto found = key in _adjustedEntries) {
+                entry = *found;
+                return;
+            }
+            auto plan = new CallPlan;
+            *plan = prepareCallback(declaration);
+            assert(plan.hasHiddenContext);
+            const reserved = reserve(Slot(
+                _handler, _owner, word, declaration, plan, adjustment,
+                contains(word) ? null : word,
+            ));
+            entry = *_adjustedEntries.insert(key, reserved);
+        });
         return entry;
     }
 }

@@ -6,29 +6,34 @@ private:
 
 // Resolves already-loaded symbols by linker name. The cache keeps both
 // addresses and missing symbols, so a missing template instance is not
-// looked up again on every call.
+// looked up again on every call. Every thread reads the cache without a
+// lock (ADR-0006); a symbol is looked up once, on its first use.
 public struct Resolver {
     import snakebite.dependencyimage: DependencyImage;
+    import snakebite.sharedtable: SharedTable;
 
     private const(DependencyImage)* _image;
-    private void*[string] _addresses;
+    // Read without a lock the same way as every other ADR-0006 cache:
+    // several guest threads can each resolve a symbol for the first time
+    // at once.
+    private SharedTable!(string, void*) _addresses;
 
     // The owner must outlive this resolver and every address it returns.
     public this(const(DependencyImage)* image) {
         _image = image;
     }
+
     version(unittest) private size_t _lookups;
 
     public void* resolve(in char[] name) {
-        if (auto cached = name in _addresses)
+        if (auto cached = _addresses.find(cast(string) name))
             return *cached;
 
         version(unittest) ++_lookups;
         auto address = _image is null ? null : _image.resolve(name);
         if (address is null)
             address = symbolAddress(name);
-        _addresses[name.idup] = address;
-        return address;
+        return *_addresses.insert(name.idup, address);
     }
 
     version(unittest)
