@@ -4153,9 +4153,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(CondExp expression) {
-        import dmd.astenums: Tnoreturn;
-
-        if (_destination == discardResult && expression.type.ty == Tnoreturn) {
+        if (_destination == discardResult) {
             compileTernary(expression, discardResult, 0);
             return;
         }

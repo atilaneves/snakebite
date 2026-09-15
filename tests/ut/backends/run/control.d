@@ -9,6 +9,38 @@ module ut.backends.run.control;
 import ut.backends;
 
 
+// A discarded __ctfe conditional can assign a nested field of `this`, with a
+// call in its alternate branch. This is the shape used by std.sumtype.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE selects the compile-time conditional branch"),
+)) {
+    @("discardedConditionalAssignmentRunsSelectedBranch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Storage { int value; }
+            struct Holder {
+                Storage storage;
+
+                this(int value) {
+                    __ctfe
+                        ? (this.storage.value = value)
+                        : (this.storage.value = fallback());
+                }
+
+                int fallback() { return 2; }
+            }
+
+            void main() {
+                auto holder = Holder(1);
+                assert(holder.storage.value == 2);
+            }
+        });
+    }
+}
+
+
 // An ordinary switch selects one case, falls through until `break`, and
 // takes `default` when no case matches.
 // `fellThrough += value;` sums an `int` with the `uint` a `foreach` over
