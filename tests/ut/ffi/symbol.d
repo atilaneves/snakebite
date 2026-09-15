@@ -4,17 +4,14 @@ module ut.ffi.symbol;
 import ut;
 import snakebite.ffi: Resolver;
 import snakebite.dependencyimage: defaultCompiler, prepareImage;
-import std.file: mkdirRecurse, rmdirRecurse, tempDir, timeLastModified;
-import std.path: buildPath;
-import std.conv: text;
-import std.uuid: randomUUID;
+import std.file: timeLastModified;
 import core.atomic: atomicStore;
 import snakebite.exception: SnakebiteException;
 import ut.backends;
 import snakebite.backends.backend: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
-import std.file: dirEntries, SpanMode, write;
+import std.file: dirEntries, SpanMode;
 import std.array: array;
 
 private enum atomicSource = q{
@@ -25,17 +22,11 @@ private enum atomicSource = q{
     }
 };
 
-private string cacheDirectory() {
-    const path = buildPath(tempDir, text("snakebite-image-", randomUUID));
-    mkdirRecurse(path);
-    return path;
-}
-
 @("image.atomicLoad.cache")
 @Serial
 unittest {
-    const directory = cacheDirectory;
-    scope(exit) rmdirRecurse(directory);
+    const sandbox = Sandbox();
+    const directory = sandbox.sandboxPath;
     auto image = prepareImage(atomicSource, directory);
     const stamp = timeLastModified(image.path);
     auto reused = prepareImage(atomicSource, directory);
@@ -44,24 +35,24 @@ unittest {
     auto resolver = Resolver(&reused);
     alias Load = extern(C) int function(shared int*);
     const load = cast(Load) resolver.resolve("image_atomic_load");
-    assert(load !is null);
+    load.should.not == null;
     shared int value;
     foreach (expected; [0, 42, -7, int.min, int.max]) {
         atomicStore(value, expected);
         load(&value).should == expected;
     }
-    assert(resolver.resolve("abs") !is null);
-    assert(resolver.resolve("image_missing_symbol") is null);
+    resolver.resolve("abs").should.not == null;
+    resolver.resolve("image_missing_symbol").should == null;
 }
 
 @("image.sourceChange")
 @Serial
 unittest {
-    const directory = cacheDirectory;
-    scope(exit) rmdirRecurse(directory);
+    const sandbox = Sandbox();
+    const directory = sandbox.sandboxPath;
     auto first = prepareImage("export extern(C) int answer() { return 1; }", directory);
     auto second = prepareImage("export extern(C) int answer() { return 2; }", directory);
-    assert(first.path != second.path);
+    first.path.should.not == second.path;
     alias Answer = extern(C) int function();
     (cast(Answer) first.resolve("answer"))().should == 1;
     (cast(Answer) second.resolve("answer"))().should == 2;
@@ -70,55 +61,75 @@ unittest {
 @("image.compileFailure")
 @Serial
 unittest {
-    const directory = cacheDirectory;
-    scope(exit) rmdirRecurse(directory);
-    (() { auto image = prepareImage("this is invalid D", directory); })()
-        .shouldThrow!SnakebiteException;
+    const sandbox = Sandbox();
+    const directory = sandbox.sandboxPath;
+    (() {
+        try {
+            auto image = prepareImage(q{
+                static assert(false, "image compile diagnostic");
+            }, directory);
+        } catch (SnakebiteException error) {
+            (error.next !is null).should == true;
+            "image compile diagnostic".shouldBeIn(error.next.msg);
+            throw error;
+        }
+    })().shouldThrowWithMessage!SnakebiteException(
+        "Dependency image compilation failed");
     dirEntries(directory, SpanMode.shallow).array.length.should == 0;
 }
 
 @("image.linkFailure")
 @Serial
 unittest {
-    const directory = cacheDirectory;
-    scope(exit) rmdirRecurse(directory);
+    const sandbox = Sandbox();
+    const directory = sandbox.sandboxPath;
     (() {
-        auto image = prepareImage(q{
-            extern(C) int image_missing_dependency();
-            export extern(C) int answer() { return image_missing_dependency(); }
-        }, directory);
-    })().shouldThrow!SnakebiteException;
+        try {
+            auto image = prepareImage(q{
+                extern(C) int image_missing_dependency();
+                export extern(C) int answer() { return image_missing_dependency(); }
+            }, directory);
+        } catch (SnakebiteException error) {
+            (error.next !is null).should == true;
+            "image_missing_dependency".shouldBeIn(error.next.msg);
+            throw error;
+        }
+    })().shouldThrowWithMessage!SnakebiteException(
+        "Dependency image linking failed");
     dirEntries(directory, SpanMode.shallow).array.length.should == 0;
 }
 
 @("image.compilerFamily")
 @Serial
 unittest {
-    const directory = cacheDirectory;
-    scope(exit) rmdirRecurse(directory);
-    version (DigitalMars)
+    const sandbox = Sandbox();
+    const directory = sandbox.sandboxPath;
+    version (DigitalMars) {
         const otherCompiler = "ldc2";
-    else
+        const message = "Image compiler must be DMD";
+    } else {
         const otherCompiler = "dmd";
+        const message = "Image compiler must be LDC";
+    }
     (() {
         auto image = prepareImage(atomicSource, directory, otherCompiler);
-    })().shouldThrow!SnakebiteException;
+    })().shouldThrowWithMessage!SnakebiteException(message);
     dirEntries(directory, SpanMode.shallow).array.length.should == 0;
 }
 
 @("image.inputChange")
 @Serial
 unittest {
-    const directory = cacheDirectory;
-    scope(exit) rmdirRecurse(directory);
-    const input = buildPath(directory, "settings");
-    input.write("first");
+    const sandbox = Sandbox();
+    const directory = sandbox.sandboxPath;
+    const input = sandbox.inSandboxPath("settings");
+    sandbox.writeFile("settings", "first");
     auto first = prepareImage(atomicSource, directory,
         defaultCompiler, [input]);
-    input.write("second");
+    sandbox.writeFile("settings", "second");
     auto second = prepareImage(atomicSource, directory,
         defaultCompiler, [input]);
-    assert(first.path != second.path);
+    first.path.should.not == second.path;
 }
 
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
@@ -126,8 +137,8 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     @("image.atomicLoad." ~ backend.stringof)
     @Serial
     unittest {
-        const directory = cacheDirectory;
-        scope(exit) rmdirRecurse(directory);
+        const sandbox = Sandbox();
+        const directory = sandbox.sandboxPath;
         auto image = prepareImage(atomicSource, directory);
         shared int value = 42;
         static if (is(backend == Native)) {
@@ -154,8 +165,8 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 @("image.moduleConstructor")
 @Serial
 unittest {
-    const directory = cacheDirectory;
-    scope(exit) rmdirRecurse(directory);
+    const sandbox = Sandbox();
+    const directory = sandbox.sandboxPath;
     auto image = prepareImage(q{
         module image;
         __gshared int value;
@@ -172,7 +183,7 @@ unittest {
     Resolver resolver;
 
     foreach (_; 0 .. 100)
-        assert(resolver.resolve("abs") !is null);
+        resolver.resolve("abs").should.not == null;
 
     resolver.lookups.should == 1;
 }
@@ -183,9 +194,9 @@ unittest {
     Resolver resolver;
 
     foreach (_; 0 .. 100)
-        assert(resolver.resolve(
+        resolver.resolve(
             "snakebite_symbol_that_does_not_exist",
-        ) is null);
+        ).should == null;
 
     resolver.lookups.should == 1;
 }

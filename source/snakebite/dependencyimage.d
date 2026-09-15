@@ -98,9 +98,9 @@ public DependencyImage prepareImage(
         const imagePath = staging.buildPath("image.so");
         sourcePath.write(source ~ text("\nstatic assert(__VERSION__ == ",
             __VERSION__, ", \"Image compiler must match the host compiler version\");\n"));
-        runCompiler([executable] ~ compileFlags
+        runCompiler("compilation", [executable] ~ compileFlags
             ~ [sourcePath, "-of=" ~ objectPath]);
-        runCompiler([executable] ~ linkFlags
+        runCompiler("linking", [executable] ~ linkFlags
             ~ [objectPath, "-of=" ~ imagePath]);
         // Readers must never observe a partially linked image. Concurrent
         // builders publish equivalent complete files with atomic rename.
@@ -122,13 +122,19 @@ else version (LDC)
     public enum defaultCompiler = "ldc2";
 
 
-private void runCompiler(in string[] command) {
+private void runCompiler(in string phase, in string[] command) {
     import std.process: execute;
     import std.conv: text;
 
     const result = execute(command);
-    require(result.status == 0, text("Dependency image command failed: ",
-        command, "\n", result.output));
+    if (result.status != 0) {
+        import snakebite.exception: SnakebiteException;
+
+        auto error = new SnakebiteException(
+            text("Dependency image ", phase, " failed"));
+        error.next = new Exception(text("Command: ", command, "\n", result.output));
+        throw error;
+    }
 }
 
 

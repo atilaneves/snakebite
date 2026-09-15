@@ -66,9 +66,10 @@ directories and publish completed libraries with an atomic rename. A failed
 build does not publish an image. Concurrent builders can duplicate work but
 cannot expose a partially linked library.
 
-Compiler errors include the command and compiler output. Loader errors
-include the library path. The cache directory must be writable and owned by
-the caller. Cache eviction is left to the caller.
+Compiler errors name the failed phase. Their exception cause retains the
+command and compiler output. Loader errors include the library path. The
+cache directory must be writable and owned by the caller. Cache eviction is
+left to the caller.
 
 ## Verification
 
