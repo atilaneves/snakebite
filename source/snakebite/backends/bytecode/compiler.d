@@ -4031,6 +4031,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(CondExp expression) {
+        import dmd.astenums: Tnoreturn;
+
+        if (_destination == discardResult && expression.type.ty == Tnoreturn) {
+            compileTernary(expression, discardResult, 0);
+            return;
+        }
+
         requireDestination(expression);
         compileTernary(expression, _destination, _width);
     }
