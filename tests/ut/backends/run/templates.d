@@ -182,3 +182,94 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("decodeFrontPreservesResultAndConsumesCodeUnits." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.utf: decodeFront;
+            void main() {
+                wchar[] input = ['A', 0xD83D, 0xDE00, 'Z'];
+                size_t count;
+                assert(decodeFront(input, count) == 'A');
+                assert(count == 1 && input.length == 3);
+                assert(decodeFront(input, count) == 0x1F600);
+                assert(count == 2 && input.length == 1);
+                assert(decodeFront(input) == 'Z');
+                assert(input.length == 0);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot take the address of an initializer symbol"),
+)) {
+    @("emplaceMersenneTwisterInitializerRestoresState." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.internal.lifetime: emplaceInitializer;
+            import std.random: Mt19937;
+            void main() {
+                Mt19937 generator;
+                generator.seed(123);
+                generator.popFront();
+                emplaceInitializer(generator);
+                assert(generator == Mt19937.init);
+                generator.seed(5489);
+                assert(generator.front == 3499211612U);
+                generator.popFront();
+                assert(generator.front == 581869302U);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("postconditionReadsReturnedLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int checked(int value)
+            out (result) {
+                assert(result == value + 1);
+            }
+            do {
+                immutable answer = value + 1;
+                return answer;
+            }
+            void main() {
+                assert(checked(41) == 42);
+                assert(checked(8) == 9);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot take the address of an initializer symbol"),
+)) {
+    @("structInitializerSymbolCopiesDefaultBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.string: memcpy;
+            struct State {
+                uint[6] words = 17;
+                size_t index = 6;
+            }
+            void main() {
+                State state;
+                state.words[] = 99;
+                state.index = 1;
+                const initializer = __traits(initSymbol, State);
+                assert(initializer.length == State.sizeof);
+                memcpy(&state, initializer.ptr, initializer.length);
+                assert(state == State.init);
+            }
+        });
+    }
+}

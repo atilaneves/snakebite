@@ -40,6 +40,16 @@ public struct RuntimeTypes {
         _initialValue = initialValue;
     }
 
+    public const(void)[] initializer(
+        imported!"dmd.aggregate".AggregateDeclaration declaration,
+    ) {
+        // A class variable defaults to null; its instance initializer
+        // instead includes the header and the default field values.
+        if (auto classDeclaration = declaration.isClassDeclaration)
+            return _classInfo(classDeclaration).m_init;
+        return _initialValue(declaration.type, declaration.loc);
+    }
+
     // `_types` caches by `Type` identity, not only for a struct, class or
     // enum's own `TypeInfo` - `build`'s `TypeTuple`, array and qualified
     // (`const`/`shared`/...) branches below are covered by this same

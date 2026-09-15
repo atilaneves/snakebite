@@ -145,6 +145,11 @@ package struct FrameLayout {
         if (function_.fbody !is null) {
             scope collector = new LocalsCollector(&layout);
             function_.fbody.accept(collector);
+            // DMD assigns the out-contract result in the lowered body,
+            // but does not introduce it with a DeclarationExp.
+            if (function_.vresult !is null
+                    && !layout.hasSlot(function_.vresult))
+                collector.collectVariable(function_.vresult);
         }
 
         return layout;
