@@ -2778,7 +2778,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // whole-static-array-slice case reaches here asking for that
         // literal's own address. Evaluating it here, into a fresh
         // temporary, then handing back that temporary's own address, is
-        // what supplies one.
+        // what supplies one. `_temporaries.reserveValue`, not `_frames.
+        // push` (`valueCallAddress`'s own doc has the same reasoning):
+        // `push` hands back a `Frame` whose own destructor pops the
+        // reservation the moment that local `Frame` goes out of scope -
+        // here, at this very function's own return, before the caller
+        // this address is for ever reads it - while `reserveValue`'s
+        // storage stays live until the enclosing full expression releases
+        // it, the same lifetime a callee reading a typesafe variadic
+        // parameter throughout its own body, after nested calls of its
+        // own, needs.
         public void* storageValue(Expression expression) {
             const facts = evaluator.factsOf(expression.type);
             auto temporary = evaluator._temporaries.reserveValue(

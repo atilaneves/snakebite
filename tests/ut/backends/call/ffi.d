@@ -2176,6 +2176,45 @@ private extern(D) int snakebite_ut_dvariadic_typesafe_backend(
 }
 
 
+// Guest-to-guest, no FFI at all: dmd's own typesafe variadic packing
+// slices a fresh, variable-less `ArrayLiteralExp` (`[3, 4, 5]`) at the
+// call site (`Evaluator.addressOf`'s own `isArrayLiteralExp` case, issue
+// #334 step 6's own doc there). `helper`'s own `int[8]` local is a
+// second, later reservation from the same frame stack `addressOf` used
+// for that slice's own storage - a probe for a dangling address: if
+// `addressOf` handed back a reservation its own RAII already popped, a
+// nested call's own frame would land on those exact same, "already
+// free" bytes and clobber `[3, 4, 5]` out from under `a` before
+// `typesafeSum`'s `foreach` ever reads it.
+static foreach (backend; Matrix!()) {
+    @("variadic.typesafe.addressSurvivesNestedCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        22.shouldBeRetOf!(
+            backend,
+            q{
+                int helper(int x) {
+                    int[8] pad = [9, 9, 9, 9, 9, 9, 9, 9];
+                    return x + pad[7];
+                }
+
+                int typesafeSum(int[] a...) {
+                    int t = helper(1);
+                    foreach (v; a)
+                        t += v;
+                    return t;
+                }
+
+                int answer() {
+                    return typesafeSum(3, 4, 5);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
 private struct VariadicPointBackend {
     int x;
     int y;
