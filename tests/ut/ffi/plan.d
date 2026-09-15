@@ -976,7 +976,7 @@ private struct ContextThenMixedSpill {
 // body for `hasHiddenThis` to see its `vthis` (`called.
 // contextPrecedesHiddenReturnPointer`'s own doc), but any guest
 // declaration with a body always runs as guest code
-// (`snakebite.backends.calls.prefersGuestBody`'s own doc - "a guest
+// (`snakebite.backends.calls.CallSelection`'s own doc - "a guest
 // function's body is the one being tested, so it runs as guest even when
 // its linker name is also in this process"), never as an FFI call -
 // verified by trying it: a bodyless guest method left `hasHiddenThis`

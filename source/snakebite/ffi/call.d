@@ -81,6 +81,123 @@ public struct CallAdapter {
         }
     }
 
+    // Both backends consume the same call-site facts, but one can reuse
+    // declared argument storage while the other must emit every argument.
+    public struct Arguments {
+        import dmd.arraytypes: Expressions;
+        import dmd.expression: Expression;
+        import dmd.func: FuncDeclaration;
+        import dmd.mtype: Type, TypeFunction;
+        import snakebite.callarguments: CallArguments;
+        import snakebite.ffi.plan: CallPlan, PlanCache;
+
+        private TypeFunction _type;
+        private Expression[] _expressions;
+        private size_t _declaredOffset;
+
+        public static Arguments of(
+            TypeFunction type, Expressions* expressions,
+        ) {
+            Arguments result;
+            result._type = type;
+            result._expressions = expressions is null ? null : (*expressions)[];
+            result._declaredOffset = type.isDstyleVariadic ? 1 : 0;
+            return result;
+        }
+
+        public Expression[] declared() {
+            return _expressions[_declaredOffset .. extraOffset];
+        }
+
+        private size_t extraOffset() {
+            return _declaredOffset + _type.parameterList.length;
+        }
+
+        // Called only when the backend has no plan for this call site.
+        // A repeated interpreter call must not rebuild the extra-type list.
+        public const(CallPlan)* prepare(
+            ref PlanCache plans, FuncDeclaration callee,
+        ) {
+            import dmd.astenums: VarArg;
+
+            if (_type.parameterList.varargs != VarArg.variadic)
+                return plans.of(callee);
+
+            Type[] extraTypes;
+            foreach (expression; _expressions[extraOffset .. $])
+                extraTypes ~= expression.type;
+            return plans.variadicOf(callee, extraTypes);
+        }
+
+        public struct Value {
+            public Expression expression;
+            public TypeFacts facts;
+            public bool isReference;
+            public bool readsField;
+            public size_t fieldOffset;
+            public TypeFacts fieldFacts;
+        }
+
+        public void each(scope void delegate(Value) emit) {
+            if (_declaredOffset)
+                emit(hiddenArgument);
+            foreach (i, expression; declared) {
+                import dmd.astenums: STC;
+
+                auto parameter = _type.parameterList[i];
+                const reference = Argument.of(parameter).isReference;
+                const facts = reference ? TypeFacts.pointer
+                    : parameter.storageClass & STC.lazy_
+                        ? TypeFacts.lazyArgument : TypeFacts.of(parameter.type);
+                emit(Value(expression, facts, reference));
+            }
+            foreach (expression; _expressions[extraOffset .. $])
+                emit(Value(expression, TypeFacts.of(expression.type)));
+        }
+
+        private Value hiddenArgument() {
+            import snakebite.ffi.abi: dVariadicArgumentsIsSlice;
+
+            auto expression = _expressions[0];
+            auto value = Value(expression, TypeFacts.of(expression.type));
+            // The host compiler can require a field read after evaluation.
+            if (dVariadicArgumentsIsSlice) {
+                value.readsField = true;
+                value.fieldOffset = TypeInfo_Tuple.elements.offsetof;
+                value.fieldFacts = TypeFacts(
+                    (TypeInfo[]).sizeof, (TypeInfo[]).alignof,
+                );
+            }
+            return value;
+        }
+
+        // Declared arguments are already bound in the interpreter's frame.
+        // Only hidden and extra arguments need fresh expression storage.
+        public CallArguments bind(
+            void* context,
+            scope void* delegate(size_t) declaredAddress,
+            scope void* delegate(Value) evaluate,
+        ) {
+            auto arguments = CallArguments(
+                _expressions.length + (context !is null),
+            );
+            auto slots = arguments.values; // The address slots must stay mutable.
+            size_t first;
+            if (context !is null)
+                slots[first++] = context;
+
+            foreach (i; 0 .. _type.parameterList.length)
+                slots[first + _declaredOffset + i] = declaredAddress(i);
+            if (_declaredOffset)
+                slots[first] = evaluate(hiddenArgument);
+            foreach (i; extraOffset .. _expressions.length)
+                slots[first + i] = evaluate(Value(
+                    _expressions[i], TypeFacts.of(_expressions[i].type),
+                ));
+            return arguments;
+        }
+    }
+
     public static CallAdapter of(
         imported!"dmd.func".FuncDeclaration function_,
     ) {

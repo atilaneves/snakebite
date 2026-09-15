@@ -4,59 +4,63 @@ module snakebite.backends.calls;
 private:
 
 
-// Guest delegates and captured guest frames cannot be passed to a host
-// body that expects native callable addresses and native stack frames.
-// The caller supplies its ordinary target preference; symbol resolution
-// stays lazy because a guest callback can make that lookup unnecessary.
-//
-// A callee with an outer function reads that function's frame through
-// the static chain, which only this compiler's own frame layout can
-// supply - a native instantiation of the same nested function would
-// read the enclosing frame at the offsets the host compiler gave it
-// instead. This is why any such callee runs as guest, not only one
-// nested directly in the function being compiled: `contextAddressOf`/
-// `tryContextOf` already walk the static chain up from wherever
-// execution currently is, one hop per level of nesting, to reach any
-// ancestor's frame, so a sibling nesting level resolves the same way a
-// direct child does. A template's own nested lambda - druntime's
-// `_d_aaApply2`'s `_toAA` cast, for one - is where this shows: that
-// lambda has a native instance the host links, and calling it there
-// hands it a guest frame it cannot read (#275).
-public bool usesGuestBody(
-    imported!"dmd.func".FuncDeclaration function_,
-    imported!"dmd.arraytypes".Expressions* arguments,
-    scope bool delegate(imported!"dmd.func".FuncDeclaration) isGuest,
-    lazy bool preferGuest,
-) {
-    import snakebite.frontend.dmd.delegates: outerFunctionOf;
+// A call's target rules and cached declaration preference belong together.
+// Argument-dependent guest requirements must run before symbol resolution:
+// a host body cannot read a captured guest frame.
+public struct CallSelection {
+    import dmd.func: FuncDeclaration;
+    import dmd.arraytypes: Expressions;
 
-    if (function_.fbody is null)
-        return false;
+    private bool[FuncDeclaration] _preferences;
 
-    if (hasGuestDelegateArgument(arguments, isGuest))
-        return true;
+    public bool usesGuestBody(
+        FuncDeclaration function_,
+        Expressions* arguments,
+        scope bool delegate(FuncDeclaration) isGuest,
+        lazy bool hasNativeSymbol,
+        in string backend,
+    ) {
+        import dmd.astenums: VarArg;
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+        import snakebite.frontend.dmd.delegates: outerFunctionOf;
+        import snakebite.exception: SnakebiteException;
+        import std.conv: text;
 
-    if (outerFunctionOf(function_) !is null)
-        return true;
+        if (function_.fbody is null)
+            return false;
 
-    return preferGuest;
-}
+        // The barrier supports these calls, but neither backend executes
+        // a guest body that reads the hidden variadic locals (ADR-0010).
+        if (typeFunctionOf(function_).parameterList.varargs
+                == VarArg.variadic) {
+            if (isGuest(function_) && !hasNativeSymbol)
+                throw new SnakebiteException(text(
+                    backend, " cannot call `", function_.toString,
+                    "`: guest-bodied D variadic functions are not ",
+                    "interpreted yet",
+                ));
+            return false;
+        }
 
-// Whether a backend should run `function_`'s own body rather than the
-// machine code this process may have for it. A guest function's body is
-// the one being tested, so it runs as guest even when its linker name is
-// also in this process: a guest `main` mangles to `_Dmain`, which the
-// host program itself exports, and calling that re-enters the host. A
-// template instance is the exception, because a native instantiation, when
-// there is one, is the same code the guest would have compiled.
-public bool prefersGuestBody(
-    imported!"dmd.func".FuncDeclaration function_,
-    in bool isGuest,
-    lazy bool hasNativeSymbol,
-) {
-    const isTemplate = function_.isInstantiated() !is null
-        && function_.fbody !is null;
-    return isTemplate ? !hasNativeSymbol : isGuest;
+        if (hasGuestDelegateArgument(arguments, isGuest))
+            return true;
+
+        // This includes siblings and deeper nested callees: every static
+        // chain points into frames whose offsets belong to this backend.
+        if (outerFunctionOf(function_) !is null)
+            return true;
+
+        if (auto cached = function_ in _preferences)
+            return *cached;
+
+        // A root-owned body must run as guest even when its linker name
+        // is in the host (notably _Dmain). A template can reuse the host
+        // instantiation; a missing template symbol leaves its guest body.
+        const prefers = function_.isInstantiated() !is null
+            ? !hasNativeSymbol : isGuest(function_);
+        _preferences[function_] = prefers;
+        return prefers;
+    }
 }
 
 // Whether a call site's own argument list has the wrong length for
