@@ -72,10 +72,7 @@ static foreach (backend; Matrix!()) {
 // only one member name at a time - `off`'s member index is `0`, the
 // smallest a `final switch` in `toStr` can pick, unlike the three-member
 // enum `toStringOnEnum` (`structs.d`) pins.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "`assert(to!string(Setting.on) == \"on\")` fails"),
-)) {
+static foreach (backend; Matrix!()) {
     @("toStringOnTwoMemberEnum." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

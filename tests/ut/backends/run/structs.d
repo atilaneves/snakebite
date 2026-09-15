@@ -3184,10 +3184,7 @@ static foreach (backend; Matrix!()) {
 // on a plain `int`: `toImpl`'s `enumRep` reads the enum's own member names,
 // a `static` initializer dmd's CTFE folds to an `ArrayLiteralExp` of code
 // units rather than a `StringExp`.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "`assert(to!string(Color.green) == \"green\")` fails"),
-)) {
+static foreach (backend; Matrix!()) {
     @("toStringOnEnum." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
