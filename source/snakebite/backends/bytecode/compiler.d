@@ -7,6 +7,8 @@ import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
+import snakebite.backends.fullexpression:
+    FullExpressionKind, FullExpressionScope;
 import snakebite.ffi:
     CallbackBridge, PlanCache, supportsBoolFunction;
 import snakebite.ffi.abi: Register;
@@ -424,6 +426,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opResolveInterfaceMethod,
         opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
+        opTemporaryArm, opTemporaryArmAddress, opTemporaryBegin,
+        opTemporaryEnd,
+        opTemporaryRegister, opTemporarySuspend,
         opSliceCopy, opSliceFill,
         opStaticAddress, opStaticArrayEqual, opStaticLoad, opStaticStore,
         opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero;
@@ -433,6 +438,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         DelegateTarget, delegateTargetOf, functionNeedsClosure,
         outerFunctionOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
+    import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout:
         alignUp, initializerValueOf, isIntegralSize, TypeFacts;
@@ -461,6 +467,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
+    private struct Temporary {
+        size_t base;
+        size_t site;
+        imported!"dmd.expression".Expression destructor;
+    }
+    private Temporary[] _temporaries;
+    private size_t[] _lifetimeMarkers;
+    private size_t[] _lifetimeFirstTemporaries;
+    private FullExpressionScope _expressions;
+    private bool _emittingCleanup;
     private size_t _closureOffset = size_t.max;
     // Set once nothing after the statement just compiled can run: a
     // `return`, a `continue`, or an `if`/loop whose every path already
@@ -686,6 +702,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         optimizeStaticLoads;
+
+        foreach (ref site; _callSites)
+            if (site.cleanupStartIndex != size_t.max) {
+                site.cleanupStart = cast(void*) instructionAt(
+                    site.cleanupStartIndex);
+                site.cleanupEnd = cast(void*) instructionAt(
+                    site.cleanupEndIndex);
+            }
 
         ClosureSlot[] closureSlots;
         if (_closureOffset != size_t.max)
@@ -1116,7 +1140,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, statement.loc, statementText(statement));
 
         const conditionOffset = reserveTemp(facts);
-        evalInto(statement.condition, conditionOffset, facts.size);
+        compileValue(statement.condition, conditionOffset, facts.size);
 
         if (statement.cases !is null) {
             foreach (case_; *statement.cases) {
@@ -1283,7 +1307,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // another `return`, without disturbing the value already on its
         // way out.
         const offset = reserveTemp(_returnFacts);
-        evalInto(statement.exp, offset, _returnFacts.size);
+        compileValue(statement.exp, offset, _returnFacts.size);
         runPendingFinallyBodies();
         emit(&opReturn, 0, offset, _returnFacts.size);
         _finished = true;
@@ -1325,7 +1349,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const facts = TypeFacts.of(condition.type);
         if (facts.isDynamicArray) {
             const arrayOffset = reserveTemp(facts);
-            evalInto(condition, arrayOffset, facts.size);
+            compileValue(condition, arrayOffset, facts.size);
             return arrayOffset + arrayPointerOffset;
         }
 
@@ -1337,7 +1361,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 expressionText(condition));
 
         const offset = reserveTemp(facts);
-        evalInto(condition, offset, facts.size);
+        compileValue(condition, offset, facts.size);
         return offset;
     }
 
@@ -1345,7 +1369,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression condition, in TypeFacts facts,
     ) {
         const offset = reserveTemp(facts);
-        evalInto(condition, offset, facts.size);
+        compileValue(condition, offset, facts.size);
         return offset;
     }
 
@@ -1364,11 +1388,26 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (handler is null)
             return size_t.max;
         const leftOffset = reserveTemp(facts);
-        evalInto(expression.e1, leftOffset, facts.size);
         const rightOffset = reserveTemp(facts);
-        evalInto(expression.e2, rightOffset, facts.size);
+        withFullExpression(FullExpressionKind.value, expression, {
+            evalInto(expression.e1, leftOffset, facts.size);
+            evalInto(expression.e2, rightOffset, facts.size);
+        });
         const index = _instructions.length;
         emit(handler, leftOffset, rightOffset, facts.size, 0);
+        return index;
+    }
+
+    private size_t compileConditionBranch(Expression condition) {
+        auto comparison = condition.isBinExp;
+        const comparisonIndex = comparison is null
+            ? size_t.max : compileIntegralComparisonBranch(comparison);
+        if (comparisonIndex != size_t.max)
+            return comparisonIndex;
+
+        const offset = compileCondition(condition);
+        const index = _instructions.length;
+        emit(&opBranchFalse, offset, 0, conditionWidth(condition));
         return index;
     }
 
@@ -1444,18 +1483,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        size_t branchIndex;
-        auto comparison = statement.condition.isBinExp;
-        const comparisonIndex = comparison is null
-            ? size_t.max : compileIntegralComparisonBranch(comparison);
-        if (comparisonIndex != size_t.max) {
-            branchIndex = comparisonIndex;
-        } else {
-            const conditionOffset = compileCondition(statement.condition);
-            const width = conditionWidth(statement.condition);
-            branchIndex = _instructions.length;
-            emit(&opBranchFalse, conditionOffset, 0, width);
-        }
+        const branchIndex = compileConditionBranch(statement.condition);
 
         compileStatement(statement.ifbody);
         const ifFinished = _finished;
@@ -1539,17 +1567,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             && !isTriviallyTrueCondition(statement.condition);
         const conditionIndex = _instructions.length;
         size_t branchIndex = size_t.max;
-        if (guarded) {
-            auto comparison = statement.condition.isBinExp;
-            branchIndex = comparison is null
-                ? size_t.max : compileIntegralComparisonBranch(comparison);
-            if (branchIndex == size_t.max) {
-                const conditionOffset = compileCondition(statement.condition);
-                const width = conditionWidth(statement.condition);
-                branchIndex = _instructions.length;
-                emit(&opBranchFalse, conditionOffset, 0, width);
-            }
-        }
+        if (guarded)
+            branchIndex = compileConditionBranch(statement.condition);
 
         _loops ~= LoopContext(label);
         _breakables ~= Breakable(label);
@@ -1748,7 +1767,63 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         _destination = discardResult;
         _width = 0;
-        expression.accept(this);
+
+        withFullExpression(FullExpressionKind.effect, expression,
+            { expression.accept(this); },
+        );
+    }
+
+    private void compileValue(
+        Expression expression, in size_t destination, in size_t width,
+    ) {
+        if (_emittingCleanup)
+            return evalInto(expression, destination, width);
+
+        withFullExpression(FullExpressionKind.value, expression,
+            { evalInto(expression, destination, width); },
+        );
+    }
+
+    private void withFullExpression(
+        FullExpressionKind kind,
+        Expression root,
+        scope void delegate() evaluate,
+    ) {
+        _expressions.run(kind, cast(const(void)*) root,
+            { beginLifetime; }, evaluate, { endLifetime; });
+    }
+
+    private void beginLifetime() {
+        const marker = reserveTemp(pointerFacts);
+        emit(&opTemporaryBegin, marker, 0, 0);
+        _lifetimeMarkers ~= marker;
+        _lifetimeFirstTemporaries ~= _temporaries.length;
+    }
+
+    private void endLifetime() {
+        const marker = _lifetimeMarkers[$ - 1];
+        const firstTemporary = _lifetimeFirstTemporaries[$ - 1];
+        _lifetimeMarkers.length -= 1;
+        _lifetimeFirstTemporaries.length -= 1;
+        finishLifetime(marker, firstTemporary);
+    }
+
+    private void finishLifetime(
+        in size_t marker,
+        in size_t firstTemporary,
+    ) {
+        const jump = _instructions.length;
+        emit(&opJump, 0, 0, 0);
+        foreach_reverse (temporary; _temporaries[firstTemporary .. $]) {
+            _callSites[temporary.site].cleanupStartIndex = _instructions.length;
+            _emittingCleanup = true;
+            compileEffect(temporary.destructor);
+            _emittingCleanup = false;
+            _callSites[temporary.site].cleanupEndIndex = _instructions.length;
+        }
+        _temporaries.length = firstTemporary;
+        _instructions[jump].destination = _instructions.length;
+        emit(&opTemporaryEnd, marker, 0, 0);
     }
 
     protected extern(C++) override void visitTupleElement(
@@ -1791,6 +1866,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return false;
     }
 
+    private size_t registerTemporary(
+        VarDeclaration variable,
+        Expression destructor,
+    ) {
+        const base = _layout.offsetOf(variable);
+        const site = _callSites.length;
+        _callSites ~= CallSite.temporary;
+        _temporaries ~= Temporary(base, site, destructor);
+        emit(&opTemporaryRegister, base, site, 0);
+        return base;
+    }
+
     // Runs a local's initialiser into the frame slot `_layout` already
     // gave it - `int sum = 0;` is a `DeclarationExp` here, the same as in
     // the interpreter.
@@ -1830,8 +1917,27 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (variable._init.isVoidInitializer !is null)
             return;
 
-        compileVariableInitializer(variable, expression.loc,
-            expressionText(expression));
+        const emitDeclaration = () {
+            const plan = TemporaryPlan.of(variable, expression,
+                _emittingCleanup ? null : cast(Expression) _expressions.root,
+                _expressions.rootOwnsTemporary);
+            size_t temporary;
+            plan.initialize((Expression destructor) {
+                temporary = registerTemporary(variable, destructor);
+            }, {
+                compileVariableInitializer(variable, expression.loc,
+                    expressionText(expression));
+            }, {
+                emit(&opTemporaryArmAddress, 0, temporary, 0);
+            });
+        };
+
+        if (_emittingCleanup)
+            return emitDeclaration();
+
+        withFullExpression(FullExpressionKind.effect, expression,
+            emitDeclaration,
+        );
     }
 
     // Runs `variable`'s own initialiser into whichever storage its layout
@@ -2803,6 +2909,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(DeclarationExp expression) {
+        if (_destination != discardResult && _expressions.active())
+            return compileDeclaration(expression);
         if (_destination != discardResult)
             return visit(cast(Expression) expression);
 
@@ -3683,12 +3791,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(CallExp expression) {
-        if (_destination != discardResult && expression.f !is null
-                && expression.f.isCtorDeclaration() !is null) {
-            compileCall(expression, _destination);
-            return;
-        }
-
         if (_destination != discardResult && isRefCall(expression)) {
             const addressOffset = compileAddress(expression);
             emit(&opLoadIndirect, _destination, addressOffset, _width);
@@ -3856,7 +3958,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(LogicalExp expression) {
-        requireDestination(expression);
         compileLogical(expression, _destination, _width);
     }
 
@@ -4499,6 +4600,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? &opBranchFalse : &opBranchTrue;
         emit(shortCircuit, leftOffset, 0, leftWidth);
 
+        if (destOffset == discardResult) {
+            compileEffect(expression.e2);
+            _instructions[branchIndex].source = _instructions.length;
+            return;
+        }
+
         // The left side did not decide the answer: the right side's own
         // truthiness does.
         const rightOffset = compileCondition(expression.e2);
@@ -4950,39 +5057,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto dot = expression.e1.isDotVarExp;
         auto receiver = dot is null ? expression.e1 : dot.e1;
 
-        // A struct literal's own `S(1, 2)` (no `dot` at all) and a
-        // user-constructor field initializer's own `S(0, 0).__ctor(args)`
-        // (`dot.e1` a bare default-init `StructLiteralExp`) name the same
-        // thing: a temporary with no storage of its own besides the
-        // destination this call is already being compiled into. Reusing
-        // `destOffset` here, rather than `compileAddress(receiver)`'s
-        // generic struct-rvalue fallback (which would reserve a second,
-        // unrelated temporary and construct into that instead), is what
-        // makes the constructor's writes land where the caller - a
-        // struct literal's own field slot, most often - actually reads
-        // them back from afterward.
-        if (callee.isCtorDeclaration !is null
-                && (dot is null || receiver.isStructLiteralExp !is null)) {
-            if (destOffset == discardResult)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            // `Adder(2).sum()`: dmd keeps the constructor-call temporary
-            // as a bare `StructLiteralExp` receiver with no wrapping
-            // `VarExp`, so nothing else ever visits it. Evaluating it
-            // here, into the same `destOffset` the constructor is about
-            // to run on, is what runs `visit(StructLiteralExp)` at all -
-            // including its `fillVthis` call, for a nested struct.
-            if (receiver.isStructLiteralExp !is null) {
-                const facts = TypeFacts.of(receiver.type);
-                evalInto(receiver, destOffset, facts.size);
-            }
-
-            const thisOffset = reserveTemp(pointerFacts);
-            emit(&opFrameAddress, thisOffset, destOffset, size_t.sizeof);
-            return thisOffset;
-        }
-
         if (dot !is null || receiver.isThisExp !is null
                 || receiver.isSuperExp !is null)
             return compileAddress(receiver);
@@ -5018,6 +5092,30 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.backends.calls:
             arityMismatches, prefersGuestBody, usesGuestBody;
 
+        size_t receiverOffset = size_t.max;
+        if (hasThis)
+            receiverOffset = thisOffsetOf();
+        constructTemporary(callee,
+            { emit(&opTemporarySuspend, 0, receiverOffset, 0); },
+            { compileResolvedCallBody(callee, arguments, loc, exprText,
+                hasThis, receiverOffset, destOffset); },
+            { emit(&opTemporaryArm, 0, receiverOffset, 0); });
+    }
+
+    private void compileResolvedCallBody(
+        FuncDeclaration callee,
+        imported!"dmd.arraytypes".Expressions* arguments,
+        imported!"dmd.location".Loc loc,
+        string exprText,
+        bool hasThis,
+        size_t receiverOffset,
+        size_t destOffset,
+    ) {
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+        import snakebite.backends.calls:
+            arityMismatches, prefersGuestBody, usesGuestBody;
+        const isConstructor = callee.isCtorDeclaration !is null;
+
         const guest = usesGuestBody(
             callee, arguments, &_bytecode.isGuestFunction,
             prefersGuestBody(
@@ -5029,7 +5127,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             Arg[] initialArgs;
             if (hasThis)
-                initialArgs ~= Arg(thisOffsetOf(), 0, size_t.sizeof);
+                initialArgs ~= Arg(receiverOffset, 0, size_t.sizeof);
 
             compileNativeCall(
                 callee, type, arguments, loc, exprText, initialArgs,
@@ -5045,7 +5143,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, loc, exprText);
 
         Arg[] args;
-        const isConstructor = callee.isCtorDeclaration !is null;
         // `calleeLayout.hiddenThis.variable`, not `hasThis`: a
         // `FuncLiteralDeclaration` bound through `auto` can keep a dead
         // `vthis` semantic proved nothing reads (see `FrameLayout.of`'s
@@ -5056,7 +5153,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 throw rejection(_function, loc, exprText);
 
             args ~= Arg(
-                thisOffsetOf(),
+                receiverOffset,
                 calleeLayout.hiddenThis.parameter.offset,
                 size_t.sizeof,
             );
@@ -5096,7 +5193,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const siteIndex = _callSites.length;
         _callSites ~= CallSite.guest(
             calleeFunction, args,
-            isVoidCallee ? 0 : returnShape.returnFacts.size,
+            returnShape.returnFacts.size,
         );
         emit(&opCall, destOffset, siteIndex, 0);
     }
@@ -5198,7 +5295,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto plan = &_bytecode._plans.of(callee);
         _callSites ~= CallSite.native(
             cast(const(void)*) plan, args,
-            isVoidCallee ? 0 : returnShape.returnFacts.size,
+            returnShape.returnFacts.size,
         );
         emit(&opCall, destOffset, _callSites.length - 1, 0);
     }
@@ -5490,10 +5587,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             CatAssignExp expression, size_t target,
         ) {
             compiler.compileEffect(expression);
-        }
-
-        public size_t storageConstructorCall(CallExp expression) {
-            return storageValue(expression);
         }
 
         public size_t storageReferenceCall(CallExp expression) {

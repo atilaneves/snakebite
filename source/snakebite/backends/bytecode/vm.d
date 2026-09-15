@@ -101,6 +101,15 @@ public struct CallSite {
     package const(Function)* callee;
     package const(void)* nativePlan;
     package size_t calleeSlotOffset;
+    package size_t cleanupStartIndex = size_t.max;
+    package size_t cleanupEndIndex = size_t.max;
+    package const(void)* cleanupStart;
+    package const(void)* cleanupEnd;
+
+    public static CallSite temporary() {
+        CallSite site;
+        return site;
+    }
 }
 
 
@@ -429,6 +438,11 @@ private void dispatch(
     scope const ExceptionHandler[] exceptionHandlers,
     FrameStack* frames,
 ) {
+    const cleanupMark = frames.cleanupMark;
+    scope (exit)
+        cleanupSince(
+            cleanupMark, frame, constants, callSites, assertSites, frames);
+
     while (pc !is null) {
         try {
             while (pc !is null)
@@ -436,6 +450,8 @@ private void dispatch(
                     pc, frame, returnPlace, constants, callSites,
                     assertSites, frames);
         } catch (Throwable throwable) {
+            cleanupSince(
+                cleanupMark, frame, constants, callSites, assertSites, frames);
             auto handler = findHandler(
                 exceptionHandlers, pc, throwable.classinfo);
             if (handler is null)
@@ -446,6 +462,97 @@ private void dispatch(
             pc = handler.handler;
         }
     }
+}
+
+
+private void cleanupSince(
+    in size_t mark,
+    ubyte* frame,
+    scope const long[] constants,
+    scope const CallSite[] callSites,
+    scope const AssertSite[] assertSites,
+    FrameStack* frames,
+) {
+    frames.finishCleanups(mark, (in size_t siteIndex) {
+        auto site = &callSites[siteIndex];
+        assert(site.cleanupStart !is null, "temporary cleanup start missing");
+        assert(site.cleanupEnd !is null, "temporary cleanup end missing");
+        auto pc = cast(const(Instruction)*) site.cleanupStart;
+        const end = cast(const(Instruction)*) site.cleanupEnd;
+        while (pc !is end) {
+            pc = pc.handler(
+                pc, frame, null, constants, callSites, assertSites, frames);
+        }
+    });
+}
+
+
+public alias opTemporaryBegin =
+    execute!(runTemporaryBegin, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runTemporaryBegin(Decoded)(
+    ref Decoded execution,
+) {
+    storeIntegral(execution.destination, execution.frames.cleanupMark,
+        size_t.sizeof);
+    return execution.next;
+}
+
+
+public alias opTemporaryRegister =
+    execute!(runTemporaryRegister, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runTemporaryRegister(Decoded)(
+    ref Decoded execution,
+) {
+    execution.frames.registerCleanup(execution.source, execution.destination);
+    return execution.next;
+}
+
+
+public alias opTemporarySuspend =
+    execute!(runTemporarySuspend, OperandKind.immediate, OperandKind.storage);
+
+private const(Instruction)* runTemporarySuspend(Decoded)(
+    ref Decoded execution,
+) {
+    execution.frames.suspendCleanup(*cast(ubyte**) execution.source);
+    return execution.next;
+}
+
+
+public alias opTemporaryArm =
+    execute!(runTemporaryArm, OperandKind.immediate, OperandKind.storage);
+
+private const(Instruction)* runTemporaryArm(Decoded)(
+    ref Decoded execution,
+) {
+    execution.frames.armCleanup(*cast(ubyte**) execution.source);
+    return execution.next;
+}
+
+
+public alias opTemporaryArmAddress =
+    execute!(runTemporaryArmAddress, OperandKind.immediate, OperandKind.storage);
+
+private const(Instruction)* runTemporaryArmAddress(Decoded)(
+    ref Decoded execution,
+) {
+    execution.frames.armCleanup(execution.source);
+    return execution.next;
+}
+
+
+public alias opTemporaryEnd =
+    execute!(runTemporaryEnd, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runTemporaryEnd(Decoded)(
+    ref Decoded execution,
+) {
+    const mark = loadUnsigned(execution.destination, size_t.sizeof);
+    cleanupSince(mark, execution._frame, execution.constants,
+        execution.callSites, execution.assertSites, execution.frames);
+    return execution.next;
 }
 
 

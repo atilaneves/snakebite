@@ -3,9 +3,12 @@ module snakebite.backends.interpreter.temporarylifetime;
 
 private:
 
-import dmd.astenums: STC;
 import dmd.declaration: VarDeclaration;
 import dmd.expression: DeclarationExp, Expression, StructLiteralExp;
+import snakebite.backends.temporary: TemporaryPlan;
+import snakebite.backends.temporarystack: TemporaryStack;
+import snakebite.backends.fullexpression:
+    FullExpressionKind, FullExpressionScope;
 import snakebite.framestack: FrameStack, defaultFrameCapacity;
 import snakebite.nativelayout: TypeFacts;
 
@@ -28,17 +31,29 @@ public final class TemporaryLifetime {
         FrameStack.Mark mark;
         ubyte* base;
         Expression edtor;
-        bool armed;
+    }
+
+    private struct ExpressionState {
+        size_t mark;
+        size_t stackMark;
+        size_t floor;
     }
 
     private Temporary[] _temporaries;
+    private TemporaryStack _stack;
     private FrameStack _frames;
     private size_t _floor;
-    private Expression _root;
+    private FullExpressionScope _expressions;
+    private ExpressionState[] _expressionStates;
+    private size_t _expressionDepth;
     private Destroy _destroy;
 
     public this(Destroy destroy) {
         _frames = FrameStack(defaultFrameCapacity);
+        // Reserve the usual call nesting without putting an allocation in
+        // the steady-state expression path. Recursive calls can grow this
+        // stack when they exceed the initial depth.
+        _expressionStates.length = 16;
         _destroy = destroy;
     }
 
@@ -46,20 +61,24 @@ public final class TemporaryLifetime {
     // the unwind backstop for a guest call that exits before a statement
     // visitor gets control again.
     public void withCall(scope Action action) {
+        const state = _expressions.suspendCall;
+        scope (exit) _expressions.resumeCall(state);
         withLifetime(0, action);
     }
 
-    // Runs one full expression. The root is needed because DMD uses the
-    // same temporary declaration shape both for a complete statement and
-    // for a declaration nested inside a larger expression.
-    public void withFullExpression(
+    public void withNestedCall(scope Action action) {
+        const state = _expressions.suspendCall;
+        scope (exit) _expressions.resumeCall(state);
+        action();
+    }
+
+    public void withExpression(
+        FullExpressionKind kind,
         Expression root,
         scope Action action,
     ) {
-        auto previousRoot = _root;
-        _root = root;
-        scope(exit) _root = previousRoot;
-        withLifetime(_temporaries.length, action);
+        _expressions.run(kind, cast(const(void)*) root,
+            { beginExpression; }, action, { endExpression; });
     }
 
     // Gives a nested evaluation its own temporary pairing and cleanup
@@ -68,27 +87,20 @@ public final class TemporaryLifetime {
         withLifetime(_temporaries.length, action);
     }
 
-    public void registerDestructor(
+    public void initialize(
         VarDeclaration variable,
         DeclarationExp declaration,
         ubyte* base,
+        scope Action evaluate,
     ) {
-        if (!(variable.storage_class & STC.temp) || variable.edtor is null)
-            return;
-        // DMD marks a moved value nodtor: its new owner destroys it, so
-        // recording it here would destroy the same value twice.
-        if (variable.storage_class & STC.nodtor)
-            return;
-        if (declaration is _root)
-            return;
-
-        _temporaries ~= Temporary(
-            null,
-            _frames.mark,
-            base,
-            variable.edtor,
-            true,
-        );
+        const plan = TemporaryPlan.of(variable, declaration,
+            cast(Expression) _expressions.root,
+            _expressions.rootOwnsTemporary);
+        plan.initialize((Expression destructor) {
+            const payload = _temporaries.length;
+            _temporaries ~= Temporary(null, _frames.mark, base, destructor);
+            _stack.registerTemporary(base, payload);
+        }, evaluate, { _stack.arm(base); });
     }
 
     // Reserves a value-returning temporary. Its address remains valid until
@@ -119,21 +131,12 @@ public final class TemporaryLifetime {
     // Suspends destruction while a constructor is writing its destination.
     // A failed constructor therefore leaves no completed value to destroy.
     public void suspendConstructor(in void* address) {
-        foreach_reverse (ref temporary; _temporaries[_floor .. $])
-            if (temporary.armed && temporary.base is address) {
-                temporary.armed = false;
-                return;
-            }
+        _stack.suspend(cast(void*) address);
     }
 
     // Arms the matching declaration after its constructor returns.
     public void armConstructor(in void* address) {
-        foreach_reverse (ref temporary; _temporaries[_floor .. $])
-            if (!temporary.armed && temporary.edtor !is null
-                    && temporary.base is address) {
-                temporary.armed = true;
-                return;
-            }
+        _stack.arm(cast(void*) address);
     }
 
     private ubyte* reserve(
@@ -143,7 +146,7 @@ public final class TemporaryLifetime {
     ) {
         const mark = _frames.mark;
         auto base = _frames.reserve(size, alignment);
-        _temporaries ~= Temporary(node, mark, base, null, false);
+        _temporaries ~= Temporary(node, mark, base, null);
         return base;
     }
 
@@ -152,28 +155,45 @@ public final class TemporaryLifetime {
         scope Action action,
     ) {
         const previousFloor = _floor;
+        const stackMark = _stack.mark;
         _floor = mark;
         scope(exit) {
-            releaseSince(mark);
+            releaseSince(mark, stackMark);
             _floor = previousFloor;
         }
         action();
     }
 
-    private void releaseSince(in size_t mark) {
-        if (_temporaries.length <= mark)
-            return;
+    private void beginExpression() {
+        if (_expressionDepth == _expressionStates.length)
+            _expressionStates ~= ExpressionState.init;
 
+        auto state = &_expressionStates[_expressionDepth++];
+        state.mark = _temporaries.length;
+        state.stackMark = _stack.mark;
+        state.floor = _floor;
+        _floor = _temporaries.length;
+    }
+
+    private void endExpression() {
+        assert(_expressionDepth != 0);
+        const state = _expressionStates[--_expressionDepth];
+        releaseSince(state.mark, state.stackMark);
+        _floor = state.floor;
+    }
+
+    private void releaseSince(in size_t mark, in size_t stackMark) {
         // The storage must be released even if a DMD-provided destructor
         // expression throws while unwinding this full expression.
         scope(exit) {
-            _frames.release(_temporaries[mark].mark);
+            if (_temporaries.length > mark)
+                _frames.release(_temporaries[mark].mark);
             _temporaries.length = mark;
             _temporaries.assumeSafeAppend;
         }
 
-        foreach_reverse (ref temporary; _temporaries[mark .. $])
-            if (temporary.armed)
-                _destroy(temporary.edtor);
+        _stack.finish(stackMark, (in TemporaryStack.Entry entry) {
+            _destroy(_temporaries[entry.payload].edtor);
+        });
     }
 }

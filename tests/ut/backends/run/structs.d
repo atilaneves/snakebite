@@ -9,6 +9,160 @@ module ut.backends.run.structs;
 import ut.backends;
 
 
+// Native D initializes the receiver before evaluating constructor arguments.
+// Arming it after the call must preserve that original lifetime order.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE does not run these temporary destructors"),
+)) {
+    @("temporaryCleanupPreservesDeclarationOrderDuringConstruction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner {
+                int* log;
+                ~this() { *log = *log * 10 + 1; }
+                int get() { return 1; }
+            }
+            struct Outer {
+                int* log;
+                this(int* target, int argument) {
+                    log = target;
+                }
+                ~this() { *log = *log * 10 + 2; }
+                int get() { return 42; }
+            }
+            void main() {
+                int log;
+                int result = Outer(&log, Inner(&log).get()).get();
+                assert(result == 42);
+                assert(log == 12);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE does not run the temporary destructor or catch its exception"),
+)) {
+    @("temporaryCleanupContinuesWhenDestructorThrows." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* log;
+                int value;
+                ~this() {
+                    *log = *log * 10 + value;
+                    if (value == 2)
+                        throw new Exception("destructor");
+                }
+                int get() { return value; }
+            }
+            void main() {
+                int log;
+                bool caught;
+                try {
+                    int result = Tracked(&log, 1).get()
+                        + Tracked(&log, 2).get();
+                } catch (Exception) {
+                    caught = true;
+                }
+                assert(caught);
+                assert(log == 21);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE does not destroy the temporary before the condition body"),
+)) {
+    @("temporaryComparisonConditionCleanup." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* dtors;
+                ~this() { ++*dtors; }
+                int get() { return 42; }
+            }
+            void main() {
+                int dtors;
+                if (Tracked(&dtors).get() == 42)
+                    assert(dtors == 1);
+                else
+                    assert(false);
+                if (Tracked(&dtors).get() != 42)
+                    assert(false);
+                else
+                    assert(dtors == 2);
+                for (; Tracked(&dtors).get() == 42;) {
+                    assert(dtors == 3);
+                    break;
+                }
+                switch (Tracked(&dtors).get()) {
+                    case 42: assert(dtors == 4); break;
+                    default: assert(false);
+                }
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE evaluates this runtime-only temporary but does not run its "
+        ~ "destructor before the return completes"),
+)) {
+    @("reviewTemporaryReturnCleanup." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* dtors;
+                ~this() { ++*dtors; }
+                int get() { return 42; }
+            }
+            int value(int* dtors) {
+                return Tracked(dtors).get();
+            }
+            void main() {
+                int dtors;
+                assert(value(&dtors) == 42);
+                assert(dtors == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE evaluates this runtime-only temporary but does not run its "
+        ~ "destructor before the condition body"),
+)) {
+    @("reviewTemporaryConditionCleanup." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Tracked {
+                int* dtors;
+                ~this() { ++*dtors; }
+                int get() { return 42; }
+            }
+            void main() {
+                int dtors;
+                if (Tracked(&dtors).get()) {
+                    assert(dtors == 1);
+                }
+                assert(dtors == 1);
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot inspect guest TypeInfo metadata"),
@@ -1424,7 +1578,6 @@ static foreach (backend; Matrix!()) {
 // only use is `.get()`, called on the constructor-call rvalue itself, and
 // its destructor still runs once the statement using it is done.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE evaluates the call but never runs the " ~
         "destructor of a struct-typed rvalue temporary that is only " ~
@@ -1534,7 +1687,6 @@ static foreach (backend; Matrix!()) {
 // once as the whole expression unwinds - the temporary is not silently
 // leaked just because nothing ever consumed its value.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE catches the throw but never runs the " ~
         "destructor of the already-constructed first-argument temporary " ~
@@ -1681,7 +1833,6 @@ static foreach (backend; Matrix!()) {
 // returns normally - so its destructor runs exactly once at the end of
 // the full expression, the same as when the result is discarded.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right value but never runs " ~
         "the destructor of the user-constructor temporary once its " ~
@@ -1726,7 +1877,6 @@ static foreach (backend; Matrix!(
 // exactly once - construction finishing, not the expression finishing,
 // is what commits the destructor.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE catches the throw but never runs the " ~
         "destructor of the user-constructor temporary whose `__ctor` " ~
@@ -1776,7 +1926,6 @@ static foreach (backend; Matrix!(
 // the full expression that created it - three destructor runs in
 // total, never a shared or clobbered slot.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of any of the three reentrant " ~
@@ -1825,7 +1974,6 @@ static foreach (backend; Matrix!(
 // destroyed when the outer full expression ends. Two temporaries, two
 // destructor runs, each owned by its own full expression.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of either user-constructor " ~
@@ -1929,7 +2077,6 @@ static foreach (backend; Matrix!()) {
 // declaration, and its destructor runs once at the end of the full
 // expression.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of the temporary initialized from " ~
@@ -1981,7 +2128,6 @@ static foreach (backend; Matrix!(
 // while the condition temporary's frame slot is still live - never
 // later, against a frame that is already gone.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.diverges,
         "confirmed: dmd's CTFE computes the right return value but " ~
         "never runs the destructor of the taken ternary branch's " ~
@@ -2030,7 +2176,6 @@ static foreach (backend; Matrix!(
 // the whole value. The destructor still runs once: a constructor call
 // that never arrives must not be what the destructor waits for.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
     Omit!(Ctfe, Because.inexpressible,
         "confirmed: dmd's CTFE refuses `gdtors` with \"static variable " ~
         "`gdtors` cannot be read at compile time\" - the enum's " ~
@@ -2082,7 +2227,8 @@ static foreach (backend; Matrix!(
 // temporary's constructor never returns, so its destructor never runs
 // at all.
 static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
+    Omit!(Bytecode, Because.unconfirmed,
+        "Bytecode cannot compile the constructor parameter cleanup finally"),
 )) {
     @("temporaryMovedIntoThrowingOuterCtorDestroyedOnceByCallee." ~
         backend.stringof)

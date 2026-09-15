@@ -89,6 +89,7 @@ private final class GuestException: Exception {
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
+import snakebite.backends.fullexpression: FullExpressionKind;
 
 // The evaluation context: executes statements and evaluates expressions,
 // always into the current destination (`_type` bytes at `_place`),
@@ -614,8 +615,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     // Runs one call through the FFI seam. The callee receives its frame
-    // already reserved and its parameter slots already filled. The call
-    // result adapter keeps the representation of `ref` results out of the
+    // already reserved. Guest arguments are evaluated within construction
+    // lifetime handling. The result adapter keeps `ref` results out of the
     // evaluator; the raw runner below only executes the selected callee.
     private CallResult executeCall(
         FuncDeclaration function_,
@@ -631,29 +632,31 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             scope void* place,
             scope const(void*)[] arguments,
         ) {
-            executeRaw(
-                function_, place, frameBase, layout, callSite,
-                classConstructor, arguments.ptr, arguments.length,
-            );
+            _temporaries.withNestedCall({
+                executeRaw(
+                    function_, place, frameBase, layout, callSite,
+                    classConstructor, arguments.ptr, arguments.length,
+                );
+            });
         }
 
-        auto result = callShapeOf(function_).adapter.invoke(
-            returnPlace,
-            arguments.values,
-            &executeCallee,
-        );
-        if (function_.isCtorDeclaration !is null
-                && function_.isThis !is null
-                && function_.isThis.isStructDeclaration !is null) {
-            import snakebite.nativelayout: loadIntegral;
+        import snakebite.backends.temporary: constructTemporary;
+        import snakebite.nativelayout: loadIntegral;
 
-            const self = cast(ubyte*) loadIntegral(
+        ubyte* receiver;
+        CallResult result;
+        constructTemporary(function_, {
+            receiver = cast(ubyte*) loadIntegral(
                 frameBase + layout.hiddenThis.parameter.offset,
-                size_t.sizeof,
-                false,
-            );
-            _temporaries.armConstructor(self);
-        }
+                size_t.sizeof, false);
+            _temporaries.suspendConstructor(receiver);
+        }, {
+            if (callSite !is null)
+                bindArguments(function_, callSite.arguments, callSite.loc,
+                    frameBase, layout);
+            result = callShapeOf(function_).adapter.invoke(
+                returnPlace, arguments.values, &executeCallee);
+        }, { _temporaries.armConstructor(receiver); });
         return result;
     }
 
@@ -1219,7 +1222,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (_type.ty == Tvoid)
             return;
 
-        _temporaries.withTemporaryLifetime({
+        _temporaries.withExpression(FullExpressionKind.value, statement.exp, {
             void* referenceAddress() {
                 return addressOf(statement.exp);
             }
@@ -1261,7 +1264,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // temporary, so a guest throw from any point of the evaluation still
     // releases whatever was reserved by then.
     private void runFullExpression(Expression expression) {
-        _temporaries.withFullExpression(expression, {
+        _temporaries.withExpression(FullExpressionKind.effect, expression, {
             runForEffect(expression);
         });
     }
@@ -1271,7 +1274,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // soon as its truth is known.
     private bool conditionHolds(Expression condition) {
         bool result;
-        _temporaries.withTemporaryLifetime({
+        _temporaries.withExpression(FullExpressionKind.value, condition, {
             result = truthOf(condition);
         });
         return result;
@@ -1299,7 +1302,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     override void visit(SwitchStatement statement) {
         _pendingLoopLabel = null;
         Statement selected;
-        _temporaries.withTemporaryLifetime({
+        _temporaries.withExpression(FullExpressionKind.value,
+            statement.condition, {
             const condition = asIntegral(statement.condition);
             if (statement.cases !is null)
                 foreach (case_; *statement.cases) {
@@ -1308,7 +1312,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                         break;
                     }
                 }
-        });
+            });
 
         if (selected is null)
             selected = statement.sdefault;
@@ -2171,22 +2175,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto value = initializerValueOf(expInitializer);
         auto slot = storageOf(variable);
-        if (isRefStorage(variable)) {
-            import snakebite.nativelayout: storeIntegral;
+        _temporaries.initialize(variable, expression, slot, {
+            if (isRefStorage(variable)) {
+                import snakebite.nativelayout: storeIntegral;
 
-            storeIntegral(
-                slot,
-                cast(size_t) addressOf(value),
-                size_t.sizeof,
-            );
-        } else
-            evaluate(value, variable.type, slot);
-
-        _temporaries.registerDestructor(
-            variable,
-            expression,
-            storageOf(variable),
-        );
+                storeIntegral(slot, cast(size_t) addressOf(value),
+                    size_t.sizeof);
+            } else
+                evaluate(value, variable.type, slot);
+        });
     }
 
     protected override void visitUnloweredConstruct(ConstructExp expression) {
@@ -2469,10 +2466,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             CatAssignExp expression, void* target,
         ) {
             evaluator.runForEffect(expression);
-        }
-
-        public void* storageConstructorCall(CallExp expression) {
-            return evaluator.valueCallAddress(expression, expression.f);
         }
 
         public void* storageReferenceCall(CallExp expression) {
@@ -4579,6 +4572,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto nativeVirtual = nativeVirtualAddress(function_, classReceiver);
         if (nativeVirtual !is null) {
+            bindArguments(function_, expression.arguments, expression.loc,
+                frame.base, layout);
             auto arguments = argumentSlots(frame.base, layout);
             _plans.of(function_).callAt(
                 nativeVirtual,
@@ -4753,13 +4748,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return cast(void*) loadIntegral(value.ptr, facts.size, false);
     }
 
-    // Reserves `function_`'s frame and binds every argument into it: a
-    // `ref` parameter's slot gets the argument's address (`addressOf`),
-    // everything else gets its value (`evaluate`), exactly as a compiled
-    // frame would be filled. Shared between an ordinary call and one only
-    // wanted for the address a `ref` return hands back (`refCallAddress`),
-    // since both fill a frame the same way and differ only in what they
-    // do with the callee once it has run.
+    // The receiver is evaluated before argument binding starts. The shared
+    // construction operation can then protect that receiver while arguments
+    // and the callee run.
     private FrameStack.Frame bindFrame(
         CallExp expression,
         FuncDeclaration function_,
@@ -4826,8 +4817,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     );
                 else {
                     auto receiver = addressOf(dot.e1);
-                    if (function_.isCtorDeclaration !is null)
-                        _temporaries.suspendConstructor(receiver);
                     storeIntegral(
                         frame.base + layout.hiddenThis.parameter.offset,
                         cast(size_t) receiver,
@@ -4856,18 +4845,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     context, size_t.sizeof);
             }
         }
-
-        // Every argument is evaluated, even one the callee never reads,
-        // since evaluating an argument can have effects. The shared binder
-        // also preserves the native representation of `ref`, `out`, and
-        // `lazy` parameters for constructor calls.
-        bindArguments(
-            function_,
-            arguments,
-            expression.loc,
-            frame.base,
-            layout,
-        );
 
         return frame;
     }

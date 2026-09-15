@@ -90,9 +90,6 @@ public struct StorageResolver(Result, Adapter) {
                     ? null : calleeExp.var.isFuncDeclaration;
             }
 
-            if (callee !is null && callee.isCtorDeclaration !is null)
-                return _adapter.storageConstructorCall(call);
-
             auto functionType = callee !is null
                 ? callee.type.isTypeFunction
                 : call.e1.type.isTypeFunction;
