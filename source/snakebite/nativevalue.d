@@ -66,6 +66,73 @@ pragma(inline, true) public ulong loadUnsigned(
     return 0;
 }
 
+// Floating values in guest storage use the same widths as compiled D values.
+// A real return value carries every supported source precision without a
+// second rounding step; the destination width applies the one conversion.
+pragma(inline, true) public real loadFloating(
+    in void* place,
+    in size_t size,
+) @nogc nothrow {
+    if (size == float.sizeof)
+        return *cast(const(float)*) place;
+    if (size == double.sizeof)
+        return *cast(const(double)*) place;
+    assert(size == real.sizeof, "no native layout for this floating width");
+    return *cast(const(real)*) place;
+}
+
+pragma(inline, true) public void storeFloating(
+    void* place,
+    in real value,
+    in size_t size,
+) @nogc nothrow {
+    if (size == float.sizeof) {
+        *cast(float*) place = cast(float) value;
+        return;
+    }
+    if (size == double.sizeof) {
+        *cast(double*) place = cast(double) value;
+        return;
+    }
+    assert(size == real.sizeof, "no native layout for this floating width");
+    *cast(real*) place = value;
+}
+
+pragma(inline, true) public void integralToFloating(
+    void* destination,
+    in void* source,
+    in size_t destinationSize,
+    in size_t sourceSize,
+    in bool unsignedSource,
+) @nogc nothrow {
+    const value = unsignedSource
+        ? cast(real) loadUnsigned(source, sourceSize)
+        : cast(real) loadSigned(source, sourceSize);
+    storeFloating(destination, value, destinationSize);
+}
+
+pragma(inline, true) public void floatingToIntegral(
+    void* destination,
+    in void* source,
+    in size_t destinationSize,
+    in size_t sourceSize,
+    in bool unsignedDestination,
+) @nogc nothrow {
+    const value = loadFloating(source, sourceSize);
+    const converted = unsignedDestination
+        ? cast(long) cast(ulong) value
+        : cast(long) value;
+    storeIntegral(destination, cast(ulong) converted, destinationSize);
+}
+
+pragma(inline, true) public void floatingToBool(
+    void* destination,
+    in void* source,
+    in size_t sourceSize,
+) @nogc nothrow {
+    storeIntegral(destination, loadFloating(source, sourceSize) != 0, 1);
+}
+
 // Whether an integral width has a native representation handled above.
 public bool isIntegralSize(in size_t size) @safe @nogc nothrow pure {
     return size == 1 || size == 2 || size == 4 || size == 8;

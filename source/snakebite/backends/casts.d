@@ -30,6 +30,7 @@ public struct CastPlan {
         classReference,
         integralToFloat,
         floatToIntegral,
+        floatToBool,
         floatWidth,
         sarrayToSlice,
         sarrayToPointer,
@@ -99,6 +100,10 @@ public CastPlan classify(
     }
 
     if (isFloatingType(sourceType)) {
+        if (destType.ty == Tbool)
+            return CastPlan(
+                CastPlan.Kind.floatToBool, sourceFacts, destFacts);
+
         if (destFacts.isIntegral && isIntegralSize(destFacts.size))
             return CastPlan(
                 CastPlan.Kind.floatToIntegral, sourceFacts, destFacts);

@@ -140,11 +140,6 @@ static foreach (backend; Matrix!()) {
 // a function call.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges, "CTFE keeps `cast(float)` at real precision"),
-    Omit!(
-        Interpreter,
-        Because.unconfirmed,
-        "runtime floating-to-integral cast not implemented yet",
-    ),
 )) {
     @("float.intToFloatUsesFloatPrecision." ~ backend.stringof)
     @Tags(backend.stringof)

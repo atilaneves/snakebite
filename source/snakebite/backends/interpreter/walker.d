@@ -3350,6 +3350,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // meaning is "keep `e`'s effects, produce no value".
     protected override void visitUnloweredCast(CastExp expression) {
         import snakebite.backends.casts: classify, CastPlan;
+        import snakebite.nativevalue:
+            floatingToBool, floatingToIntegral, integralToFloating;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
         import std.conv: text;
@@ -3462,26 +3464,19 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
             return;
 
-        // An integral-to-floating cast rounds the operand's mathematical
-        // value to the destination's own precision, read as signed or
-        // unsigned per the operand's type - the host's own
-        // `cast(float)`/`cast(double)` is exactly that conversion, so it
-        // is applied per destination width rather than through a shared
-        // wider intermediate, which for `float` would round twice. `real`
-        // is not one of the two widths this reaches for yet.
+        // The shared operation reads the source's native width and
+        // signedness, then rounds once at the destination width.
         case integralToFloat: {
-            if (_type.ty != Tfloat32 && _type.ty != Tfloat64)
-                goto case unsupported;
-
-            const value = asIntegral(expression.e1, plan.sourceFacts);
-            if (_type.ty == Tfloat32)
-                *cast(float*) _place = plan.sourceFacts.isUnsigned
-                    ? cast(float) cast(ulong) value
-                    : cast(float) value;
-            else
-                *cast(double*) _place = plan.sourceFacts.isUnsigned
-                    ? cast(double) cast(ulong) value
-                    : cast(double) value;
+            align(real.alignof) ubyte[real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            integralToFloating(
+                _place,
+                buffer.ptr,
+                plan.destFacts.size,
+                plan.sourceFacts.size,
+                plan.sourceFacts.isUnsigned,
+            );
             return;
         }
 
@@ -3501,16 +3496,36 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        // Neither reached yet: a pointer reinterpreted as a dynamic
-        // array's own `{length, ptr}` header, and a floating-to-integral
-        // cast.
+        // A pointer reinterpreted as a dynamic array's own
+        // `{length, ptr}` header.
         case pointerToArray:
-        case floatToIntegral:
         case unsupported:
             throw new SnakebiteException(
                 text("interpreter cannot evaluate a `", expression.op,
                     "` expression: `", expression.toString, "`"),
             );
+
+        case floatToIntegral: {
+            align(real.alignof) ubyte[real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            floatingToIntegral(
+                _place,
+                buffer.ptr,
+                plan.destFacts.size,
+                plan.sourceFacts.size,
+                plan.destFacts.isUnsigned,
+            );
+            return;
+        }
+
+        case floatToBool: {
+            align(real.alignof) ubyte[real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            floatingToBool(_place, buffer.ptr, plan.sourceFacts.size);
+            return;
+        }
         }
     }
 
