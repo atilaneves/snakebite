@@ -202,6 +202,31 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot take the address of an initializer symbol"),
+)) {
+    @("emplaceMersenneTwisterInitializerRestoresState." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.internal.lifetime: emplaceInitializer;
+            import std.random: Mt19937;
+            void main() {
+                Mt19937 generator;
+                generator.seed(123);
+                generator.popFront();
+                emplaceInitializer(generator);
+                assert(generator == Mt19937.init);
+                generator.seed(5489);
+                assert(generator.front == 3499211612U);
+                generator.popFront();
+                assert(generator.front == 581869302U);
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("postconditionReadsReturnedLocal." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -218,6 +243,32 @@ static foreach (backend; Matrix!()) {
             void main() {
                 assert(checked(41) == 42);
                 assert(checked(8) == 9);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot take the address of an initializer symbol"),
+)) {
+    @("structInitializerSymbolCopiesDefaultBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.string: memcpy;
+            struct State {
+                uint[6] words = 17;
+                size_t index = 6;
+            }
+            void main() {
+                State state;
+                state.words[] = 99;
+                state.index = 1;
+                const initializer = __traits(initSymbol, State);
+                assert(initializer.length == State.sizeof);
+                memcpy(&state, initializer.ptr, initializer.length);
+                assert(state == State.init);
             }
         });
     }

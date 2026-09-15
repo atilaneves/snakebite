@@ -1897,15 +1897,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        // `__traits(initSymbol, T)` for a class `T`: dmd's own lowering
-        // (`traits.d`, `Id.initSymbol`) hands back a `VarExp` on a
-        // `SymbolDeclaration` wrapping `T`'s `AggregateDeclaration`, typed
-        // `const(void[])` - a byte range over linked static data dmd's own
-        // code generator would normally emit for the class's `.init`
-        // image. `classRuntimeInfo` already builds that same image, for a
-        // `new` expression's own allocation and for the class's vtable and
-        // `typeid` - this reads it back rather than emitting a second copy
-        // of it.
+        // initSymbol exposes the aggregate's native initializer as bytes.
+        // Keep the image in the same storage used for default values and
+        // class runtime information so its address remains valid.
         if (auto symbol = expression.var.isSymbolDeclaration) {
             if (symbol.type.isTypeStruct !is null) {
                 initializeDefault(_type, _facts, cast(ubyte*) _place,
@@ -1913,23 +1907,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return;
             }
 
-            auto classDeclaration = symbol.dsym.isClassDeclaration;
-            if (classDeclaration is null)
+            auto declaration = symbol.dsym.isAggregateDeclaration;
+            if (declaration is null)
                 throw new SnakebiteException(
                     text("interpreter cannot evaluate `", expression.toString,
-                        "`: only a class's own `initSymbol` is supported"),
+                        "`: unsupported initializer symbol"),
                 );
+            const initial = _runtimeTypes.initializer(declaration);
 
             import snakebite.nativelayout:
                 arrayLengthOffset, arrayPointerOffset;
 
-            auto runtime = classRuntimeInfo(classDeclaration);
             auto bytes = cast(ubyte*) _place;
             storeIntegral(
-                bytes + arrayLengthOffset, runtime.m_init.length,
-                size_t.sizeof);
-            *cast(const(void)**) (bytes + arrayPointerOffset) =
-                runtime.m_init.ptr;
+                bytes + arrayLengthOffset, initial.length, size_t.sizeof);
+            *cast(const(void)**) (bytes + arrayPointerOffset) = initial.ptr;
             return;
         }
 
