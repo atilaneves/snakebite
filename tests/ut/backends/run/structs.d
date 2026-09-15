@@ -2918,10 +2918,7 @@ static foreach (backend; Matrix!()) {
 // static struct S`) nest one attribute declaration inside another (a
 // storage class alone merges into a single one, `@safe static` included);
 // the struct underneath still has no runtime action.
-static foreach (backend; Matrix!(
-    // the interpreter recurses through one attribute wrapper, not two
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("userAttributeOnStaticLocalStructDeclarationHasNoRuntimeAction." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
