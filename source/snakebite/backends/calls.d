@@ -23,24 +23,14 @@ public struct CallSelection {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import snakebite.frontend.dmd.delegates: outerFunctionOf;
-        import snakebite.exception: SnakebiteException;
-        import std.conv: text;
 
         if (function_.fbody is null)
             return false;
 
-        // The barrier supports these calls, but neither backend executes
-        // a guest body that reads the hidden variadic locals (ADR-0010).
-        if (typeFunctionOf(function_).parameterList.varargs
-                == VarArg.variadic) {
-            if (isGuest(function_) && !hasNativeSymbol)
-                throw new SnakebiteException(text(
-                    backend, " cannot call `", function_.toString,
-                    "`: guest-bodied D variadic functions are not ",
-                    "interpreted yet",
-                ));
+        const type = typeFunctionOf(function_);
+        if (type.parameterList.varargs == VarArg.variadic
+                && (!type.isDstyleVariadic || hasNativeSymbol))
             return false;
-        }
 
         if (hasGuestDelegateArgument(arguments, isGuest))
             return true;

@@ -951,6 +951,17 @@ public extern(C) void executeCallPlan(
     plan.call(returnPlace, arguments[0 .. argumentCount]);
 }
 
+public extern(C) bool executeIndirectCallPlan(
+    const(void)* opaquePlan, const(void)* address, void* returnPlace,
+    scope const(void*)* arguments, size_t argumentCount,
+) {
+    const plan = cast(const(CallPlan)*) opaquePlan;
+    if (plan._callbacks !is null && plan._callbacks.contains(address))
+        return false;
+    plan.callAt(address, returnPlace, arguments[0 .. argumentCount]);
+    return true;
+}
+
 // The plans already prepared, one per function. A backend owns one of
 // these and keeps it for its whole life, so the second call to a function
 // and every call after it reuses the first call's answers.
@@ -961,7 +972,43 @@ public extern(C) void executeCallPlan(
 // without hashing at all, but it needs somewhere on the call site to keep
 // it, which is the caller's business and not this package's.
 public struct PlanCache {
+    import dmd.func: FuncDeclaration;
+    import dmd.mtype: TypeFunction;
+
     private CallbackBridge* _callbacks;
+
+    public void* callableAddress(
+        const(void)* word, FuncDeclaration declaration,
+        in ptrdiff_t adjustment = 0,
+    ) {
+        if (word is null)
+            word = of(declaration)._address;
+        return cast(void*) _callbacks.adjustedEntryOf(
+            word, declaration, adjustment);
+    }
+
+    public bool isGuestWord(const(void)* word) const {
+        return _callbacks !is null && _callbacks.contains(word);
+    }
+
+    private struct Signature {
+        const(TypeFunction) type;
+        bool context;
+    }
+    private CallPlan*[Signature] _signatures;
+
+    public const(CallPlan)* signatureOf(
+        TypeFunction type, in bool context,
+    ) {
+        const key = Signature(type, context);
+        if (auto plan = key in _signatures)
+            return *plan;
+        auto plan = new CallPlan;
+        *plan = _shapeOf(type, context, type.linkage, null, false);
+        plan._callbacks = _callbacks;
+        _signatures[key] = plan;
+        return plan;
+    }
 
     // The registry of this backend instance's guest function words, and
     // the owner of their pool entries (ADR-0003). A backend installs one
@@ -1209,10 +1256,8 @@ private CallPlan prepareCommon(
 // the guest function `function_`: the same classification a forward call
 // to a function of this signature would get, from the function's own
 // declared linkage, with no address to resolve - the guest function has
-// none. `snakebite.ffi.callback` keeps one per slot. A `ref` return has
-// no guest storage for the backend to hand back an address to, and a
-// variadic callee's own register save area is not something a backend
-// can fill, so both are refused here, once, when the slot is made.
+// none. `snakebite.ffi.callback` keeps one per slot. Reference results
+// use the same pointer return convention as a forward call.
 package CallPlan prepareCallback(
     imported!"dmd.func".FuncDeclaration function_,
 ) {
@@ -1230,12 +1275,6 @@ package CallPlan prepareCallback(
             text("ffi cannot make a callback entry for `",
                 function_.toString, "`: it is variadic"),
         );
-    if (type.isRef)
-        throw new Exception(
-            text("ffi cannot make a callback entry for `",
-                function_.toString, "`: it returns by `ref`"),
-        );
-
     auto plan = shapeOf(function_, function_.resolvedLinkage, null, false);
     plan.buildCallbackLayout;
     return plan;
@@ -1251,6 +1290,17 @@ private CallPlan shapeOf(
     in bool isVariadicCall,
 ) {
     import snakebite.frontend.dmd.delegates: hasHiddenThis;
+    return _shapeOf(function_.type.isTypeFunction,
+        hasHiddenThis(function_), linkage, extraArgumentTypes,
+        isVariadicCall);
+}
+
+private CallPlan _shapeOf(
+    imported!"dmd.mtype".TypeFunction type, in bool hasContext,
+    in imported!"dmd.astenums".LINK linkage,
+    scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+    in bool isVariadicCall,
+) {
     import snakebite.ffi.abi:
         ArgumentPlan, Register, contextPrecedesHiddenReturnPointer,
         dVariadicArgumentsIsSlice, needsHiddenReturnPointer,
@@ -1264,11 +1314,9 @@ private CallPlan shapeOf(
             "ffi is implemented for the System V AMD64 ABI only",
         );
     else {
-        auto type = function_.type.isTypeFunction;
         if (type is null)
             throw new Exception(
-                text("ffi cannot call `", function_.toString,
-                    "`: it is not a function"),
+                "ffi cannot call a value without a function type",
             );
 
         // A variadic callee is handed its extra arguments differently -
@@ -1300,7 +1348,7 @@ private CallPlan shapeOf(
         if (isVariadicCall) {
             if (!isCVariadic && !isDVariadic)
                 throw new Exception(
-                    text("ffi cannot call `", function_.toString,
+                    text("ffi cannot call `", type.toString,
                         "` as a variadic function: only an `extern(C)` ",
                         "C-style or `extern(D)` untyped variadic callee ",
                         "is supported"),
@@ -1308,7 +1356,7 @@ private CallPlan shapeOf(
         } else if (type.parameterList.varargs == VarArg.variadic)
             throw new Exception(
                 text("ffi cannot call the variadic function `",
-                    function_.toString, "`: only an `extern(C)` C-style ",
+                    type.toString, "`: only an `extern(C)` C-style ",
                     "or `extern(D)` untyped variadic callee is supported, ",
                     "and only at its own call site"),
             );
@@ -1326,7 +1374,6 @@ private CallPlan shapeOf(
         const hasVArguments = isVariadicCall && isDVariadic;
 
         const count = type.parameterList.length;
-        const hasContext = hasHiddenThis(function_);
         const argumentCount = count + hasContext + hasVArguments
             + extraArgumentTypes.length;
 

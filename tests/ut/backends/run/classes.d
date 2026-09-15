@@ -43,10 +43,7 @@ private enum linkedClassesModule = q{
 };
 
 
-static foreach (BackendType; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "scope class allocation is not supported"),
-)) {
+static foreach (BackendType; Matrix!()) {
     @("linkedScopeClassRunsDestructorAtScopeExit." ~ BackendType.stringof)
     @Tags(BackendType.stringof)
     unittest {
@@ -409,9 +406,6 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the mutable static destruction counter"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "`scope class` stack allocation (`NewExp.onstack`) is not " ~
-            "compiled; only the GC-allocated `new C(args)` path is"),
 )) {
     @("scopeClassRunsDestructorAtScopeExit." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -425,12 +419,20 @@ static foreach (backend; Matrix!(
                 }
             }
 
+            scope class Derived : Resource {
+                ~this() { destructions += 10; }
+            }
+
             void main() {
                 {
                     scope Resource resource = new Resource;
                 }
 
                 assert(destructions == 1);
+                {
+                    scope Resource resource = new Derived;
+                }
+                assert(destructions == 12);
             }
         });
     }
@@ -751,22 +753,74 @@ static foreach (backend; Matrix!(
                 auto mutex = new Mutex;
                 Object.Monitor monitor = cast(Object.Monitor) mutex;
                 assert(monitor !is null);
+                assert(cast(void*) monitor != cast(void*) mutex);
+                Mutex empty;
+                Object.Monitor absent = empty;
+                assert(absent is null);
             }
         });
     }
 }
 
 
-// A call through an interface reference to a native object: the
-// interface's own method runs on the object the cast above kept.
+static foreach (backend; Matrix!()) {
+    @("multipleInterfacesKeepIdentityAndOverrides." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface Reader { int read(); }
+            interface Writer { void write(int value); }
+            interface Access : Reader, Writer {}
+            class Base : Access {
+                int value;
+                int read() { return value; }
+                void write(int next) { value = next; }
+            }
+            class Derived : Base {
+                override int read() { return value + 1; }
+            }
+            void main() {
+                auto object = new Derived;
+                Access access = object;
+                Reader reader = access;
+                Writer writer = access;
+                writer.write(41);
+                assert(reader.read() == 42);
+                assert(cast(Object) reader is object);
+                assert(cast(Object) writer is object);
+                assert(cast(Writer) reader is writer);
+                auto read = &reader.read;
+                writer.write(49);
+                assert(read() == 50);
+            }
+        });
+    }
+
+    @("virtualReferenceReturnAliasesField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface Access { ref int get(); }
+            class Cell : Access {
+                int value;
+                ref int get() { return value; }
+            }
+            void main() {
+                auto cell = new Cell;
+                Access access = cell;
+                access.get() = 40;
+                auto get = &access.get;
+                get() += 2;
+                assert(cell.value == 42);
+                assert(access.get() == 42);
+            }
+        });
+    }
+}
+
+// A call through an interface reference uses its native vtable entry.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot allocate a native class"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "the process segfaults resolving the interface method on a native " ~
-        "object"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "`ffi cannot resolve the symbol `_D6object6Object7Monitor4lockMFZv`" ~
-        " declared by `lock`: it is not in this process`"),
 )) {
     @("nativeClassInterfaceCall." ~ backend.stringof)
     @Tags(backend.stringof)

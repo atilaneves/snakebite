@@ -14,7 +14,7 @@ public struct RuntimeTypes {
     import dmd.dstruct: StructDeclaration;
     import dmd.dsymbol: Dsymbol;
     import dmd.mtype: Type;
-    import object: TypeInfo, TypeInfo_Class, TypeInfo_Struct;
+    import object: TypeInfo, TypeInfo_Class, TypeInfo_Interface, TypeInfo_Struct;
 
     private bool delegate(Dsymbol) const _isRootOwned;
     private void* delegate(const(char)[]) _resolve;
@@ -90,8 +90,15 @@ public struct RuntimeTypes {
         }
 
         TypeInfo info;
-        if (classType !is null)
-            info = _classInfo(classType.sym);
+        if (classType !is null) {
+            auto classInfo = _classInfo(classType.sym);
+            if (classType.sym.isInterfaceDeclaration !is null) {
+                auto interfaceInfo = new TypeInfo_Interface;
+                interfaceInfo.info = classInfo;
+                info = interfaceInfo;
+            } else
+                info = classInfo;
+        }
         else if (structType !is null)
             info = structInfo(structType.sym);
         else if (auto enumType = type.isTypeEnum)
@@ -225,7 +232,10 @@ public struct RuntimeTypes {
         if (isRootOwned(declaration))
             return null;
 
-        if (auto info = cast(TypeInfo_Class) linkedInfo(declaration.type))
+        auto linked = linkedInfo(declaration.type);
+        if (auto info = cast(TypeInfo_Interface) linked)
+            return info.info;
+        if (auto info = cast(TypeInfo_Class) linked)
             return info;
 
         return cast(TypeInfo_Class) TypeInfo_Class.find(

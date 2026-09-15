@@ -56,6 +56,22 @@ public imported!"dmd.mtype".TypeFunction typeFunctionOf(
     return type;
 }
 
+public imported!"dmd.mtype".TypeFunction typeFunctionOf(
+    imported!"dmd.expression".CallExp expression,
+) {
+    import dmd.astenums: Tdelegate, Tpointer;
+    import dmd.typesem: nextOf;
+
+    if (expression.f !is null)
+        return typeFunctionOf(expression.f);
+    auto type = expression.e1.type;
+    if (type is null)
+        return null;
+    if (type.ty == Tdelegate || type.ty == Tpointer)
+        type = type.nextOf;
+    return type.isTypeFunction;
+}
+
 // Every unittest in `module_`, in declaration order, as druntime's
 // `__modtest` runs them: the ones nested in a struct or a class count too,
 // so the search descends into aggregates as well as attributes.

@@ -1060,13 +1060,7 @@ static foreach (backend; Matrix!()) {
 // `&s.get` on a struct method is dmd's `DelegateExp`: the delegate's context
 // is the struct's own storage, so calling it through the pointer must see
 // the same fields the struct held when the address was taken.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "bytecode compiler cannot compile `&s.get` in `deref`"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "interpreter cannot evaluate `&s.get`: its delegate declaration " ~
-        "is unsupported"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.addressOf.structMethod." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1120,13 +1114,7 @@ static foreach (backend; Matrix!()) {
 
 // `&c.get` on a class method is dmd's `DelegateExp` too, with the object
 // reference as context instead of a struct's inline storage.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "bytecode compiler cannot compile `&c.get` in `deref`"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "interpreter cannot evaluate `&c.get`: its delegate declaration " ~
-        "is unsupported"),
-)) {
+static foreach (backend; Matrix!()) {
     @("pointers.addressOf.classMethod." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1146,6 +1134,51 @@ static foreach (backend; Matrix!(
             },
             "deref",
         );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "CTFE dispatches a delegate bound through super to the override"),
+)) {
+    @("pointers.addressOf.boundMethodDispatchAndMutation." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface View { int read(); }
+            class Base : View {
+                int value = 40;
+                int read() { return value; }
+            }
+            class Derived : Base {
+                override int read() { return value + 2; }
+                int delegate() baseReader() { return &super.read; }
+            }
+            struct Counter {
+                int value;
+                int increment() { return ++value; }
+            }
+            void main() {
+                auto object = new Derived;
+                Base base = object;
+                View view = object;
+                int calls;
+                Base receiver() { ++calls; return base; }
+                auto read = &receiver().read;
+                assert(calls == 1);
+                assert(read() == 42);
+                base = new Base;
+                object.value = 50;
+                assert(read() == 52);
+                auto viaInterface = &view.read;
+                assert(viaInterface() == 52);
+                assert(object.baseReader()() == 50);
+                Counter counter;
+                auto increment = &counter.increment;
+                assert(increment() == 1);
+                assert(increment() == 2 && counter.value == 2);
+            }
+        });
     }
 }
 

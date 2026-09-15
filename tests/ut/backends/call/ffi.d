@@ -2813,21 +2813,7 @@ unittest {
 // *separately compiled*, non-nested definition expects), there is no
 // mismatched convention here to trip over - both sides agree, whatever
 // dmd's own nested-function calling convention happens to be.
-// Interpreter and Bytecode refuse instead, naming the limitation
-// (`Evaluator.callVariadicNative`'s and `FunctionCompiler.
-// compileResolvedCall`'s own doc); Ctfe hits dmd's own, pre-existing
-// CTFE limitation for a variadic function's body ("C-style variadic
-// functions are not yet implemented in CTFE" - `dmd`'s own message,
-// unrelated to this backend).
 static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "guest-bodied D variadic functions are not interpreted yet - " ~
-        "see Evaluator.callVariadicNative's own doc for what a full " ~
-        "implementation would need"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "guest-bodied D variadic functions are not interpreted yet - " ~
-        "see FunctionCompiler.compileResolvedCall's own doc for what " ~
-        "a full implementation would need"),
     Omit!(Ctfe, Because.inexpressible,
         "dmd's own CTFE interpreter refuses a variadic function's " ~
         "body outright (\"C-style variadic functions are not yet " ~
@@ -2851,5 +2837,72 @@ static foreach (backend; Matrix!(
             },
             "answer",
         );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot execute C-style variadic function bodies"),
+)) {
+    @("variadic.externD.guestReadsValues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdarg;
+            struct Mixed { double fraction; long whole; }
+            struct Large { long[4] values; }
+            struct Extended { real value; }
+            void check(int first, ...) {
+                assert(first == 7);
+                assert(_arguments.length == 6);
+                assert(_arguments[0] is typeid(int));
+                assert(va_arg!int(_argptr) == 42);
+                assert(va_arg!double(_argptr) == 2.5);
+                assert(va_arg!string(_argptr) == "hello");
+                auto mixed = va_arg!Mixed(_argptr);
+                assert(mixed.fraction == 3.5 && mixed.whole == 9);
+                auto large = va_arg!Large(_argptr);
+                assert(large.values == [1, 2, 3, 4]);
+                assert(va_arg!Extended(_argptr).value == 1.25L);
+            }
+            void main() {
+                check(7, 42, 2.5, "hello", Mixed(3.5, 9),
+                    Large([1, 2, 3, 4]), Extended(1.25L));
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot execute C-style variadic function bodies"),
+)) {
+    @("variadic.externD.guestIndirectAndRecursive." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdarg;
+            int sum(int depth, ...) {
+                if (!depth)
+                    return cast(int) _arguments.length;
+                auto value = va_arg!int(_argptr);
+                auto next = sum(depth - 1, value + 1);
+                return value + next;
+            }
+            struct Reader {
+                int base;
+                int read(int first, ...) {
+                    return base + first + va_arg!int(_argptr);
+                }
+            }
+            void main() {
+                auto fp = &sum;
+                assert(fp(3, 10) == 34);
+                assert(fp(0) == 0);
+                Reader reader = Reader(30);
+                auto dg = &reader.read;
+                assert(dg(5, 7) == 42);
+            }
+        });
     }
 }

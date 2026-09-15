@@ -45,6 +45,8 @@ package struct FrameLayout {
     // The argument-evaluation loop already has the positional index in
     // hand, so it never pays an AA hash lookup for the hottest path.
     package Parameter[] parameters;
+    package size_t variadicTypes = size_t.max;
+    package size_t variadicCursor = size_t.max;
 
     // A struct method's hidden `this`, together in one place: the slot
     // and the declaration that owns it always exist - or not - as a
@@ -126,6 +128,14 @@ package struct FrameLayout {
             }
         }
 
+        layout.reserveVariadic(typeFunctionOf(function_));
+        if (function_.v_arguments !is null)
+            layout._slotOf[function_.v_arguments] =
+                VariableSlot(layout.variadicTypes, false);
+        if (layout.variadicCursor != size_t.max && function_.v_argptr !is null)
+            layout._slotOf[function_.v_argptr] =
+                VariableSlot(layout.variadicCursor, false);
+
         // Locals share the same frame as the parameters: each one gets a
         // slot appended after whatever came before it, keyed by its own
         // `VarDeclaration` since `visit(VarExp)` looks up both kinds of
@@ -176,7 +186,15 @@ package struct FrameLayout {
         foreach (i; 0 .. type.parameterList.length)
             layout.parameters[i] = layout.packParameter(type.parameterList[i]);
 
+        layout.reserveVariadic(type);
         return layout;
+    }
+
+    private void reserveVariadic(TypeFunction type) {
+        if (!type.isDstyleVariadic)
+            return;
+        variadicTypes = reserveSlot(TypeFacts.pointer).offset;
+        variadicCursor = reserveSlot(TypeFacts.pointer).offset;
     }
 
     // One slot `reserveSlot` just reserved: its offset into the frame,

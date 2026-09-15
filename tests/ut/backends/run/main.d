@@ -23,7 +23,6 @@ static foreach (backend; Matrix!()) {
 // arguments exist. The entry point must receive its native dynamic-array
 // layout.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed),
     Omit!(Ctfe, Because.unconfirmed),
 )) {
     @("ret.int.arguments." ~ backend.stringof)

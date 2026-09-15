@@ -63,8 +63,6 @@ public struct Omit(B, Because why, string note = "") {
     public enum note_ = note;
 }
 
-public alias BytecodeUnconfirmed = Omit!(Bytecode, Because.unconfirmed);
-
 // The backends a test runs on: `TestBackends` minus every `Omit!(...)`.
 // Usable directly as `static foreach (backend; Matrix!(...))`.
 public template Matrix(specs...) {

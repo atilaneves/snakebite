@@ -20,13 +20,8 @@ public struct CastPlan {
         // pointer<->pointer, equal-width float<->float, equal-width
         // integral<->integral and equal-element-width array<->array.
         copy,
-        // class->class where dmd's semantic pass left the cast unlowered
-        // (`expressionsem.lowerCastExp`): only when the destination is a base
-        // of the source - an upcast, or a cast to an interface the source
-        // implements - so the reference is kept as it is. A cast needing a
-        // runtime check never reaches a backend this way: dmd lowers it to
-        // `_d_cast`, which `LoweringVisitor.visit(CastExp)` dispatches before
-        // `visitUnloweredCast` is ever reached.
+        // DMD leaves proven upcasts unlowered so code generation can apply
+        // the native reference adjustment. Null stays null.
         classReference,
         integralToFloat,
         floatToIntegral,
@@ -56,6 +51,7 @@ public struct CastPlan {
     public TypeFacts destFacts;
     // Element count, only meaningful for `sarrayToSlice`.
     public size_t staticLength;
+    public int referenceOffset;
 }
 
 // The single decision both backends' cast adapters read: `sourceType` and
@@ -74,8 +70,13 @@ public CastPlan classify(
     const sourceFacts = TypeFacts.of(sourceType);
     const destFacts = TypeFacts.of(destType);
 
-    if (sourceType.ty == Tclass && destType.ty == Tclass)
-        return CastPlan(CastPlan.Kind.classReference, sourceFacts, destFacts);
+    if (sourceType.ty == Tclass && destType.ty == Tclass) {
+        auto plan = CastPlan(
+            CastPlan.Kind.classReference, sourceFacts, destFacts);
+        destType.isTypeClass.sym.isBaseOf(
+            sourceType.isTypeClass.sym, &plan.referenceOffset);
+        return plan;
+    }
 
     if (sourceType.ty == Taarray && destType.ty == Taarray)
         return CastPlan(CastPlan.Kind.copy, sourceFacts, destFacts);

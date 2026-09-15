@@ -195,9 +195,6 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "Bytecode compiler cannot take the address of a `typeid` receiver "
-        ~ "for its `name` call"),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read guest typeid metadata"),
 )) {
