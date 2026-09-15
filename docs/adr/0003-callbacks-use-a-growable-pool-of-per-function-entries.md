@@ -34,6 +34,10 @@ We decide as follows.
    A guest delegate uses the same per-function slot as its function
    pointer, and keeps its own context word untouched, because the
    host passes that context back on every call.
+   Native vtables also use callable entries. An interface entry that must
+   adjust `this` is keyed by target and adjustment; the entry owns that
+   adjustment, not the call site or the delegate context. The same entry
+   mechanism can forward to a host method inherited by a guest class.
 3. The pool grows on demand. There is no fixed limit and no
    exhaustion error. The first chunk of entries is a template linked
    into the binary. When every slot in every chunk is taken, the pool
@@ -74,6 +78,11 @@ We decide as follows.
 
 The callback handler, not the entry, classifies arguments. It uses
 the same plan machinery as a forward call, in reverse. A backend
+puts these native addresses in generated vtables, including destructor
+entries. Interface references use native object offsets. Virtual calls
+load their target from the receiver's vtable; they do not search class
+metadata for an implementation. Druntime owns destructor-chain execution.
+A backend
 registers every word it stores for a guest function's address, so
 the plan can swap that word for the function's pool entry when it
 crosses the barrier, and swap a pool entry back for the word when

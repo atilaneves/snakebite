@@ -504,13 +504,7 @@ static foreach (backend; Matrix!()) {
 // A struct declared inside a nested struct's method captures that method's
 // frame; reading `main`'s local from the inner struct then alternates
 // struct, function, struct, function all the way out.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "the interpreter's closure allocation only stores an outer link "
-            ~ "when its own immediate parent is a function; a method of a "
-            ~ "nested struct has a struct as its immediate parent, so the "
-            ~ "closure it allocates links to nothing"),
-)) {
+static foreach (backend; Matrix!()) {
     @("nested.staticChain.structInsideNestedStructMethod." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

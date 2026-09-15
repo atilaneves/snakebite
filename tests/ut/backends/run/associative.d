@@ -143,9 +143,7 @@ static foreach (backend; Matrix!()) {
 
 // `foreach` over an associative array keyed by a built-in type (as
 // opposed to a struct) also yields every key/value pair.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("intKeyedForeach." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

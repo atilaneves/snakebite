@@ -175,14 +175,16 @@ public size_t alignUp(in size_t offset, in uint alignment) {
 
 // `alignmember` takes a `structalign_t` for cases with an explicit
 // `align(N)`; there is none here, so `defaultAlignment` is always the
-// type's own natural alignment - and it is built once at module load,
+// type's own natural alignment - and it is built at compile time,
 // not on every call, since this runs on every parameter offset and every
 // frame stack push.
-private imported!"dmd.astenums".structalign_t defaultAlignment;
+private enum defaultAlignment = () {
+    import dmd.astenums: structalign_t;
 
-shared static this() {
-    defaultAlignment.setDefault;
-}
+    structalign_t alignment;
+    alignment.setDefault;
+    return alignment;
+}();
 
 // Inspecting an initializer's value must not itself run construction.
 public imported!"dmd.expression".Expression initializerValueOf(

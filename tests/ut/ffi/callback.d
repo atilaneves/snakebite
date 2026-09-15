@@ -50,6 +50,11 @@ private struct Triple {
     long c;
 }
 
+private struct ContextValue {
+    int value;
+    int add(int x) { return value + x; }
+}
+
 
 private alias IntOfInt = extern(C) int function(int);
 private alias DoubleOfMixed = extern(C) double function(double, long, float);
@@ -224,6 +229,23 @@ unittest {
     recorded.hasContext.should == true;
     (recorded.context is &context).should == true;
     recorded.integers.should == [4];
+
+    ubyte[32] object;
+    callback.ptr = object.ptr + 16;
+    callback.funcptr = cast(int function(int))
+        bridge.adjustedEntryOf(&word, function_, -16);
+    callback(5).should == 11;
+    (recorded.context is object.ptr).should == true;
+    (callback.ptr is object.ptr + 16).should == true;
+    (bridge.adjustedEntryOf(&word, function_, -16)
+        is cast(const(void)*) callback.funcptr).should == true;
+
+    auto native = ContextValue(37);
+    auto target = &native.add;
+    callback.ptr = cast(ubyte*) target.ptr + 16;
+    callback.funcptr = cast(int function(int)) bridge.adjustedEntryOf(
+        cast(const(void)*) target.funcptr, function_, -16);
+    callback(5).should == 42;
 }
 
 

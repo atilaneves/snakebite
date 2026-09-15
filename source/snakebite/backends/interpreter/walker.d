@@ -558,14 +558,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto closure = allocation.ptr + start;
         memset(closure, 0, closureLayout.size);
 
-        auto parent = function_.toParent2;
-        auto parentFunction = parent is null ? null : parent.isFuncDeclaration;
-        storeIntegral(
-            closure,
-            parentFunction is null
-                ? 0 : cast(size_t) tryContextOf(parentFunction),
-            size_t.sizeof,
-        );
+        if (layout.hiddenThis.variable !is null)
+            memcpy(closure, frameBase + layout.hiddenThis.parameter.offset,
+                size_t.sizeof);
 
         foreach (variable; function_.closureVars) {
             if (!variable.isParameter)
@@ -612,7 +607,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         ubyte* frameBase,
         const(FrameLayout)* layout,
         CallExp callSite = null,
-        bool classConstructor = false,
     ) {
         auto arguments = argumentSlots(frameBase, layout);
 
@@ -623,7 +617,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _temporaries.withNestedCall({
                 executeRaw(
                     function_, place, frameBase, layout, callSite,
-                    classConstructor, arguments.ptr, arguments.length,
+                    arguments.ptr, arguments.length,
                 );
             });
         }
@@ -639,7 +633,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 size_t.sizeof, false);
             _temporaries.suspendConstructor(receiver);
         }, {
-            if (callSite !is null)
+            if (callSite !is null && typeFunctionOf(function_).isDstyleVariadic) {
+                bindArguments(function_, callSite.arguments, callSite.loc,
+                    frameBase, layout, true, 1);
+                bindVariadicArguments(callSite, frameBase, layout);
+            } else if (callSite !is null)
                 bindArguments(function_, callSite.arguments, callSite.loc,
                     frameBase, layout);
             result = callShapeOf(function_).adapter.invoke(
@@ -660,7 +658,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         ubyte* frameBase,
         const(FrameLayout)* layout,
         CallExp callSite = null,
-        bool classConstructor = false,
         const(void*)* arguments,
         size_t argumentCount,
     ) {
@@ -691,24 +688,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
             return;
         }
-
-        // `function_` being resolved only means a declaration was found;
-        // it does not mean this call is safe to run directly. Only a
-        // struct method's hidden context is covered: `bindFrame` fills
-        // its `this` slot with the receiver lvalue's address. A class
-        // method is resolved by dmd to the statically known declaration
-        // even though the call is virtual, so running it here would
-        // silently devirtualize the call and answer from the wrong
-        // declaration. Constructors are the one class method this backend
-        // executes directly: construction has selected that declaration,
-        // and the object is not yet available through a virtual reference.
-        auto aggregate = function_.isThis;
-        if (aggregate !is null && aggregate.isStructDeclaration is null
-                && callSite is null && !classConstructor)
-            throw new SnakebiteException(
-                text("interpreter cannot call `", function_.toString,
-                    "`: its class `this` is not bound"),
-            );
 
         const guard = CallStateGuard(this);
 
@@ -755,12 +734,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         callPlan(plan, returnPlace, arguments[0 .. argumentCount]);
     }
 
-    // Records that the word this evaluator stores for `function_`'s
-    // address is the declaration itself - only for a function this
-    // program interprets, since a host function's declaration is never
-    // what host code should call.
+    // Declaration words need registration so indirect calls can distinguish
+    // them from native callable addresses.
     private void registerGuestWord(FuncDeclaration function_) {
-        if (function_ !is null && _program.isInterpreted(function_))
+        if (function_ !is null)
             _plans.registerGuestFunction(cast(void*) function_, function_);
     }
 
@@ -889,7 +866,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             }
 
             _temporaries.withTemporaryLifetime({
-                executeCall(function_, call.returnPlace, frame.base, layout);
+                auto arguments = argumentSlots(frame.base, layout);
+                _temporaries.withNestedCall({
+                    executeRaw(function_, call.returnPlace, frame.base,
+                        layout, null,
+                        arguments.values.ptr, arguments.values.length);
+                });
             });
         });
     }
@@ -1625,6 +1607,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // into a `null` place, the same convention `execute` already uses for
     // a discarded `void` return.
     private void runForEffect(Expression expression) {
+        if (expression.isDeclarationExp !is null) {
+            expression.accept(this);
+            return;
+        }
+
         // A tuple result is a sequence of effects, not a native value. This
         // also covers enclosing expressions such as `CommaExp` whose type is
         // the tuple result of their right operand.
@@ -1791,7 +1778,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         // DMD classifies pointers as integral for some type queries, but
         // their value must be read as an address, not as a signed integer.
-        if (type.ty == Tpointer)
+        if (type.ty == Tpointer || type.ty == Tclass)
             return asPointer(expression) !is null;
 
         if (facts.isIntegral)
@@ -1886,7 +1873,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import std.conv: text;
 
         auto type = expression.type;
-        if (type.ty != Tpointer)
+        if (type.ty != Tpointer && type.ty != Tclass)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "` as a pointer: its type is `", type.toString, "`"),
@@ -1981,7 +1968,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.frontend.dmd.delegates: delegateTargetOf;
 
         storeDelegateValue(
-            delegateTargetOf(expression.func, _type), expression, _place);
+            delegateTargetOf(expression.func, _type, expression.e1),
+            expression, _place);
     }
 
     // Shared tail of `visit(FuncExp)`/`visit(DelegateExp)`: once
@@ -2008,7 +1996,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
 
         auto context = cast(size_t) 0;
-        if (target.needsContext) {
+        if (target.receiver !is null) {
+            if (target.receiverIsAddress)
+                context = cast(size_t) addressOf(target.receiver);
+            else
+                evaluate(target.receiver, target.receiver.type,
+                    factsOf(target.receiver.type), &context);
+
+        } else if (target.needsContext) {
             if (target.contextOwner is null)
                 throw new SnakebiteException(
                     text("interpreter cannot evaluate `",
@@ -2026,12 +2021,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
         storeIntegral(
             bytes + delegateContextOffset, context, size_t.sizeof);
-        registerGuestWord(target.function_);
-        storeIntegral(
-            bytes + delegateFunctionOffset,
-            cast(size_t) cast(void*) target.function_,
-            size_t.sizeof,
-        );
+        void* address;
+        if (target.virtualDispatch)
+            address = _virtualAddress(target.function_, cast(void*) context);
+        else {
+            registerGuestWord(target.function_);
+            address = cast(void*) target.function_;
+        }
+        storeIntegral(bytes + delegateFunctionOffset,
+            cast(size_t) address, size_t.sizeof);
     }
 
     override void visit(DelegatePtrExp expression) {
@@ -2352,8 +2350,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     extern(D) private void* constantSymbolAddress(Declaration symbol) {
-        if (auto function_ = symbol.isFuncDeclaration)
+        if (auto function_ = symbol.isFuncDeclaration) {
+            registerGuestWord(function_);
             return cast(void*) function_;
+        }
 
         return _plans.resolve(nativeSymbolName(symbol));
     }
@@ -2692,12 +2692,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         public void* storageValueCall(CallExp expression) {
-            if (expression.f is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot call an unresolved function: `",
-                        expression.toString, "`"),
-                );
-            return evaluator.valueCallAddress(expression, expression.f);
+            return evaluator.valueCallAddress(expression);
         }
 
         public void* storageArrayLength(
@@ -2962,7 +2957,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import std.conv: text;
 
         const targetFacts = factsOf(expression.e1.type);
-        if (!targetFacts.isIntegral)
+        if (!targetFacts.isIntegral && expression.e1.type.ty != Tpointer)
             throw new SnakebiteException(
                 text("interpreter cannot assign to `",
                     expression.e1.toString, "`: `", expression.toString,
@@ -3414,6 +3409,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     override void visit(MinExp expression) {
         import snakebite.nativelayout: storeIntegral;
 
+        if (expression.type.ty == Tpointer) {
+            const pointer = cast(ubyte*) asPointer(expression.e1);
+            const offset = asIntegral(expression.e2);
+            storeIntegral(_place, cast(size_t)(pointer - offset), _facts.size);
+            return;
+        }
+
         if (expression.e1.type.ty == Tpointer
                 && expression.e2.type.ty == Tpointer) {
             const left = cast(ubyte*) asPointer(expression.e1);
@@ -3615,9 +3617,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
             return;
 
-        case classReference:
+        case classReference: {
             evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
+            auto reference = cast(ubyte**) _place;
+            if (*reference !is null)
+                *reference += plan.referenceOffset;
             return;
+        }
 
         case zero:
             _nativeData.write(_type, _facts, expression.e1, _place);
@@ -3948,9 +3954,19 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(TypeidExp expression) {
-        import dmd.dtemplate: isType;
+        import dmd.dtemplate: isExpression, isType;
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
+
+        if (auto value = isExpression(expression.obj)) {
+            auto address = classReferenceOf(value);
+            const indirections = 2
+                + (value.type.isTypeClass.sym.isInterfaceDeclaration !is null);
+            foreach (i; 0 .. indirections)
+                address = *cast(void**) address;
+            storeIntegral(_place, cast(size_t) address, _facts.size);
+            return;
+        }
 
         auto type = isType(expression.obj);
         if (type is null || type.vtinfo is null)
@@ -4411,7 +4427,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(DeleteExp expression) {
-        import snakebite.nativelayout: storeIntegral;
+        import snakebite.druntime.classfinalizer: _d_callfinalizer;
 
         if (expression.e1.type.ty != Tclass)
             throw new SnakebiteException(
@@ -4420,50 +4436,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
 
         auto object = classReferenceOf(expression.e1);
-        if (object is null)
-            return;
-
-        auto info = *cast(TypeInfo_Class*) (*cast(void**) object);
-        auto declaration = declarationOf(info);
-        if (declaration is null) {
-            import snakebite.druntime.classfinalizer: _d_callfinalizer;
-
-            _d_callfinalizer(object);
-            return;
-        }
-
-        auto destructor = (*declaration).dtor;
-        if (destructor !is null) {
-            auto layout = layoutOf(destructor);
-            auto frame = _frames.push(layout.size, layout.alignment);
-            storeIntegral(
-                frame.base + layout.hiddenThis.parameter.offset,
-                cast(size_t) object,
-                size_t.sizeof,
-            );
-            executeCall(
-                destructor,
-                null,
-                frame.base,
-                layout,
-                null,
-                true,
-            );
-        }
+        _d_callfinalizer(object);
     }
 
-    // Parsed guest classes have no emitted native ClassInfo. Build the
-    // native TypeInfo_Class metadata druntime needs for allocation and
-    // classinfo. This vtable is real native layout that native code
-    // reaching a guest object can call through directly (an unoverridden
-    // base method, a template instantiated natively over a guest type,
-    // ...), so every slot stays whatever `classRuntimeInfo_` already
-    // copies down from the base - a real address, never a
-    // `FuncDeclaration` this evaluator alone knows how to walk. Guest
-    // virtual dispatch instead resolves through `_declarationOf`
-    // (`virtualFunction`), the object's own dynamic type answered back
-    // into the `ClassDeclaration` whose own `vtbl` this backend already
-    // walks for an ordinary call.
     private TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
         import snakebite.backends.classinfo:
             classRuntimeInfo_ = classRuntimeInfo, Hooks;
@@ -4472,8 +4447,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             declaration,
             _classRuntime,
             Hooks(
-                (FuncDeclaration) => null,
-                (concrete, interface_, interfaceInfo) => interfaceInfo.vtbl,
+                &methodAddress,
                 (decl, base) => fillFieldInits(decl, base),
                 &_runtimeTypes.linkedClassInfo,
                 (decl, info) {
@@ -4481,6 +4455,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 },
             ),
         );
+    }
+
+    extern(D) private void* methodAddress(
+        FuncDeclaration method, ptrdiff_t adjustment,
+    ) {
+        import dmd.dsymbolsem: isAbstract;
+
+        if (method.isAbstract)
+            return null;
+        const(void)* word;
+        if (prefersGuestBodyOf(method)) {
+            registerGuestWord(method);
+            word = cast(void*) method;
+        }
+        return _plans.callableAddress(word, method, adjustment);
     }
 
     // The guest declaration `info` was generated for, or `null` for a
@@ -4534,7 +4523,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             layout,
         );
 
-        executeCall(constructor, null, frame.base, layout, null, true);
+        executeCall(constructor, null, frame.base, layout);
     }
 
     private void bindArguments(
@@ -4546,19 +4535,27 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         in bool allowExtra = false,
         in size_t argumentOffset = 0,
     ) {
+        _bindArguments(typeFunctionOf(function_), arguments, loc,
+            frameBase, layout, allowExtra, argumentOffset);
+    }
+
+    private void _bindArguments(
+        TypeFunction type, Expressions* arguments, in Loc loc,
+        ubyte* frameBase, const(FrameLayout)* layout,
+        in bool allowExtra = false, in size_t argumentOffset = 0,
+    ) {
         import dmd.astenums: STC;
         import snakebite.backends.calls: arityMismatches;
         import std.conv: text;
 
-        auto parameterList = typeFunctionOf(function_).parameterList;
+        auto parameterList = type.parameterList;
         if (arityMismatches(parameterList, arguments, allowExtra))
             throw new SnakebiteException(
-                text("interpreter: `", function_.toString, "` expects ",
+                text("interpreter: `", type.toString, "` expects ",
                     parameterList.length, " argument(s), got ",
                     arguments is null ? 0 : arguments.length),
             );
 
-        auto shape = callShapeOf(function_);
 
         // `argumentOffset` skips an `extern(D)` untyped variadic call
         // site's own leading `_arguments` (issue #334 step 6,
@@ -4591,7 +4588,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 );
             }
 
-            shape.arguments[i].store(
+            CallAdapter.Argument.of(parameterList[i]).store(
                 slot,
                 &argumentAddress,
                 &evaluateArgument,
@@ -4817,31 +4814,33 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // value into `_place` for this ordinary expression path; `addressOf`
     // uses `refCallAddress` when the expression itself is an lvalue.
     override void visit(CallExp expression) {
+        _executeCallExpression(expression, _place);
+    }
+
+    private CallResult _executeCallExpression(
+        CallExp expression, void* returnPlace,
+    ) {
         import core.stdc.string: memcpy;
         import std.conv: text;
 
         auto callee = expression.f is null
             ? calleeOf(expression)
             : Callee(expression.f, null, false);
+        if (callee.address !is null)
+            return _callIndirect(expression, callee.type,
+                callee.address, callee.context, callee.fromDelegate,
+                returnPlace);
         auto function_ = callee.function_;
 
-        // A `VarArg.variadic` callee - `extern(C)` C-style (issue #334
-        // step 5), or `extern(D)` untyped (issue #334 step 6) - always
-        // reaches a native symbol, so this never joins the class-
-        // receiver/virtual-dispatch machinery below, which exists for
-        // guest method calls only: whatever the callee's own linkage,
-        // nothing this backend interprets can have a `va_arg`-reading
-        // body walked correctly (`callVariadicNative`'s own doc). A
-        // root-owned callee whose own body is meant to *run* - not merely
-        // exist so dmd's `semantic3` populates its hidden `_arguments`/
-        // `_argptr` locals - is refused inside `callVariadicNative`
-        // itself, naming that exact limitation, rather than misrouted
-        // here to the ordinary call path's own, unrelated arity-mismatch
-        // message (`callVariadicNative`'s own doc).
+
         auto funcType = typeFunctionOf(function_);
-        if (funcType.parameterList.varargs == VarArg.variadic) {
+        if (funcType.parameterList.varargs == VarArg.variadic
+                && (!funcType.isDstyleVariadic
+                    || function_.fbody is null
+                    || !_program.isInterpreted(function_)
+                    || _plans.hasNativeSymbol(function_))) {
             callVariadicNative(expression, function_, funcType);
-            return;
+            return CallResult.init;
         }
 
         void* classReceiver;
@@ -4862,8 +4861,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             // `super.f()` is statically bound. Every other virtual class
             // call uses the declaration of the object held by the receiver,
             // not the declaration dmd selected from its static type.
-            if (receiver.isSuperExp is null)
-                function_ = virtualFunction(function_, classReceiver);
+            if (!expression.directcall && receiver.isSuperExp is null
+                    && function_.isVirtualMethod)
+                return _callIndirect(expression, funcType,
+                    _virtualAddress(function_, classReceiver),
+                    classReceiver, true, returnPlace);
         }
 
         auto layout = layoutOf(function_);
@@ -4871,57 +4873,45 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             expression,
             function_,
             layout,
-            false,
+            funcType.isDstyleVariadic,
             classReceiver,
             hasClassReceiver,
             callee.context,
             callee.fromDelegate,
+            funcType.isDstyleVariadic ? 1 : 0,
         );
 
-        auto nativeVirtual = nativeVirtualAddress(function_, classReceiver);
-        if (nativeVirtual !is null) {
-            bindArguments(function_, expression.arguments, expression.loc,
-                frame.base, layout);
-            auto arguments = argumentSlots(frame.base, layout);
-            _plans.of(function_).callAt(
-                nativeVirtual,
-                _place,
-                arguments.values,
-            );
-            return;
-        }
-        executeCall(
-            function_, _place, frame.base, layout, expression,
-            function_.isCtorDeclaration() !is null,
+        return executeCall(
+            function_, returnPlace, frame.base, layout, expression,
         );
     }
 
-    // Calls a `VarArg.variadic` callee - `extern(C)` C-style, or
-    // `extern(D)` untyped (issue #334 step 6) - always a native symbol,
-    // so this never checks `usesGuestBody` the way `executeRaw` does. A
-    // root-owned callee whose own body is meant to *run* - has a body,
-    // and (`PlanCache.hasNativeSymbol`, the same check `prepareCommon`'s
-    // own resolver makes) no real host address - is refused below with a
-    // clearer message than that resolver's own "cannot resolve the
-    // symbol" would give: nothing is missing from this process, this
-    // backend simply does not walk a `VarArg.variadic` body yet (ADR-
-    // 0010's own D-variadic paragraph narrows its "every shape" claim
-    // for exactly this case). A root-owned declaration can still carry a
-    // `pragma(mangle)` naming a real, separately linked native symbol
-    // (`DVariadicMethodHost.sum`'s own shape, `ut.backends.call.ffi`'s
-    // own `variadic.externD.method`) - its body exists only so dmd's own
-    // `semantic3` populates its hidden `_arguments`/`_argptr` locals, and
-    // `hasNativeSymbol` is true for it, so it reaches the ordinary native
-    // call below same as any other native callee, no refusal.
-    // Interpreting a guest body that really does need `_arguments`/
-    // `_argptr` bound from the call site would mean building a SysV
-    // register-save-area for this backend's own callee to read `_argptr`
-    // over, *and* interpreting whatever `core.vararg`/`core.internal.
-    // vararg.sysv_x64` template instantiation its own body's `va_arg`
-    // calls resolve to - ADR-0009 rule 1 makes a root-instantiated
-    // druntime template root-owned too, so that call would need walking,
-    // not a native `va_arg`, the same way this callee itself would be.
-    //
+    private void bindVariadicArguments(
+        CallExp expression, ubyte* frame, const(FrameLayout)* layout,
+    ) {
+        import snakebite.backends.variadic: VariadicLayout;
+        import snakebite.nativelayout: storeIntegral;
+
+        auto arguments = expression.arguments;
+        const firstExtra = 1 + layout.parameters.length;
+        TypeFacts[] facts;
+        foreach (argument; (*arguments)[firstExtra .. $])
+            facts ~= factsOf(argument.type);
+        const plan = VariadicLayout.of(facts);
+        auto storage = _frames.reserve(plan.size, plan.alignment);
+        plan.initialize(storage);
+        foreach (i, offset; plan.offsets) {
+            auto argument = (*arguments)[firstExtra + i];
+            evaluate(argument, argument.type, facts[i], storage + offset);
+        }
+        storeIntegral(frame + layout.variadicCursor, cast(size_t) storage,
+            size_t.sizeof);
+        auto types = (*arguments)[0];
+        evaluate(types, types.type, factsOf(types.type),
+            frame + layout.variadicTypes);
+    }
+
+    // Native variadic calls use a plan for the call site's extra types.
     // `funcType.parameterList`'s own, declared parameters bind into a
     // frame exactly as any other call (`bindFrame`, passed `allowExtra`
     // `true` below), so `expression.arguments` running longer than that
@@ -4966,16 +4956,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         FuncDeclaration function_,
         TypeFunction funcType,
     ) {
-        if (function_.fbody !is null && _program.isInterpreted(function_)
-                && !_plans.hasNativeSymbol(function_)) {
-            import std.conv: text;
 
-            throw new SnakebiteException(
-                text("interpreter cannot call `", function_.toString,
-                    "`: guest-bodied D variadic functions are not ",
-                    "interpreted yet"),
-            );
-        }
 
         const isDVariadic = funcType.isDstyleVariadic;
         const declaredArgumentOffset = isDVariadic ? 1 : 0;
@@ -5071,88 +5052,42 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return slice;
     }
 
-    // `receiver`'s own dynamic `TypeInfo_Class`, read the same way `visit
-    // (PtrExp)`'s `.classinfo` read does - word 0 is the vtable, whose own
-    // slot 0 is the classinfo pointer, real native layout for a guest
-    // object and a native one alike. Looking it up in `_declarationOf`
-    // tells the two apart: only a generated one, built by this backend's
-    // own `classRuntimeInfo`, is ever a key there.
-    private TypeInfo_Class dynamicClassInfo(void* receiver) {
-        import snakebite.nativelayout: loadIntegral;
 
-        return *cast(TypeInfo_Class*) cast(void*) loadIntegral(
-            receiver, size_t.sizeof, false);
+
+    private void* _virtualAddress(
+        FuncDeclaration method, void* receiver,
+    ) {
+        auto table = *cast(void***) receiver;
+        return table[method.vtblIndex];
     }
 
-    // A genuinely native receiver's own vtable already holds real,
-    // directly callable addresses - the only slots `classRuntimeInfo`'s
-    // hooks never touch (see its own doc) - so this is the one shape a
-    // guest virtual call can hand straight to the FFI seam instead of
-    // walking a `FuncDeclaration`.
-    private void* nativeVirtualAddress(
-        FuncDeclaration staticFunction,
-        void* receiver,
+    private CallResult _callIndirect(
+        CallExp expression, TypeFunction type, void* address,
+        void* context, bool hasContext, void* returnPlace,
     ) {
-        if (receiver is null
-                || declarationOf(dynamicClassInfo(receiver)) !is null
-                || !staticFunction.isVirtualMethod)
-            return null;
-
-        const index = staticFunction.vtblIndex;
-        if (index < 0)
-            return null;
-
-        auto vtable = *cast(void***) receiver;
-        return vtable[index];
-    }
-
-    // `staticFunction`'s own override, for whichever class `receiver`
-    // turns out to hold at run time - dmd's own `ClassDeclaration.vtbl`
-    // already resolves this correctly for any declaration, guest or
-    // native, so once `receiver`'s actual declaration is known (its own
-    // dynamic `TypeInfo_Class`, looked back up in `_declarationOf` - the
-    // reverse of `classRuntimeInfo`'s own cache) this walks that
-    // declaration's own AST vtable rather than this backend's generated
-    // one: `classRuntimeInfo`'s vtable stays real native layout end to
-    // end (see its own doc), so it never holds a `FuncDeclaration` this
-    // evaluator could read back out of it.
-    private FuncDeclaration virtualFunction(
-        FuncDeclaration staticFunction,
-        void* receiver,
-    ) {
-        if (!staticFunction.isVirtualMethod)
-            return staticFunction;
-
-        auto actual = declarationOf(dynamicClassInfo(receiver));
-        if (actual is null)
-            return staticFunction;
-
-        // Const makes DMD's vtable entries const, but this function must
-        // return the mutable declaration that the evaluator executes.
-        auto declaration = *actual;
-        const staticClass = staticFunction.isThis.isClassDeclaration;
-        if (staticClass is null)
-            return staticFunction;
-
-        if (staticClass.isInterfaceDeclaration !is null) {
-            import snakebite.backends.classinfo: interfaceOverride;
-
-            auto candidate = interfaceOverride(declaration, staticFunction);
-            return candidate is null ? staticFunction : candidate;
-        }
-
-        const index = staticFunction.vtblIndex;
-        if (index >= 0 && cast(size_t) index < declaration.vtbl.length)
-            if (auto candidate = declaration.vtbl[index].isFuncDeclaration)
-                return candidate;
-
-        return staticFunction;
+        const layout = FrameLayout.ofParameters(type, hasContext);
+        auto frame = _frames.push(layout.size, layout.alignment);
+        _bindArguments(type, expression.arguments, expression.loc,
+            frame.base, &layout);
+        auto arguments = CallArguments(layout.parameters.length + hasContext);
+        auto values = arguments.values;
+        if (hasContext)
+            values[0] = &context;
+        foreach (i, parameter; layout.parameters)
+            values[i + hasContext] = frame.base + parameter.offset;
+        return CallAdapter.ofType(type).invoke(returnPlace, values,
+            (place, arguments) {
+                _plans.signatureOf(type, hasContext).callAt(
+                    address, place, arguments);
+            });
     }
 
     private struct Callee {
         FuncDeclaration function_;
         void* context;
         bool fromDelegate;
+        void* address;
+        TypeFunction type;
     }
 
     // The callee of a call dmd left unresolved: one reached through a
@@ -5184,6 +5119,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                         "`: the function pointer is null"),
                 );
 
+            if (!_plans.isGuestWord(cast(void*) function_))
+                return Callee(null, null, false, cast(void*) function_,
+                    deref.type.isTypeFunction);
             return Callee(function_, null, false);
         }
 
@@ -5212,6 +5150,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: the delegate is null"),
             );
 
+        if (!_plans.isGuestWord(cast(void*) function_))
+            return Callee(null, cast(void*) context, true,
+                cast(void*) function_, callee.type.nextOf.isTypeFunction);
         return Callee(function_, cast(void*) context, true);
     }
 
@@ -5270,7 +5211,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // The shared layout excludes unused lambda contexts even when
         // dmd retains their `vthis` declarations.
         if (layout.hiddenThis.variable !is null) {
-            if (function_.isThis !is null) {
+            if (fromDelegate)
+                storeIntegral(
+                    frame.base + layout.hiddenThis.parameter.offset,
+                    cast(size_t) delegateContext,
+                    size_t.sizeof,
+                );
+            else if (function_.isThis !is null) {
                 auto dot = expression.e1.isDotVarExp;
                 const classDeclaration =
                     cast(ClassDeclaration) function_.isThis.isClassDeclaration;
@@ -5279,12 +5226,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                         storeIntegral(
                             frame.base + layout.hiddenThis.parameter.offset,
                             cast(size_t) classReceiver,
-                            size_t.sizeof,
-                        );
-                    else if (fromDelegate)
-                        storeIntegral(
-                            frame.base + layout.hiddenThis.parameter.offset,
-                            cast(size_t) delegateContext,
                             size_t.sizeof,
                         );
                     else {
@@ -5324,9 +5265,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                             "function could not be determined"),
                     );
 
-                const context = fromDelegate
-                    ? cast(size_t) delegateContext
-                    : cast(size_t) tryContextOf(enclosing);
+                const context = cast(size_t) tryContextOf(enclosing);
                 storeIntegral(
                     frame.base + layout.hiddenThis.parameter.offset,
                     context, size_t.sizeof);
@@ -5341,20 +5280,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // bound to another call's `ref` result. The FFI call adapter validates
     // that the result is a reference.
     private void* refCallAddress(CallExp expression) {
-        import std.conv: text;
-
-        auto function_ = expression.f;
-        if (function_ is null)
-            throw new SnakebiteException(
-                text("interpreter cannot call an unresolved function: `",
-                    expression.toString, "`"),
-            );
-
-        auto layout = layoutOf(function_);
-        auto frame = bindFrame(expression, function_, layout);
-        return executeCall(
-            function_, null, frame.base, layout, expression,
-        ).address;
+        return _executeCallExpression(expression, null).address;
     }
 
     // The address of a call's own return value, for `addressOf` when the
@@ -5372,7 +5298,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // own RAII, which would pop it the instant this returns instead.
     private void* valueCallAddress(
         CallExp expression,
-        FuncDeclaration function_,
     ) {
         const facts = factsOf(expression.type);
         auto base = _temporaries.reserveValue(
@@ -5380,9 +5305,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             facts.alignment,
         );
 
-        auto layout = layoutOf(function_);
-        auto frame = bindFrame(expression, function_, layout);
-        executeCall(function_, base, frame.base, layout, expression);
+        _executeCallExpression(expression, base);
         return base;
     }
 

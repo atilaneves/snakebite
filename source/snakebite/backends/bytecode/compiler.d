@@ -125,12 +125,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     ) {
         import snakebite.frontend.compiler: withCompilerLock;
 
-        if (args.length != 0)
-            throw new SnakebiteException(
-                "bytecode compiler does not support host-to-guest " ~
-                    "arguments yet",
-            );
-
         // `compileFunction` walks dmd's AST and calls dmd frontend semantic
         // helpers (`Type.size`, `toInteger`, `defaultInit`, ...) that memoise
         // onto process-global, dmd-owned objects (e.g. `Type` singletons
@@ -143,7 +137,16 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         // through a native callback (`invokeCallback`) reenters the same,
         // recursive mutex rather than a fresh one.
         withCompilerLock({
-            _vm.call(*compileFunction(function_), returnPlace);
+            const layout = FrameLayout.of(function_);
+            assert(args.length == layout.parameters.length);
+            Vm.HostArgument[] arguments;
+            foreach (i, parameter; layout.parameters)
+                arguments ~= Vm.HostArgument(
+                    parameter.offset,
+                    parameter.isRef ? &args[i] : args[i],
+                    parameter.isRef ? size_t.sizeof : parameter.facts.size,
+                );
+            _vm.call(*compileFunction(function_), returnPlace, arguments);
         });
     }
 
@@ -168,8 +171,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     package void registerGuestWord(
         FuncDeclaration function_, const(Function)* compiled,
     ) {
-        if (isGuestFunction(function_))
-            _plans.registerGuestFunction(compiled, function_);
+        _plans.registerGuestFunction(compiled, function_);
     }
 
     extern(C) private static void invokeCallback(
@@ -295,46 +297,26 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             declaration,
             _classRuntime,
             Hooks(
-                (method) => isGuestFunction(method)
-                    ? cast(void*) compileFunction(method) : null,
-                &interfaceVtable,
+                &methodAddress,
                 &fillFieldInits,
                 &_runtimeTypes.linkedClassInfo,
             ),
         );
     }
 
-    // The concrete overrides `declaration` gives every method `interface_`
-    // declares, in `interface_`'s own vtable order - not `declaration`'s
-    // own, since a call through an interface reference only ever has the
-    // interface's method index to work from (`compileVirtualCall`'s
-    // `interfaceInfo` case), never the concrete class's. `overrides`
-    // resolves each slot the same way dmd itself decides one method
-    // overrides another; a slot dmd could never leave unresolved for a
-    // class that actually implements the interface stays `null` here
-    // rather than throwing, since only a call that is actually made ever
-    // reads it back out. `interfaceInfo` is unread here: the interface's
-    // own vtable is never a stand-in for the concrete class's overrides.
-    private void*[] interfaceVtable(
-        imported!"dmd.dclass".ClassDeclaration declaration,
-        imported!"dmd.dclass".ClassDeclaration interface_,
-        TypeInfo_Class interfaceInfo,
-    ) {
-        import snakebite.backends.classinfo: interfaceOverride;
+    private void* methodAddress(FuncDeclaration method, ptrdiff_t adjustment) {
+        import dmd.dsymbolsem: isAbstract;
+        import snakebite.backends.calls: prefersGuestBody;
 
-        auto vtbl = new void*[interface_.vtbl.length];
-        foreach (i; 1 .. interface_.vtbl.length) {
-            auto interfaceMethod = interface_.vtbl[i].isFuncDeclaration;
-            if (interfaceMethod is null)
-                continue;
-
-            auto candidate = interfaceOverride(
-                declaration, interfaceMethod, &isGuestFunction);
-            if (candidate !is null)
-                vtbl[i] = cast(void*) compileFunction(candidate);
+        if (method.isAbstract)
+            return null;
+        const(void)* word;
+        if (prefersGuestBody(method, isGuestFunction(method),
+                hasNativeSymbol(method))) {
+            word = compileFunction(method);
+            registerGuestWord(method, cast(const(Function)*) word);
         }
-
-        return vtbl;
+        return _plans.callableAddress(word, method, adjustment);
     }
 
     private void fillFieldInits(
@@ -414,6 +396,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         // compile that reached here.
         auto placeholder = new Function;
         _compiled[function_] = placeholder;
+        registerGuestWord(function_, placeholder);
 
         scope compiler = new FunctionCompiler(
             this, function_, layout, returnFacts, isVoidReturn, isRefReturn);
@@ -474,7 +457,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opLessThanUnsigned, opLoadBitfield, opLoadIndirect, opLogicalNot,
         opModuloSigned,
         opModuloUnsigned, opMultiply, opNegate, opNotEqual,
-        opResolveInterfaceMethod,
         opReturn,
         opReturnVoid, opShiftLeft, opShiftRightArithmetic, opShiftRightLogical,
         opTemporaryArm, opTemporaryArmAddress, opTemporaryBegin,
@@ -1514,7 +1496,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // it, not the array's own full size.
     private size_t compileCondition(Expression condition) {
         import snakebite.nativelayout: arrayPointerOffset;
-        import dmd.astenums: Tpointer;
+        import dmd.astenums: Tclass, Tpointer;
 
         const facts = TypeFacts.of(condition.type);
         if (facts.isDynamicArray) {
@@ -1523,7 +1505,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return arrayOffset + arrayPointerOffset;
         }
 
-        if (condition.type.ty == Tpointer)
+        if (condition.type.ty == Tpointer || condition.type.ty == Tclass)
             return compilePointerCondition(condition, facts);
 
         if (!facts.isIntegral || !isIntegralSize(facts.size))
@@ -3204,17 +3186,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             delegateTargetOf(expression.fd, expression.type), expression);
     }
 
-    // `&nested` (`&obj.method` and a bound `this`-capturing literal are
-    // out of scope, matching the interpreter's own `visit(DelegateExp)`/
-    // `visit(FuncExp)` - see `snakebite.frontend.dmd.delegates.
-    // delegateTargetOf`'s own doc for why): dmd lowers a nested function's
-    // address-of to this node, naming the function directly in
-    // `expression.func`.
     override void visit(DelegateExp expression) {
         requireDestination(expression);
 
         compileDelegateValue(
-            delegateTargetOf(expression.func, expression.type), expression);
+            delegateTargetOf(expression.func, expression.type, expression.e1),
+            expression);
     }
 
     // Shared tail of `visit(FuncExp)`/`visit(DelegateExp)`: once
@@ -3235,7 +3212,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (target.function_ is null)
             return visit(cast(Expression) expression);
 
-        if (target.needsContext) {
+        const context = _destination + delegateContextOffset;
+        if (target.receiver !is null) {
+            if (target.receiverIsAddress) {
+                const address = compileAddress(target.receiver);
+                emit(&opCopy, context, address, size_t.sizeof);
+            } else
+                evalInto(target.receiver, context, size_t.sizeof);
+        } else if (target.needsContext) {
             if (target.contextOwner is null)
                 throw rejection(_function, expression.loc, "a static chain");
 
@@ -3245,6 +3229,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         } else {
             emit(&opConstant, _destination + delegateContextOffset,
                 addConstant(0), size_t.sizeof);
+        }
+
+        if (target.virtualDispatch) {
+            const method = compileClassVtableSlot(
+                expression, context, target.function_);
+            emit(&opCopy, _destination + delegateFunctionOffset,
+                method, size_t.sizeof);
+            return;
         }
 
         auto compiled = _bytecode.compileFunction(target.function_);
@@ -3785,6 +3777,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
+        prepareNewDestination(expression);
+    }
+
+    private void prepareNewDestination(NewExp expression) {
         // Type must stay mutable for destination restoration.
         auto destination = NewDestination(
             _destination, _width, _valueType);
@@ -3805,7 +3801,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     protected override void visitUnloweredNew(NewExp expression) {
-        visit(cast(Expression) expression);
+        auto classType = expression.newtype.isTypeClass;
+        if (!expression.onstack || classType is null
+                || expression.placement !is null || expression.thisexp !is null)
+            return visit(cast(Expression) expression);
+
+        prepareNewDestination(expression);
+        scope (exit) restoreNew;
+        auto declaration = classType.sym;
+        auto runtime = _bytecode.classRuntimeInfo(declaration);
+        const alignment = declaration.alignsize == 0
+            ? 1 : declaration.alignsize;
+        const object = reserveTemp(TypeFacts(declaration.structsize, alignment));
+        emit(&opStaticLoad, object, cast(size_t) runtime.m_init.ptr,
+            runtime.m_init.length);
+        emit(&opFrameAddress, _destination, object, size_t.sizeof);
+        visitLoweredNew(expression);
     }
 
     protected override void visitLoweredNew(NewExp expression) {
@@ -3868,6 +3879,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 applyStep(step, expression.loc, indirectStorage(objectOffset));
     }
 
+    override void visit(DeleteExp expression) {
+        auto classType = expression.e1.type.isTypeClass;
+        if (classType is null)
+            return visit(cast(Expression) expression);
+
+        const object = reserveTemp(pointerFacts);
+        evalInto(expression.e1, object, size_t.sizeof);
+        auto plan = _bytecode._plans.rawPlanOf(
+            "_d_callfinalizer", [Register(Register.Kind.pointer, size_t.sizeof)],
+        );
+        _callSites ~= CallSite.native(plan,
+            [Arg(object, 0, size_t.sizeof)], 0);
+        emit(&opCall, discardResult, _callSites.length - 1, 0);
+    }
+
     // `null` is all-zero bytes whatever it means - a pointer, a class
     // reference, an associative array, or a dynamic array's `{length,
     // pointer}` pair - so this fills the destination's own width with
@@ -3886,10 +3912,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(TypeidExp expression) {
-        import dmd.dtemplate: isType;
+        import dmd.dtemplate: isExpression, isType;
         import std.conv: text;
 
         requireDestination(expression);
+
+        if (auto value = isExpression(expression.obj)) {
+            evalInto(value, _destination, size_t.sizeof);
+            const indirections = 2
+                + (value.type.isTypeClass.sym.isInterfaceDeclaration !is null);
+            foreach (i; 0 .. indirections)
+                emit(&opLoadIndirect, _destination, _destination, size_t.sizeof);
+            return;
+        }
 
         auto type = isType(expression.obj);
         if (type is null || type.vtinfo is null)
@@ -3943,17 +3978,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private bool isRefCall(CallExp expression) {
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        auto callee = expression.f;
-        if (callee is null) {
-            auto calleeExp = expression.e1.isVarExp;
-            callee = calleeExp is null
-                ? null : calleeExp.var.isFuncDeclaration;
-        }
-        if (callee !is null)
-            return typeFunctionOf(callee).isRef;
-
-        auto deref = expression.e1.isPtrExp;
-        auto functionType = deref is null ? null : deref.type.isTypeFunction;
+        auto functionType = typeFunctionOf(expression);
         return functionType !is null && functionType.isRef;
     }
 
@@ -4835,8 +4860,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         case copy:
             return evalInto(expression.e1, destOffset, width);
 
-        case classReference:
-            return evalInto(expression.e1, destOffset, width);
+        case classReference: {
+            evalInto(expression.e1, destOffset, width);
+            if (plan.referenceOffset == 0)
+                return;
+            const skip = _instructions.length;
+            emit(&opBranchFalse, destOffset, 0, width);
+            const adjustment = reserveTemp(pointerFacts);
+            emit(&opConstant, adjustment,
+                addConstant(plan.referenceOffset), size_t.sizeof);
+            emit(&opAdd, destOffset, adjustment, size_t.sizeof);
+            patchTarget(skip, _instructions.length);
+            return;
+        }
 
         case zero:
             return evalInto(expression.e1, destOffset, width);
@@ -5016,7 +5052,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // A call reached through the receiver's own dynamic type: `callee`
     // only names dmd's statically-resolved target, the method a base
     // class or an interface declares, never the guest override that
-    // actually runs. `compileClassVtableSlot`/`compileInterfaceVtableSlot`
+    // actually runs. `compileClassVtableSlot`
     // read the real one back out of the object at run time, into a
     // temporary this reuses the same `CallSite.indirect` shape
     // `compileIndirectCall` already built for a function-pointer value -
@@ -5045,7 +5081,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto returnType = calleeType.next;
         const isVoidCallee = returnType is null || returnType.ty == Tvoid;
         const returnFacts =
-            isVoidCallee ? TypeFacts.init : TypeFacts.of(returnType);
+            isVoidCallee ? TypeFacts.init
+                : calleeType.isRef ? pointerFacts : TypeFacts.of(returnType);
         if (isVoidCallee && destOffset != discardResult)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
@@ -5053,15 +5090,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const objectOffset = reserveTemp(pointerFacts);
         evalInto(dot.e1, objectOffset, size_t.sizeof);
 
-        auto owner = callee.isThis;
-        auto interfaceDeclaration =
-            owner is null ? null : owner.isInterfaceDeclaration;
-        const calleeSlotOffset = interfaceDeclaration is null
-            ? compileClassVtableSlot(expression, objectOffset, callee)
-            : compileInterfaceVtableSlot(
-                expression, objectOffset, callee, interfaceDeclaration);
-
-        auto calleeLayout = FrameLayout.of(callee);
+        const calleeSlotOffset =
+            compileClassVtableSlot(expression, objectOffset, callee);
+        auto calleeLayout = FrameLayout.ofParameters(calleeType, true);
         Arg[] args;
         args ~= Arg(
             objectOffset, calleeLayout.hiddenThis.parameter.offset,
@@ -5089,6 +5120,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const siteIndex = _callSites.length;
         _callSites ~= CallSite.indirect(
             calleeSlotOffset, args, isVoidCallee ? 0 : returnFacts.size,
+            _bytecode._plans.signatureOf(calleeType, true),
         );
         emit(&opCall, destOffset, siteIndex, 0);
     }
@@ -5102,7 +5134,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // offset, just through the object's vptr instead of the object
     // itself.
     private size_t compileClassVtableSlot(
-        CallExp expression, in size_t objectOffset, FuncDeclaration callee,
+        Expression expression, in size_t objectOffset, FuncDeclaration callee,
     ) {
         const index = callee.vtblIndex;
         if (index <= 0)
@@ -5119,33 +5151,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const calleeOffset = reserveTemp(pointerFacts);
         emit(&opLoadIndirect, calleeOffset, slotOffset, size_t.sizeof);
-        return calleeOffset;
-    }
-
-    // `callee`'s own override, for whichever class `objectOffset` turns
-    // out to hold at run time - never at a fixed vtable index the way a
-    // class's own virtual method is (a different implementing class
-    // places the same interface method at a different index in its own
-    // main vtable), so this reaches for `opResolveInterfaceMethod`
-    // instead of an ordinary call: not a call at all, just an address
-    // computation. `interfaceInfo` and `callee.vtblIndex` are both fixed
-    // once `expression.e1`'s own static type (`Factory`, not whichever
-    // class actually implements it) is known, so both travel as the
-    // instruction's own operands, never read from a frame.
-    private size_t compileInterfaceVtableSlot(
-        CallExp expression, in size_t objectOffset, FuncDeclaration callee,
-        imported!"dmd.dclass".ClassDeclaration interfaceDeclaration,
-    ) {
-        const index = callee.vtblIndex;
-        if (index <= 0)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        auto interfaceInfo = _bytecode.classRuntimeInfo(interfaceDeclaration);
-
-        const calleeOffset = reserveTemp(pointerFacts);
-        emit(&opResolveInterfaceMethod, calleeOffset, objectOffset,
-            cast(size_t) index, cast(size_t) cast(void*) interfaceInfo);
         return calleeOffset;
     }
 
@@ -5225,6 +5230,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto dot = expression.e1.isDotVarExp;
         auto receiver = dot is null ? expression.e1 : dot.e1;
 
+        if (receiver.type.isTypeClass !is null) {
+            const object = reserveTemp(pointerFacts);
+            evalInto(receiver, object, size_t.sizeof);
+            return object;
+        }
+
         if (dot !is null || receiver.isThisExp !is null
                 || receiver.isSuperExp !is null)
             return compileAddress(receiver);
@@ -5288,51 +5299,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: VarArg;
         auto type = typeFunctionOf(callee);
 
-        // A `VarArg.variadic` callee - `extern(C)` C-style or `extern(D)`
-        // untyped (issue #334 steps 5 and 6) - always reaches a native
-        // symbol, the same way `Evaluator.visit(CallExp)`'s own check
-        // does for the interpreter (its own doc): a guest declaration
-        // written only so dmd's `semantic3` populates its own hidden
-        // context (the `ContextHiddenPointer`-style prototype `ut.ffi.
-        // plan`'s own `called.contextPrecedesHiddenReturnPointer`
-        // documents) or `_arguments`/`_argptr` locals is never meant to
-        // be walked as guest code - so this bypasses `usesGuestBody`'s
-        // ordinary preference entirely instead of letting a callee that
-        // merely *has* a body (`{ assert(0); }`, say) fall into the
-        // guest branch below and trip over its own compiler-synthesised
-        // `_arguments = v_arguments.elements;` construct statement, which
-        // reads a hidden parameter no `FrameLayout` ever reserves a guest
-        // frame slot for.
-        //
-        // A root-owned callee whose body is meant to *run* - has a body,
-        // and (`hasNativeSymbol`, the same check `CallPlan.prepareCommon`'s
-        // own resolver makes) no real host address - is refused below
-        // instead, naming this exact limitation: this compiler does not
-        // yet walk a `VarArg.variadic` body (ADR-0010's own D-variadic
-        // paragraph narrows its "every shape" claim for this case), the
-        // same refusal `Evaluator.callVariadicNative`'s own doc explains.
-        // A root-owned declaration can still carry a `pragma(mangle)`
-        // naming a real, separately linked native symbol
-        // (`DVariadicMethodHost.sum`'s own shape, `ut.backends.call.ffi`'s
-        // own `variadic.externD.method`) - `hasNativeSymbol` is true for
-        // it, so it reaches the ordinary native call below, no refusal.
-        if (type.parameterList.varargs == VarArg.variadic
-                && callee.fbody !is null && _bytecode.isGuestFunction(callee)
-                && !_bytecode.hasNativeSymbol(callee)) {
-            import std.conv: text;
 
-            throw new SnakebiteException(text(
-                "bytecode compiler cannot call `", callee.toString,
-                "`: guest-bodied D variadic functions are not ",
-                "interpreted yet",
-            ));
-        }
 
         // A callee with an outer function reads that function's frame
         // through the static chain, which only this compiler's own frame
         // layout can supply - see `usesGuestBody`'s own doc. `Evaluator.
         // executeRaw` makes the same choice for the interpreter.
-        const guest = type.parameterList.varargs != VarArg.variadic
+        const guest = (type.parameterList.varargs != VarArg.variadic
+                || (type.isDstyleVariadic && !_bytecode.hasNativeSymbol(callee)))
             && usesGuestBody(
                 callee, arguments, &_bytecode.isGuestFunction,
                 prefersGuestBody(
@@ -5354,7 +5328,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto calleeType = typeFunctionOf(callee);
 
         const parameterCount = calleeType.parameterList.length;
-        if (arityMismatches(calleeType.parameterList, arguments))
+        const argumentStart = calleeType.isDstyleVariadic ? 1 : 0;
+        if (arityMismatches(calleeType.parameterList, arguments,
+                calleeType.isDstyleVariadic))
             throw rejection(_function, loc, exprText);
 
         Arg[] args;
@@ -5378,18 +5354,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto parameter = calleeLayout.parameters[i];
 
             if (parameter.isRef) {
-                const argumentOffset = compileAddress((*arguments)[i]);
+                const argumentOffset = compileAddress((*arguments)[argumentStart + i]);
                 args ~= Arg(argumentOffset, parameter.offset, size_t.sizeof);
                 continue;
             }
 
             const argumentOffset = reserveTemp(parameter.facts);
             evalInto(
-                (*arguments)[i], argumentOffset,
+                (*arguments)[argumentStart + i], argumentOffset,
                 parameter.facts.size,
             );
             args ~= Arg(argumentOffset, parameter.offset, parameter.facts.size);
         }
+
+        if (calleeType.isDstyleVariadic)
+            args ~= compileVariadicArguments(arguments, calleeLayout);
 
         // A `ref` return hands the caller the callee's own returned
         // storage's address - `compileAddress`'s `CallExp` case is the one
@@ -5571,6 +5550,38 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCall, destOffset, _callSites.length - 1, 0);
     }
 
+    private Arg[] compileVariadicArguments(
+        imported!"dmd.arraytypes".Expressions* arguments,
+        in FrameLayout layout,
+    ) {
+        import snakebite.backends.variadic: VariadicLayout;
+
+        const firstExtra = 1 + layout.parameters.length;
+        TypeFacts[] facts;
+        foreach (argument; (*arguments)[firstExtra .. $])
+            facts ~= TypeFacts.of(argument.type);
+        const plan = VariadicLayout.of(facts);
+        const storage = reserveTemp(TypeFacts(plan.size, plan.alignment));
+        alias Cursor = VariadicLayout.Cursor;
+        const initial = Cursor.init;
+        emit(&opZero, storage, 0, plan.size);
+        emit(&opConstant, storage + Cursor.offset_regs.offsetof,
+            addConstant(initial.offset_regs), uint.sizeof);
+        emit(&opConstant, storage + Cursor.offset_fpregs.offsetof,
+            addConstant(initial.offset_fpregs), uint.sizeof);
+        emit(&opFrameAddress, storage + Cursor.stack_args.offsetof,
+            storage + plan.argumentsOffset, size_t.sizeof);
+        foreach (i, offset; plan.offsets)
+            evalInto((*arguments)[firstExtra + i], storage + offset,
+                facts[i].size);
+        const cursor = reserveTemp(pointerFacts);
+        emit(&opFrameAddress, cursor, storage, size_t.sizeof);
+        const types = reserveTemp(pointerFacts);
+        evalInto((*arguments)[0], types, size_t.sizeof);
+        return [Arg(types, layout.variadicTypes, size_t.sizeof),
+            Arg(cursor, layout.variadicCursor, size_t.sizeof)];
+    }
+
     // On ldc (`dVariadicArgumentsIsSlice`), an `extern(D)` untyped
     // variadic callee's own hidden `_arguments` is the `TypeInfo_Tuple`'s
     // own `elements` field - a two-register `TypeInfo[]` slice, not the
@@ -5653,7 +5664,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const parameterCount = functionType.parameterList.length;
-        if (arityMismatches(functionType.parameterList, expression.arguments))
+        const argumentStart = functionType.isDstyleVariadic ? 1 : 0;
+        if (arityMismatches(functionType.parameterList, expression.arguments,
+                functionType.isDstyleVariadic))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -5679,11 +5692,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             );
 
         foreach (i; 0 .. parameterCount) {
-            auto parameter = functionType.parameterList[i];
-            if (parameter.storageClass & (STC.out_ | STC.lazy_))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
             auto slot = calleeLayout.parameters[i];
 
             // `slot.isRef` comes from the same `packParameter` a resolved
@@ -5694,7 +5702,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // call.
             if (slot.isRef) {
                 const argumentOffset =
-                    compileAddress((*expression.arguments)[i]);
+                    compileAddress((*expression.arguments)[argumentStart + i]);
                 args ~= Arg(argumentOffset, slot.offset, size_t.sizeof);
                 continue;
             }
@@ -5702,13 +5710,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             const argumentOffset = reserveTemp(slot.facts);
             evalInto(
-                (*expression.arguments)[i], argumentOffset, slot.facts.size);
+                (*expression.arguments)[argumentStart + i], argumentOffset,
+                slot.facts.size);
             args ~= Arg(argumentOffset, slot.offset, slot.facts.size);
         }
+
+        if (functionType.isDstyleVariadic)
+            args ~= compileVariadicArguments(expression.arguments, calleeLayout);
 
         const siteIndex = _callSites.length;
         _callSites ~= CallSite.indirect(
             calleeOffset, args, isVoidCallee ? 0 : returnShape.returnFacts.size,
+            functionType.isDstyleVariadic ? null
+                : _bytecode._plans.signatureOf(functionType, isDelegateCall),
         );
         emit(&opCall, destOffset, siteIndex, 0);
     }

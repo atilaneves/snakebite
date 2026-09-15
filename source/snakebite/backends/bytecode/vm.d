@@ -11,6 +11,11 @@ extern(C) void executeCallPlan(
     size_t argumentCount,
 );
 
+extern(C) bool executeIndirectCallPlan(
+    const(void)* opaquePlan, const(void)* address, void* returnPlace,
+    scope const(void*)* arguments, size_t argumentCount,
+);
+
 import snakebite.callarguments: CallArguments;
 import snakebite.nativevalue:
     floatingToBool, floatingToIntegral, integralToFloating, loadFloating,
@@ -53,9 +58,8 @@ public struct CallSite {
         // `calleeSlotOffset` is the caller's own frame offset holding a
         // `const(Function)*` value read back at run time in place of a
         // fixed `callee` - a call through a function pointer or delegate
-        // value, or through a vtable slot the compiler already resolved
-        // into a temporary (`compileClassVtableSlot`/
-        // `compileInterfaceVtableSlot`).
+        // value. Native addresses, including vtable entries, use the
+        // call site's prepared native plan.
         indirect,
     }
 
@@ -88,9 +92,11 @@ public struct CallSite {
     // callee's own address back out of at run time.
     public static CallSite indirect(
         size_t calleeSlotOffset, Arg[] args, size_t returnWidth,
+        const(void)* nativePlan = null,
     ) {
         CallSite site;
         site.kind = Kind.indirect;
+        site.nativePlan = nativePlan;
         site.calleeSlotOffset = calleeSlotOffset;
         site.args = args;
         site.returnWidth = returnWidth;
@@ -112,32 +118,6 @@ public struct CallSite {
         CallSite site;
         return site;
     }
-}
-
-
-// Finds `object`'s own override of the interface method at `methodIndex`
-// (`interfaceInfo`'s own vtable order - see `opResolveInterfaceMethod`'s
-// doc) by walking `object`'s real class hierarchy, base first to most
-// derived... actually most-derived first, since `object`'s own vptr names
-// its most-derived `TypeInfo_Class` directly, and `.base` walks upward
-// from there. `TypeInfo_Class`/`Interface` are plain druntime shapes, so
-// this needs nothing from dmd's frontend to read them.
-package extern(C) void* resolveInterfaceMethod(
-    void* object, void* interfaceInfo, size_t methodIndex,
-) {
-    import object: Interface;
-
-    if (object is null)
-        return null;
-
-    auto target = cast(TypeInfo_Class) interfaceInfo;
-    for (auto info = *cast(TypeInfo_Class*) (*cast(void**) object);
-            info !is null; info = info.base)
-        foreach (entry; info.interfaces)
-            if (entry.classinfo is target)
-                return entry.vtbl[methodIndex];
-
-    return null;
 }
 
 
@@ -302,12 +282,9 @@ public struct Instruction {
     //    already carries.
     //  - a resolved static-storage address, cast to a `size_t`: the
     //    `source` of `opStaticLoad`/`opStaticAddress` and the
-    //    `destination` of `opStaticStore`. `opResolveInterfaceMethod`'s
-    //    `sourceWidth` carries an `interfaceInfo` address the same way.
+    //    `destination` of `opStaticStore`.
     //  - a source offset's width, for floating-point conversions whose
-    //    destination and source widths can differ - or, for
-    //    `opResolveInterfaceMethod`, the interface method's own index
-    //    (`width`).
+    //    destination and source widths can differ.
     //  - a resolved instruction address, cast to a `size_t`: `opJump`'s
     //    `destination`, and `opBranchFalse`/`opBranchTrue`'s `source`.
     //    The compiler patches every branch with a plain instruction
@@ -784,6 +761,15 @@ private const(Instruction)* runCall(Decoded)(
     case indirect:
         auto callee =
             *cast(const(Function)**) (execution.storage(site.calleeSlotOffset));
+        if (site.nativePlan !is null) {
+            auto arguments = CallArguments(site.args.length);
+            auto values = arguments.values;
+            foreach (i, arg; site.args)
+                values[i] = execution.storage(arg.callerOffset);
+            if (executeIndirectCallPlan(site.nativePlan, callee,
+                    execution.destination, values.ptr, values.length))
+                return execution.next;
+        }
         return callFunction(execution, site, callee);
     case native:
         auto arguments = CallArguments(site.args.length);
@@ -834,33 +820,6 @@ private const(Instruction)* callFunction(Decoded)(
         callee.callSites, callee.assertSites, callee.exceptionHandlers, execution.frames,
     );
 
-    return execution.next;
-}
-
-
-// Not a call: the concrete override a guest class gives an interface
-// method is not at a fixed vtable index the way a class's own virtual
-// method is - the same interface method sits at a different index in
-// every implementing class's own vtable, and a call site only ever knows
-// the interface's own index, never which class it will reach at run time.
-// This resolves `execution.source`'s own override through
-// `resolveInterfaceMethod` and stores the result at `execution.destination`,
-// for `compileVirtualCall`'s interface branch to call
-// through the same way it would any other indirect call. `execution.width` is
-// the interface's own `methodIndex`; `execution.sourceWidth` is
-// `interfaceInfo`,
-// cast to a `size_t` the same way `opStaticLoad`'s own `source` carries a
-// resolved address.
-public alias opResolveInterfaceMethod =
-    execute!(runResolveInterfaceMethod, OperandKind.storage, OperandKind.storage);
-
-private const(Instruction)* runResolveInterfaceMethod(Decoded)(
-    ref Decoded execution,
-) {
-    auto object = *cast(void**) (execution.source);
-    auto result = resolveInterfaceMethod(
-        object, cast(void*) execution.sourceWidth, execution.width);
-    *cast(void**) (execution.destination) = result;
     return execution.next;
 }
 
@@ -952,7 +911,7 @@ private const(Instruction)* runBranchTrue(Decoded)(
 // leave are the same whichever way the wider intermediate was extended.
 // `destination` holds the left operand on entry and the answer on exit;
 // `source` holds the right operand, read but not written.
-package alias opAdd =
+public alias opAdd =
     execute!(runAdd, OperandKind.storage, OperandKind.storage);
 
 private const(Instruction)* runAdd(Decoded)(
@@ -1627,7 +1586,7 @@ private const(Instruction)* runFloatWidthCast(Decoded)(
 // Reads `execution.width` bytes from the address held at `execution.source` -
 // a dynamic array's element, at an address the compiler computed from its
 // pointer word and an index - and writes them to `execution.destination`.
-package alias opLoadIndirect =
+public alias opLoadIndirect =
     execute!(runLoadIndirect, OperandKind.storage, OperandKind.storage);
 
 private const(Instruction)* runLoadIndirect(Decoded)(

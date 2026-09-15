@@ -3,8 +3,8 @@ module ut.backends.bytecode.vm;
 
 import ut;
 import snakebite.backends.bytecode.vm:
-    Arg, CallSite, Function, Instruction, opCall, opConstant,
-    opResolveInterfaceMethod, opReturn, Vm;
+    Arg, CallSite, Function, Instruction, opAdd, opCall, opConstant,
+    opLoadIndirect, opReturn, Vm;
 import snakebite.ffi: PlanCache;
 import snakebite.ffi.abi: Register;
 import snakebite.framestack: defaultFrameCapacity;
@@ -164,28 +164,21 @@ private class Formal: Greeter {
 }
 
 
-// Not a `CallSite` at all - `opResolveInterfaceMethod` only computes an
-// address, read back afterward through an ordinary `CallSite.indirect`
-// call the same way `compileVirtualCall` does. `Formal`/`Greeter` are
-// real, normally-compiled D types (this test module is itself compiled
-// by the host D compiler, not by this project's own dmd-frontend-backed
-// bytecode compiler), so `obj`'s vptr and its `TypeInfo_Class.interfaces`
-// are the same shapes a real linked program's own interface dispatch
-// reads - proving `opResolveInterfaceMethod` against genuine druntime
-// metadata rather than a shape this project's own `classinfo.d` built.
-@("opResolveInterfaceMethod.resolvesRealClassOverride")
+@("vtable.loadsRealInterfaceOverride")
 unittest {
     auto obj = new Formal;
-    auto interfaceInfo = obj.classinfo.interfaces[0].classinfo;
+    Greeter receiver = obj;
 
     auto fn = Function(
         [
             Instruction(&opConstant, 0, 0, size_t.sizeof),
-            Instruction(&opResolveInterfaceMethod, size_t.sizeof, 0, 1,
-                cast(size_t) cast(void*) interfaceInfo),
+            Instruction(&opLoadIndirect, 0, 0, size_t.sizeof),
+            Instruction(&opConstant, size_t.sizeof, 1, size_t.sizeof),
+            Instruction(&opAdd, 0, size_t.sizeof, size_t.sizeof),
+            Instruction(&opLoadIndirect, size_t.sizeof, 0, size_t.sizeof),
             Instruction(&opReturn, 0, size_t.sizeof, size_t.sizeof),
         ],
-        [cast(long) cast(size_t) cast(void*) obj],
+        [cast(long) cast(size_t) cast(void*) receiver, size_t.sizeof],
         [],
         [],
         [],
@@ -198,7 +191,7 @@ unittest {
     vm.call(fn, &result);
 
     int delegate() greet;
-    greet.ptr = cast(void*) obj;
+    greet.ptr = cast(void*) receiver;
     greet.funcptr = cast(int function()) result;
 
     greet().should == 111;

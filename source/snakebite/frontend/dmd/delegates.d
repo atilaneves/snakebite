@@ -6,6 +6,7 @@ private:
 
 import dmd.declaration: Declaration, VarDeclaration;
 import dmd.dsymbol: Dsymbol;
+import dmd.expression: Expression;
 import dmd.func: FuncDeclaration;
 import dmd.mtype: Type;
 
@@ -109,9 +110,7 @@ public FuncDeclaration outerFunctionOf(Dsymbol symbol) {
 // must reject the expression outright: dmd left no declaration to resolve
 // (`DelegateExp.func`/`FuncExp.fd` can be null for an expression this
 // project's frontend usage never actually produces, but both backends
-// checked it defensively before this was factored out), the function is a
-// bound method (`isThis`, out of scope for both backends - a method's
-// receiver is a `this` argument, not a static-chain context to resolve),
+// checked it defensively before this was factored out),
 // or `type` is not actually `Tdelegate` (a plain function pointer takes
 // neither backend's delegate path at all).
 //
@@ -129,14 +128,26 @@ public struct DelegateTarget {
     public FuncDeclaration function_;
     public bool needsContext;
     public FuncDeclaration contextOwner;
+    public Expression receiver;
+    public bool receiverIsAddress;
+    public bool virtualDispatch;
 }
 
-public DelegateTarget delegateTargetOf(FuncDeclaration function_, Type type) {
-    import dmd.astenums: Tdelegate;
+public DelegateTarget delegateTargetOf(
+    FuncDeclaration function_, Type type,
+    imported!"dmd.expression".Expression receiver = null,
+) {
+    import dmd.astenums: Tdelegate, Tstruct;
+    import dmd.funcsem: isVirtualMethod;
 
-    if (function_ is null || function_.isThis() !is null
-            || type.ty != Tdelegate)
+    if (function_ is null || type.ty != Tdelegate)
         return DelegateTarget.init;
+
+    if (function_.isThis !is null)
+        return DelegateTarget(function_, false, null, receiver,
+            receiver !is null && receiver.type.ty == Tstruct,
+            receiver !is null && receiver.isSuperExp is null
+                && function_.isVirtualMethod);
 
     if (function_.outerVars.length == 0 && !functionNeedsClosure(function_))
         return DelegateTarget(function_, false, null);

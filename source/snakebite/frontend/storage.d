@@ -83,16 +83,8 @@ public struct StorageResolver(Result, Adapter) {
             return assignmentResult(cast(AssignExp) assignment, assignment.e1);
 
         if (auto call = expression.isCallExp) {
-            auto callee = call.f;
-            if (callee is null) {
-                auto calleeExp = call.e1.isVarExp;
-                callee = calleeExp is null
-                    ? null : calleeExp.var.isFuncDeclaration;
-            }
-
-            auto functionType = callee !is null
-                ? callee.type.isTypeFunction
-                : call.e1.type.isTypeFunction;
+            import snakebite.frontend.dmd.functions: typeFunctionOf;
+            auto functionType = typeFunctionOf(call);
             if (functionType !is null && functionType.isRef)
                 return _adapter.storageReferenceCall(call);
 

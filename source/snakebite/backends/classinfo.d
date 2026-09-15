@@ -9,178 +9,129 @@ import dmd.func: FuncDeclaration;
 import object: Interface, TypeInfo_Class;
 
 
-// Guest classes never reach dmd's own code generator, so nothing ever
-// emits their `TypeInfo_Class`, instance vtable or `.init` bytes as real
-// linked data - both backends build the same shapes by hand instead, from
-// the same `ClassDeclaration`. What differs between them is only how a
-// vtable slot gets its callable value (an interpreter has no compiled
-// address to put there; the bytecode compiler has a `Function*` for every
-// guest override), how a slot in a concrete class's per-interface vtable
-// gets its callable value (interface dispatch means a second, differently
-// shaped question - see `interfaceVtable` below), and how a field's own
-// default value is written into the `.init` bytes. Those questions are
-// asked through `Hooks`. Linked metadata and generated metadata use one
-// cache and the same lookup for every base class and interface.
+// Callable addresses and field initializers differ between backends.
+// Object layout and DMD's resolved vtables do not.
 public struct Hooks {
-    // The value for `declaration.vtbl[i]`'s own slot, `method` being the
-    // override dmd resolved there - `null` when the caller has nothing to
-    // put there (an interpreter dispatches a guest virtual call through
-    // dmd's own `ClassDeclaration.vtbl` directly, never through this
-    // native vtable, so this slot is left however it already reads: a
-    // native address copied down from the base, or unset).
-    public void* delegate(FuncDeclaration method) methodAddress;
-
-    // `concrete`'s own override for every method `interface_` declares, in
-    // `interface_`'s own vtable order - not `concrete`'s, since a call
-    // through an interface reference only ever has the interface's own
-    // method index to work from. `interfaceInfo` is `interface_`'s own,
-    // already-built `TypeInfo_Class`, handed back in case reusing its
-    // (otherwise unused) vtable is all a caller needs.
-    public void*[] delegate(
-        ClassDeclaration concrete,
-        ClassDeclaration interface_,
-        TypeInfo_Class interfaceInfo,
-    ) interfaceVtable;
-
-    // Every field `declaration` itself declares - not an inherited one,
-    // already present in `base` by the time this runs - written at its own
-    // offset into `base`.
+    public void* delegate(FuncDeclaration method, ptrdiff_t adjustment)
+        methodAddress;
     public void delegate(ClassDeclaration declaration, ubyte* base)
         fillFieldInits;
-
-    // Lookup must not generate metadata or call back into this operation.
     public TypeInfo_Class delegate(ClassDeclaration declaration)
         linkedClassInfo;
-
-    // Only generated metadata belongs in a backend's guest dispatch map.
     public void delegate(ClassDeclaration declaration, TypeInfo_Class info)
         registerGenerated;
 }
 
 public alias ClassRuntimeCache = TypeInfo_Class[ClassDeclaration];
 
-// The native metadata a guest class needs at run time: an instance vtable
-// (`vtbl[0]` the classinfo pointer, `vtbl[1 .. $]` every guest override in
-// the same slots dmd's own `ClassDeclaration.vtbl` already assigns them -
-// `vtblOffset` is `1` for a D class, never `0`), a per-interface vtable
-// for every interface `declaration` implements, and the `.init` bytes
-// `_d_newclassT`'s real body would otherwise copy from a linked symbol
-// this project's compiler never emits.
-//
-// Cached by declaration, in `cache`: every `new`, virtual call and
-// `typeid` of the same class reuses the one instance built the first
-// time any of them needs it. Registered there before its own vtable and
-// fields are filled in, so a class that reaches itself again while
-// walking a base or interface chain - direct or mutual recursion - finds
-// this same (possibly still-filling) object instead of recursing forever.
 public TypeInfo_Class classRuntimeInfo(
-    ClassDeclaration declaration,
+    imported!"dmd.dclass".ClassDeclaration declaration,
     ref ClassRuntimeCache cache,
     Hooks hooks,
 ) {
+    import dmd.root.string: toDString;
+
     if (auto cached = declaration in cache)
         return *cached;
-
     if (auto linked = hooks.linkedClassInfo(declaration)) {
         cache[declaration] = linked;
         return linked;
     }
 
-    import dmd.root.string: toDString;
-
-    auto typeInfo = new TypeInfo_Class;
-    // `TypeInfo_Class.ClassFlags`'s own default (`.init`) is `isCOMclass`,
-    // its first member, not `0` - left alone, a guest class not actually a
-    // COM class would still carry that flag.
-    typeInfo.m_flags = cast(TypeInfo_Class.ClassFlags) 0;
-    typeInfo.name = cast(string) declaration.toPrettyChars.toDString;
-    cache[declaration] = typeInfo;
+    auto info = new TypeInfo_Class;
+    info.m_flags = cast(TypeInfo_Class.ClassFlags) 0;
+    info.name = cast(string) declaration.toPrettyChars.toDString;
+    // Register before resolving methods: their bodies can refer to this
+    // same class while its metadata is being built.
+    cache[declaration] = info;
     if (hooks.registerGenerated !is null)
-        hooks.registerGenerated(declaration, typeInfo);
+        hooks.registerGenerated(declaration, info);
 
-    // Base metadata must have the same identity as a direct classinfo
-    // lookup, including when a guest base has a linked namesake.
-    TypeInfo_Class baseInfo;
-    if (declaration.isInterfaceDeclaration is null
-            && declaration.baseClass !is null)
-        baseInfo = classRuntimeInfo(declaration.baseClass, cache, hooks);
+    const isInterface = declaration.isInterfaceDeclaration !is null;
+    if (!isInterface && declaration.baseClass !is null)
+        info.base = classRuntimeInfo(declaration.baseClass, cache, hooks);
 
-    typeInfo.base = baseInfo;
+    const baseLength = info.base is null ? 0 : info.base.vtbl.length;
+    const length = declaration.vtbl.length > baseLength
+        ? declaration.vtbl.length : baseLength;
+    info.vtbl = new void*[length];
+    if (info.base !is null)
+        info.vtbl[0 .. baseLength] = info.base.vtbl[];
+    if (length)
+        info.vtbl[0] = cast(void*) info;
 
-    // A slot this class never overrides still names the base's own method
-    // (`Throwable.toString`, `Object.opEquals`, ...) - copied down rather
-    // than left unset, since native code (a native base class's own
-    // constructor, for one) calls through this vtable directly and needs
-    // a real address there.
-    //
-    // `declaration.vtbl` only lists the slots dmd's frontend resolved
-    // while compiling this class; a guest class over a native base
-    // (`Exception`, ...) can end up with a shorter list than the base
-    // class's own real vtable, since dmd never lowers the native base's
-    // full body here. The vtable is always at least as long as the
-    // base's, so every native slot still has a home.
-    const baseVtableLength = baseInfo is null ? 0 : baseInfo.vtbl.length;
-    const vtableLength = declaration.vtbl.length > baseVtableLength
-        ? declaration.vtbl.length : baseVtableLength;
-    auto vtbl = new void*[vtableLength];
-    if (baseInfo !is null)
-        vtbl[0 .. baseVtableLength] = baseInfo.vtbl[];
-    vtbl[0] = cast(void*) typeInfo;
-    // An interface's own slots name its abstract methods, none with a
-    // body a caller could ever compile - only a concrete class's own
-    // override is ever a callable value, and only a concrete class ever
-    // has `.init` bytes to write one into.
-    if (declaration.isInterfaceDeclaration is null) {
+    if (!isInterface) {
+        if (declaration.dtor !is null)
+            info.destructor = hooks.methodAddress(declaration.dtor, 0);
         foreach (i; 1 .. declaration.vtbl.length) {
             auto method = declaration.vtbl[i].isFuncDeclaration;
-            if (method is null)
-                continue;
-
-            auto address = hooks.methodAddress(method);
-            if (address !is null)
-                vtbl[i] = address;
+            if (method !is null)
+                info.vtbl[i] = hooks.methodAddress(method, 0);
         }
-
-        typeInfo.m_init = new byte[](declaration.structsize);
-        if (baseInfo !is null && baseInfo.m_init.length != 0)
-            typeInfo.m_init[0 .. baseInfo.m_init.length] = baseInfo.m_init[];
-        *cast(void**) typeInfo.m_init.ptr = vtbl.ptr;
-        hooks.fillFieldInits(declaration, cast(ubyte*) typeInfo.m_init.ptr);
+        // Initializers contain GC pointers, including inherited vtables.
+        info.m_init = cast(byte[]) new void[declaration.structsize];
+        info.m_init[] = 0;
+        if (info.base !is null)
+            info.m_init[0 .. info.base.m_init.length] = info.base.m_init[];
+        *cast(void**) info.m_init.ptr = info.vtbl.ptr;
+        hooks.fillFieldInits(declaration, cast(ubyte*) info.m_init.ptr);
     }
-    typeInfo.vtbl = vtbl;
 
-    if (declaration.interfaces.length != 0) {
-        typeInfo.interfaces = new Interface[declaration.interfaces.length];
-        foreach (i, base; declaration.interfaces) {
-            auto interfaceInfo =
-                classRuntimeInfo(base.sym, cache, hooks);
-            typeInfo.interfaces[i] = Interface(
-                interfaceInfo,
-                hooks.interfaceVtable(declaration, base.sym, interfaceInfo),
-                base.offset,
-            );
+    info.interfaces = new Interface[declaration.vtblInterfaces.length];
+    foreach (i; 0 .. declaration.vtblInterfaces.length) {
+        auto base = (*declaration.vtblInterfaces)[i];
+        info.interfaces[i] = Interface(
+            classRuntimeInfo(base.sym, cache, hooks), null, base.offset,
+        );
+        if (!isInterface) {
+            auto table = _interfaceVtable(
+                declaration, base, &info.interfaces[i], hooks);
+            info.interfaces[i].vtbl = table;
+            *cast(void**)(info.m_init.ptr + base.offset) = table.ptr;
         }
     }
 
-    return typeInfo;
+    // An inherited interface keeps its object offset and its Interface
+    // descriptor. A derived override gets a new table at that same offset.
+    if (!isInterface)
+        for (auto parent = declaration.baseClass;
+                parent !is null; parent = parent.baseClass) {
+            auto parentInfo = classRuntimeInfo(parent, cache, hooks);
+            foreach (i; 0 .. parent.vtblInterfaces.length) {
+                import dmd.dsymbolsem: fillVtbl;
+                auto base = (*parent.vtblInterfaces)[i];
+                if (!base.fillVtbl(declaration, null, 0))
+                    continue;
+                auto table = _interfaceVtable(
+                    declaration, base, &parentInfo.interfaces[i], hooks);
+                *cast(void**)(info.m_init.ptr + base.offset) = table.ptr;
+            }
+        }
+    return info;
 }
 
-
-// DMD's override relation also covers covariant interface methods. The
-// caller can limit candidates to methods it can make callable.
-public imported!"dmd.func".FuncDeclaration interfaceOverride(
-    imported!"dmd.dclass".ClassDeclaration concrete,
-    imported!"dmd.func".FuncDeclaration method,
-    scope bool delegate(imported!"dmd.func".FuncDeclaration) accepts = null,
+private void*[] _interfaceVtable(
+    imported!"dmd.dclass".ClassDeclaration declaration,
+    imported!"dmd.dclass".BaseClass* base,
+    Interface* descriptor, Hooks hooks,
 ) {
-    import dmd.funcsem: overrides;
+    import dmd.arraytypes: FuncDeclarations;
+    import dmd.dsymbolsem: fillVtbl;
 
-    foreach (symbol; concrete.vtbl) {
-        auto candidate = symbol.isFuncDeclaration;
-        if (candidate !is null
-                && (accepts is null || accepts(candidate))
-                && candidate.overrides(method))
-            return candidate;
+    FuncDeclarations methods;
+    base.fillVtbl(declaration, &methods, 0);
+    auto table = new void*[methods.length];
+    const first = base.sym.vtblOffset;
+    if (first)
+        table[0] = descriptor;
+    foreach (i; first .. methods.length) {
+        auto method = methods[i];
+        if (method is null)
+            continue;
+        const adjustment = -cast(ptrdiff_t) base.offset
+            + (method.interfaceVirtual is null
+                ? 0 : method.interfaceVirtual.offset);
+        table[i] = hooks.methodAddress(method, adjustment);
     }
-    return null;
+    return table;
 }

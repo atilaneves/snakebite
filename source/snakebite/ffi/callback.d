@@ -60,6 +60,8 @@ private struct Slot {
     const(void)* function_;
     FuncDeclaration declaration;
     const(CallPlan)* plan;
+    ptrdiff_t contextAdjustment;
+    const(void)* nativeAddress;
 }
 
 
@@ -355,10 +357,19 @@ private void invoke(ref Slot slot, CallFrame* frame) {
     call.declaration = slot.declaration;
     call.hasContext = plan.hasHiddenContext;
     call.context = call.hasContext ? *cast(void**) addresses[0] : null;
+    if (call.hasContext)
+        call.context = cast(ubyte*) call.context + slot.contextAdjustment;
     call.arguments = cast(const(void*)[]) addresses[call.hasContext .. $];
     call.returnPlace = plan.callbackReturnPlace(frame, scratch);
 
-    slot.handler(slot.owner, &call);
+    if (slot.nativeAddress is null)
+        slot.handler(slot.owner, &call);
+    else {
+        if (call.hasContext)
+            addresses[0] = &call.context;
+        plan.callAt(slot.nativeAddress, call.returnPlace,
+            cast(const(void*)[]) addresses);
+    }
 
     plan.packResult(frame, call.returnPlace);
 }
@@ -391,6 +402,11 @@ public struct CallbackBridge {
     }
 
     private Registered[const(void)*] _words;
+    private struct Adjusted {
+        const(void)* word;
+        ptrdiff_t offset;
+    }
+    private const(void)*[Adjusted] _adjustedEntries;
     private const(void)*[const(void)*] _wordOfEntry;
     private CallbackHandler _handler;
     private void* _owner;
@@ -435,5 +451,33 @@ public struct CallbackBridge {
     public const(void)* wordOf(const(void)* entry) {
         auto word = entry in _wordOfEntry;
         return word is null ? null : *word;
+    }
+
+    public bool contains(const(void)* word) const {
+        return (word in _words) !is null;
+    }
+
+    // A native ABI thunk owns the receiver adjustment. Callers keep the
+    // original interface pointer, including when they store a delegate.
+    public const(void)* adjustedEntryOf(
+        const(void)* word, FuncDeclaration declaration,
+        in ptrdiff_t adjustment,
+    ) {
+        if (adjustment == 0) {
+            const entry = entryOf(word);
+            return entry is null ? word : entry;
+        }
+        const key = Adjusted(word, adjustment);
+        if (auto entry = key in _adjustedEntries)
+            return *entry;
+        auto plan = new CallPlan;
+        *plan = prepareCallback(declaration);
+        assert(plan.hasHiddenContext);
+        const entry = reserve(Slot(
+            _handler, _owner, word, declaration, plan, adjustment,
+            contains(word) ? null : word,
+        ));
+        _adjustedEntries[key] = entry;
+        return entry;
     }
 }
