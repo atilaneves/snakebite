@@ -2289,22 +2289,27 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // Runs a local's initializer into the frame slot `layoutOf` already
     // gave it. `long sum = 0;` is a `DeclarationExp` here.
     override void visit(DeclarationExp expression) {
-        import std.conv: text;
-
         import snakebite.backends.declaration: runtimeVariables;
 
-        auto variables = runtimeVariables(expression.declaration);
-        foreach (variable; variables) {
+        foreach (variable; runtimeVariables(expression.declaration))
+            initializeDeclaredVariable(variable, expression);
+    }
+
+    private void initializeDeclaredVariable(
+        VarDeclaration variable, DeclarationExp expression,
+    ) {
+        import std.conv: text;
+
         // A data-segment variable is initialised once, when the guest
         // first reaches it, not every time its declaration executes.
         if (variable.isDataseg)
-            continue;
+            return;
 
         // `T value = void` requests storage without initialization. The
         // frame slot already exists, so executing this declaration performs
         // no write. Code must assign any bytes it reads, as in compiled D.
         if (variable._init.isVoidInitializer !is null)
-            continue;
+            return;
 
         auto expInitializer = variable._init.isExpInitializer;
         if (expInitializer is null)
@@ -2325,7 +2330,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             } else
                 evaluate(value, variable.type, slot);
         });
-        }
     }
 
     protected override void visitUnloweredConstruct(ConstructExp expression) {

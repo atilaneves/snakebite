@@ -4,8 +4,23 @@ module snakebite.backends.declaration;
 private:
 
 
+// Layout and execution must see the same variables after DMD expands
+// attributes, template mixins, and tuple declarations.
+public imported!"dmd.declaration".VarDeclaration[] runtimeVariables(
+    imported!"dmd.dsymbol".Dsymbol declaration,
+) {
+    import dmd.dsymbolsem: apply;
+
+    RuntimeVariables result;
+    declaration.apply(&collectRuntimeVariable, &result);
+    return result.values;
+}
+
+
 private struct RuntimeVariables {
-    imported!"dmd.declaration".VarDeclaration[] values;
+    import dmd.declaration: VarDeclaration;
+
+    VarDeclaration[] values;
 }
 
 
@@ -23,20 +38,4 @@ private int collectRuntimeVariable(
             variables.values ~= variable;
     }
     return 0;
-}
-
-
-// Return the variable represented by a declaration expression. DMD keeps
-// declaration attributes as wrappers. Its semantic accessor selects the
-// branch that belongs to the program being compiled. Other symbols only bind
-// names or types, so they have no runtime variable.
-public imported!"dmd.declaration".VarDeclaration[] runtimeVariables(
-    imported!"dmd.dsymbol".Dsymbol declaration,
-) {
-    import dmd.dsymbolsem: apply;
-
-    RuntimeVariables result;
-
-    apply(declaration, &collectRuntimeVariable, &result);
-    return result.values;
 }

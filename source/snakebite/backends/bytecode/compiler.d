@@ -1959,22 +1959,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // gave it - `int sum = 0;` is a `DeclarationExp` here, the same as in
     // the interpreter.
     private void compileDeclaration(DeclarationExp expression) {
-        // These declarations bind names for the semantic pass but have no
-        // runtime action, the same way an `import` inside a function body
-        // does. `static struct S { ... }` reaches here as an
-        // `AttribDeclaration` wrapping the actual `StructDeclaration` - a
-        // storage class attached to a non-variable declaration parses as
-        // the attribute holding it, not as a flag on the declaration
-        // itself the way `static int x;` sets `STC.static_` directly on
-        // its own `VarDeclaration` - so this recurses through one to
-        // reach the same no-op declarations underneath.
         import snakebite.backends.declaration: runtimeVariables;
 
-        foreach (variable; runtimeVariables(expression.declaration)) {
+        foreach (variable; runtimeVariables(expression.declaration))
+            compileDeclaredVariable(variable, expression);
+    }
 
+    private void compileDeclaredVariable(
+        VarDeclaration variable, DeclarationExp expression,
+    ) {
         if (variable.isDataseg) {
             staticAddressOf(variable);
-            continue;
+            return;
         }
 
         // dmd always installs an `ExpInitializer` holding the type's own
@@ -1988,7 +1984,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             "a local variable declaration with no initializer at all");
 
         if (variable._init.isVoidInitializer !is null)
-            continue;
+            return;
 
         const emitDeclaration = () {
             const plan = TemporaryPlan.of(variable, expression,
@@ -2011,7 +2007,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         withFullExpression(FullExpressionKind.effect, expression,
             emitDeclaration,
         );
-        }
     }
 
     // Runs `variable`'s own initialiser into whichever storage its layout
