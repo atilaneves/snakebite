@@ -795,6 +795,10 @@ public struct CallPlan {
             // register exactly that load - sized to only the bytes still
             // left, so it never reads past the argument's own storage.
             if (plan.memory) {
+                const alignment = plan.memoryAlignment / size_t.sizeof;
+                if (alignment > 1)
+                    stackCount = (stackCount + alignment - 1)
+                        / alignment * alignment;
                 const words = plan.memoryWords;
                 foreach (j; 0 .. words) {
                     const offset = j * size_t.sizeof;

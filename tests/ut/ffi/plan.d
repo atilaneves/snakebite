@@ -1323,18 +1323,29 @@ private struct AlignedMemory {
 }
 
 
-// A MEMORY-class argument whose own ABI alignment is 16, not 8 - the
-// stack area `buildMoves` writes into is only 8-byte aligned
-// (`abi.validateMemoryParameter`'s own comment), so this is refused with
-// a clear message instead of silently misaligning it (issue #334 step
-// 3). `real`'s SysV alignment is 16, and the trailing `long` pushes the
-// struct past two eightbytes, so `aggregatePlan` classifies it MEMORY
-// by size alone (the `count > 2` check), without ever needing `classify`
-// to understand a `real` field itself. `prepare` validates every
-// parameter before it resolves a symbol (see `prepare`'s own body), so
-// no native implementation of `snakebite_ut_aligned_memory` needs to
-// exist for this test.
-@("called.memoryClassParameter.refusedAlignment")
+private long _alignedMemoryResult;
+
+
+private extern(C) void snakebite_ut_aligned_memory(AlignedMemory value) {
+    _alignedMemoryResult = cast(long) value.r + value.padding;
+}
+
+
+private extern(C) void snakebite_ut_aligned_memory_after_odd_stack_word(
+    long a, long b, long c, long d, long e, long f, long prefix,
+    AlignedMemory value,
+) {
+    _alignedMemoryResult = cast(long) value.r + value.padding + prefix
+        + a + b + c + d + e + f;
+}
+
+
+// A MEMORY-class argument whose own ABI alignment is 16. `real`'s SysV
+// alignment is 16, and the trailing `long` pushes the struct past two
+// eightbytes, so `aggregatePlan` classifies it MEMORY by size alone (the
+// `count > 2` check), without needing `classify` to understand a `real`
+// field itself.
+@("called.memoryClassParameter.alignedArgument")
 unittest {
     auto guestModule = parseSnippet(q{
         struct AlignedMemory {
@@ -1350,10 +1361,71 @@ unittest {
         "No `snakebite_ut_aligned_memory` in the guest program");
 
     PlanCache cache;
+    AlignedMemory value = AlignedMemory(17, 31);
+    cache.of(function_).call(null, [cast(const(void*)) &value]);
+
+    _alignedMemoryResult.should == 48;
+}
+
+
+// The preceding `prefix` is the first stack word after six integer
+// registers. The 16-byte-aligned argument then needs one padding word
+// before its own stack words.
+@("called.memoryClassParameter.alignedArgumentAfterOddStackWord")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct AlignedMemory {
+            real r;
+            long padding;
+        }
+
+        extern(C) void snakebite_ut_aligned_memory_after_odd_stack_word(
+            long a, long b, long c, long d, long e, long f, long prefix,
+            AlignedMemory value,
+        );
+    });
+    auto function_ = findFunction(
+        guestModule, "snakebite_ut_aligned_memory_after_odd_stack_word",
+    );
+    assert(function_ !is null,
+        "No `snakebite_ut_aligned_memory_after_odd_stack_word` in the " ~
+            "guest program");
+
+    PlanCache cache;
+    AlignedMemory value = AlignedMemory(17, 31);
+    long[7] prefix = [1, 2, 3, 4, 5, 6, 7];
+    cache.of(function_).call(null, [
+        cast(const(void*)) &prefix[0], cast(const(void*)) &prefix[1],
+        cast(const(void*)) &prefix[2], cast(const(void*)) &prefix[3],
+        cast(const(void*)) &prefix[4], cast(const(void*)) &prefix[5],
+        cast(const(void*)) &prefix[6], cast(const(void*)) &value,
+    ]);
+
+    _alignedMemoryResult.should == 76;
+}
+
+
+// The assembly stub guarantees a 16-byte stack base. A greater alignment
+// needs a different stub, so the planner must reject it before resolution.
+@("called.memoryClassParameter.refusedOverAlignment")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct OverAligned {
+            align(32) long word;
+            long[3] words;
+        }
+
+        extern(C) void snakebite_ut_over_aligned(OverAligned value);
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_over_aligned");
+    assert(function_ !is null,
+        "No `snakebite_ut_over_aligned` in the guest program");
+
+    PlanCache cache;
     cache.of(function_).shouldThrowWithMessage(
-        "ffi cannot pass a value of type `AlignedMemory`: its ABI " ~
-            "alignment is 16 bytes, and only 8-byte-aligned MEMORY-class " ~
-            "arguments are supported");
+        "ffi cannot pass a value of type `OverAligned`: its ABI alignment " ~
+            "is 32 bytes, and only 16-byte-aligned MEMORY-class arguments " ~
+            "are supported");
 }
 
 
