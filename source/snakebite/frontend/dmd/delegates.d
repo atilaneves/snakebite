@@ -100,7 +100,12 @@ public bool hasHiddenThis(FuncDeclaration function_) {
 // toParent2`, see `delegateTargetOf` below) are both resolved the same way.
 public FuncDeclaration outerFunctionOf(Dsymbol symbol) {
     auto parent = symbol.toParent2();
-    return parent is null ? null : parent.isFuncDeclaration;
+    while (parent !is null) {
+        if (auto function_ = parent.isFuncDeclaration)
+            return function_;
+        parent = parent.toParent2();
+    }
+    return null;
 }
 
 // What a `DelegateExp` (`&nested`) or a delegate-typed `FuncExp` (a
@@ -152,5 +157,8 @@ public DelegateTarget delegateTargetOf(
     if (function_.outerVars.length == 0 && !functionNeedsClosure(function_))
         return DelegateTarget(function_, false, null);
 
-    return DelegateTarget(function_, true, outerFunctionOf(function_));
+    auto contextOwner = outerFunctionOf(function_);
+    if (contextOwner is null && function_.outerVars.length)
+        contextOwner = outerFunctionOf(function_.outerVars[0]);
+    return DelegateTarget(function_, true, contextOwner);
 }

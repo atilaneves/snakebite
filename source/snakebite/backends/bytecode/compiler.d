@@ -2831,8 +2831,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression target, in Loc loc,
         in string operation,
     ) {
+        import dmd.astenums: Tpointer;
+
         const facts = TypeFacts.of(target.type);
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
+        if ((!facts.isIntegral && target.type.ty != Tpointer)
+                || !isIntegralSize(facts.size))
             throw rejection(_function, loc, operation);
 
         if (auto dot = target.isDotVarExp) {
@@ -3493,6 +3496,93 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, _destination, arrayOffset + arrayLengthOffset, _width);
     }
 
+    private void compileBoundedSlice(
+            SliceExp expression,
+            size_t sourceLengthOffset,
+            size_t sourcePointerOffset) {
+        import snakebite.backends.elementaddress:
+            sliceBoundsHook, sliceBoundsRegisters;
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset;
+
+        auto outerDollarVariable = _dollarVariable;
+        auto outerDollarOffset = _dollarOffset;
+        scope (exit) {
+            _dollarVariable = outerDollarVariable;
+            _dollarOffset = outerDollarOffset;
+        }
+        if (expression.lengthVar !is null) {
+            _dollarVariable = expression.lengthVar;
+            _dollarOffset = sourceLengthOffset;
+        }
+
+        const lowOffset = reserveTemp(pointerFacts);
+        if (expression.lwr is null)
+            emit(&opConstant, lowOffset, addConstant(0), size_t.sizeof);
+        else
+            evalOperandInto(expression.lwr, lowOffset, size_t.sizeof);
+
+        const highOffset = reserveTemp(pointerFacts);
+        if (expression.upr is null)
+            emit(&opCopy, highOffset, sourceLengthOffset, size_t.sizeof);
+        else
+            evalOperandInto(expression.upr, highOffset, size_t.sizeof);
+
+        // D requires both bounds to be within the source array and the
+        // lower bound to come first. Check before pointer arithmetic so a
+        // bad slice cannot form an address outside the guest array.
+        const orderOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, orderOffset, lowOffset, size_t.sizeof);
+        emit(&opLessOrEqualUnsigned, orderOffset, highOffset,
+            size_t.sizeof);
+        compileBoundsHook(
+            orderOffset,
+            sliceBoundsHook,
+            sliceBoundsRegisters,
+            [
+                Arg(lowOffset, 0, size_t.sizeof),
+                Arg(highOffset, 0, size_t.sizeof),
+                Arg(sourceLengthOffset, 0, size_t.sizeof),
+            ],
+            expression.loc,
+        );
+
+        emit(&opCopy, orderOffset, highOffset, size_t.sizeof);
+        emit(&opLessOrEqualUnsigned, orderOffset, sourceLengthOffset,
+            size_t.sizeof);
+        compileBoundsHook(
+            orderOffset,
+            sliceBoundsHook,
+            sliceBoundsRegisters,
+            [
+                Arg(lowOffset, 0, size_t.sizeof),
+                Arg(highOffset, 0, size_t.sizeof),
+                Arg(sourceLengthOffset, 0, size_t.sizeof),
+            ],
+            expression.loc,
+        );
+
+        emit(&opCopy, _destination + arrayLengthOffset,
+            highOffset, size_t.sizeof);
+        emit(&opSubtract, _destination + arrayLengthOffset,
+            lowOffset, size_t.sizeof);
+
+        const byteOffsetOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, byteOffsetOffset, lowOffset, size_t.sizeof);
+        const elementFacts = TypeFacts.of(expression.e1.type.nextOf);
+        const elementSizeOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, elementSizeOffset,
+            addConstant(cast(long) elementFacts.size), size_t.sizeof);
+        emit(&opMultiply, byteOffsetOffset, elementSizeOffset,
+            size_t.sizeof);
+
+        const pointerOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, pointerOffset, sourcePointerOffset, size_t.sizeof);
+        emit(&opAdd, pointerOffset, byteOffsetOffset, size_t.sizeof);
+        emit(&opCopy, _destination + arrayPointerOffset,
+            pointerOffset, size_t.sizeof);
+    }
+
     // `arr[]`: dmd's own `foreach` lowering over an array takes a bare
     // whole-array slice of it before iterating, to fix the range being
     // walked against mutation of the original variable during the loop.
@@ -3534,6 +3624,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
+        // A bounded static-array slice has no length word to read back, but
+        // its result still has the native dynamic-array shape. Use the
+        // dimension from the static type as its source length.
+        if (expression.e1.type.ty == Tsarray
+                && (expression.lwr !is null || expression.upr !is null)) {
+            const sourceLengthOffset = reserveTemp(pointerFacts);
+            const dim = cast(size_t)
+                expression.e1.type.isTypeSArray.dim.toInteger;
+            emit(&opConstant, sourceLengthOffset,
+                addConstant(cast(long) dim), size_t.sizeof);
+            const addressOffset = compileAddress(expression.e1);
+            compileBoundedSlice(
+                expression, sourceLengthOffset, addressOffset);
+            return;
+        }
+
         // `xs[]`: a static array's own whole-array slice, dmd's own
         // `foreach` lowering over one (see `dmd.statementsem`'s rewrite to
         // a `for` loop over `xs[]`) as well as an explicit one written by
@@ -3566,91 +3672,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const arrayOffset = reserveTemp(facts);
         evalInto(expression.e1, arrayOffset, facts.size);
 
-        auto outerDollarVariable = _dollarVariable;
-        auto outerDollarOffset = _dollarOffset;
-        scope (exit) {
-            _dollarVariable = outerDollarVariable;
-            _dollarOffset = outerDollarOffset;
-        }
-        if (expression.lengthVar !is null) {
-            _dollarVariable = expression.lengthVar;
-            _dollarOffset = arrayOffset + arrayLengthOffset;
-        }
-
-        const lowOffset = reserveTemp(pointerFacts);
-        if (expression.lwr is null)
-            emit(&opConstant, lowOffset, addConstant(0), size_t.sizeof);
-        else
-            evalOperandInto(expression.lwr, lowOffset, size_t.sizeof);
-
-        const highOffset = reserveTemp(pointerFacts);
-        if (expression.upr is null)
-            emit(&opCopy, highOffset,
-                arrayOffset + arrayLengthOffset, size_t.sizeof);
-        else
-            evalOperandInto(expression.upr, highOffset, size_t.sizeof);
-
-        // D requires both bounds to be within the source array and the
-        // lower bound to come first. Check before pointer arithmetic so a
-        // bad slice cannot form an address outside the guest array. Both
-        // checks report through the same hook with the same three
-        // operands - `_d_arraybounds_slicep` itself tells a
-        // larger-lower-than-upper failure from an out-of-range one apart
-        // (`ArraySliceError.msg`) - so this calls it twice, once per
-        // condition, rather than building one combined flag first.
-        import snakebite.backends.elementaddress:
-            sliceBoundsHook, sliceBoundsRegisters;
-
-        const orderOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, orderOffset, lowOffset, size_t.sizeof);
-        emit(&opLessOrEqualUnsigned, orderOffset, highOffset, size_t.sizeof);
-        compileBoundsHook(
-            orderOffset,
-            sliceBoundsHook,
-            sliceBoundsRegisters,
-            [
-                Arg(lowOffset, 0, size_t.sizeof),
-                Arg(highOffset, 0, size_t.sizeof),
-                Arg(arrayOffset + arrayLengthOffset, 0, size_t.sizeof),
-            ],
-            expression.loc,
-        );
-
-        emit(&opCopy, orderOffset, highOffset, size_t.sizeof);
-        emit(&opLessOrEqualUnsigned, orderOffset,
-            arrayOffset + arrayLengthOffset, size_t.sizeof);
-        compileBoundsHook(
-            orderOffset,
-            sliceBoundsHook,
-            sliceBoundsRegisters,
-            [
-                Arg(lowOffset, 0, size_t.sizeof),
-                Arg(highOffset, 0, size_t.sizeof),
-                Arg(arrayOffset + arrayLengthOffset, 0, size_t.sizeof),
-            ],
-            expression.loc,
-        );
-
-        emit(&opCopy, _destination + arrayLengthOffset,
-            highOffset, size_t.sizeof);
-        emit(&opSubtract, _destination + arrayLengthOffset,
-            lowOffset, size_t.sizeof);
-
-        const byteOffsetOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, byteOffsetOffset, lowOffset, size_t.sizeof);
-        const elementFacts = TypeFacts.of(expression.e1.type.nextOf);
-        const elementSizeOffset = reserveTemp(pointerFacts);
-        emit(&opConstant, elementSizeOffset,
-            addConstant(cast(long) elementFacts.size), size_t.sizeof);
-        emit(&opMultiply, byteOffsetOffset, elementSizeOffset,
-            size_t.sizeof);
-
-        const pointerOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, pointerOffset,
-            arrayOffset + arrayPointerOffset, size_t.sizeof);
-        emit(&opAdd, pointerOffset, byteOffsetOffset, size_t.sizeof);
-        emit(&opCopy, _destination + arrayPointerOffset,
-            pointerOffset, size_t.sizeof);
+        compileBoundedSlice(
+            expression,
+            arrayOffset + arrayLengthOffset,
+            arrayOffset + arrayPointerOffset);
     }
 
     // `arr[i]`, read as a value. The shared storage resolver computes where
@@ -3992,6 +4017,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(AssignExp expression) {
+        compileAssign(expression, _destination);
+    }
+
+    override void visit(BlitExp expression) {
         compileAssign(expression, _destination);
     }
 

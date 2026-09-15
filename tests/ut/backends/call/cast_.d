@@ -24,6 +24,24 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("cast.immutableSliceToMutablePointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool nonNull() {
+                    string value = "hello";
+                    char* pointer = cast(char*) value;
+                    return pointer !is null;
+                }
+            },
+            "nonNull",
+        );
+    }
+}
+
 
 // `5_000_000_000` needs 33 bits, so its low 32 bits - what `cast(int)`
 // keeps - differ from the value itself. An implementation that clamps or

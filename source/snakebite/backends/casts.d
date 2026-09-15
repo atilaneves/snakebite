@@ -64,7 +64,7 @@ public CastPlan classify(
 ) {
     import dmd.astenums: Tbool, Taarray, Tclass, Tpointer, Tsarray;
     import dmd.expressionsem: toInteger;
-    import dmd.typesem: nextOf;
+    import dmd.typesem: mutableOf, nextOf;
     import snakebite.nativelayout: isIntegralSize;
 
     const sourceFacts = TypeFacts.of(sourceType);
@@ -128,7 +128,7 @@ public CastPlan classify(
 
     if (sourceType.ty == Tsarray && destFacts.isDynamicArray
             && destType.nextOf !is null
-            && sourceType.nextOf.equals(destType.nextOf)) {
+            && sourceType.nextOf.mutableOf.equals(destType.nextOf.mutableOf)) {
         auto plan = CastPlan(
             CastPlan.Kind.sarrayToSlice, sourceFacts, destFacts);
         plan.staticLength =
@@ -140,13 +140,13 @@ public CastPlan classify(
     // casts straight to a pointer to its element type.
     if (sourceType.ty == Tsarray && destType.ty == Tpointer
             && destType.nextOf !is null
-            && sourceType.nextOf.equals(destType.nextOf))
+            && sourceType.nextOf.mutableOf.equals(destType.nextOf.mutableOf))
         return CastPlan(CastPlan.Kind.sarrayToPointer, sourceFacts, destFacts);
 
     // `arr.ptr`: the same lowering, over a dynamic array.
     if (sourceFacts.isDynamicArray && destType.ty == Tpointer
             && destType.nextOf !is null
-            && sourceType.nextOf.equals(destType.nextOf))
+            && sourceType.nextOf.mutableOf.equals(destType.nextOf.mutableOf))
         return CastPlan(CastPlan.Kind.sliceToPointer, sourceFacts, destFacts);
 
     if (sourceFacts.isDynamicArray && destFacts.isDynamicArray)

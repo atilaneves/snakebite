@@ -114,6 +114,27 @@ static foreach (backend; Matrix!(
     }
 }
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("pointerPostIncrementAdvancesByElementSize." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        14.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    int[2] values = [6, 8];
+                    int* pointer = &values[0];
+                    auto old = pointer++;
+                    return *old + *pointer;
+                }
+            },
+            "result",
+        );
+    }
+}
+
 // Pointer arithmetic uses the pointee size, not byte addressing, for a
 // dynamic array whose elements are wider than one byte.
 static foreach (backend; Matrix!(

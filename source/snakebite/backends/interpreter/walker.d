@@ -2243,6 +2243,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         assign(expression);
     }
 
+    override void visit(BlitExp expression) {
+        assign(expression);
+    }
+
     private void* assign(AssignExp expression) {
         return addressOf(expression);
     }
@@ -2838,6 +2842,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import std.conv: text;
 
         const facts = factsOf(expression.e1.type);
+        if (expression.e1.type.ty == Tpointer) {
+            const target = addressOf(expression.e1);
+            const current = asPointer(expression.e1);
+            const elementSize = factsOf(expression.e1.type.nextOf).size;
+            const changed = expression.op == EXP.plusPlus
+                ? cast(ubyte*) current + elementSize
+                : cast(ubyte*) current - elementSize;
+
+            storeIntegral(_place, cast(size_t) current, _facts.size);
+            storeIntegral(cast(void*) target, cast(size_t) changed,
+                facts.size);
+            return;
+        }
+
         if (!facts.isIntegral)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,

@@ -44,6 +44,7 @@ public Hop[] staticChainPath(
     imported!"dmd.func".FuncDeclaration from,
     imported!"dmd.func".FuncDeclaration to,
 ) {
+    import dmd.aggregate: AggregateDeclaration;
     import snakebite.frontend.dmd.delegates: functionNeedsClosure;
 
     if (from is to)
@@ -57,18 +58,22 @@ public Hop[] staticChainPath(
 
     auto parent = from.toParent2();
     auto currentFunction = parent is null ? null : parent.isFuncDeclaration;
-    auto currentStruct = parent is null ? null : parent.isStructDeclaration;
+    auto currentAggregate =
+        parent is null ? null : parent.isAggregateDeclaration;
 
     while (currentFunction !is to) {
-        if (currentStruct !is null) {
-            if (!currentStruct.isNested() || currentStruct.vthis is null)
+        if (currentAggregate !is null) {
+            if (!currentAggregate.isNested()
+                    || currentAggregate.vthis is null)
                 return null;
 
-            hops ~= Hop(Hop.Kind.structField, currentStruct.vthis.offset);
+            hops ~= Hop(Hop.Kind.structField,
+                currentAggregate.vthis.offset);
 
-            auto next = currentStruct.toParent2();
+            auto next = currentAggregate.toParent2();
             currentFunction = next is null ? null : next.isFuncDeclaration;
-            currentStruct = next is null ? null : next.isStructDeclaration;
+            currentAggregate =
+                next is null ? null : next.isAggregateDeclaration;
             continue;
         }
 
@@ -90,7 +95,8 @@ public Hop[] staticChainPath(
 
         auto next = currentFunction.toParent2();
         currentFunction = next is null ? null : next.isFuncDeclaration;
-        currentStruct = next is null ? null : next.isStructDeclaration;
+        currentAggregate =
+            next is null ? null : next.isAggregateDeclaration;
     }
 
     return hops;

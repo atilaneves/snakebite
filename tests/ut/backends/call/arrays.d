@@ -913,6 +913,27 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!()) {
+    @("arrays.slice.bounded.staticArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        498.shouldBeRetOf!(
+            backend,
+            q{
+                int middle() {
+                    char[5] values = "abcde";
+                    size_t low = 1;
+                    size_t high = 4;
+                    auto slice = values[low .. high];
+                    return cast(int) slice.length * 100
+                        + slice[0] + slice[2];
+                }
+            },
+            "middle",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
     @("arrays.slice.bounded.outOfBounds." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
