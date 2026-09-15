@@ -182,12 +182,7 @@ static foreach (backend; Matrix!()) {
 // A `break` out of a `try` body runs the `finally` on its way out, the
 // same as a `return` does. The `break` here sits in an `if` with no
 // `else`, the shape a lookup loop with an early exit has.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.diverges,
-        "a `break` reached only through the taken branch of an `if` " ~
-        "with no `else` skips the `finally` silently instead of " ~
-        "running it - `finallyRuns` stays 0 instead of reaching 2"),
-)) {
+static foreach (backend; Matrix!()) {
     @("tryFinally.breakInsideIfRunsFinally." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -508,7 +503,6 @@ static foreach (backend; Matrix!()) {
 
 
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot mutate a module-level variable at run time"),
 )) {
@@ -545,7 +539,7 @@ static foreach (backend; Matrix!(
 }
 
 
-static foreach (backend; Matrix!(Omit!(Bytecode, Because.unconfirmed))) {
+static foreach (backend; Matrix!()) {
     @("tryFinally.scopeExitRunsDuringContinue." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -883,5 +877,99 @@ static foreach (backend; Matrix!()) {
             },
             "pick",
         );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("tryFinally.nestedThrowRunsCleanupOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        123.shouldBeRetOf!(backend, q{
+            int result() {
+                int trace;
+                try {
+                    try {
+                        try {
+                            throw new Exception("body");
+                        } finally {
+                            trace = trace * 10 + 1;
+                        }
+                    } finally {
+                        trace = trace * 10 + 2;
+                        throw new Exception("cleanup");
+                    }
+                } catch (Exception e) {
+                    trace = trace * 10 + 3;
+                }
+                return trace;
+            }
+        }, "result");
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("tryFinally.loopExitsKeepEnclosingCleanupPending." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        112.shouldBeRetOf!(backend, q{
+            int result() {
+                int trace;
+                try {
+                    outer: for (int i; i < 2; ++i) {
+                        try {
+                            for (int j; j < 2; ++j) {
+                                if (j == 0)
+                                    continue;
+                                break;
+                            }
+                            continue outer;
+                        } finally {
+                            trace = trace * 10 + 1;
+                        }
+                    }
+                } finally {
+                    trace = trace * 10 + 2;
+                }
+                return trace;
+            }
+        }, "result");
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "a goto inside finally returns 0 instead of running cleanup"),
+    Omit!(Interpreter, Because.diverges,
+        "a goto inside finally leaves an unresolved transfer and returns " ~
+        "an incorrect value instead of finishing cleanup"),
+)) {
+    @("tryFinally.gotoWithinCleanupRunsOnBothExits." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        22.shouldBeRetOf!(backend, q{
+            int cleanup(bool fail) {
+                int trace;
+                try {
+                    try {
+                        if (fail)
+                            throw new Exception("body");
+                    } finally {
+                        goto done;
+                        trace = 9;
+                    done:
+                        trace += 2;
+                    }
+                } catch (Exception e) {
+                }
+                return trace;
+            }
+
+            int result() {
+                return cleanup(false) * 10 + cleanup(true);
+            }
+        }, "result");
     }
 }
