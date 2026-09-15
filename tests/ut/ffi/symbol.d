@@ -32,6 +32,7 @@ private string cacheDirectory() {
 }
 
 @("image.atomicLoad.cache")
+@Serial
 unittest {
     const directory = cacheDirectory;
     scope(exit) rmdirRecurse(directory);
@@ -54,6 +55,7 @@ unittest {
 }
 
 @("image.sourceChange")
+@Serial
 unittest {
     const directory = cacheDirectory;
     scope(exit) rmdirRecurse(directory);
@@ -66,6 +68,7 @@ unittest {
 }
 
 @("image.compileFailure")
+@Serial
 unittest {
     const directory = cacheDirectory;
     scope(exit) rmdirRecurse(directory);
@@ -75,6 +78,7 @@ unittest {
 }
 
 @("image.linkFailure")
+@Serial
 unittest {
     const directory = cacheDirectory;
     scope(exit) rmdirRecurse(directory);
@@ -88,6 +92,7 @@ unittest {
 }
 
 @("image.compilerFamily")
+@Serial
 unittest {
     const directory = cacheDirectory;
     scope(exit) rmdirRecurse(directory);
@@ -102,6 +107,7 @@ unittest {
 }
 
 @("image.inputChange")
+@Serial
 unittest {
     const directory = cacheDirectory;
     scope(exit) rmdirRecurse(directory);
@@ -118,6 +124,7 @@ unittest {
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     "CTFE cannot call a function in a loaded native image"))) {
     @("image.atomicLoad." ~ backend.stringof)
+    @Serial
     unittest {
         const directory = cacheDirectory;
         scope(exit) rmdirRecurse(directory);
@@ -145,6 +152,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 }
 
 @("image.moduleConstructor")
+@Serial
 unittest {
     const directory = cacheDirectory;
     scope(exit) rmdirRecurse(directory);
