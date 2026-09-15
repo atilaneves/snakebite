@@ -377,10 +377,31 @@ public struct Vm {
         _frames = FrameStack(frameCapacity);
     }
 
+    // One argument the host hands a guest function: the callee frame
+    // slot it fills, and the bytes that fill it.
+    public struct HostArgument {
+        public size_t offset;
+        public const(void)* source;
+        public size_t width;
+    }
+
     public void call(
         scope const ref Function function_,
         void* returnPlace,
     ) {
+        call(function_, returnPlace, null);
+    }
+
+    // As `call`, with the callee's parameter slots filled from `arguments`
+    // first - the way `callFunction` fills them from a caller's frame for
+    // a guest call site.
+    public void call(
+        scope const ref Function function_,
+        void* returnPlace,
+        scope const HostArgument[] arguments,
+    ) {
+        import core.stdc.string: memcpy;
+
         assert(function_.instructions.length > 0);
         assert(function_.frameAlignment > 0);
 
@@ -388,6 +409,9 @@ public struct Vm {
             function_.frameSize,
             function_.frameAlignment,
         );
+        foreach (argument; arguments)
+            memcpy(frame.base + argument.offset, argument.source,
+                argument.width);
         initializeClosure(&function_, frame.base, &_frames);
         auto pc = function_.instructions.ptr;
         dispatch(

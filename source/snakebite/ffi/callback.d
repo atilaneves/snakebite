@@ -5,296 +5,421 @@ private:
 
 
 import core.sync.mutex: Mutex;
-import snakebite.callarguments: CallArguments;
-import snakebite.exception: SnakebiteException;
+import snakebite.ffi.plan: CallPlan, prepareCallback;
+import snakebite.ffi.sysv:
+    CallbackTrailer, CallFrame, callbackEntriesPerChunk, callbackEntryBytes,
+    snakebite_ffi_callback_chunk, snakebite_ffi_callback_chunk_end,
+    snakebite_ffi_callback_chunk_trailer, snakebite_ffi_callback_common;
 
 
-// The fixed compiler-built entries available to all callback owners.
-public enum boolFunctionEntryCount = 64;
+// The pool of callback entries (ADR-0003): the addresses host code calls
+// when it calls a guest function through a function pointer or a
+// delegate. Every entry is a copy of the same position-independent
+// template in `sysv_amd64.S`; `snakebite_ffi_callback_common` spills the
+// argument registers and calls `snakebite_ffi_callback_handler` below,
+// which finds the entry's slot and replays the slot's plan in reverse to
+// re-enter the backend that owns the slot.
+//
+// The first chunk of entries is the template itself, linked into the
+// binary. When every slot in every chunk is taken, the pool copies the
+// template's bytes into a new mapping and flips that mapping to
+// read-execute (`allocateChunk`). Memory is never writable and
+// executable at the same time. A slot is never released.
 
 
-// The callback shape currently supported by the Barrier. Keeping this policy
-// here makes both backends reject the same declarations before host code can
-// jump to them.
-public bool supportsBoolFunction(
-    imported!"dmd.func".FuncDeclaration function_,
-) {
-    import dmd.astenums: LINK, Tbool;
-
-    if (function_ is null)
-        return false;
-    auto type = function_.type.isTypeFunction;
-    if (type is null)
-        return false;
-
-    const linkage = function_.resolvedLinkage;
-    return type.parameterList.length == 0
-        && type.next.ty == Tbool
-        && (linkage == LINK.d || linkage == LINK.default_);
+// What the pool hands a backend when host code calls one of its guest
+// functions: which function, in the backend's own representation, its
+// context word if the signature has one, and the arguments and result
+// place in native layout - the arguments in the same shape
+// `CallPlan.call` takes them, one address per declared parameter, and
+// for a `ref`/`out` parameter the address of the pointer the host passed.
+public struct CallbackCall {
+    public const(void)* function_;
+    public imported!"dmd.func".FuncDeclaration declaration;
+    public void* context;
+    public bool hasContext;
+    public void* returnPlace;
+    public const(void*)[] arguments;
 }
 
 
-// An entry calls this handler with the target state that its owner supplied.
-public alias BoolFunctionHandler = extern(C) bool function(void*, void*);
+public alias CallbackHandler = extern(C) void function(void*, CallbackCall*);
 
 
-// The address that host code calls. It has the same ABI as the supported
-// guest callback shape, so a guest callback crosses the Barrier without a
-// host-side representation.
-private alias BoolFunction = extern(D) bool function();
-
-
-private struct BoolFunctionTarget {
-    BoolFunctionHandler handler;
-    void* context;
-    void* function_;
-}
-
-
-private enum unusedEntry = size_t.max;
-
-
+// What one entry re-enters: the backend (`handler`, `owner`), the guest
+// function in that backend's own representation (`function_`), and the
+// plan its arguments are unpacked with.
 private struct Slot {
-    BoolFunctionTarget target;
-    bool used;
+    CallbackHandler handler;
+    void* owner;
+    const(void)* function_;
+    imported!"dmd.func".FuncDeclaration declaration;
+    const(CallPlan)* plan;
 }
 
 
-private __gshared Slot[boolFunctionEntryCount] slots;
+private struct Chunk {
+    const(ubyte)* base;
+    Slot[] slots;
+    size_t used;
+}
+
+
+// How a new chunk gets its executable copy of the template. `protect`
+// is the usual way; `dualMapping` is the fallback for a kernel that
+// refuses to make an anonymous mapping executable after it was written
+// (SELinux `execmem`, PaX, systemd's `MemoryDenyWriteExecute`), and maps
+// one memory file twice instead, one view to write and one to execute.
+public enum ChunkStrategy {
+    protect,
+    dualMapping,
+}
+
+
+private __gshared Slot[callbackEntriesPerChunk] templateSlots;
+private __gshared Chunk[] chunks;
 private __gshared Mutex mutex;
 
 
+private const(ubyte)* templateBase() {
+    return cast(const(ubyte)*) &snakebite_ffi_callback_chunk;
+}
+
+private const(ubyte)* templateEnd() {
+    return cast(const(ubyte)*) &snakebite_ffi_callback_chunk_end;
+}
+
+private const(CallbackTrailer)* templateTrailer() {
+    return cast(const(CallbackTrailer)*)
+        &snakebite_ffi_callback_chunk_trailer;
+}
+
+private const(ubyte)* commonEntry() {
+    return cast(const(ubyte)*) &snakebite_ffi_callback_common;
+}
+
+private size_t trailerOffset() {
+    return cast(const(ubyte)*) templateTrailer() - templateBase();
+}
+
+
 shared static this() {
+    import std.conv: text;
+
     mutex = new Mutex;
+
+    // The assembler's own `CB_*` defines cannot be read from D, so the
+    // template's real layout is checked against `sysv.d`'s constants here,
+    // once, before any entry is handed out.
+    const entryBytes = callbackEntriesPerChunk * callbackEntryBytes;
+    if (trailerOffset != entryBytes
+            || templateEnd - cast(const(ubyte)*) templateTrailer
+                <= CallbackTrailer.sizeof
+            || templateTrailer.commonDelta
+                != commonEntry - cast(const(ubyte)*) templateTrailer
+            || templateTrailer.slots !is null)
+        throw new Exception(
+            text("ffi callback template layout mismatch: trailer at ",
+                trailerOffset, ", expected ", entryBytes),
+        );
+
+    chunks = [Chunk(templateBase, templateSlots[], 0)];
 }
 
 
-private bool invoke(in size_t index) {
-    auto target = slots[index].target;
-    if (target.handler is null)
-        throw new Exception("ffi callback entry is no longer valid");
+// The address host code calls for `slot`: the next free entry, from a new
+// chunk if every existing one is full. Never released.
+private const(void)* reserve(Slot slot) {
+    mutex.lock;
+    scope(exit) mutex.unlock;
 
-    return target.handler(target.context, target.function_);
+    if (chunks[$ - 1].used == callbackEntriesPerChunk)
+        chunks ~= allocateChunk(ChunkStrategy.protect, true);
+
+    auto chunk = &chunks[$ - 1];
+    const index = chunk.used++;
+    chunk.slots[index] = slot;
+    return chunk.base + index * callbackEntryBytes;
 }
 
 
-private extern(D) bool entry(size_t index)() {
-    return invoke(index);
+// How many chunks the pool has, the template included.
+version(unittest)
+public size_t callbackChunkCount() {
+    mutex.lock;
+    scope(exit) mutex.unlock;
+
+    return chunks.length;
 }
 
 
-private immutable BoolFunction[boolFunctionEntryCount] entries = () {
-    BoolFunction[boolFunctionEntryCount] result;
-    static foreach (i; 0 .. boolFunctionEntryCount)
-        result[i] = &entry!i;
-    return result;
-}();
+// Starts a fresh chunk made with `strategy`, so the entries reserved
+// after this come from it: the way a test drives the dual-mapping
+// fallback on a kernel that never refuses `mprotect`.
+version(unittest)
+public void beginCallbackChunk(ChunkStrategy strategy) {
+    mutex.lock;
+    scope(exit) mutex.unlock;
+
+    chunks ~= allocateChunk(strategy, false);
+}
 
 
-// The unique owner of one reserved compiler-built entry. CallbackBridge is
-// the public seam, so this lifetime detail cannot leak into a backend.
-private struct BoolFunctionEntry {
-    private size_t _index = unusedEntry;
+// A new chunk: the template's bytes, in memory this process can execute,
+// with the trailer patched to reach `snakebite_ffi_callback_common` from
+// the copy's own address and to name the copy's own slot table.
+// `fallback` says whether a refused `protect` may fall through to
+// `dualMapping`.
+private Chunk allocateChunk(in ChunkStrategy strategy, in bool fallback) {
+    auto slots = new Slot[callbackEntriesPerChunk];
+    const bytes = templateEnd - templateBase;
 
-    @disable this(this);
+    const(ubyte)* base;
+    final switch (strategy) with (ChunkStrategy) {
+        case protect:
+            base = copyThenProtect(bytes, slots.ptr);
+            if (base is null) {
+                if (!fallback)
+                    throw new Exception(
+                        "ffi callback pool: mprotect refused to make the " ~
+                            "chunk executable, and no fallback was allowed",
+                    );
+                base = copyDualMapped(bytes, slots.ptr);
+            }
+            break;
 
-    public static BoolFunctionEntry reserve(BoolFunctionTarget target) {
-        if (target.handler is null)
-            throw new Exception("ffi callback target has no handler");
-
-        mutex.lock;
-        scope(exit) mutex.unlock;
-
-        foreach (i; 0 .. slots.length) {
-            if (slots[i].used)
-                continue;
-
-            slots[i] = Slot(target, true);
-            return BoolFunctionEntry(i);
-        }
-
-        throw new Exception("ffi bool function callback pool is exhausted");
+        case dualMapping:
+            base = copyDualMapped(bytes, slots.ptr);
+            break;
     }
 
-    public BoolFunction address() const {
-        if (_index == unusedEntry)
-            throw new Exception("ffi callback entry is not reserved");
-
-        return entries[_index];
-    }
-
-    public void release() {
-        if (_index == unusedEntry)
-            return;
-
-        mutex.lock;
-        scope(exit) mutex.unlock;
-
-        slots[_index] = Slot.init;
-        _index = unusedEntry;
-    }
+    return Chunk(base, slots, 0);
 }
 
 
-// A raw function-pointer word that the backend has already established is a
-// guest declaration. The backend-specific ownership check stays an adapter;
-// all ABI inspection and host argument rewriting stay behind this seam.
-public alias GuestFunction = imported!"dmd.func".FuncDeclaration;
-public alias GuestFunctionPredicate = extern(C) bool function(
-    void*, GuestFunction,
-);
+// Fills `writable` with the template, patched for a copy whose entries
+// will execute at `executable` (the same address, or a second view of
+// the same memory).
+private void fillChunk(
+    ubyte* writable, const(ubyte)* executable, Slot* slots,
+) {
+    import core.stdc.string: memcpy;
+
+    memcpy(writable, templateBase, templateEnd - templateBase);
+    auto trailer = cast(CallbackTrailer*) (writable + trailerOffset);
+    trailer.commonDelta = commonEntry - (executable + trailerOffset);
+    trailer.slots = slots;
+}
 
 
+// An anonymous read-write mapping, filled, then flipped to read-execute.
+// Returns null, with the mapping released, when the kernel refuses the
+// flip - the one failure `allocateChunk` can fall back from.
+private const(ubyte)* copyThenProtect(in size_t bytes, Slot* slots) {
+    import core.sys.posix.sys.mman:
+        MAP_ANON, MAP_FAILED, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE,
+        mmap, mprotect, munmap;
+
+    const size = roundUpToPage(bytes);
+    auto mapping = cast(ubyte*) mmap(
+        null, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (mapping == cast(ubyte*) MAP_FAILED)
+        throw new Exception(
+            "ffi callback pool: " ~ errnoText("mmap of a new chunk"),
+        );
+
+    fillChunk(mapping, mapping, slots);
+
+    if (mprotect(mapping, size, PROT_READ | PROT_EXEC) != 0) {
+        munmap(mapping, size);
+        return null;
+    }
+
+    return mapping;
+}
+
+
+// One anonymous memory file, mapped twice: a read-write view to fill, and
+// a read-execute view to keep. The write view is unmapped once filled, so
+// nothing stays writable and executable at the same time.
+private const(ubyte)* copyDualMapped(in size_t bytes, Slot* slots) {
+    import core.sys.posix.sys.mman:
+        MAP_FAILED, MAP_SHARED, PROT_EXEC, PROT_READ, PROT_WRITE, mmap,
+        munmap;
+    import core.sys.posix.unistd: close, ftruncate;
+
+    const size = roundUpToPage(bytes);
+    const file = memfd_create("snakebite-callbacks", MFD_CLOEXEC);
+    if (file < 0)
+        throw new Exception(
+            "ffi callback pool: " ~ errnoText("memfd_create"),
+        );
+    scope(exit) close(file);
+
+    if (ftruncate(file, size) != 0)
+        throw new Exception(
+            "ffi callback pool: " ~ errnoText("ftruncate of the memory file"),
+        );
+
+    auto executable = cast(ubyte*) mmap(
+        null, size, PROT_READ | PROT_EXEC, MAP_SHARED, file, 0);
+    if (executable == cast(ubyte*) MAP_FAILED)
+        throw new Exception(
+            "ffi callback pool: "
+                ~ errnoText("read-execute mapping of the memory file"),
+        );
+
+    auto writable = cast(ubyte*) mmap(
+        null, size, PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
+    if (writable == cast(ubyte*) MAP_FAILED) {
+        munmap(executable, size);
+        throw new Exception(
+            "ffi callback pool: "
+                ~ errnoText("read-write mapping of the memory file"),
+        );
+    }
+
+    fillChunk(writable, executable, slots);
+    munmap(writable, size);
+
+    return executable;
+}
+
+
+private extern(C) int memfd_create(const(char)* name, uint flags) @nogc nothrow;
+private enum MFD_CLOEXEC = 1;
+
+
+private size_t roundUpToPage(in size_t bytes) {
+    import core.memory: pageSize;
+
+    return (bytes + pageSize - 1) / pageSize * pageSize;
+}
+
+
+private string errnoText(string what) {
+    import core.stdc.errno: errno;
+    import core.stdc.string: strerror;
+    import std.conv: text;
+    import std.string: fromStringz;
+
+    return text(what, " failed: ", strerror(errno).fromStringz);
+}
+
+
+// Called by `snakebite_ffi_callback_common` for every callback: `entry`
+// is the entry the host called, `trailer` its chunk's trailer, and
+// `frame` the spilled argument registers plus where the host's stack
+// arguments start. A copied chunk names its own slot table in its
+// trailer; the template chunk's table is static. Nothing here takes a
+// lock: the slot was fully written before its entry was ever handed out.
+public extern(C) void snakebite_ffi_callback_handler(
+    const(void)* entry,
+    const(CallbackTrailer)* trailer,
+    CallFrame* frame,
+) {
+    auto slots = trailer.slots is null
+        ? templateSlots.ptr : cast(Slot*) trailer.slots;
+    const base = cast(const(ubyte)*) trailer
+        - callbackEntriesPerChunk * callbackEntryBytes;
+    const index = (cast(const(ubyte)*) entry - base) / callbackEntryBytes;
+    invoke(slots[index], frame);
+}
+
+
+private void invoke(ref Slot slot, CallFrame* frame) {
+    const plan = slot.plan;
+
+    const scratchBytes = plan.callbackScratchBytes;
+    align(16) ubyte[256] inlineScratch = void;
+    auto scratch = scratchBytes <= inlineScratch.length
+        ? inlineScratch.ptr : (new ubyte[scratchBytes]).ptr;
+
+    const count = plan.callbackArgumentCount;
+    void*[16] inlineAddresses = void;
+    auto addresses = count <= inlineAddresses.length
+        ? inlineAddresses[0 .. count] : new void*[count];
+    plan.unpackArguments(frame, scratch, addresses);
+
+    CallbackCall call;
+    call.function_ = slot.function_;
+    call.declaration = slot.declaration;
+    call.hasContext = plan.hasHiddenContext;
+    call.context = call.hasContext ? *cast(void**) addresses[0] : null;
+    call.arguments = cast(const(void*)[]) addresses[call.hasContext .. $];
+    call.returnPlace = plan.callbackReturnPlace(frame, scratch);
+
+    slot.handler(slot.owner, &call);
+
+    plan.packResult(frame, call.returnPlace);
+}
+
+
+// One backend instance's registry of guest function words, and the owner
+// of their pool slots. A backend registers every word it stores for a
+// guest function's address (`register`); a plan asks for the word's
+// entry when that word is about to cross the barrier (`entryOf`), which
+// reserves the slot on first use - keyed by guest function, so a
+// delegate to a function and a pointer to it share one entry, and the
+// delegate keeps its own context word because the host passes that
+// word back on every call. Slots are never released: host code may keep
+// an entry for as long as it likes, and this bridge keeps its owner
+// reachable for the same reason.
+//
+// Not thread-safe on its own: registration and first use both happen on
+// the thread that runs this backend instance. ADR-0006 moves per-thread
+// state out of the backend; the pool's own reservation already takes a
+// lock.
 public final class CallbackBridge {
-    private BoolFunctionHandler _handler;
-    private void* _context;
-    private GuestFunctionPredicate _isGuest;
-    private void* _owner;
-    private string _backendName;
-    private BoolFunctionEntry[GuestFunction] _entries;
+    private struct Registered {
+        imported!"dmd.func".FuncDeclaration declaration;
+        const(void)* entry;
+    }
 
-    public this(
-        BoolFunctionHandler handler,
-        void* context,
-        GuestFunctionPredicate isGuest,
-        void* owner,
-        string backendName,
-    ) {
-        if (handler is null || isGuest is null)
-            throw new Exception("ffi callback bridge has no target");
+    private Registered[const(void)*] _words;
+    private const(void)*[const(void)*] _wordOfEntry;
+    private CallbackHandler _handler;
+    private void* _owner;
+
+    public this(CallbackHandler handler, void* owner) {
+        if (handler is null)
+            throw new Exception("ffi callback bridge has no handler");
 
         _handler = handler;
-        _context = context;
-        _isGuest = isGuest;
         _owner = owner;
-        _backendName = backendName;
     }
 
-    public ~this() {
-        release;
-    }
-
-    // Releases every entry owned by this backend. Backends call this from
-    // their own lifetime hook because host code may retain the bridge's
-    // executable addresses until the backend is disposed.
-    public void release() {
-        foreach (ref entry_; _entries.byValue)
-            entry_.release;
-        _entries = null;
-    }
-
-    // Returns one stable executable identity for each guest declaration.
-    // Repeated conversions of the same declaration therefore compare equal
-    // in host code, while different declarations remain distinct.
-    public void* address(GuestFunction function_) {
-        if (!supportsBoolFunction(function_))
-            throw new Exception("ffi callback declaration has unsupported "
-                ~ "signature");
-
-        if (auto existing = function_ in _entries)
-            return cast(void*) existing.address;
-
-        auto target = BoolFunctionTarget(
-            _handler,
-            _context,
-            cast(void*) function_,
-        );
-        _entries[function_] = BoolFunctionEntry.reserve(target);
-        return cast(void*) _entries[function_].address;
-    }
-
-    // The holder keeps callback addresses alive until the call returns.
-    public void adaptArguments(
-        GuestFunction hostFunction,
-        scope const(void*)[] arguments,
-        ref CallbackArguments result,
+    public void register(
+        const(void)* word,
+        imported!"dmd.func".FuncDeclaration declaration,
     ) {
-        result._arguments = CallArguments(arguments.length);
-        result._addresses = CallArguments(arguments.length);
-        result._arguments.values[] = arguments[];
-        adapt(hostFunction, arguments, result);
+        if (word is null || word in _words)
+            return;
+        _words[word] = Registered(declaration, null);
     }
 
-    private void* callbackAddress(
-        GuestFunction hostFunction,
-        GuestFunction callback,
-        bool indirect,
-    ) {
-        import std.conv: text;
+    // The pool entry for `word`, reserved on first use, or null when
+    // `word` is not a guest function this backend registered - a host
+    // address, or already an entry - and so crosses the barrier as it is.
+    public const(void)* entryOf(const(void)* word) {
+        auto registered = word in _words;
+        if (registered is null)
+            return null;
 
-        if (indirect)
-            throw new SnakebiteException(
-                text(_backendName, " cannot call `", hostFunction.toString,
-                    "` with a guest function pointer through a `ref` "
-                    ~ "or `out` parameter (see issue #9)"),
-            );
-
-        if (!supportsBoolFunction(callback))
-            throw new SnakebiteException(
-                text(_backendName, " cannot call `", hostFunction.toString,
-                    "` with `", callback.toString,
-                    "` as a function pointer argument: callback signature `",
-                    callback.type.toString,
-                    "` is not supported (see issue #9)"),
-            );
-
-        return address(callback);
-    }
-
-    private void adapt(
-        GuestFunction hostFunction,
-        scope const(void*)[] arguments,
-        ref CallbackArguments result,
-    ) {
-        import dmd.astenums: STC;
-        import snakebite.nativelayout: loadIntegral;
-
-        auto type = hostFunction.type.isTypeFunction;
-        assert(type !is null);
-
-        size_t index = hostFunction.vthis !is null ? 1 : 0;
-        foreach (i; 0 .. type.parameterList.length) {
-            if (index >= arguments.length)
-                break;
-
-            auto parameter = type.parameterList[i];
-            const argumentIndex = index++;
-            auto pointer = parameter.type.isTypePointer;
-            if (pointer is null || pointer.next.isTypeFunction is null)
-                continue;
-
-            const indirect =
-                (parameter.storageClass & (STC.ref_ | STC.out_)) != 0;
-            auto callbackPlace = indirect
-                ? cast(const(void)*) loadIntegral(
-                    arguments[argumentIndex], size_t.sizeof, false,
-                )
-                : arguments[argumentIndex];
-            if (callbackPlace is null)
-                continue;
-            const raw = loadIntegral(
-                callbackPlace, size_t.sizeof, false);
-            if (raw == 0)
-                continue;
-
-            auto candidate = cast(GuestFunction) cast(void*) raw;
-            if (!_isGuest(_owner, candidate))
-                continue;
-
-            result._addresses.values[argumentIndex] =
-                callbackAddress(hostFunction, candidate, indirect);
-            result._arguments.values[argumentIndex] =
-                &result._addresses.values[argumentIndex];
+        if (registered.entry is null) {
+            auto plan = new CallPlan;
+            *plan = prepareCallback(registered.declaration);
+            registered.entry = reserve(Slot(
+                _handler, _owner, word, registered.declaration, plan));
+            _wordOfEntry[registered.entry] = word;
         }
+
+        return registered.entry;
     }
-}
 
-
-public struct CallbackArguments {
-    private CallArguments _arguments;
-    private CallArguments _addresses;
-
-    public const(void*)[] values() return scope {
-        return _arguments.values;
+    // The guest word behind one of this bridge's own entries, or null.
+    public const(void)* wordOf(const(void)* entry) {
+        auto word = entry in _wordOfEntry;
+        return word is null ? null : *word;
     }
 }

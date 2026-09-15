@@ -3,9 +3,7 @@ module snakebite.ffi;
 
 public import snakebite.ffi.call: CallAdapter, CallResult;
 public import snakebite.ffi.callback:
-    CallbackArguments, CallbackBridge, GuestFunction,
-    GuestFunctionPredicate, BoolFunctionHandler, boolFunctionEntryCount,
-    supportsBoolFunction;
+    CallbackBridge, CallbackCall, CallbackHandler, ChunkStrategy;
 public import snakebite.ffi.plan: CallPlan, PlanCache;
 public import snakebite.ffi.symbol: Resolver;
 

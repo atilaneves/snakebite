@@ -1117,11 +1117,13 @@ private alias VoidCallback = void delegate();
 
 
 private extern(C) int snakebite_ut_delegate_value(VoidCallback callback) {
+    callback();
     return 1;
 }
 
 
 private extern(C) int snakebite_ut_delegate_ref(ref VoidCallback callback) {
+    callback();
     return 1;
 }
 
@@ -1132,39 +1134,34 @@ private extern(C) int snakebite_ut_delegate_out(out VoidCallback callback) {
 
 
 private extern(C) int snakebite_ut_delegate_lazy(lazy int value) {
-    return 1;
+    return value + value;
 }
 
 
+// A guest delegate handed to host code by value, by `ref`, or as dmd's
+// implicit `lazy` delegate is called by the host through its pool entry
+// (ADR-0003), with its own context word: `++value` in the closure changes
+// the guest's `value`, which `answer` adds to the host's result. An `out`
+// delegate travels the other way, so the host only writes it.
 static foreach (form; AliasSeq!("value", "ref", "out", "lazy")) {
     static foreach (backend; Matrix!(
         Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
     )) {
-        @("delegateArgument." ~ (form == "out" ? "output." : "refused.")
+        @("delegateArgument." ~ (form == "out" ? "output." : "called.")
             ~ form ~ "." ~ backend.stringof)
         @Tags(backend.stringof)
         unittest {
             enum parameter = form == "lazy" ? "lazy int value"
                 : (form == "value" ? "" : form ~ " ") ~ "Callback cb";
-            enum argument = form == "lazy" ? "42" : "callback";
+            enum argument = form == "lazy" ? "value + 21" : "callback";
             enum code = "alias Callback = void delegate();"
                 ~ "pragma(mangle, \"snakebite_ut_delegate_" ~ form ~ "\")"
                 ~ "extern(C) int host(" ~ parameter ~ ");"
                 ~ "int answer() { int value;"
                 ~ "Callback callback = () { ++value; };"
-                ~ "return host(" ~ argument ~ "); }";
-            static if (is(backend == Native) || form == "out") {
-                1.shouldBeRetOf!(backend, code, "answer");
-            } else {
-                auto module_ = parseSnippet(code);
-                auto function_ = findFunction(module_, "answer");
-                auto backend_ = new backend(Program([module_]));
-                int result;
-                backend_.call(function_, &result, [])
-                    .shouldThrowWithMessage(
-                        "ffi cannot call `host`: guest delegate callbacks "
-                            ~ "are not supported");
-            }
+                ~ "return host(" ~ argument ~ ") + value; }";
+            enum expected = form == "out" ? 1 : form == "lazy" ? 42 : 2;
+            expected.shouldBeRetOf!(backend, code, "answer");
         }
     }
 }
@@ -2576,58 +2573,80 @@ static foreach (backend; Matrix!(
 }
 
 
-// A function pointer or delegate extra argument has no callback pool
-// entry (ADR-0003) to turn it into a native-callable address - a named
-// parameter of that shape crosses through the bool-function bridge
-// instead (`snakebite.ffi.callback`), which a variadic extra argument
-// has no parameter to attach to (issue #9). `CallPlan.prepareVariadic`
-// refuses both shapes before either backend ever calls the native
-// callee; this checks the refusal reaches a guest caller unchanged.
-static foreach (Backend; AliasSeq!(Interpreter, Bytecode)) {
-    @("variadic.callbackExtraArgumentRefused." ~ Backend.stringof)
-    @Tags(Backend.stringof)
+// Reads one `int function(int)` past `first` and calls it with `first`.
+private extern(C) int snakebite_ut_variadic_call_function_backend(
+    int first, ...
+) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, first);
+    auto callback = va_arg!(int function(int))(args);
+    va_end(args);
+    return callback(first);
+}
+
+
+// As above, for an `int delegate(int)`.
+private extern(C) int snakebite_ut_variadic_call_delegate_backend(
+    int first, ...
+) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, first);
+    auto callback = va_arg!(int delegate(int))(args);
+    va_end(args);
+    return callback(first);
+}
+
+
+// A function pointer or delegate extra argument gets its pool entry
+// (ADR-0003) at the variadic call site the same way a declared parameter
+// of that shape does: the site's own extra argument types name it. The
+// host reads the callback back with `va_arg` and calls it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("variadic.callbackExtraArgument.functionPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
     unittest {
-        auto functionPointerModule = parseSnippet(q{
-            pragma(mangle, "snakebite_ut_variadic_sum_ints_backend")
-            extern(C) int nativeSum(int first, ...);
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_call_function_backend")
+                extern(C) int nativeCall(int first, ...);
 
-            int twice(int x) {
-                return x * 2;
-            }
+                static int twice(int x) {
+                    return x * 2;
+                }
 
-            int answer() {
-                int function(int) callback = &twice;
-                return nativeSum(1, callback);
-            }
-        });
-        auto functionPointerAnswer =
-            findFunction(functionPointerModule, "answer");
+                int answer() {
+                    int function(int) callback = &twice;
+                    return nativeCall(21, callback);
+                }
+            },
+            "answer",
+        );
+    }
 
-        int result;
-        new Backend(Program([functionPointerModule]))
-            .call(functionPointerAnswer, &result, [])
-            .shouldThrowWithMessage(
-                "ffi cannot pass a function pointer or delegate as a " ~
-                    "variadic argument to `nativeSum`: it has no " ~
-                    "callback pool entry (ADR-0003)");
+    @("variadic.callbackExtraArgument.delegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        45.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_call_delegate_backend")
+                extern(C) int nativeCall(int first, ...);
 
-        auto delegateModule = parseSnippet(q{
-            pragma(mangle, "snakebite_ut_variadic_sum_ints_backend")
-            extern(C) int nativeSum(int first, ...);
-
-            int answer() {
-                int delegate(int) callback = (int x) => x * 2;
-                return nativeSum(1, callback);
-            }
-        });
-        auto delegateAnswer = findFunction(delegateModule, "answer");
-
-        new Backend(Program([delegateModule]))
-            .call(delegateAnswer, &result, [])
-            .shouldThrowWithMessage(
-                "ffi cannot pass a function pointer or delegate as a " ~
-                    "variadic argument to `nativeSum`: it has no " ~
-                    "callback pool entry (ADR-0003)");
+                int answer() {
+                    int offset = 3;
+                    int delegate(int) callback = (int x) => x * 2 + offset;
+                    return nativeCall(21, callback);
+                }
+            },
+            "answer",
+        );
     }
 }
 

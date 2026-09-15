@@ -85,3 +85,32 @@ public alias CallEntry = extern(C) void function(
     const(void)* address,
     CallFrame* frame,
 ) @system;
+
+
+// The callback entry template in `sysv_amd64.S` (ADR-0003): a chunk of
+// `callbackEntriesPerChunk` position-independent entries, one shared
+// dispatch, and a `CallbackTrailer`. `snakebite.ffi.callback` hands out
+// entries from this chunk first, and copies its bytes into a fresh
+// executable mapping when it needs more. The `static assert`s in
+// `snakebite.ffi.callback` check the label distances against these
+// constants at start-up, since the assembler's own `CB_*` defines cannot
+// be read from D.
+public enum callbackEntriesPerChunk = 128;
+public enum callbackEntryBytes = 16;
+
+// The two words at the end of every chunk. `commonDelta` is the signed
+// distance from the trailer itself to `snakebite_ffi_callback_common`,
+// which the dispatch adds to its own address to reach the common frame.
+// `slots` is the chunk's own slot table - null in the template chunk,
+// whose table is a static one in `snakebite.ffi.callback`.
+public struct CallbackTrailer {
+    public ptrdiff_t commonDelta;
+    public void* slots;
+}
+
+static assert(CallbackTrailer.sizeof == 16);
+
+public extern(C) void snakebite_ffi_callback_chunk() @system;
+public extern(C) void snakebite_ffi_callback_chunk_trailer() @system;
+public extern(C) void snakebite_ffi_callback_chunk_end() @system;
+public extern(C) void snakebite_ffi_callback_common() @system;

@@ -3,7 +3,7 @@ module ut.backends.call.pointers;
 
 import ut.backends;
 import snakebite.backends.backend: Program;
-import snakebite.ffi: boolFunctionEntryCount;
+import snakebite.ffi.sysv: callbackEntriesPerChunk;
 import snakebite.frontend.compiler: parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction;
 
@@ -14,6 +14,14 @@ private alias BoolCallback = extern(D) bool function();
 public extern(C) bool snakebite_ut_call_bool_callback(
     BoolCallback callback,
 ) {
+    return callback();
+}
+
+
+private alias IntCallback = extern(D) int function();
+
+
+public extern(C) int snakebite_ut_call_int_callback(IntCallback callback) {
     return callback();
 }
 
@@ -66,6 +74,8 @@ private enum hostCallbackDeclarations = q{
     alias BoolCallback = extern(D) bool function();
 
     extern(C) bool snakebite_ut_call_bool_callback(BoolCallback);
+    alias IntCallback = extern(D) int function();
+    extern(C) int snakebite_ut_call_int_callback(IntCallback);
     extern(C) bool snakebite_ut_same_bool_callback(
         BoolCallback, BoolCallback,
     );
@@ -481,69 +491,54 @@ unittest {
 }
 
 
-// Capacity belongs to the process, so the child runs without callback entries
-// held by other parallel tests. Each evaluator reserves one entry. The 65th
-// evaluator must fail clearly, then succeed after one owner is destroyed.
-@("pointers.functionPointer.boolCallback.poolCapacity.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import std.file: thisExePath;
-    import std.process: environment, execute;
+// The pool grows on demand: more distinct guest functions than one chunk
+// of entries holds all get a working entry, and the ones past the first
+// chunk's capacity are reached through a chunk the pool copied from its
+// template at run time (ADR-0003). Each function returns its own number
+// so a wrong entry would change the sum.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't call host code"),
+)) {
+    @("pointers.functionPointer.poolGrowth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import snakebite.ffi.callback: callbackChunkCount;
+        import std.conv: text;
+        import std.range: iota;
+        import std.algorithm: map, sum;
+        import std.array: join;
 
-    enum marker = "SNAKEBITE_CALLBACK_POOL_CAPACITY_CHILD";
-    enum testName = "ut.backends.call.pointers.pointers.functionPointer."
-        ~ "boolCallback.poolCapacity.Interpreter";
-    if (environment.get(marker) is null) {
-        auto childEnvironment = environment.toAA;
-        childEnvironment[marker] = "1";
-        const child = execute([thisExePath, testName], childEnvironment);
-        assert(child.status == 0, child.output);
-        return;
+        enum count = callbackEntriesPerChunk + 2;
+        const functions = count.iota
+            .map!(i => text("static int f", i, "() { return ", i, "; }"))
+            .join("\n");
+        const calls = count.iota
+            .map!(i => text("sum += snakebite_ut_call_int_callback(&f", i,
+                ");"))
+            .join("\n");
+        const code = "import ut.backends.call.pointers: "
+            ~ "snakebite_ut_call_int_callback;\n"
+            ~ functions
+            ~ "\nint answer() { int sum;\n" ~ calls ~ "\nreturn sum; }";
+        enum expected = count * (count - 1) / 2;
+
+        static if (is(backend == Native))
+            expected.shouldBeRetOf!(backend, code, "answer");
+        else {
+            auto modules = parseSnippets([
+                "module pool_growth_root;\n" ~ code,
+                hostCallbackDeclarations,
+            ]);
+            auto function_ = findFunction(modules[0], "answer");
+            auto backend_ = new backend(Program([modules[0]]));
+
+            int result;
+            backend_.call(function_, &result, []);
+
+            result.should == expected;
+            callbackChunkCount.shouldBeGreaterThan(1);
+        }
     }
-
-    auto modules = parseSnippets([
-        q{
-            module bool_callback_capacity_root;
-            import ut.backends.call.pointers:
-                snakebite_ut_call_bool_callback;
-
-            static bool yes() {
-                return true;
-            }
-
-            bool call() {
-                return snakebite_ut_call_bool_callback(&yes);
-            }
-        },
-        hostCallbackDeclarations,
-    ]);
-    auto function_ = findFunction(modules[0], "call");
-    auto program = Program([modules[0]]);
-    Interpreter[boolFunctionEntryCount] interpreters;
-    Interpreter overflow = new Interpreter(program);
-    scope(exit) {
-        foreach (instance; interpreters)
-            if (instance !is null)
-                destroy(instance);
-        if (overflow !is null)
-            destroy(overflow);
-    }
-
-    foreach (ref instance; interpreters) {
-        instance = new Interpreter(program);
-        bool result;
-        instance.call(function_, &result, []);
-        result.should == true;
-    }
-
-    bool result;
-    const exhausted = overflow.call(function_, &result, []).shouldThrow;
-    exhausted.msg.should == "ffi bool function callback pool is exhausted";
-
-    destroy(interpreters[0]);
-    interpreters[0] = null;
-    overflow.call(function_, &result, []);
-    result.should == true;
 }
 
 
@@ -885,40 +880,17 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A guest function pointer travels as `visit(SymOffExp)`'s stand-in - the
-// `FuncDeclaration` itself, since this backend has no machine code of its
-// own for an interpreted function (see the comment there). That stand-in
-// is only ever resolved back by this evaluator's own `calleeOf`, on a call
-// this evaluator itself makes. Handed instead to genuinely native code
-// through the FFI seam - `qsort`'s comparator argument here - the bits
-// leave as an ordinary function pointer value and native code jumps to
-// them directly.
-//
-// Native compiles `compare` to real machine code, so the same program runs
-// correctly there: `qsort` calls it back and the array comes out sorted.
-// The interpreter has no machine code to jump to, so it cannot let this
-// reach `qsort` at all; that is pinned separately below, in
-// `pointers.functionPointer.nativeCallback.refused.Interpreter`, since
-// `shouldBeRetOf` cannot express "throws on this backend, succeeds on
-// that one" in a single assertion.
+// A guest function pointer's own value is a backend stand-in - the
+// `FuncDeclaration` itself in the interpreter, the compiled function in
+// the bytecode compiler - that only the backend's own call path can
+// resolve. Handed to genuinely native code through the FFI seam -
+// `qsort`'s comparator argument here - it cannot leave as it is.
+// `qsort` calls `compare` back through the pool entry the function
+// pointer became at the barrier (ADR-0003): an `extern(C)` callback with
+// two pointer parameters and an `int` result, nothing like the
+// `extern(D) bool()` shape the pool once supported alone.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
-    Omit!(Interpreter, Because.diverges,
-        "pinned in " ~
-        "pointers.functionPointer.nativeCallback.refused.Interpreter: " ~
-        "the callback's extern(C) int signature is outside the " ~
-        "extern(D) bool signature supported by issue #168"),
-    // `qsort` is reached and `xs` (a static array, now supported) is laid
-    // out and sliced correctly, but `&compare`'s own callback bridge
-    // (`guestFunctionPointer`/`supportsBoolFunction`) only accepts a
-    // guest function returning `bool` - the same `extern(D) bool`
-    // restriction issue #168 already names for `Interpreter` above.
-    // `compare` returns `extern(C) int`, so this compiler refuses the
-    // call before `qsort` ever runs, unrelated to static arrays.
-    Omit!(Bytecode, Because.unconfirmed,
-        "`&compare`'s signature is `extern(C) int(scope const void*, " ~
-        "scope const void*)`, not the `bool()` callback this backend " ~
-        "supports handing to native code"),
 )) {
     @("pointers.functionPointer.nativeCallback." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -941,40 +913,6 @@ static foreach (backend; Matrix!(
             "answer",
         );
     }
-}
-
-// The sibling of the Matrix test above, for the one backend it could not
-// express: the interpreter refuses to hand `qsort` a callback whose
-// signature is not supported, with a message naming the signature and the
-// remaining issue #9 work instead of letting the host call a declaration.
-@("pointers.functionPointer.nativeCallback.refused.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
-
-    auto module_ = parseSnippet(q{
-        extern(C) int compare(scope const void* a, scope const void* b) {
-            return *cast(const int*) a - *cast(const int*) b;
-        }
-
-        int answer() {
-            import core.stdc.stdlib: qsort;
-
-            int[3] xs = [3, 1, 2];
-            qsort(xs.ptr, xs.length, int.sizeof, &compare);
-            return xs[0];
-        }
-    });
-    auto function_ = findFunction(module_, "answer");
-
-    int result;
-    interpreter(module_).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "interpreter cannot call `qsort` with `compare` as a function " ~
-                "pointer argument: callback signature `extern (C) " ~
-                "int(scope const(void*) a, scope const(void*) b)` is not " ~
-                "supported (see issue #9)");
 }
 
 // `FrameLayout.ofParameters` packs a `ref` parameter the same way
