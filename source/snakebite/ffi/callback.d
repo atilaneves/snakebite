@@ -33,16 +33,19 @@ private alias FuncDeclaration = imported!"dmd.func".FuncDeclaration;
 
 
 // What the pool hands a backend when host code calls one of its guest
-// functions: which function, in the backend's own representation, its
-// context word if the signature has one, and the arguments and result
-// place in native layout - the arguments in the same shape
-// `CallPlan.call` takes them, one address per declared parameter, and
-// for a `ref`/`out` parameter the address of the pointer the host passed.
+// functions: which function, in the backend's own representation, and
+// the arguments and result place in native layout - the arguments in
+// the same shape `CallPlan.call` takes them, one address per declared
+// parameter, and for a `ref`/`out` parameter the address of the pointer
+// the host passed. When the signature has a hidden context, `arguments`
+// carries it too, first: the address of a pointer-sized word holding it,
+// already adjusted for the callee's own place in a class or interface
+// hierarchy (`Slot.contextAdjustment`) - one argument list, the same
+// shape whether or not there is a context, so a backend's own
+// `runHostToGuest` reads it exactly as it reads a declared parameter.
 public struct CallbackCall {
     public const(void)* function_;
     public FuncDeclaration declaration;
-    public void* context;
-    public bool hasContext;
     public void* returnPlace;
     public const(void*)[] arguments;
 }
@@ -352,24 +355,29 @@ private void invoke(ref Slot slot, CallFrame* frame) {
         ? inlineAddresses[0 .. count] : new void*[count];
     plan.unpackArguments(frame, scratch, addresses);
 
+    // The context word lives at `addresses[0]`, in the same shape as any
+    // other argument - the address of its own pointer-sized storage
+    // (here, a slot in `scratch`). Adjusting it in place, rather than
+    // copying it out to a separate field, keeps one argument list for
+    // every caller below: the backend's own `runHostToGuest` and a
+    // forwarded native call both read `addresses`/`call.arguments`
+    // exactly as they read a declared parameter.
+    if (plan.hasHiddenContext) {
+        auto contextSlot = cast(void**) addresses[0];
+        *contextSlot = cast(ubyte*) *contextSlot + slot.contextAdjustment;
+    }
+
     CallbackCall call;
     call.function_ = slot.function_;
     call.declaration = slot.declaration;
-    call.hasContext = plan.hasHiddenContext;
-    call.context = call.hasContext ? *cast(void**) addresses[0] : null;
-    if (call.hasContext)
-        call.context = cast(ubyte*) call.context + slot.contextAdjustment;
-    call.arguments = cast(const(void*)[]) addresses[call.hasContext .. $];
+    call.arguments = cast(const(void*)[]) addresses;
     call.returnPlace = plan.callbackReturnPlace(frame, scratch);
 
     if (slot.nativeAddress is null)
         slot.handler(slot.owner, &call);
-    else {
-        if (call.hasContext)
-            addresses[0] = &call.context;
+    else
         plan.callAt(slot.nativeAddress, call.returnPlace,
             cast(const(void*)[]) addresses);
-    }
 
     plan.packResult(frame, call.returnPlace);
 }

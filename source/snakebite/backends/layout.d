@@ -290,6 +290,43 @@ package struct FrameLayout {
         auto slot = variable in _slotOf;
         return slot !is null && slot.isRef;
     }
+
+    // The one host-to-guest argument-count rule, shared by both backends'
+    // one entry point apiece (a program's top-level `Backend.call` and a
+    // callback's re-entry send `args` through the same check): the count
+    // must be one slot per declared parameter, plus one more when this
+    // layout has a hidden `this` - that slot holds the context word's own
+    // address, first, the same as `CallPlan.call` and a callback's own
+    // `addresses` already order it. A count short by exactly that one
+    // hidden-`this` slot gets the specific "no context" message; every
+    // other mismatch gets the generic one. `backendName` names the
+    // caller in both messages, the same way each backend already names
+    // itself in its own text.
+    package void checkHostArgumentCount(
+        in size_t argumentCount, FuncDeclaration function_,
+        in string backendName,
+    ) const {
+        import std.conv: text;
+
+        const required = parameters.length
+            + (hiddenThis.variable !is null ? 1 : 0);
+        if (argumentCount == required)
+            return;
+
+        if (hiddenThis.variable !is null
+                && argumentCount == parameters.length)
+            throw new SnakebiteException(
+                text(backendName, " cannot run `", function_.toString,
+                    "`: the host passed no context for its "
+                    ~ "hidden `this`"),
+            );
+
+        throw new SnakebiteException(
+            text(backendName, " expected ", required,
+                " host-to-guest argument(s) for `",
+                function_.toString, "`, got ", argumentCount),
+        );
+    }
 }
 
 // One guest closure's native context layout: the enclosing context pointer

@@ -356,27 +356,76 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void* returnPlace,
         void*[] args,
     ) {
-        import snakebite.frontend.compiler: withCompilerLock;
+        runHostToGuest(function_, returnPlace, args);
+    }
 
-        const parameterCount =
-            function_.parameters is null ? 0 : function_.parameters.length;
-        if (args.length != parameterCount)
-            throw new SnakebiteException(
-                "interpreter expected " ~ text(parameterCount)
-                    ~ " host-to-guest argument(s), got "
-                    ~ text(args.length),
-            );
+    // The interpreter's one host-to-guest entry. The program runner's
+    // top-level call (`call`) and a callback's re-entry
+    // (`callGuestFromHost`) both reach guest code only here - neither
+    // binds arguments on its own. `args` are host-to-guest arguments in
+    // native layout, one pointer per parameter, per `Backend.call`'s own
+    // contract - each pointer holds the address of storage for that
+    // parameter's native bytes, which for a `ref`/`out` parameter are the
+    // target's own address. When the callee has a hidden `this`, `args[0]`
+    // is that same shape one more time, before the declared parameters:
+    // the address of a pointer-sized word holding the context - the one
+    // convention `CallPlan.call` and a callback's own `addresses` already
+    // use for it.
+    //
+    // A `ref`-returning callee hands back the result's own address, not
+    // its value - the same word compiled D returns in `rax` - so
+    // `returnPlace` must be pointer-sized for one of those, exactly as a
+    // callback re-entry already required.
+    //
+    // This nests under the caller's own pending temporaries
+    // (`withTemporaryLifetime`) rather than a fresh top-level lifetime: at
+    // true top level `_temporaries.length` is 0, so the nested form is
+    // already the same as starting one from empty, and every release path
+    // here runs in `scope(exit)`, so no earlier call can leave temporaries
+    // behind that a separate top-level backstop would need to clean up.
+    // This also suspends the caller's expression state around the
+    // callee's body (`withNestedCall`) - the same protection a guest call
+    // site gives a callee it reaches mid-expression (`executeCall`). A
+    // callback can fire while an outer guest expression still owns
+    // pending temporaries; a top-level call owns none, so the nesting
+    // costs it nothing.
+    extern(D) private void runHostToGuest(
+        FuncDeclaration function_,
+        void* returnPlace,
+        scope const(void*)[] args,
+    ) {
+        import snakebite.frontend.compiler: withCompilerLock;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
 
         withCompilerLock({
             auto layout = layoutOf(function_);
             auto shape = callShapeOf(function_);
-            shape.adapter.rejectHostReferenceReturn(function_);
+            layout.checkHostArgumentCount(
+                args.length, function_, "interpreter");
             auto frame = _frames.push(layout.size, layout.alignment);
 
+            scope const(void*)[] declaredArguments = args;
+            if (layout.hiddenThis.variable !is null) {
+                storeIntegral(
+                    frame.base + layout.hiddenThis.parameter.offset,
+                    loadIntegral(args[0], size_t.sizeof, false),
+                    size_t.sizeof,
+                );
+                declaredArguments = args[1 .. $];
+            }
+
             try
-                _temporaries.withCall({
-                    bindHostArguments(args, frame.base, layout, shape);
-                    executeCall(function_, returnPlace, frame.base, layout);
+                _temporaries.withTemporaryLifetime({
+                    bindHostArguments(
+                        declaredArguments, frame.base, layout, shape);
+                    auto arguments = argumentSlots(frame.base, layout);
+                    _temporaries.withNestedCall({
+                        executeRaw(
+                            function_, returnPlace, frame.base, layout,
+                            null, arguments.values.ptr,
+                            arguments.values.length,
+                        );
+                    });
                 });
             catch (GuestException exception)
                 throw exception._guest;
@@ -384,18 +433,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     extern(D) private void bindHostArguments(
-        void*[] args,
+        scope const(void*)[] args,
         ubyte* frameBase,
         const(FrameLayout)* layout,
         const(CallShape)* shape,
     ) {
         import core.stdc.string: memcpy;
+        import snakebite.nativelayout: loadIntegral;
 
         foreach (i, parameter; layout.parameters) {
             auto argument = args[i];
             shape.arguments[i].store(
                 frameBase + parameter.offset,
-                () => argument,
+                () => cast(void*) loadIntegral(
+                    argument, size_t.sizeof, false),
                 (void* place) {
                     memcpy(place, argument, parameter.facts.size);
                 },
@@ -764,24 +815,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallbackCall* call,
     ) {
         auto evaluator = cast(Evaluator) context;
-        auto function_ = cast(FuncDeclaration) cast(void*) call.function_;
-        evaluator.callGuestFromHost(function_, call);
+        evaluator.callGuestFromHost(call);
     }
 
     // The re-entry a pool entry (ADR-0003) reaches when host code calls a
-    // guest function pointer or delegate: the callee's frame is filled
-    // from `call` - the delegate's own context word into the hidden
-    // context slot, each argument into its parameter slot - and the body
-    // runs like any other call. A `Throwable` the body throws unwinds
-    // through the host frames untouched (ADR-0004).
-    extern(D) private void callGuestFromHost(
-        FuncDeclaration function_,
-        CallbackCall* call,
-    ) {
-        import core.stdc.string: memcpy;
+    // guest function pointer or delegate. It shares `runHostToGuest` with
+    // the program runner's top-level call: neither binds arguments on its
+    // own. A `Throwable` the body throws unwinds through the host frames
+    // untouched (ADR-0004).
+    extern(D) private void callGuestFromHost(CallbackCall* call) {
         import core.thread: Thread;
-        import snakebite.frontend.compiler: withCompilerLock;
-        import snakebite.nativelayout: loadIntegral, storeIntegral;
 
         if (Thread.getThis.id != _ownerThread)
             throw new SnakebiteException(
@@ -789,53 +832,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     ~ "own its evaluator (see issue #40)",
             );
 
-        withCompilerLock({
-            auto layout = layoutOf(function_);
-            auto shape = callShapeOf(function_);
-            auto frame = _frames.push(layout.size, layout.alignment);
-
-            if (layout.hiddenThis.variable !is null) {
-                if (!call.hasContext)
-                    throw new SnakebiteException(
-                        text("interpreter cannot run `", function_.toString,
-                            "` as a callback: the host passed no context "
-                            ~ "for its hidden `this`"),
-                    );
-                storeIntegral(
-                    frame.base + layout.hiddenThis.parameter.offset,
-                    cast(size_t) call.context,
-                    size_t.sizeof,
-                );
-            }
-
-            if (call.arguments.length != layout.parameters.length)
-                throw new SnakebiteException(
-                    text("interpreter callback `", function_.toString,
-                        "` expected ", layout.parameters.length,
-                        " argument(s), got ", call.arguments.length),
-                );
-
-            foreach (i, parameter; layout.parameters) {
-                auto argument = call.arguments[i];
-                shape.arguments[i].store(
-                    frame.base + parameter.offset,
-                    () => cast(void*) loadIntegral(
-                        argument, size_t.sizeof, false),
-                    (void* place) {
-                        memcpy(place, argument, parameter.facts.size);
-                    },
-                );
-            }
-
-            _temporaries.withTemporaryLifetime({
-                auto arguments = argumentSlots(frame.base, layout);
-                _temporaries.withNestedCall({
-                    executeRaw(function_, call.returnPlace, frame.base,
-                        layout, null,
-                        arguments.values.ptr, arguments.values.length);
-                });
-            });
-        });
+        runHostToGuest(call.declaration, call.returnPlace, call.arguments);
     }
 
     private void destroyTemporary(Expression expression) {

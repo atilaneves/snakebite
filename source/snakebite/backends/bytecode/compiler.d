@@ -77,11 +77,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private size_t _compilationDepth;
     private size_t _cacheMisses;
     private imported!"core.time".Duration _compilationTime;
-    // The frame layout of every guest function host code has called
-    // back into, built once per declaration: a callback fills the
-    // callee's parameter slots itself (`callGuestFromHost`), the way a
-    // compiled call site's `Arg`s would.
-    private FrameLayout[FuncDeclaration] _callbackLayouts;
+    // The frame layout of every guest function reached through
+    // `runHostToGuest`, built once per declaration and shared by the
+    // program runner's top-level call and a callback's re-entry.
+    private FrameLayout[FuncDeclaration] _hostLayouts;
     // The thread that owns the VM's frame stack (issue #40) - set once
     // at construction, the same way the interpreter's `Evaluator` does.
     // `callGuestFromHost` rejects a call from any other thread before it
@@ -125,31 +124,83 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         void* returnPlace,
         void*[] args,
     ) {
+        runHostToGuest(function_, returnPlace, args);
+    }
+
+    // The bytecode backend's one host-to-guest entry. The program
+    // runner's top-level call (`call`) and a callback's re-entry
+    // (`callGuestFromHost`) both reach the compiled body only here -
+    // neither binds arguments on its own. `args` are host-to-guest
+    // arguments in native layout, one pointer per parameter, per
+    // `Backend.call`'s own contract - each pointer holds the address of
+    // storage for that parameter's native bytes, which for a `ref`/`out`
+    // parameter are the target's own address. When the callee has a
+    // hidden `this`, `args[0]` is that same shape one more time, before
+    // the declared parameters: the address of a pointer-sized word
+    // holding the context - the one convention `CallPlan.call` and a
+    // callback's own `addresses` already use for it.
+    //
+    // A `ref`-returning callee hands back the result's own address, not
+    // its value - the same word compiled D returns in `rax`.
+    private void runHostToGuest(
+        FuncDeclaration function_,
+        void* returnPlace,
+        scope const(void*)[] args,
+    ) {
         import snakebite.frontend.compiler: withCompilerLock;
 
-        // `compileFunction` walks dmd's AST and calls dmd frontend semantic
-        // helpers (`Type.size`, `toInteger`, `defaultInit`, ...) that memoise
-        // onto process-global, dmd-owned objects (e.g. `Type` singletons
-        // shared across every module). Two `bin/ut` threads compiling
-        // unrelated guest functions at once can race on that shared state,
-        // corrupting it for both - the same reason the CTFE and interpreter
-        // backends serialise their own dmd-touching entry points on this
-        // lock. `_vm.call` itself only runs already-compiled bytecode, but it
-        // is kept inside the lock too so a lazily-compiled callee reached
-        // through a native callback (`invokeCallback`) reenters the same,
-        // recursive mutex rather than a fresh one.
         withCompilerLock({
-            const layout = FrameLayout.of(function_);
-            assert(args.length == layout.parameters.length);
-            Vm.HostArgument[] arguments;
-            foreach (i, parameter; layout.parameters)
-                arguments ~= Vm.HostArgument(
-                    parameter.offset,
-                    parameter.isRef ? &args[i] : args[i],
-                    parameter.isRef ? size_t.sizeof : parameter.facts.size,
+            auto layout = hostLayoutOf(function_);
+            layout.checkHostArgumentCount(args.length, function_, "bytecode");
+
+            // `compileFunction` walks dmd's AST and calls dmd frontend
+            // semantic helpers (`Type.size`, `toInteger`, `defaultInit`,
+            // ...) that memoise onto process-global, dmd-owned objects
+            // (e.g. `Type` singletons shared across every module). Two
+            // `bin/ut` threads compiling unrelated guest functions at
+            // once can race on that shared state, corrupting it for both
+            // - the same reason the CTFE and interpreter backends
+            // serialise their own dmd-touching entry points on this
+            // lock. `_vm.call` itself only runs already-compiled
+            // bytecode, but it is kept inside the lock too so a
+            // lazily-compiled callee reached through a native callback
+            // (`invokeCallback`) reenters the same, recursive mutex
+            // rather than a fresh one.
+            auto compiled = compileFunction(function_);
+
+            Vm.HostArgument[16] inlineArguments = void;
+            const count = layout.parameters.length
+                + (layout.hiddenThis.variable !is null);
+            auto arguments = count <= inlineArguments.length
+                ? inlineArguments[0 .. count] : new Vm.HostArgument[count];
+            size_t filled;
+
+            scope const(void*)[] declaredArguments = args;
+            if (layout.hiddenThis.variable !is null) {
+                arguments[filled++] = Vm.HostArgument(
+                    layout.hiddenThis.parameter.offset, args[0],
+                    size_t.sizeof,
                 );
-            _vm.call(*compileFunction(function_), returnPlace, arguments);
+                declaredArguments = args[1 .. $];
+            }
+
+            foreach (i, parameter; layout.parameters)
+                arguments[filled++] = Vm.HostArgument(
+                    parameter.offset, declaredArguments[i],
+                    parameter.facts.size);
+
+            _vm.call(*compiled, returnPlace, arguments[0 .. filled]);
         });
+    }
+
+    // `function_`'s frame layout, cached: both host-to-guest entries
+    // share this cache instead of each keeping its own.
+    private const(FrameLayout)* hostLayoutOf(FuncDeclaration function_) {
+        if (auto found = function_ in _hostLayouts)
+            return found;
+
+        _hostLayouts[function_] = FrameLayout.of(function_);
+        return function_ in _hostLayouts;
     }
 
     public override string eval(FuncDeclaration function_) {
@@ -181,22 +232,16 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         CallbackCall* call,
     ) {
         auto bytecode = cast(Bytecode) context;
-        auto function_ = cast(const(Function)*) call.function_;
-        bytecode.callGuestFromHost(function_, call);
+        bytecode.callGuestFromHost(call);
     }
 
     // The re-entry a pool entry (ADR-0003) reaches when host code calls a
-    // guest function pointer or delegate: the callee's frame slots are
-    // filled from `call` - the delegate's own context word into the
-    // hidden context slot, each argument into its parameter slot - and
-    // the compiled body runs. A `Throwable` the body throws unwinds
-    // through the host frames untouched (ADR-0004).
-    private void callGuestFromHost(
-        const(Function)* function_, CallbackCall* call,
-    ) {
+    // guest function pointer or delegate. It shares `runHostToGuest` with
+    // the program runner's top-level call: neither binds arguments on its
+    // own. A `Throwable` the body throws unwinds through the host frames
+    // untouched (ADR-0004).
+    private void callGuestFromHost(CallbackCall* call) {
         import core.thread: Thread;
-        import snakebite.frontend.compiler: withCompilerLock;
-        import std.conv: text;
 
         // `_vm`'s frame stack belongs to `_ownerThread` alone. Without
         // this check, a callback from another thread would wait on
@@ -209,50 +254,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                     ~ "own its compiler (see issue #40)",
             );
 
-        // Same reasoning as `call`: a callback can reach a callee that
-        // is compiled for the first time here.
-        withCompilerLock({
-            auto layout = call.declaration in _callbackLayouts;
-            if (layout is null) {
-                _callbackLayouts[call.declaration] =
-                    FrameLayout.of(call.declaration);
-                layout = call.declaration in _callbackLayouts;
-            }
-
-            if (call.arguments.length != layout.parameters.length)
-                throw new SnakebiteException(
-                    text("bytecode callback `", call.declaration.toString,
-                        "` expected ", layout.parameters.length,
-                        " argument(s), got ", call.arguments.length),
-                );
-
-            Vm.HostArgument[16] inlineArguments = void;
-            const count = layout.parameters.length + 1;
-            auto arguments = count <= inlineArguments.length
-                ? inlineArguments[0 .. count] : new Vm.HostArgument[count];
-            size_t filled;
-
-            if (layout.hiddenThis.variable !is null) {
-                if (!call.hasContext)
-                    throw new SnakebiteException(
-                        text("bytecode cannot run `",
-                            call.declaration.toString,
-                            "` as a callback: the host passed no context "
-                            ~ "for its hidden `this`"),
-                    );
-                arguments[filled++] = Vm.HostArgument(
-                    layout.hiddenThis.parameter.offset,
-                    &call.context,
-                    size_t.sizeof,
-                );
-            }
-
-            foreach (i, parameter; layout.parameters)
-                arguments[filled++] = Vm.HostArgument(
-                    parameter.offset, call.arguments[i], parameter.facts.size);
-
-            _vm.call(*function_, call.returnPlace, arguments[0 .. filled]);
-        });
+        runHostToGuest(call.declaration, call.returnPlace, call.arguments);
     }
 
     // The prepared FFI plan for druntime's own `gc_malloc`, the real

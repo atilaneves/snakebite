@@ -2,8 +2,11 @@ module ut.backends.call.exceptions;
 
 
 import ut.backends;
+import snakebite.backends.backend: Program;
+import snakebite.exception: SnakebiteException;
 import snakebite.frontend.compiler: parseSnippet;
-import snakebite.frontend.dmd.functions: findFunction;
+import snakebite.frontend.dmd.functions: findFunction, findStruct;
+import std.meta: AliasSeq;
 
 
 static foreach (backend; Matrix!()) {
@@ -474,5 +477,59 @@ static foreach (backend; Matrix!(
                 return "";
             }
         }, "result");
+    }
+}
+
+// A wrong host-to-guest argument count used to be an `assert` on
+// bytecode - `AssertError`, and gone entirely in a `-release` build,
+// which would read past `args` instead. `Backend.call` now throws
+// `SnakebiteException` on both backends, in a normal `-release` build
+// too. `Native` cannot express a call with the wrong argument count, so
+// only the two backends that can be driven directly are covered here.
+static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
+    @("hostToGuestArguments.wrongCount.throws." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        auto module_ = parseSnippet(q{
+            int add(int a, int b) {
+                return a + b;
+            }
+        });
+        auto instance = new backend(Program([module_]));
+        int result;
+        int argument;
+
+        instance.call(
+            findFunction(module_, "add"), &result, [cast(void*) &argument],
+        ).shouldThrow!SnakebiteException;
+    }
+}
+
+// A struct method called with no context word - the host omitting the
+// one argument a hidden `this` needs - used to dump core on both
+// backends: bytecode read past its own `args`, and the interpreter read
+// an uninitialised frame slot as an address and dereferenced it.
+// `Backend.call` now throws `SnakebiteException` instead, the same
+// count check `hostToGuestArguments.wrongCount.throws` exercises without
+// a hidden `this`: the host handed a struct method zero arguments, one
+// short of the one slot its hidden `this` needs.
+static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
+    @("hostToGuestArguments.methodWithoutContext.throws." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        auto module_ = parseSnippet(q{
+            struct S {
+                int value = 7;
+                int get() {
+                    return value;
+                }
+            }
+        });
+        auto instance = new backend(Program([module_]));
+        int result;
+
+        instance.call(
+            findFunction(findStruct(module_, "S"), "get"), &result, [],
+        ).shouldThrow!SnakebiteException;
     }
 }

@@ -34,12 +34,21 @@ private struct Recorded {
 }
 
 
+// A raw handler has no layout of its own, only `call.declaration` - the
+// same thing a real backend's `runHostToGuest` asks to decide whether
+// `call.arguments[0]` is a hidden context or the first declared
+// parameter. There is one argument list either way: a context, when
+// there is one, is `arguments[0]`'s own address, not a separate field.
 private extern(C) void recordIntOfInt(void* owner, CallbackCall* call) {
+    import snakebite.frontend.dmd.delegates: hasHiddenThis;
+
     auto recorded = cast(Recorded*) owner;
     ++recorded.calls;
-    recorded.hasContext = call.hasContext;
-    recorded.context = call.context;
-    recorded.integers ~= *cast(const int*) call.arguments[0];
+    recorded.hasContext = hasHiddenThis(call.declaration);
+    const first = recorded.hasContext ? 1 : 0;
+    recorded.context = recorded.hasContext
+        ? *cast(void**) call.arguments[0] : null;
+    recorded.integers ~= *cast(const int*) call.arguments[first];
     *cast(int*) call.returnPlace = cast(int) (recorded.integers[$ - 1] * 2 + 1);
 }
 
