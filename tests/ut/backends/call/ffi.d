@@ -2176,6 +2176,84 @@ private extern(D) int snakebite_ut_dvariadic_typesafe_backend(
 }
 
 
+private struct VariadicPointBackend {
+    int x;
+    int y;
+}
+
+
+// One declared parameter, then an `int` extra and a `struct` extra,
+// checked through `_arguments` itself - `_arguments.length` and
+// `_arguments[0]`'s own identity, not merely inferred from the sum this
+// callee returns - alongside `mixed_sum_backend`'s split int/double sum
+// and `struct_backend`'s tsize-driven copy above. This is a `static`
+// struct member below (the workaround `signatures.externD.
+// nineWordsTwoStringsSpill` already documents), so it can run through
+// `Matrix!`/`shouldBeRetOf` like an ordinary variadic test, unlike the
+// six that follow. `acceptance/at/ffi/dvariadic.d`'s own callee checks
+// this exact shape again, built by ldc2 instead of dmd - the one host
+// whose own `_arguments` ABI differs (`snakebite.ffi.abi.
+// dVariadicArgumentsIsSlice`'s own doc).
+pragma(mangle, "snakebite_ut_dvariadic_length_type_sum_backend")
+private extern(D) int snakebite_ut_dvariadic_length_type_sum_backend(
+    VariadicPointBackend point, ...
+) {
+    import core.vararg;
+
+    assert(_arguments.length == 3, "wrong _arguments.length");
+    assert(_arguments[0] is typeid(int), "wrong _arguments[0]");
+
+    int total = point.x + point.y;
+    foreach (i; 0 .. _arguments.length) {
+        if (_arguments[i] is typeid(int))
+            total += va_arg!int(_argptr);
+        else {
+            VariadicPointBackend extra;
+            va_arg(_argptr, _arguments[i], &extra);
+            total += extra.x + extra.y;
+        }
+    }
+    return total;
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("variadic.externD.lengthFirstTypeAndSums." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        21.shouldBeRetOf!(
+            backend,
+            q{
+                struct GuestPoint {
+                    int x;
+                    int y;
+                }
+
+                struct Ffi {
+                    static:
+                    pragma(mangle,
+                        "snakebite_ut_dvariadic_length_type_sum_backend")
+                    extern(D) int probe(GuestPoint point, ...);
+                }
+
+                int answer() {
+                    GuestPoint point;
+                    point.x = 3;
+                    point.y = 4;
+                    GuestPoint extra;
+                    extra.x = 5;
+                    extra.y = 6;
+                    return Ffi.probe(point, 1, 2, extra);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
 // These six tests cannot use `Matrix!`/`shouldBeRetOf`, unlike every
 // other variadic test above: `shouldBeRetOf`'s `Native` branch mixes a
 // test's whole guest snippet - the `pragma(mangle)` prototype included -

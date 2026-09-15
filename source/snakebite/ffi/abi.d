@@ -48,6 +48,28 @@ public enum contextPrecedesHiddenReturnPointer = () {
         return false;
 }();
 
+// Whether an `extern(D)` untyped variadic call site's hidden `_arguments`
+// argument (issue #334 step 6) travels as a two-register `TypeInfo[]`
+// slice instead of dmd's own single pointer to the `TypeInfo_Tuple` the
+// frontend's leading `typeid` expression evaluates to. Both host
+// compilers' frontends insert that same `typeid` expression - this is a
+// codegen difference, not a frontend one: dmd's codegen forwards the
+// `TypeInfo_Tuple` reference itself, and the callee's own prologue reads
+// its `elements` field to build the slice; ldc's codegen reads `elements`
+// at the *call site* instead, and passes the resulting slice directly
+// (verified: disassembling a real `extern(D) int f(int a, int b, int c,
+// ...)` call built by ldc2 1.43, frontend 2.113.0 - the same frontend
+// version this project vendors - shows `%edi`/`%esi`=length/pointer, not
+// one pointer register; an ldc2-built callee's own prologue starts
+// `gp_offset` at 0x18, three GP registers for `_arguments`+`a`, matching
+// only the slice shape).
+public enum dVariadicArgumentsIsSlice = () {
+    version (LDC)
+        return true;
+    else
+        return false;
+}();
+
 // What one value's bytes have to become to travel in one argument or
 // return register. `integer` is used for an aggregate eightbyte; the
 // scalar kinds retain their widening rules.

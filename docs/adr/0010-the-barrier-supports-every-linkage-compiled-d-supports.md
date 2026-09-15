@@ -19,13 +19,22 @@ requires.
 Typesafe variadics are a slice, classified and passed exactly like any
 other declared parameter - the frontend has already packed the call
 site's trailing arguments into it. Untyped variadics pass `_arguments`
-as one hidden pointer argument, ahead of the declared parameters: the
-frontend inserts a `typeid` of the call's own extra-argument types as
-the literal first element of the call's argument list, whose value at
-run time is a `TypeInfo_Tuple` reference, not a `TypeInfo[]` slice
-itself - the callee's own prologue builds that slice, by reading the
-tuple's `elements` field, before its body ever runs (verified against
-dmd's `expressionsem.functionParameters` and `semantic3`). For a
+ahead of the declared parameters: the frontend inserts a `typeid` of
+the call's own extra-argument types as the literal first element of
+the call's argument list, whose value at run time is a `TypeInfo_Tuple`
+reference, not a `TypeInfo[]` slice itself. What actually reaches the
+callee's own hidden `_arguments` argument then depends on the host
+compiler's own codegen, not the frontend (`snakebite.ffi.abi.
+dVariadicArgumentsIsSlice`): on dmd, one hidden pointer to that
+`TypeInfo_Tuple` reference - the callee's own prologue builds the slice
+itself, by reading the tuple's `elements` field, before its body ever
+runs (verified against dmd's `expressionsem.functionParameters` and
+`semantic3`); on LDC, LDC's own codegen reads `elements` at the call
+site instead and passes the resulting two-register `TypeInfo[]` slice
+directly, so an LDC-built callee's own prologue never has to (verified:
+disassembling a real `extern(D) int f(int a, int b, int c, ...)` call
+built by ldc2 1.43, frontend 2.113.0, shows a length/pointer pair in
+the first two integer registers where dmd passes one pointer). For a
 guest-declared function the backend builds that `TypeInfo_Tuple`, and
 the `TypeInfo` of each of its own extra arguments, from its own runtime
 types; a guest-declared struct's own fabricated `TypeInfo_Struct` also
@@ -68,7 +77,7 @@ requirement above.
 
 **Refuse D untyped variadics.** Rejected, for the same reason. The
 shape also turned out to be simple: the C variadic ABI plus one hidden
-pointer argument, never reversed even on dmd.
+`_arguments` argument, never reversed even on dmd.
 
 ## Consequences
 

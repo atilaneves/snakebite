@@ -116,12 +116,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.ffi:
         CallAdapter, CallbackArguments, CallbackBridge, CallPlan, CallResult,
         PlanCache;
-    import snakebite.ffi.abi: Register;
+    import snakebite.ffi.abi: dVariadicArgumentsIsSlice, Register;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
         initializerValueOf, isIntegralSize, TypeFacts;
     import object:
-        Error, Exception, Throwable, TypeInfo_Class;
+        Error, Exception, Throwable, TypeInfo, TypeInfo_Class,
+        TypeInfo_Tuple;
     import dmd.root.string: toDString;
     import dmd.astenums:
         LINK, Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32,
@@ -4915,7 +4916,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             const facts = factsOf(vArguments.type);
             auto storage = _frames.reserve(facts.size, facts.alignment);
             evaluate(vArguments, vArguments.type, facts, storage);
-            values[layout.hiddenThis.variable !is null] = storage;
+            values[layout.hiddenThis.variable !is null] =
+                dVariadicArgumentsIsSlice
+                    ? dVariadicArgumentsSliceStorage(storage)
+                    : storage;
         }
 
         foreach (i; declaredArgumentOffset + declaredCount .. totalCount) {
@@ -4927,6 +4931,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         callPlan(plan, _place, values);
+    }
+
+    // On ldc (`dVariadicArgumentsIsSlice`), `_arguments` travels as the
+    // `TypeInfo_Tuple` reference's own `elements` field - a two-register
+    // `TypeInfo[]` slice, not the one pointer `tupleStorage` already
+    // holds (`callVariadicNative`'s own doc; `abi.
+    // dVariadicArgumentsIsSlice`'s own doc). `tupleStorage` still has to
+    // be evaluated first, exactly as on dmd, since it is the only place
+    // the fabricated (or host) `TypeInfo_Tuple` this reads `elements` off
+    // comes from.
+    private void* dVariadicArgumentsSliceStorage(void* tupleStorage) {
+        auto tuple = *cast(TypeInfo_Tuple*) tupleStorage;
+        auto slice = _frames.reserve(
+            (TypeInfo[]).sizeof, (TypeInfo[]).alignof);
+        *cast(TypeInfo[]*) slice = tuple.elements;
+        return slice;
     }
 
     // `receiver`'s own dynamic `TypeInfo_Class`, read the same way `visit

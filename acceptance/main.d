@@ -5,6 +5,7 @@ int main(string[] args) {
     initialize(Snippets.yes);
 
     return args.runTests!(
-        "at.ffi.cost", "at.bench.timing", "at.runtime.arraycopy",
+        "at.ffi.cost", "at.ffi.dvariadic", "at.bench.timing",
+        "at.runtime.arraycopy",
     );
 }

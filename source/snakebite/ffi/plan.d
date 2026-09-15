@@ -920,8 +920,8 @@ private CallPlan prepareCommon(
     import snakebite.druntime.constructoratomic: nativeTarget;
     import snakebite.ffi.abi:
         ArgumentPlan, Register, contextPrecedesHiddenReturnPointer,
-        needsHiddenReturnPointer, reversedDParameters,
-        supported;
+        dVariadicArgumentsIsSlice, needsHiddenReturnPointer,
+        reversedDParameters, supported;
     import dmd.astenums: LINK, STC, Tdelegate, VarArg;
     import dmd.mangle: mangleExact;
     import dmd.typesem: nextOf, toBasetype;
@@ -996,15 +996,15 @@ private CallPlan prepareCommon(
             );
 
         // An `extern(D)` untyped variadic callee's own hidden `_arguments`
-        // (this function's own doc above) is one more pointer-class
-        // argument, alongside `hasContext`'s hidden `this` - `addArgument`
-        // below places it right after `this` and before every declared
-        // parameter, at index `firstExplicit` (`buildMoves`'s own doc), so
-        // it falls inside the very same reversed-or-forward group as the
-        // declared parameters and the extra arguments that follow it:
-        // dmd's own reversal (`_reversedArguments`) reverses the whole
-        // call site's argument list together, `_arguments` included, not
-        // only the declared parameters.
+        // (this function's own doc above) is one more argument, alongside
+        // `hasContext`'s hidden `this` - `addArgument` below places it
+        // right after `this` and before every declared parameter, at
+        // index `firstExplicit` (`buildMoves`'s own doc), so it falls
+        // inside the very same reversed-or-forward group as the declared
+        // parameters and the extra arguments that follow it. Its own
+        // shape depends on the host compiler (`abi.
+        // dVariadicArgumentsIsSlice`'s own doc): one pointer register on
+        // dmd, a two-register `TypeInfo[]` slice on ldc.
         const hasVArguments = isVariadicCall && isDVariadic;
 
         const count = type.parameterList.length;
@@ -1048,11 +1048,21 @@ private CallPlan prepareCommon(
         size_t argumentIndex;
 
         // The shape of a bare pointer-sized argument - a hidden `this`,
-        // a `ref`/`out` parameter's own address, and (issue #334 step 6)
-        // an `extern(D)` untyped variadic callee's hidden `_arguments`
-        // all travel this same one-eightbyte-pointer way.
+        // a `ref`/`out` parameter's own address, and, on dmd, (issue #334
+        // step 6) an `extern(D)` untyped variadic callee's hidden
+        // `_arguments` - all travel this same one-eightbyte-pointer way.
         enum ArgumentPlan pointerArgument = ArgumentPlan(
             [Register(Register.Kind.pointer, 8), Register.init], 1, false,
+        );
+
+        // On ldc, `_arguments` is a two-register `TypeInfo[]` slice
+        // instead (`abi.dVariadicArgumentsIsSlice`'s own doc) - the same
+        // shape `abi.classify`'s own `Tarray` case gives any other
+        // dynamic-array-typed argument, length then pointer, both
+        // integer-class.
+        enum ArgumentPlan sliceArgument = ArgumentPlan(
+            [Register(Register.Kind.integer, 8),
+                Register(Register.Kind.integer, 8)], 2, false,
         );
 
         // Places one argument's `ArgumentPlan` in `plan`, at the next
@@ -1079,7 +1089,8 @@ private CallPlan prepareCommon(
         // function's reversed-or-forward group with the declared
         // parameters and the extra arguments added after them.
         if (hasVArguments)
-            addArgument(pointerArgument);
+            addArgument(
+                dVariadicArgumentsIsSlice ? sliceArgument : pointerArgument);
 
         foreach (i; 0 .. count) {
             // A `ref` parameter occupies a pointer slot in the caller's

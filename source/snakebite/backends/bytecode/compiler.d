@@ -13,7 +13,7 @@ import snakebite.backends.controlflow:
     ScopeFrame, cleanupCount, scopePath;
 import snakebite.ffi:
     CallbackBridge, PlanCache, supportsBoolFunction;
-import snakebite.ffi.abi: Register;
+import snakebite.ffi.abi: dVariadicArgumentsIsSlice, Register;
 
 
 // Whether `type` is `float`/`double`/`real` - `TypeFacts` has no notion of
@@ -5349,7 +5349,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const facts = TypeFacts.of(vArguments.type);
             const argumentOffset = reserveTemp(facts);
             evalInto(vArguments, argumentOffset, facts.size);
-            args ~= Arg(argumentOffset, 0, facts.size);
+            if (dVariadicArgumentsIsSlice) {
+                const sliceFacts = TypeFacts(
+                    2 * size_t.sizeof, size_t.sizeof, false, false);
+                const sliceOffset =
+                    dVariadicArgumentsSliceOffset(argumentOffset, sliceFacts);
+                args ~= Arg(sliceOffset, 0, sliceFacts.size);
+            } else
+                args ~= Arg(argumentOffset, 0, facts.size);
         }
 
         foreach (i; 0 .. parameterCount) {
@@ -5457,6 +5464,32 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             returnShape.returnFacts.size,
         );
         emit(&opCall, destOffset, _callSites.length - 1, 0);
+    }
+
+    // On ldc (`dVariadicArgumentsIsSlice`), an `extern(D)` untyped
+    // variadic callee's own hidden `_arguments` is the `TypeInfo_Tuple`'s
+    // own `elements` field - a two-register `TypeInfo[]` slice, not the
+    // one pointer `tupleOffset` already holds (`compileNativeCall`'s own
+    // doc; `abi.dVariadicArgumentsIsSlice`'s own doc). `TypeInfo_Tuple.
+    // elements` is a real, host-compiled `object.d` class field, so its
+    // own `.offsetof`, read here by whichever compiler builds this file,
+    // is this exact host's own class layout - the same native-layout
+    // assumption every other field read this compiler emits already
+    // makes (`compileFieldAddress`'s own `field.offset`).
+    private size_t dVariadicArgumentsSliceOffset(
+        in size_t tupleOffset, in TypeFacts sliceFacts,
+    ) {
+        import object: TypeInfo_Tuple;
+
+        const addressOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, addressOffset,
+            addConstant(cast(long) TypeInfo_Tuple.elements.offsetof),
+            size_t.sizeof);
+        emit(&opAdd, addressOffset, tupleOffset, size_t.sizeof);
+
+        const sliceOffset = reserveTemp(sliceFacts);
+        emit(&opLoadIndirect, sliceOffset, addressOffset, sliceFacts.size);
+        return sliceOffset;
     }
 
     // `fn(args)` where dmd left `expression.f` unresolved: a call through a
