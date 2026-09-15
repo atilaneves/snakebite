@@ -11,6 +11,11 @@ import snakebite.ffi.sysv:
     snakebite_ffi_callback_chunk, snakebite_ffi_callback_chunk_end,
     snakebite_ffi_callback_chunk_trailer, snakebite_ffi_callback_common;
 
+// `imported!"dmd.func"` is a module-scope-only construct (ai/CODING.md);
+// this names the one type this module reads from it, so every struct
+// and class below reads it as a plain type instead.
+private alias FuncDeclaration = imported!"dmd.func".FuncDeclaration;
+
 
 // The pool of callback entries (ADR-0003): the addresses host code calls
 // when it calls a guest function through a function pointer or a
@@ -35,7 +40,7 @@ import snakebite.ffi.sysv:
 // for a `ref`/`out` parameter the address of the pointer the host passed.
 public struct CallbackCall {
     public const(void)* function_;
-    public imported!"dmd.func".FuncDeclaration declaration;
+    public FuncDeclaration declaration;
     public void* context;
     public bool hasContext;
     public void* returnPlace;
@@ -53,7 +58,7 @@ private struct Slot {
     CallbackHandler handler;
     void* owner;
     const(void)* function_;
-    imported!"dmd.func".FuncDeclaration declaration;
+    FuncDeclaration declaration;
     const(CallPlan)* plan;
 }
 
@@ -81,28 +86,6 @@ private __gshared Chunk[] chunks;
 private __gshared Mutex mutex;
 
 
-private const(ubyte)* templateBase() {
-    return cast(const(ubyte)*) &snakebite_ffi_callback_chunk;
-}
-
-private const(ubyte)* templateEnd() {
-    return cast(const(ubyte)*) &snakebite_ffi_callback_chunk_end;
-}
-
-private const(CallbackTrailer)* templateTrailer() {
-    return cast(const(CallbackTrailer)*)
-        &snakebite_ffi_callback_chunk_trailer;
-}
-
-private const(ubyte)* commonEntry() {
-    return cast(const(ubyte)*) &snakebite_ffi_callback_common;
-}
-
-private size_t trailerOffset() {
-    return cast(const(ubyte)*) templateTrailer() - templateBase();
-}
-
-
 shared static this() {
     import std.conv: text;
 
@@ -124,6 +107,27 @@ shared static this() {
         );
 
     chunks = [Chunk(templateBase, templateSlots[], 0)];
+}
+
+private const(ubyte)* templateBase() {
+    return cast(const(ubyte)*) &snakebite_ffi_callback_chunk;
+}
+
+private const(ubyte)* templateEnd() {
+    return cast(const(ubyte)*) &snakebite_ffi_callback_chunk_end;
+}
+
+private const(CallbackTrailer)* templateTrailer() {
+    return cast(const(CallbackTrailer)*)
+        &snakebite_ffi_callback_chunk_trailer;
+}
+
+private const(ubyte)* commonEntry() {
+    return cast(const(ubyte)*) &snakebite_ffi_callback_common;
+}
+
+private size_t trailerOffset() {
+    return cast(const(ubyte)*) templateTrailer() - templateBase();
 }
 
 
@@ -375,9 +379,14 @@ private void invoke(ref Slot slot, CallFrame* frame) {
 // the thread that runs this backend instance. ADR-0006 moves per-thread
 // state out of the backend; the pool's own reservation already takes a
 // lock.
-public final class CallbackBridge {
+//
+// A struct, not a class (ai/CODING.md): no base, no children, no virtual
+// methods. `PlanCache` and every plan it prepares share one instance by
+// reference, so it is always reached through a heap-allocated
+// `CallbackBridge*`, the same way a class reference would be shared.
+public struct CallbackBridge {
     private struct Registered {
-        imported!"dmd.func".FuncDeclaration declaration;
+        FuncDeclaration declaration;
         const(void)* entry;
     }
 
@@ -396,7 +405,7 @@ public final class CallbackBridge {
 
     public void register(
         const(void)* word,
-        imported!"dmd.func".FuncDeclaration declaration,
+        FuncDeclaration declaration,
     ) {
         if (word is null || word in _words)
             return;

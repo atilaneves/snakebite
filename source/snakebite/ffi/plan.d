@@ -137,7 +137,7 @@ public struct CallPlan {
     // entries. Shared mutable state owned by the `PlanCache`, never part
     // of this plan's own value: `callWithCallbacks` casts the `const`
     // away to reserve an entry on first use.
-    private CallbackBridge _callbacks;
+    private CallbackBridge* _callbacks;
 
     // `CallFrame.sseCount`: how many of the moves above land in an SSE
     // register, for a variadic callee's `%al`.
@@ -267,7 +267,7 @@ public struct CallPlan {
             delegateFunctionOffset, delegateValueSize;
 
         // See `_callbacks`'s own doc for why the `const` goes.
-        auto bridge = cast(CallbackBridge) _callbacks;
+        auto bridge = cast(CallbackBridge*) _callbacks;
         if (bridge is null)
             throw new Exception(
                 "ffi: this plan has a callback-typed parameter, but no " ~
@@ -961,13 +961,13 @@ public extern(C) void executeCallPlan(
 // without hashing at all, but it needs somewhere on the call site to keep
 // it, which is the caller's business and not this package's.
 public struct PlanCache {
-    private CallbackBridge _callbacks;
+    private CallbackBridge* _callbacks;
 
     // The registry of this backend instance's guest function words, and
     // the owner of their pool entries (ADR-0003). A backend installs one
     // before it prepares any plan; every plan this cache prepares reads
     // it at call time to swap a guest function word for its entry.
-    public void useCallbacks(CallbackBridge callbacks) {
+    public void useCallbacks(CallbackBridge* callbacks) {
         _callbacks = callbacks;
     }
 
