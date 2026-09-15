@@ -4714,13 +4714,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const branchIndex = _instructions.length;
         emit(&opBranchFalse, conditionOffset, 0, conditionWidth_);
 
+        _finished = false;
         evalInto(expression.e1, destOffset, width);
-        const jumpIndex = _instructions.length;
-        emit(&opJump, 0, 0, 0);
+        const ifFinished = _finished;
+        size_t jumpIndex = size_t.max;
+        if (!ifFinished) {
+            jumpIndex = _instructions.length;
+            emit(&opJump, 0, 0, 0);
+        }
 
         _instructions[branchIndex].source = _instructions.length;
+        _finished = false;
         evalInto(expression.e2, destOffset, width);
-        _instructions[jumpIndex].destination = _instructions.length;
+        const elseFinished = _finished;
+        if (jumpIndex != size_t.max)
+            _instructions[jumpIndex].destination = _instructions.length;
+        _finished = ifFinished && elseFinished;
     }
 
     // `cast(T) x`. `snakebite.backends.casts.classify` has already turned
