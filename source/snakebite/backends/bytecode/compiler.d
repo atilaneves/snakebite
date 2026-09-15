@@ -507,6 +507,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         private size_t _bodyEnd;
         private size_t _handler;
         private size_t _catchOffset;
+        private size_t _cleanupEnd = size_t.max;
     }
 
     // Where `runPendingFinallyBodies` last inlined a `finally` for a
@@ -678,7 +679,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         ExceptionHandler[] exceptionHandlers;
         foreach (pending; _exceptionHandlers) {
-            if (pending._handler >= _instructions.length)
+            if (pending._handler >= _instructions.length
+                    && pending._cleanupEnd == size_t.max)
                 throw rejection(_function, _function.loc,
                     "an empty catch handler");
 
@@ -688,6 +690,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 instructionAt(pending._bodyEnd),
                 instructionAt(pending._handler),
                 pending._catchOffset,
+                pending._cleanupEnd == size_t.max
+                    ? null : instructionAt(pending._cleanupEnd),
             );
         }
 
@@ -1067,30 +1071,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _activeScopePath.length -= 1;
         _pendingFinallyBodies.length -= 1;
 
-        const throwable = reserveTemp(pointerFacts);
-        if (!bodyFinished)
-            emit(&opConstant, throwable, addConstant(0L), size_t.sizeof);
-
-        // Both exits use the same cleanup code. The exception handler writes
-        // the pending throwable; normal fall-through supplies null.
+        // Exceptional entry runs this range inside native try/finally so
+        // druntime owns exception chaining and Error precedence.
         const handler = _instructions.length;
+        _finished = false;
+        compileFinallyBody(statement.finalbody);
+        const cleanupFinished = _finished;
+        const cleanupEnd = _instructions.length;
         foreach (range; protectedRanges(bodyStart, bodyEnd, finallyDepth))
             _exceptionHandlers ~= PendingExceptionHandler(
-                typeid(Throwable), range.start, range.end, handler, throwable,
+                typeid(Throwable), range.start, range.end, handler,
+                size_t.max, cleanupEnd,
             );
-        _finished = false;
-        compileStatement(statement.finalbody);
-        if (!_finished) {
-            size_t normalExit = size_t.max;
-            if (!bodyFinished) {
-                normalExit = _instructions.length;
-                emit(&opBranchFalse, throwable, 0, size_t.sizeof);
-            }
-            emit(&opThrow, throwable, 0, 0);
-            if (normalExit != size_t.max)
-                patchTarget(normalExit, _instructions.length);
-        }
-        _finished = bodyFinished || _finished;
+        _finished = bodyFinished || cleanupFinished;
     }
 
     override void visit(ThrowStatement statement) {
@@ -1412,11 +1405,25 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _pendingFinallyBodies = bodies[0 .. index].dup;
             _activeScopePath = scopes[0 .. scopeEnd].dup;
             const start = _instructions.length;
-            compileStatement(bodies[index]);
+            compileFinallyBody(bodies[index]);
             _finallyHoles ~= FinallyHole(start, _instructions.length, index);
             if (_finished)
                 return;
         }
+    }
+
+    private void compileFinallyBody(Statement body_) {
+        // D forbids transfers across a finally boundary. Each emitted copy
+        // therefore owns its labels, independent of the surrounding code.
+        auto targets = _labelTargets; // Restored to mutable compiler state.
+        auto pending = _pendingLabelJumps; // Restored to mutable compiler state.
+        _labelTargets = null;
+        _pendingLabelJumps = null;
+        scope (exit) {
+            _labelTargets = targets;
+            _pendingLabelJumps = pending;
+        }
+        compileStatement(body_);
     }
 
     // The condition of an `if`, a `while`/`for`, or a ternary: read at its

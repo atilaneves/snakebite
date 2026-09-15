@@ -2,6 +2,9 @@ module ut.backends.call.control_flow;
 
 
 import ut.backends;
+import snakebite.backends.backend: Program;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
 
 
 // DMD emits this shape for cleanup code, including the cleanup in the
@@ -971,5 +974,101 @@ static foreach (backend; Matrix!(
                 return cleanup(false) * 10 + cleanup(true);
             }
         }, "result");
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "a goto inside finally returns 0 instead of running cleanup"),
+    Omit!(Interpreter, Because.diverges,
+        "a goto inside finally leaves an unresolved transfer"),
+)) {
+    @("tryFinally.forwardGotoInEachCleanupCopy." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        22.shouldBeRetOf!(backend, q{
+            int result() {
+                int trace;
+                for (int i; i < 2; ++i) {
+                    try {
+                        if (i == 99) break;
+                    } finally {
+                        goto done;
+                        trace = 9;
+                    done:
+                        trace = trace * 10 + 2;
+                    }
+                }
+                return trace;
+            }
+        }, "result");
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("tryFinally.throwingCleanupPreservesOriginalException." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(backend, q{
+            bool result() {
+                auto original = new Exception("body");
+                auto cleanup = new Exception("cleanup");
+                try {
+                    try {
+                        throw original;
+                    } finally {
+                        throw cleanup;
+                    }
+                } catch (Exception e) {
+                    return e is original;
+                }
+                return false;
+            }
+        }, "result");
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.diverges,
+        "exception chaining does not link the guest cleanup exception"),
+)) {
+    @("tryFinally.throwingCleanupChainsExceptions." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum code = q{
+            Throwable[] caughtExceptions() {
+                auto original = new Exception("body");
+                auto cleanup = new Exception("cleanup");
+                try {
+                    try {
+                        throw original;
+                    } finally {
+                        throw cleanup;
+                    }
+                } catch (Exception e) {
+                    return [e, original, cleanup];
+                }
+                return null;
+            }
+            bool result() {
+                auto values = caughtExceptions();
+                return values.length == 3 && values[0] is values[1]
+                    && values[0].next is values[2];
+            }
+        };
+        static if (is(backend == Native) || is(backend == Ctfe))
+            true.shouldBeRetOf!(backend, code, "result");
+        else {
+            auto module_ = parseSnippet(code);
+            auto backend_ = new backend(Program([module_]));
+            Throwable[] values;
+            backend_.call(findFunction(module_, "caughtExceptions"), &values, []);
+            values.length.should == 3;
+            (values[0] is values[1]).should == true;
+            (values[0].next is values[2]).should == true;
+        }
     }
 }

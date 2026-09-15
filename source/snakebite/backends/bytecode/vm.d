@@ -342,6 +342,7 @@ package struct ExceptionHandler {
     package const(Instruction)* bodyEnd;
     package const(Instruction)* handler;
     package size_t catchOffset;
+    package const(Instruction)* cleanupEnd;
 }
 
 
@@ -439,30 +440,63 @@ private void dispatch(
     scope const AssertSite[] assertSites,
     scope const ExceptionHandler[] exceptionHandlers,
     FrameStack* frames,
+    const(Instruction)* end = null,
 ) {
+    const start = pc;
     const cleanupMark = frames.cleanupMark;
     scope (exit)
         cleanupSince(
             cleanupMark, frame, constants, callSites, assertSites, frames);
 
-    while (pc !is null) {
+    while (pc !is null && pc !is end) {
         try {
-            while (pc !is null)
+            while (pc !is null && pc !is end)
                 pc = pc.handler(
                     pc, frame, returnPlace, constants, callSites,
                     assertSites, frames);
         } catch (Throwable throwable) {
             cleanupSince(
                 cleanupMark, frame, constants, callSites, assertSites, frames);
-            auto handler = findHandler(
-                exceptionHandlers, pc, throwable.classinfo);
-            if (handler is null)
-                throw throwable;
+            size_t firstHandler;
+            while (true) {
+                const handler = findHandler(
+                    exceptionHandlers[firstHandler .. $], pc,
+                    throwable.classinfo);
+                if (handler is null || (end !is null
+                        && (handler.handler < start || handler.handler >= end)))
+                    throw throwable;
 
-            if (handler.catchOffset != size_t.max)
-                *cast(void**)(frame + handler.catchOffset) = cast(void*) throwable;
-            pc = handler.handler;
+                if (handler.cleanupEnd !is null) {
+                    try {
+                        unwindFinally(throwable, () {
+                            dispatch(handler.handler, frame, returnPlace,
+                                constants, callSites, assertSites,
+                                exceptionHandlers, frames, handler.cleanupEnd);
+                        });
+                    } catch (Throwable chained) {
+                        throwable = chained;
+                    }
+                    // Inner handlers have already had their chance to catch
+                    // this unwind. Continue with the scopes outside finally.
+                    firstHandler = handler - exceptionHandlers.ptr + 1;
+                    continue;
+                }
+
+                if (handler.catchOffset != size_t.max)
+                    *cast(void**)(frame + handler.catchOffset) = cast(void*) throwable;
+                pc = handler.handler;
+                break;
+            }
         }
+    }
+}
+
+
+private void unwindFinally(Throwable throwable, scope void delegate() cleanup) {
+    try {
+        throw throwable;
+    } finally {
+        cleanup();
     }
 }
 
