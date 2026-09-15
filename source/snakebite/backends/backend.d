@@ -135,11 +135,15 @@ public abstract class Backend {
 // "Run on this project": do what a compiled build of it does, implemented
 // once on top of `call`, and return the exit status. A `Throwable` that
 // escapes is handled as druntime would handle it: printed, exit status 1.
-public int run(Backend backend, Program program) {
+public int run(
+    Backend backend,
+    Program program,
+    in string[] hostArguments = null,
+) {
     if (runModuleConstructors(backend, program.moduleConstructors))
         return 1;
 
-    return runMain(backend, program);
+    return runMain(backend, program, hostArguments);
 }
 
 // A constructor that cannot run is a failed program startup. Report it
@@ -182,6 +186,7 @@ private int runModuleConstructors(
 private int runMain(
     Backend backend,
     Program program,
+    in string[] hostArguments,
 ) {
     import dmd.astenums: Tvoid;
     import dmd.typesem: nextOf;
@@ -195,7 +200,9 @@ private int runMain(
     string[] arguments;
     void*[] mainArguments;
     if (main_.parameters !is null && main_.parameters.length != 0) {
-        arguments = [program.name];
+        arguments = hostArguments.length
+            ? hostArguments.dup
+            : [program.name];
         mainArguments = [cast(void*) &arguments];
     }
     return failing(() {

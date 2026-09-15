@@ -25,6 +25,7 @@ public int main(string[] args) {
         const report = executeBackend(
             parsed.options.backend,
             preparation.project.program,
+            args,
         );
         printStatistics(preparation, report);
         return report.status;
