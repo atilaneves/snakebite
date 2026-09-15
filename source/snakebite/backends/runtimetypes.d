@@ -76,7 +76,7 @@ public struct RuntimeTypes {
 
         TypeInfo info;
         if (classType !is null)
-            info = classInfo(classType.sym);
+            info = _classInfo(classType.sym);
         else if (structType !is null)
             info = structInfo(structType.sym);
         else if (auto enumType = type.isTypeEnum)
@@ -182,15 +182,6 @@ public struct RuntimeTypes {
         return cast(TypeInfo) _resolve(name);
     }
 
-    private TypeInfo classInfo(ClassDeclaration declaration) {
-        import dmd.root.string: toDString;
-
-        auto base = linkedClassInfo(declaration);
-        if (base is null)
-            base = _classInfo(declaration);
-        return base;
-    }
-
     private TypeInfo qualified(Type type, TypeInfo base) {
         if (type.mod == 0)
             return base;
@@ -211,7 +202,7 @@ public struct RuntimeTypes {
     // into this process - `null` for a guest class (always fabricated) and
     // for a native class the host never linked. Never falls back to
     // fabrication itself, so a caller that fabricates its own metadata
-    // (`Bytecode.classRuntimeInfo`) can call this without looping back
+    // (`classinfo.classRuntimeInfo`) can call this without looping back
     // through that same fabrication path.
     public TypeInfo_Class linkedClassInfo(ClassDeclaration declaration) {
         import dmd.root.string: toDString;

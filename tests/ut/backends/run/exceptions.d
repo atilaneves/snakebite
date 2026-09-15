@@ -251,8 +251,6 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot call `getenv`"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "`t.classinfo is Exception.classinfo` fails"),
 )) {
     @("nativeCalleeThrowCarriesLinkedClassInfo." ~ backend.stringof)
     @Tags(backend.stringof)

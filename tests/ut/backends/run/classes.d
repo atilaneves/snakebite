@@ -585,8 +585,6 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot dereference classinfo"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "`Exception.classinfo.name == \"object.Exception\"` fails"),
 )) {
     @("nativeClassStaticClassInfo." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -611,8 +609,6 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot dereference classinfo"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "`MyException.classinfo.base is Exception.classinfo` fails"),
 )) {
     @("guestSubclassOfNativeClassStaticClassInfo." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -638,8 +634,6 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot dereference classinfo"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "`caught.classinfo is typeid(Exception)` fails"),
 )) {
     @("caughtNativeExceptionClassInfoIdentity." ~ backend.stringof)
     @Tags(backend.stringof)
