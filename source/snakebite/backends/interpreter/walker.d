@@ -2617,13 +2617,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (auto function_ = expression.var.isFuncDeclaration)
                 return cast(void*) function_;
 
-            if (auto typeInfo = expression.var.isTypeInfoDeclaration) {
-                auto type = typeInfo.tinfo;
-                auto classType = type.isTypeClass;
-                if (classType !is null
-                        && evaluator._runtimeTypes.isRootOwned(classType.sym))
-                    return cast(void*) evaluator._runtimeTypes.get(type);
-            }
+            if (auto typeInfo = expression.var.isTypeInfoDeclaration)
+                return cast(void*) evaluator._runtimeTypes.get(typeInfo.tinfo);
 
             return evaluator.slotOf(expression, expression.var);
         }
@@ -4183,8 +4178,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto info = *cast(TypeInfo_Class*) (*cast(void**) object);
         auto declaration = declarationOf(info);
-        if (declaration is null)
+        if (declaration is null) {
+            import snakebite.druntime.classfinalizer: _d_callfinalizer;
+
+            _d_callfinalizer(object);
             return;
+        }
 
         auto destructor = (*declaration).dtor;
         if (destructor !is null) {
@@ -4222,17 +4221,19 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.backends.classinfo:
             classRuntimeInfo_ = classRuntimeInfo, Hooks;
 
-        auto result = classRuntimeInfo_(
+        return classRuntimeInfo_(
             declaration,
             _classRuntime,
             Hooks(
                 (FuncDeclaration) => null,
                 (concrete, interface_, interfaceInfo) => interfaceInfo.vtbl,
                 (decl, base) => fillFieldInits(decl, base),
+                &_runtimeTypes.linkedClassInfo,
+                (decl, info) {
+                    _declarationOf[cast(const(void)*) info] = decl;
+                },
             ),
         );
-        _declarationOf[cast(const(void)*) result] = declaration;
-        return result;
     }
 
     // The guest declaration `info` was generated for, or `null` for a

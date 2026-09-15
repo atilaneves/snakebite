@@ -18,11 +18,9 @@ import object: Interface, TypeInfo_Class;
 // guest override), how a slot in a concrete class's per-interface vtable
 // gets its callable value (interface dispatch means a second, differently
 // shaped question - see `interfaceVtable` below), and how a field's own
-// default value is written into the `.init` bytes. Those three questions
-// are asked through `Hooks`; everything else - the base chain, the two
-// vtable sizes, the native special cases for `Object`/`Throwable`/
-// `Exception`/`Error`, and the recursion into a base or an interface - is
-// asked once, here.
+// default value is written into the `.init` bytes. Those questions are
+// asked through `Hooks`. Linked metadata and generated metadata use one
+// cache and the same lookup for every base class and interface.
 public struct Hooks {
     // The value for `declaration.vtbl[i]`'s own slot, `method` being the
     // override dmd resolved there - `null` when the caller has nothing to
@@ -49,6 +47,14 @@ public struct Hooks {
     // offset into `base`.
     public void delegate(ClassDeclaration declaration, ubyte* base)
         fillFieldInits;
+
+    // Lookup must not generate metadata or call back into this operation.
+    public TypeInfo_Class delegate(ClassDeclaration declaration)
+        linkedClassInfo;
+
+    // Only generated metadata belongs in a backend's guest dispatch map.
+    public void delegate(ClassDeclaration declaration, TypeInfo_Class info)
+        registerGenerated;
 }
 
 public alias ClassRuntimeCache = TypeInfo_Class[ClassDeclaration];
@@ -72,11 +78,13 @@ public TypeInfo_Class classRuntimeInfo(
     ref ClassRuntimeCache cache,
     Hooks hooks,
 ) {
-    if (declaration is ClassDeclaration.object)
-        return typeid(Object);
-
     if (auto cached = declaration in cache)
         return *cached;
+
+    if (auto linked = hooks.linkedClassInfo(declaration)) {
+        cache[declaration] = linked;
+        return linked;
+    }
 
     import dmd.root.string: toDString;
 
@@ -87,36 +95,15 @@ public TypeInfo_Class classRuntimeInfo(
     typeInfo.m_flags = cast(TypeInfo_Class.ClassFlags) 0;
     typeInfo.name = cast(string) declaration.toPrettyChars.toDString;
     cache[declaration] = typeInfo;
+    if (hooks.registerGenerated !is null)
+        hooks.registerGenerated(declaration, typeInfo);
 
-    // A guest class's base can itself be a native class this project
-    // never compiles a body for - not only `Object`, but any native class
-    // the guest program reaches (`Throwable`, `Exception`, `Error`;
-    // `RangeError`, a native exception `core.exception` declares; a
-    // native class exposed to the guest through FFI). `TypeInfo_Class.
-    // find` (druntime's `object.d`) answers that question the same way
-    // `hasNativeSymbol` answers it for a function: a class already
-    // registered in some linked, natively compiled module's own
-    // `ModuleInfo` is native, and this reaches for its real, complete
-    // `TypeInfo_Class` there instead of recursing into this function and
-    // reconstructing an incomplete vtable from dmd's own (only partially
-    // resolved) `ClassDeclaration.vtbl` for it. A guest declaration is
-    // never registered in any `ModuleInfo`, so `find` only ever answers a
-    // base this function itself did not just build - the recursive call
-    // below is still how a guest class over a guest class over a native
-    // base (`OutOfBytesError : MinicerealError : Exception`) reaches its
-    // own guest base's runtime info.
+    // Base metadata must have the same identity as a direct classinfo
+    // lookup, including when a guest base has a linked namesake.
     TypeInfo_Class baseInfo;
-    if (declaration.isInterfaceDeclaration !is null)
-        baseInfo = null;
-    else if (declaration.baseClass is null)
-        baseInfo = typeid(Object);
-    else {
-        auto nativeBase = cast(TypeInfo_Class) TypeInfo_Class.find(
-            declaration.baseClass.toPrettyChars.toDString);
-        baseInfo = nativeBase !is null
-            ? nativeBase
-            : classRuntimeInfo(declaration.baseClass, cache, hooks);
-    }
+    if (declaration.isInterfaceDeclaration is null
+            && declaration.baseClass !is null)
+        baseInfo = classRuntimeInfo(declaration.baseClass, cache, hooks);
 
     typeInfo.base = baseInfo;
 
