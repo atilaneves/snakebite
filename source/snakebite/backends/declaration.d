@@ -5,37 +5,33 @@ private:
 
 
 // Layout and execution must see the same variables after DMD expands
-// attributes, template mixins, and tuple declarations.
-public imported!"dmd.declaration".VarDeclaration[] runtimeVariables(
+// attributes, template mixins, and tuple declarations. The action runs
+// during traversal so execution does not allocate a variable collection.
+public void forEachRuntimeVariable(
     imported!"dmd.dsymbol".Dsymbol declaration,
+    scope void delegate(imported!"dmd.declaration".VarDeclaration) action,
 ) {
     import dmd.dsymbolsem: apply;
 
-    RuntimeVariables result;
-    declaration.apply(&collectRuntimeVariable, &result);
-    return result.values;
+    declaration.apply(&visitRuntimeVariable, &action);
 }
 
 
-private struct RuntimeVariables {
-    import dmd.declaration: VarDeclaration;
-
-    VarDeclaration[] values;
-}
-
-
-private int collectRuntimeVariable(
+private int visitRuntimeVariable(
     imported!"dmd.dsymbol".Dsymbol symbol,
     void* context,
 ) {
-    auto variables = cast(RuntimeVariables*) context;
+    import dmd.declaration: VarDeclaration;
+
+    alias Action = void delegate(VarDeclaration);
+    const action = *cast(Action*) context;
     if (auto variable = symbol.isVarDeclaration) {
         if (auto tuple = variable.aliasTuple)
             tuple.foreachVar((member) {
-                variables.values ~= member.isVarDeclaration;
+                action(member.isVarDeclaration);
             });
         else
-            variables.values ~= variable;
+            action(variable);
     }
     return 0;
 }

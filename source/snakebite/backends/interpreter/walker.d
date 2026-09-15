@@ -2289,10 +2289,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // Runs a local's initializer into the frame slot `layoutOf` already
     // gave it. `long sum = 0;` is a `DeclarationExp` here.
     override void visit(DeclarationExp expression) {
-        import snakebite.backends.declaration: runtimeVariables;
+        import snakebite.backends.declaration: forEachRuntimeVariable;
 
-        foreach (variable; runtimeVariables(expression.declaration))
+        forEachRuntimeVariable(expression.declaration, (variable) {
             initializeDeclaredVariable(variable, expression);
+        });
     }
 
     private void initializeDeclaredVariable(

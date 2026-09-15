@@ -1959,10 +1959,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // gave it - `int sum = 0;` is a `DeclarationExp` here, the same as in
     // the interpreter.
     private void compileDeclaration(DeclarationExp expression) {
-        import snakebite.backends.declaration: runtimeVariables;
+        import snakebite.backends.declaration: forEachRuntimeVariable;
 
-        foreach (variable; runtimeVariables(expression.declaration))
+        forEachRuntimeVariable(expression.declaration, (variable) {
             compileDeclaredVariable(variable, expression);
+        });
     }
 
     private void compileDeclaredVariable(
