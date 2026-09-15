@@ -207,6 +207,8 @@ private BackendReport[] benchmarkAll(
     in Options options,
 ) {
     import bench.oracle: oracleName, oracleReport;
+    import bench.wasm: wasmInterpreterName, wasmName, defaultWizardTools,
+        wasmReport;
 
     BackendReport[] reports;
     static foreach (BackendType; imported!"snakebite.backends".Backends)
@@ -225,19 +227,34 @@ private BackendReport[] benchmarkAll(
             project.sources, project.directory, options.warmup, options.runs,
         );
 
+    if (selected(options, wasmName))
+        reports ~= wasmReport(
+            project.sources, project.directory, options.warmup, options.runs,
+        );
+
+    if (selected(options, wasmInterpreterName))
+        reports ~= wasmReport(
+            project.sources, project.directory, options.warmup, options.runs,
+            defaultWizardTools,
+        );
+
     return reports;
 }
 
 private bool selected(in Options options, in string name) {
+    import bench.wasm: wasmAlias, wasmName;
     import std.algorithm.searching: canFind;
 
-    if (options.excluded.canFind(name))
+    const canonical = name == wasmAlias ? wasmName : name;
+    if (options.excluded.canFind(canonical)
+        || canonical == wasmName && options.excluded.canFind(wasmAlias))
         return false;
 
     // `--backend` overrides what the benchmark declares; both filter down
     // from every known backend, so an empty list means all of them.
     const wanted = options.backends.length ? options.backends : options.declared;
-    return wanted.length == 0 || wanted.canFind(name);
+    return wanted.length == 0 || wanted.canFind(canonical)
+        || canonical == wasmName && wanted.canFind(wasmAlias);
 }
 
 public BackendReport benchmark(
@@ -313,6 +330,9 @@ private enum knownBackendNames = () {
     static foreach (BackendType; imported!"snakebite.backends".Backends)
         names ~= backendName!BackendType;
     names ~= imported!"bench.oracle".oracleName;
+    names ~= imported!"bench.wasm".wasmName;
+    names ~= imported!"bench.wasm".wasmAlias;
+    names ~= imported!"bench.wasm".wasmInterpreterName;
     return names;
 }();
 
