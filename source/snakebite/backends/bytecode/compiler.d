@@ -5328,23 +5328,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ));
         }
 
-        // `_function` is the context owner: a function nested directly in
-        // the one being compiled reads that function's own frame through
-        // its static chain, which only this compiler's frame layout can
-        // supply - a native instantiation of the same nested function
-        // would read the enclosing frame at the offsets the host compiler
-        // gave it instead. `Evaluator.executeRaw` makes the same choice
-        // for the interpreter. A template's own nested lambda - druntime's
-        // `_d_aaApply2`'s `_toAA` cast, for one - is where this shows:
-        // that lambda has a native instance the host links, and calling it
-        // there hands it a guest frame it cannot read (#275).
+        // A callee with an outer function reads that function's frame
+        // through the static chain, which only this compiler's own frame
+        // layout can supply - see `usesGuestBody`'s own doc. `Evaluator.
+        // executeRaw` makes the same choice for the interpreter.
         const guest = type.parameterList.varargs != VarArg.variadic
             && usesGuestBody(
                 callee, arguments, &_bytecode.isGuestFunction,
                 prefersGuestBody(
                     callee, _bytecode.isGuestFunction(callee),
                     _bytecode.hasNativeSymbol(callee)),
-                _function,
             );
         if (!guest) {
             Arg[] initialArgs;

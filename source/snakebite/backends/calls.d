@@ -8,12 +8,25 @@ private:
 // body that expects native callable addresses and native stack frames.
 // The caller supplies its ordinary target preference; symbol resolution
 // stays lazy because a guest callback can make that lookup unnecessary.
+//
+// A callee with an outer function reads that function's frame through
+// the static chain, which only this compiler's own frame layout can
+// supply - a native instantiation of the same nested function would
+// read the enclosing frame at the offsets the host compiler gave it
+// instead. This is why any such callee runs as guest, not only one
+// nested directly in the function being compiled: `contextAddressOf`/
+// `tryContextOf` already walk the static chain up from wherever
+// execution currently is, one hop per level of nesting, to reach any
+// ancestor's frame, so a sibling nesting level resolves the same way a
+// direct child does. A template's own nested lambda - druntime's
+// `_d_aaApply2`'s `_toAA` cast, for one - is where this shows: that
+// lambda has a native instance the host links, and calling it there
+// hands it a guest frame it cannot read (#275).
 public bool usesGuestBody(
     imported!"dmd.func".FuncDeclaration function_,
     imported!"dmd.arraytypes".Expressions* arguments,
     scope bool delegate(imported!"dmd.func".FuncDeclaration) isGuest,
     lazy bool preferGuest,
-    imported!"dmd.func".FuncDeclaration contextOwner = null,
 ) {
     import snakebite.frontend.dmd.delegates: outerFunctionOf;
 
@@ -23,7 +36,7 @@ public bool usesGuestBody(
     if (hasGuestDelegateArgument(arguments, isGuest))
         return true;
 
-    if (contextOwner !is null && outerFunctionOf(function_) is contextOwner)
+    if (outerFunctionOf(function_) !is null)
         return true;
 
     return preferGuest;

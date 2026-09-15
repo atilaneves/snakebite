@@ -681,7 +681,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             function_, callSite is null ? null : callSite.arguments,
             (callee) => _program.isInterpreted(callee),
             prefersGuestBodyOf(function_),
-            _function,
         );
         if (!interprets) {
             const plan = callSite is null
