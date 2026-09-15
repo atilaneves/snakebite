@@ -354,10 +354,7 @@ static foreach (backend; Matrix!()) {
 
 // `continue` as the last statement of an unrolled `foreach` body only
 // ends the current element; the statement after the loop still runs.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "returns the wrong value after a trailing continue"),
-)) {
+static foreach (backend; Matrix!()) {
     @("continueAtEndOfUnrolledForeachFallsOut." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

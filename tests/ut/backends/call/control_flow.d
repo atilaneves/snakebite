@@ -945,9 +945,6 @@ static foreach (backend; Matrix!()) {
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
         "a goto inside finally returns 0 instead of running cleanup"),
-    Omit!(Interpreter, Because.diverges,
-        "a goto inside finally leaves an unresolved transfer and returns " ~
-        "an incorrect value instead of finishing cleanup"),
 )) {
     @("tryFinally.gotoWithinCleanupRunsOnBothExits." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -981,8 +978,6 @@ static foreach (backend; Matrix!(
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
         "a goto inside finally returns 0 instead of running cleanup"),
-    Omit!(Interpreter, Because.diverges,
-        "a goto inside finally leaves an unresolved transfer"),
 )) {
     @("tryFinally.forwardGotoInEachCleanupCopy." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1001,6 +996,38 @@ static foreach (backend; Matrix!(
                     }
                 }
                 return trace;
+            }
+        }, "result");
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "backward goto in cleanup is not supported by CTFE"),
+)) {
+    @("tryFinally.backwardGotoInCleanupRunsOnBothExits." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        22.shouldBeRetOf!(backend, q{
+            int cleanup(bool fail) {
+                int count;
+                try {
+                    try {
+                        if (fail)
+                            throw new Exception("body");
+                    } finally {
+                    again:
+                        ++count;
+                        if (count < 2)
+                            goto again;
+                    }
+                } catch (Exception) {
+                }
+                return count;
+            }
+
+            int result() {
+                return cleanup(false) * 10 + cleanup(true);
             }
         }, "result");
     }
@@ -1032,8 +1059,6 @@ static foreach (backend; Matrix!()) {
 
 
 static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.diverges,
-        "exception chaining does not link the guest cleanup exception"),
 )) {
     @("tryFinally.throwingCleanupChainsExceptions." ~ backend.stringof)
     @Tags(backend.stringof)

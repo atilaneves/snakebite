@@ -1124,12 +1124,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     override void visit(TryFinallyStatement statement) {
         bool bodyRan;
+        Throwable pendingException;
         if (_controlFlow.seeking) {
             if (statement._body !is null)
                 statement._body.accept(this);
+            bodyRan = true;
+            if (_controlFlow.seeking && statement.finalbody !is null)
+                statement.finalbody.accept(this);
             if (_controlFlow.seeking)
                 return;
-            bodyRan = true;
         }
 
         try {
@@ -1141,6 +1144,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 if (statement._body !is null)
                     statement._body.accept(this);
             }
+        } catch (GuestException exception) {
+            pendingException = exception._guest;
+            throw exception;
         } finally {
             auto returned = _returned;
             auto continued = _continued;
@@ -1159,8 +1165,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _breakLabel = null;
             _controlFlow.clearTransfer;
 
-            if (statement.finalbody !is null)
-                statement.finalbody.accept(this);
+            runFinallyBody(statement.finalbody, pendingException);
 
             if (!_returned && !_continued && !_break
                     && !_controlFlow.hasTransfer) {
@@ -1171,6 +1176,45 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 _breakLabel = breakLabel;
                 _controlFlow = transfer;
             }
+        }
+    }
+
+    private void runFinallyBody(
+        Statement finalbody,
+        Throwable pendingException,
+    ) {
+        if (pendingException is null) {
+            runCleanupBody(finalbody);
+            return;
+        }
+
+        try {
+            try {
+                throw pendingException;
+            } finally {
+                runFinallyBodyRaw(finalbody);
+            }
+        } catch (Throwable exception) {
+            throw new GuestException(exception);
+        }
+    }
+
+    private void runFinallyBodyRaw(Statement finalbody) {
+        try {
+            runCleanupBody(finalbody);
+        } catch (GuestException exception) {
+            throw exception._guest;
+        }
+    }
+
+    private void runCleanupBody(Statement finalbody) {
+        if (finalbody is null)
+            return;
+
+        finalbody.accept(this);
+        while (_controlFlow.hasTransfer) {
+            _controlFlow.resume;
+            finalbody.accept(this);
         }
     }
 
@@ -1240,9 +1284,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         foreach (child; *statement.statements) {
             if (child !is null) {
                 child.accept(this);
-                if (_returned || _continued || _break
-                        || _controlFlow.hasTransfer)
+                if (_returned || _break || _controlFlow.hasTransfer)
                     return;
+
+                if (_continued) {
+                    if (_continueLabel !is null)
+                        return;
+
+                    _continued = false;
+                }
             }
         }
     }
@@ -1384,6 +1434,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     override void visit(LabelStatement statement) {
         _controlFlow.at(cast(void*) statement);
+        if (statement.statement !is null)
+            _controlFlow.at(cast(void*) statement.statement);
 
         auto previousLabel = _pendingLoopLabel;
         _pendingLoopLabel = statement.ident;
