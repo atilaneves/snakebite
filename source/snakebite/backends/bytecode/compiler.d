@@ -3079,15 +3079,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
         }
 
-        // `__traits(initSymbol, T)` for a class `T`: dmd's own lowering
-        // (`traits.d`, `Id.initSymbol`) hands back a `VarExp` on a
-        // `SymbolDeclaration` wrapping `T`'s `AggregateDeclaration`, typed
-        // `const(void[])` - a byte range over linked static data dmd's own
-        // code generator would normally emit for the class's `.init`
-        // image. `classRuntimeInfo` already builds that same image, for a
-        // `new` expression's own allocation and for the class's vtable and
-        // `typeid` - this reads it back rather than emitting a second copy
-        // of it.
+        // initSymbol exposes the aggregate's native initializer as bytes.
+        // Keep the image in the same storage used for default values and
+        // class runtime information so its address remains valid.
         if (auto symbol = expression.var.isSymbolDeclaration) {
             if (symbol.type.isTypeStruct !is null) {
                 emitBytes(_bytecode._nativeData.initialValue(
@@ -3095,19 +3089,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return;
             }
 
-            auto classDeclaration = symbol.dsym.isClassDeclaration;
-            if (classDeclaration is null)
+            auto declaration = symbol.dsym.isAggregateDeclaration;
+            if (declaration is null)
                 return visit(cast(Expression) expression);
+            const initial = _bytecode._runtimeTypes.initializer(declaration);
 
             import snakebite.nativelayout:
                 arrayLengthOffset, arrayPointerOffset;
 
-            auto runtime = _bytecode.classRuntimeInfo(classDeclaration);
             emit(&opConstant, _destination + arrayLengthOffset,
-                addConstant(cast(long) runtime.m_init.length),
-                size_t.sizeof);
+                addConstant(cast(long) initial.length), size_t.sizeof);
             emit(&opConstant, _destination + arrayPointerOffset,
-                addConstant(cast(long) cast(size_t) runtime.m_init.ptr),
+                addConstant(cast(long) cast(size_t) initial.ptr),
                 size_t.sizeof);
             return;
         }
