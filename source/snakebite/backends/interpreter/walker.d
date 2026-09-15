@@ -4956,10 +4956,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // own argument type - is what `variadicCallPlanOf` classifies it by.
     //
     // The plan is built first, from types alone, before anything is
-    // evaluated or bound: a refusal `variadicCallPlanOf` raises - a
-    // function pointer or delegate extra argument has no callback pool
-    // entry (`CallPlan.prepareCommon`'s own doc, issue #9) - then happens
-    // before this binds a frame or evaluates a single argument
+    // evaluated or bound: a refusal `variadicCallPlanOf` raises - an
+    // extra argument of a type the ABI cannot classify, say - then
+    // happens before this binds a frame or evaluates a single argument
     // expression, so a call about to be refused never runs any of the
     // guest code its own extra arguments would have evaluated (issue
     // #334 step 5 review finding 2).
