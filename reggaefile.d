@@ -106,6 +106,9 @@ Target dubTarget(string compiler, string config, string objectSet,
             // default (this machine's is mold) still gets used.
             info.packages[0].lflags ~= flags.value ~ "-gcc=clang";
     }
+    // The executable and loaded D images must share one runtime.
+    info.packages[0].lflags ~= compiler == "dmd"
+        ? "-defaultlib=libphobos2.so" : "-link-defaultlib-shared";
     info.options = buildOptions;
     if (compiler == "dmd")
         info.packages[0].importPaths = info.packages[0].importPaths
