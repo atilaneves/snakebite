@@ -2781,3 +2781,56 @@ unittest {
 
     after.should == before;
 }
+
+
+// A root-owned `extern(D)` untyped variadic function *with a body*
+// (`guestLen`, ADR-0009's own "interpreted" criteria) - not the
+// prototype-only shape every other variadic test in this file uses.
+// Native (real compiled D) runs it directly, no `pragma(mangle)` or
+// static-struct workaround needed: `guestLen` and its caller `answer`
+// are both nested together inside `shouldBeRetOf`'s own delegate, so
+// unlike `signatures.externD.nineWordsTwoStringsSpill`'s own workaround
+// (a *free* `extern(D)` declaration crossing an ABI boundary a
+// *separately compiled*, non-nested definition expects), there is no
+// mismatched convention here to trip over - both sides agree, whatever
+// dmd's own nested-function calling convention happens to be.
+// Interpreter and Bytecode refuse instead, naming the limitation
+// (`Evaluator.callVariadicNative`'s and `FunctionCompiler.
+// compileResolvedCall`'s own doc); Ctfe hits dmd's own, pre-existing
+// CTFE limitation for a variadic function's body ("C-style variadic
+// functions are not yet implemented in CTFE" - `dmd`'s own message,
+// unrelated to this backend).
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "guest-bodied D variadic functions are not interpreted yet - " ~
+        "see Evaluator.callVariadicNative's own doc for what a full " ~
+        "implementation would need"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "guest-bodied D variadic functions are not interpreted yet - " ~
+        "see FunctionCompiler.compileResolvedCall's own doc for what " ~
+        "a full implementation would need"),
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's own CTFE interpreter refuses a variadic function's " ~
+        "body outright (\"C-style variadic functions are not yet " ~
+        "implemented in CTFE\"), independent of this backend"),
+)) {
+    @("variadic.externD.guestBodied." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        102.shouldBeRetOf!(
+            backend,
+            q{
+                import core.stdc.stdarg;
+
+                int guestLen(int a, ...) {
+                    return a * 100 + cast(int) _arguments.length;
+                }
+
+                int answer() {
+                    return guestLen(1, 2, 3);
+                }
+            },
+            "answer",
+        );
+    }
+}

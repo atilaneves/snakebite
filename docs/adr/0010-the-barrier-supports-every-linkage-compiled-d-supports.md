@@ -15,7 +15,12 @@ so any other platform fails loudly instead of guessing.
 sets `AL` to the count of SSE registers used, as the System V ABI
 requires.
 
-**`extern(D)`**: every shape, including all three D variadic kinds.
+**`extern(D)`**: every shape the barrier itself crosses, including all
+three D variadic kinds - a root-owned untyped variadic function with a
+body is not yet interpreted (`snakebite.backends.interpreter.walker.
+Evaluator.callVariadicNative`'s and `snakebite.backends.bytecode.
+compiler.FunctionCompiler.compileResolvedCall`'s own doc), a narrower
+exception than the barrier shapes below, which this paragraph is about.
 Typesafe variadics are a slice, classified and passed exactly like any
 other declared parameter - the frontend has already packed the call
 site's trailing arguments into it. Untyped variadics pass `_arguments`

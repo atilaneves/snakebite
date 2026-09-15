@@ -4821,9 +4821,29 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     // Calls a `VarArg.variadic` callee - `extern(C)` C-style, or
     // `extern(D)` untyped (issue #334 step 6) - always a native symbol,
-    // since nothing this backend interprets can have its `va_arg`-reading
-    // body walked correctly, so this never checks `usesGuestBody` the way
-    // `executeRaw` does.
+    // so this never checks `usesGuestBody` the way `executeRaw` does. A
+    // root-owned callee whose own body is meant to *run* - has a body,
+    // and (`PlanCache.hasNativeSymbol`, the same check `prepareCommon`'s
+    // own resolver makes) no real host address - is refused below with a
+    // clearer message than that resolver's own "cannot resolve the
+    // symbol" would give: nothing is missing from this process, this
+    // backend simply does not walk a `VarArg.variadic` body yet (ADR-
+    // 0010's own D-variadic paragraph narrows its "every shape" claim
+    // for exactly this case). A root-owned declaration can still carry a
+    // `pragma(mangle)` naming a real, separately linked native symbol
+    // (`DVariadicMethodHost.sum`'s own shape, `ut.backends.call.ffi`'s
+    // own `variadic.externD.method`) - its body exists only so dmd's own
+    // `semantic3` populates its hidden `_arguments`/`_argptr` locals, and
+    // `hasNativeSymbol` is true for it, so it reaches the ordinary native
+    // call below same as any other native callee, no refusal.
+    // Interpreting a guest body that really does need `_arguments`/
+    // `_argptr` bound from the call site would mean building a SysV
+    // register-save-area for this backend's own callee to read `_argptr`
+    // over, *and* interpreting whatever `core.vararg`/`core.internal.
+    // vararg.sysv_x64` template instantiation its own body's `va_arg`
+    // calls resolve to - ADR-0009 rule 1 makes a root-instantiated
+    // druntime template root-owned too, so that call would need walking,
+    // not a native `va_arg`, the same way this callee itself would be.
     //
     // `funcType.parameterList`'s own, declared parameters bind into a
     // frame exactly as any other call (`bindFrame`, passed `allowExtra`
@@ -4870,6 +4890,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         FuncDeclaration function_,
         TypeFunction funcType,
     ) {
+        if (function_.fbody !is null && _program.isInterpreted(function_)
+                && !_plans.hasNativeSymbol(function_)) {
+            import std.conv: text;
+
+            throw new SnakebiteException(
+                text("interpreter cannot call `", function_.toString,
+                    "`: guest-bodied D variadic functions are not ",
+                    "interpreted yet"),
+            );
+        }
+
         const isDVariadic = funcType.isDstyleVariadic;
         const declaredArgumentOffset = isDVariadic ? 1 : 0;
 

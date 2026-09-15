@@ -5195,19 +5195,43 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // A `VarArg.variadic` callee - `extern(C)` C-style or `extern(D)`
         // untyped (issue #334 steps 5 and 6) - always reaches a native
         // symbol, the same way `Evaluator.visit(CallExp)`'s own check
-        // does for the interpreter (its own doc): nothing this compiler
-        // compiles can walk a `va_arg`-reading body correctly, and a
-        // guest declaration written only so dmd's `semantic3` populates
-        // its own hidden context (the `ContextHiddenPointer`-style
-        // prototype `ut.ffi.plan`'s own `called.
-        // contextPrecedesHiddenReturnPointer` documents) or `_arguments`/
-        // `_argptr` locals is never meant to be walked as guest code
-        // either - so this bypasses `usesGuestBody`'s ordinary preference
-        // entirely instead of letting a callee that merely *has* a body
-        // (`{ assert(0); }`, say) fall into the guest branch below and
-        // trip over its own compiler-synthesised `_arguments = v_
-        // arguments.elements;` construct statement, which reads a hidden
-        // parameter no `FrameLayout` ever reserves a guest frame slot for.
+        // does for the interpreter (its own doc): a guest declaration
+        // written only so dmd's `semantic3` populates its own hidden
+        // context (the `ContextHiddenPointer`-style prototype `ut.ffi.
+        // plan`'s own `called.contextPrecedesHiddenReturnPointer`
+        // documents) or `_arguments`/`_argptr` locals is never meant to
+        // be walked as guest code - so this bypasses `usesGuestBody`'s
+        // ordinary preference entirely instead of letting a callee that
+        // merely *has* a body (`{ assert(0); }`, say) fall into the
+        // guest branch below and trip over its own compiler-synthesised
+        // `_arguments = v_arguments.elements;` construct statement, which
+        // reads a hidden parameter no `FrameLayout` ever reserves a guest
+        // frame slot for.
+        //
+        // A root-owned callee whose body is meant to *run* - has a body,
+        // and (`hasNativeSymbol`, the same check `CallPlan.prepareCommon`'s
+        // own resolver makes) no real host address - is refused below
+        // instead, naming this exact limitation: this compiler does not
+        // yet walk a `VarArg.variadic` body (ADR-0010's own D-variadic
+        // paragraph narrows its "every shape" claim for this case), the
+        // same refusal `Evaluator.callVariadicNative`'s own doc explains.
+        // A root-owned declaration can still carry a `pragma(mangle)`
+        // naming a real, separately linked native symbol
+        // (`DVariadicMethodHost.sum`'s own shape, `ut.backends.call.ffi`'s
+        // own `variadic.externD.method`) - `hasNativeSymbol` is true for
+        // it, so it reaches the ordinary native call below, no refusal.
+        if (type.parameterList.varargs == VarArg.variadic
+                && callee.fbody !is null && _bytecode.isGuestFunction(callee)
+                && !_bytecode.hasNativeSymbol(callee)) {
+            import std.conv: text;
+
+            throw new SnakebiteException(text(
+                "bytecode compiler cannot call `", callee.toString,
+                "`: guest-bodied D variadic functions are not ",
+                "interpreted yet",
+            ));
+        }
+
         const guest = type.parameterList.varargs != VarArg.variadic
             && usesGuestBody(
                 callee, arguments, &_bytecode.isGuestFunction,
