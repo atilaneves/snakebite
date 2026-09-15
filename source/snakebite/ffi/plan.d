@@ -286,9 +286,12 @@ public struct CallPlan {
         align(16) ubyte[delegateValueSize * inlineCopies] inlineCopy = void;
         void*[inlineCopies] inlinePointer = void;
         const count = _callbackArguments.length;
+        // `new void[]`, not `new ubyte[]`: a `ubyte[]` block is NO_SCAN,
+        // and this copy briefly holds a callback argument's own bytes,
+        // which the collector must still be able to trace (ADR-0005).
         auto copies = count <= inlineCopies
             ? inlineCopy[0 .. delegateValueSize * count]
-            : new ubyte[delegateValueSize * count];
+            : cast(ubyte[]) new void[delegateValueSize * count];
         auto pointers = count <= inlineCopies
             ? inlinePointer[0 .. count] : new void*[count];
 

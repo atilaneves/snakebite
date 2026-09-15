@@ -332,8 +332,13 @@ private void invoke(ref Slot slot, CallFrame* frame) {
 
     const scratchBytes = plan.callbackScratchBytes;
     align(16) ubyte[256] inlineScratch = void;
+    // `new void[]`, not `new ubyte[]`: druntime marks a `ubyte[]` block
+    // NO_SCAN, but the return place a guest callback writes through
+    // (`callbackReturnPlace`, below) can land here, and a class, slice
+    // or delegate the callback returns must stay visible to the
+    // collector (ADR-0005).
     auto scratch = scratchBytes <= inlineScratch.length
-        ? inlineScratch.ptr : (new ubyte[scratchBytes]).ptr;
+        ? inlineScratch.ptr : (cast(ubyte[]) new void[scratchBytes]).ptr;
 
     const count = plan.callbackArgumentCount;
     void*[16] inlineAddresses = void;
