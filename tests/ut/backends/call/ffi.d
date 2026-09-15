@@ -2376,6 +2376,107 @@ static foreach (backend; Matrix!(
 }
 
 
+// An odd-sized (3-byte) INTEGER eightbyte extra: `runtimetypes.
+// eightbyteRepresentative` used to always stand in with `typeid(long)`
+// (8 bytes), so `va_arg` copied 8 bytes into `dest` for a struct only 3
+// bytes wide - `answer` fills the rest of its own 8-byte buffer with a
+// `0xAA` sentinel first and checks it survives untouched past the one
+// byte of over-copy `typeid(int)` (dmd's own `argtypes_sysv_x64` table
+// for this size) still allows.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("variadic.externD.threeByteStructExtra." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        7.shouldBeRetOf!(
+            backend,
+            q{
+                struct ThreeBytes {
+                    ubyte a;
+                    ubyte b;
+                    ubyte c;
+                }
+
+                struct Ffi {
+                    static:
+                    pragma(mangle, "snakebite_ut_dvariadic_struct_backend")
+                    extern(D) size_t copyStruct(ubyte* dest, ...);
+                }
+
+                int answer() {
+                    ubyte[8] buffer = 0xAA;
+                    ThreeBytes value;
+                    value.a = 1;
+                    value.b = 2;
+                    value.c = 4;
+                    const size = Ffi.copyStruct(buffer.ptr, value);
+                    if (size != 3)
+                        return 0;
+                    if (buffer[0] != 1 || buffer[1] != 2 || buffer[2] != 4)
+                        return 0;
+                    // Index 3 is the one byte `typeid(int)`'s own
+                    // over-copy may still touch - only 4..8 prove no
+                    // wider, `typeid(long)`-sized over-copy happened.
+                    foreach (i; 4 .. 8)
+                        if (buffer[i] != 0xAA)
+                            return 0;
+                    return 7;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// A MEMORY-class (24-byte, three-eightbyte) struct extra: `abi.classify`
+// classifies anything over two eightbytes as MEMORY before this backend
+// ever fabricates `m_arg1`/`m_arg2` for it (`setSysVArgTypes`'s own
+// early `if (plan.memory) return;`), so druntime's own `va_arg` takes
+// its "always passed in memory" path instead of reading a register-save-
+// area eightbyte - the same struct extra shape `ut.ffi.plan`'s own
+// `called.memoryClassParameter*` tests check for a declared parameter,
+// here for a variadic extra argument instead.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("variadic.externD.memoryClassStructExtra." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        24_000_060L.shouldBeRetOf!(
+            backend,
+            q{
+                struct MemoryStruct {
+                    long a;
+                    long b;
+                    long c;
+                }
+
+                struct Ffi {
+                    static:
+                    pragma(mangle, "snakebite_ut_dvariadic_struct_backend")
+                    extern(D) size_t copyStruct(ubyte* dest, ...);
+                }
+
+                long answer() {
+                    ubyte[24] buffer;
+                    MemoryStruct value;
+                    value.a = 10;
+                    value.b = 20;
+                    value.c = 30;
+                    const size = Ffi.copyStruct(buffer.ptr, value);
+                    long* asLongs = cast(long*) buffer.ptr;
+                    return cast(long) size * 1_000_000
+                        + asLongs[0] + asLongs[1] + asLongs[2];
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {

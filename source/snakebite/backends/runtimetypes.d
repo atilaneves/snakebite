@@ -308,20 +308,28 @@ private void setSysVArgTypes(
 }
 
 // A real host `TypeInfo` standing in for one SysV eightbyte: `core.
-// internal.vararg.sysv_x64.va_arg`'s TypeInfo-driven overload only ever
-// reads two things off it - `tsize` (to know how many bytes this
-// eightbyte holds; the second eightbyte's own `tsize` is never read, only
-// whether it is non-null) and `flags` bit 1 (`inXMMregister`, to pick the
-// SSE save area over the integer one) - so any host type with the right
-// `tsize` and the right SSE-ness stands in correctly, whether or not it
-// is the guest's own type. `float`/`double` both set that flags bit
-// (verified: `typeid(float).flags`/`typeid(double).flags` are `2` on
-// this exact host); no integral type does. An odd-sized (3, 5, 6 or 7
-// byte) partial INTEGER eightbyte - only possible for the *last*
-// eightbyte of an unaligned or padded struct - has no exact-size
-// built-in type to stand in for it; `long` is the closest safe
-// over-read, since the register save area always reserves a full
-// eightbyte regardless of the argument's own narrower size.
+// internal.vararg.sysv_x64.va_arg`'s TypeInfo-driven overload reads
+// `tsize` (to know how many bytes this eightbyte holds) and `flags` bit
+// 1 (`inXMMregister`, to pick the SSE save area over the integer one)
+// off `arg1`; off `arg2` it reads that same flags bit, and whether it is
+// non-null at all, always - and, only on the path where the second
+// eightbyte itself spills past the SSE register file onto the stack,
+// its own `tsize` too (`sysv_x64.d`'s own `ap.stack_args +=
+// arg2.tsize.alignUp`) - so any host type with the right `tsize` and the
+// right SSE-ness stands in correctly, whether or not it is the guest's
+// own type. `float`/`double` both set that flags bit (verified: `typeid
+// (float).flags`/`typeid(double).flags` are `2` on this exact host); no
+// integral type does. An odd-sized (3, 5, 6 or 7 byte) partial INTEGER
+// eightbyte - only possible for the *last* eightbyte of an unaligned or
+// padded struct - has no exact-size built-in type to stand in for it;
+// dmd's own table for this exact case (`argtypes_sysv_x64.d`'s own
+// `toArgTypes_sysv_x64`: `size > 4 ? Tint64 : size > 2 ? Tint32 : size >
+// 1 ? Tint16 : Tint8`) is mirrored here rather than always widening to
+// `long` - `long` over-reads a 3-byte eightbyte by 5 bytes, past
+// whatever the register save area holds next, where `int` over-reads it
+// by only 1, identical to what compiled D itself reads. The register
+// save area always reserves a full eightbyte regardless of the
+// argument's own narrower size, so the over-read itself is always safe.
 private imported!"object".TypeInfo eightbyteRepresentative(
     imported!"snakebite.ffi.abi".Register register,
 ) {
@@ -333,7 +341,7 @@ private imported!"object".TypeInfo eightbyteRepresentative(
     switch (register.size) {
         case 1: return typeid(byte);
         case 2: return typeid(short);
-        case 4: return typeid(int);
+        case 3: case 4: return typeid(int);
         default: return typeid(long);
     }
 }
