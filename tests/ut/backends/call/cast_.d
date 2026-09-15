@@ -88,9 +88,7 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("cast.floatToIntegral.truncatesTowardZero." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

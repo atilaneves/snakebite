@@ -12,7 +12,9 @@ extern(C) void executeCallPlan(
 );
 
 import snakebite.callarguments: CallArguments;
-import snakebite.nativevalue: loadSigned, loadUnsigned, storeIntegral;
+import snakebite.nativevalue:
+    floatingToIntegral, integralToFloating, loadFloating, loadSigned,
+    loadUnsigned, storeFloating, storeIntegral;
 import object: Throwable, TypeInfo_Class;
 
 private alias storeWidth = storeIntegral;
@@ -1393,44 +1395,19 @@ private const(Instruction)* runCastWidenUnsigned(Decoded)(
     return execution.next;
 }
 
-private void storeFloating(T)(void* place, in T value, in size_t width)
-        @nogc nothrow {
-    if (width == float.sizeof)
-        *cast(float*) place = cast(float) value;
-    else if (width == double.sizeof)
-        *cast(double*) place = cast(double) value;
-    else {
-        assert(width == real.sizeof);
-        *cast(real*) place = value;
-    }
-}
-
-// Returns `real` rather than `double`, wide enough to carry a `real`
-// source's own precision without narrowing it first - `float` and
-// `double` both widen to `real` exactly, so the one return type serves
-// every source width.
-private real loadFloating(const(void)* place, in size_t width)
-        @nogc nothrow {
-    if (width == float.sizeof)
-        return *cast(const float*) place;
-    if (width == double.sizeof)
-        return *cast(const double*) place;
-
-    assert(width == real.sizeof);
-    return *cast(const real*) place;
-}
-
 private alias opIntegralToFloat(bool unsigned_) =
     execute!(runIntegralToFloat, OperandKind.storage, OperandKind.storage, unsigned_);
 
 private const(Instruction)* runIntegralToFloat(bool unsigned_, Decoded)(
     ref Decoded execution,
 ) {
-    static if (unsigned_)
-        const value = loadUnsigned(execution.source, execution.sourceWidth);
-    else
-        const value = loadSigned(execution.source, execution.sourceWidth);
-    storeFloating(execution.destination, value, execution.width);
+    integralToFloating(
+        execution.destination,
+        execution.source,
+        execution.width,
+        execution.sourceWidth,
+        unsigned_,
+    );
     return execution.next;
 }
 
@@ -1443,12 +1420,13 @@ private alias opFloatToIntegral(bool unsigned_) =
 private const(Instruction)* runFloatToIntegral(bool unsigned_, Decoded)(
     ref Decoded execution,
 ) {
-    const value = loadFloating(execution.source, execution.sourceWidth);
-    static if (unsigned_)
-        const converted = cast(long) cast(ulong) value;
-    else
-        const converted = cast(long) value;
-    storeWidth(execution.destination, converted, execution.width);
+    floatingToIntegral(
+        execution.destination,
+        execution.source,
+        execution.width,
+        execution.sourceWidth,
+        unsigned_,
+    );
     return execution.next;
 }
 
