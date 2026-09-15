@@ -55,18 +55,22 @@ public bool prefersGuestBody(
 // by the time this ever runs (the frontend already packed it), so this
 // stays exact for that variadic kind too.
 //
-// `allowExtra` opts a call site into accepting more arguments than
-// `parameterList.length`, positionally unmatched to any parameter: only
-// the call sites that go on to read those extra arguments themselves
-// pass it - a C-style variadic call's own extra arguments (issue #334
-// step 5), and an `extern(D)` untyped variadic call site's own leading
-// `_arguments` plus its extra arguments (issue #334 step 6), both of
-// which `snakebite.ffi.plan.CallPlan.prepareVariadic` is what actually
-// classifies. `VarArg.typesafe` (`T t...`) needs no such allowance: the
-// frontend has already packed a typesafe call's trailing arguments into
-// one array-typed argument by the time this ever runs. Every other call
-// site stays exact, so none of them can silently drop arguments it
-// never reads.
+// A variadic parameter list (`VarArg.variadic`) only requires *at
+// least* its declared parameters: a C-style variadic call site's own
+// extra arguments (issue #334 step 5) sit past `parameterList.length`
+// in `arguments`; an `extern(D)` untyped variadic call site adds its own
+// leading `_arguments` too (issue #334 step 6), at index `0`, ahead of
+// the declared parameters, not past them - only the call's total
+// argument count exceeds `parameterList.length`, by one for
+// `_arguments` and again for each of its own extra arguments past that.
+// Either way, nothing here need know an extra argument's own count or
+// types, positionally unmatched to any parameter - only whoever builds
+// the call's own plan does (`snakebite.ffi.plan.CallPlan.
+// prepareVariadic`). `VarArg.typesafe`
+// (`T t...`) needs no such allowance: the frontend has already packed a
+// typesafe call's trailing arguments into one array-typed argument by
+// the time this ever runs, so `>=` never actually admits more arguments
+// than `parameterList.length` for that kind.
 public bool arityMismatches(
     imported!"dmd.mtype".ParameterList parameterList,
     imported!"dmd.arraytypes".Expressions* arguments,

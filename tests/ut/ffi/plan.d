@@ -2276,14 +2276,12 @@ private TypeInfo_Tuple typeInfoTupleOf(TypeInfo[] elements) {
 
 // Seven `int`s past `count`: six fill the integer register file and the
 // seventh spills - but `_arguments` and `count` themselves compete for
-// those same six registers too (ADR-0010's D variadic paragraph: dmd's
-// own reversed register assignment reverses the *whole* call site's
-// argument list, `_arguments` included, not only the declared
-// parameters), so this is also the first test to exercise `_arguments`
-// actually sharing `CallPlan.buildMoves`' reversed group with the
-// declared parameters and the extra arguments - a wrong `hasVArguments`
-// position in `CallPlan.prepareCommon` would either crash the real,
-// compiled callee below or return the wrong sum, not silently pass.
+// those same six registers too, so this is also the first test to
+// exercise `_arguments` actually sharing `CallPlan.buildMoves`'s
+// register-assignment loop with the declared parameters and the extra
+// arguments - a wrong `hasVArguments` position in `CallPlan.
+// prepareCommon` would either crash the real, compiled callee below or
+// return the wrong sum, not silently pass.
 @("called.variadic.externD.sevenIntsSpillTheIntegerFile")
 unittest {
     auto site = variadicCallSite(q{
@@ -2429,13 +2427,14 @@ unittest {
 // A struct extra argument, alongside a declared pointer parameter: the
 // SysV eightbyte classification for both has to agree with what the
 // real, compiled callee's own `_argptr`/register-save-area machinery
-// expects - `snakebite.backends.runtimetypes.RuntimeTypes.structInfo`'s
-// own `setSysVArgTypes` is what makes a *guest*-declared struct's own
-// fabricated `TypeInfo_Struct` readable the same way through `core.
-// vararg`'s `TypeInfo`-driven `va_arg` (that fix is exercised end to end,
-// through a guest-declared struct, by `ut.backends.call.ffi`'s own
-// `variadic.externD.guestStructTsizeAndBytes`); this plan-level test
-// checks the ABI placement alone, with a host struct type standing in.
+// expects. `elementTypes` below is `typeid(PlanPoint)` - a real, host-
+// compiled `TypeInfo_Struct`, not the fabricated one `snakebite.
+// backends.runtimetypes.RuntimeTypes.structInfo`'s own `setSysVArgTypes`
+// builds for a *guest*-declared struct - so this plan-level test checks
+// only the ABI placement `CallPlan` itself computes, never that
+// fabrication; `ut.backends.call.ffi`'s own `variadic.externD.
+// guestStructTsizeAndBytes` is what exercises `setSysVArgTypes`, through
+// a guest-declared struct, end to end.
 pragma(mangle, "snakebite_ut_dvariadic_struct_sum")
 private extern(D) int snakebite_ut_dvariadic_struct_sum(
     ubyte* dest, ...
@@ -2454,7 +2453,7 @@ private struct PlanPoint {
 }
 
 
-@("called.variadic.externD.structArgument")
+@("called.variadic.externD.structArgumentPlacement")
 unittest {
     auto site = variadicCallSite(q{
         struct GuestPoint {
