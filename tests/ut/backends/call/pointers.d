@@ -457,37 +457,64 @@ static foreach (backend; Matrix!(
 }
 
 
+// The message a backend that owns per-thread call state rejects a
+// foreign-thread callback with. Compiled D keeps no such state, so
+// `Native`'s worker thread calls `yes` like any other thread and no
+// message is ever set.
+private string wrongThreadMessage(B)() {
+    static if (is(B == Interpreter))
+        return "interpreter callback called on a thread that does not "
+            ~ "own its evaluator (see issue #40)";
+    else static if (is(B == Bytecode))
+        return "bytecode callback called on a thread that does not "
+            ~ "own its compiler (see issue #40)";
+    else
+        return "";
+}
+
+private enum wrongThreadCode = q{
+    import ut.backends.call.pointers:
+        snakebite_ut_call_bool_callback_on_thread;
+
+    static bool yes() {
+        return true;
+    }
+
+    string message() {
+        return snakebite_ut_call_bool_callback_on_thread(&yes);
+    }
+};
+
 // Worker-thread execution is owned by issue #40. The callback rejects the
-// worker before it reads or writes the evaluator that its creator thread
-// owns, so an unsupported call is a diagnostic instead of a data race.
-@("pointers.functionPointer.boolCallback.wrongThread.Interpreter")
-@Tags("Interpreter")
-unittest {
-    auto modules = parseSnippets([
-        q{
-            module bool_callback_thread_root;
-            import ut.backends.call.pointers:
-                snakebite_ut_call_bool_callback_on_thread;
+// worker before it reads or writes the state its creator thread owns, so
+// an unsupported call is a diagnostic instead of a data race (Interpreter)
+// or a hang (Bytecode: the worker would otherwise wait forever on the
+// recursive lock its creator thread already holds).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't call host code"),
+)) {
+    @("pointers.functionPointer.boolCallback.wrongThread." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum expected = wrongThreadMessage!backend;
 
-            static bool yes() {
-                return true;
-            }
+        static if (is(backend == Native)) {
+            mixin(wrongThreadCode);
+            message().should == expected;
+        } else {
+            auto modules = parseSnippets([
+                "module bool_callback_thread_root;\n" ~ wrongThreadCode,
+                hostCallbackDeclarations,
+            ]);
+            auto function_ = findFunction(modules[0], "message");
+            auto backend_ = new backend(Program([modules[0]]));
 
-            bool rejected() {
-                return snakebite_ut_call_bool_callback_on_thread(&yes) ==
-                    "interpreter callback called on a thread that does not "
-                    ~ "own its evaluator (see issue #40)";
-            }
-        },
-        hostCallbackDeclarations,
-    ]);
-    auto function_ = findFunction(modules[0], "rejected");
-    auto interpreter = new Interpreter(Program([modules[0]]));
+            string result;
+            backend_.call(function_, &result, []);
 
-    bool result;
-    interpreter.call(function_, &result, []);
-
-    result.should == true;
+            result.should == expected;
+        }
+    }
 }
 
 

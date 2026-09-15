@@ -80,14 +80,22 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // callee's parameter slots itself (`callGuestFromHost`), the way a
     // compiled call site's `Arg`s would.
     private FrameLayout[FuncDeclaration] _callbackLayouts;
+    // The thread that owns the VM's frame stack (issue #40) - set once
+    // at construction, the same way the interpreter's `Evaluator` does.
+    // `callGuestFromHost` rejects a call from any other thread before it
+    // touches `_vm`, instead of two such calls racing on it.
+    private imported!"core.thread".ThreadID _ownerThread;
 
     public this(const Program program) {
+        import core.thread: Thread;
+
         super(program);
         _nativeData = NativeData(&constantSymbolAddress);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
         _vm = Vm(defaultFrameCapacity);
+        _ownerThread = Thread.getThis.id;
         _plans.useCallbacks(
             new CallbackBridge(&invokeCallback, cast(void*) this));
     }
@@ -182,8 +190,20 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private void callGuestFromHost(
         const(Function)* function_, CallbackCall* call,
     ) {
+        import core.thread: Thread;
         import snakebite.frontend.compiler: withCompilerLock;
         import std.conv: text;
+
+        // `_vm`'s frame stack belongs to `_ownerThread` alone. Without
+        // this check, a callback from another thread would wait on
+        // `withCompilerLock` forever whenever this thread already holds
+        // it for an outer `call` - the recursive mutex only lets the
+        // owner back in (issue #40).
+        if (Thread.getThis.id != _ownerThread)
+            throw new SnakebiteException(
+                "bytecode callback called on a thread that does not "
+                    ~ "own its compiler (see issue #40)",
+            );
 
         // Same reasoning as `call`: a callback can reach a callee that
         // is compiled for the first time here.
