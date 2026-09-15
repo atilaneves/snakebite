@@ -2,6 +2,9 @@ module ut.backends.call.ref_;
 
 
 import ut.backends;
+import snakebite.backends.backend: Program;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
 
 
 // The simplest `ref` round trip: the callee mutates the parameter twice,
@@ -276,29 +279,50 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// `Evaluator.call` is the host entry point, not a guest `CallExp`: a
-// `ref`-returning function called through it hands the host a scratch
-// buffer sized for the callee's own return type - `int`, 4 bytes here -
-// but `visit(ReturnStatement)` always writes `size_t.sizeof` (8) bytes
-// for a `ref` return, regardless of `_facts.size`. Unrefused, this call
-// would write 8 bytes into the host's 4-byte `int`.
-@("ref.return.hostCall.refused.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
+// `Backend.call` is the host entry point, not a guest `CallExp`. A
+// `ref`-returning callee hands the host the result's own address, the
+// same word compiled D returns in `rax` - not its value - so
+// `returnPlace` here is pointer-sized, not `int`-sized. The host writes
+// through that address, and a second call proves the write landed on
+// the guest's own storage: `probeCell` reads it back changed, not a
+// copy of the address it handed out the first time (issue #367).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot give the host the address of guest storage"),
+)) {
+    @("ref.return.hostCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        static if (is(backend == Native)) {
+            static int cell;
+            ref int probeCell() {
+                return cell;
+            }
 
-    auto module_ = parseSnippet(q{
-        ref int identity() {
-            static int x = 5;
-            return x;
+            int* address = &probeCell();
+            *address = 9;
+            probeCell().should == 9;
+        } else {
+            auto module_ = parseSnippet(q{
+                ref int probeCell() {
+                    static int cell;
+                    return cell;
+                }
+            });
+            auto function_ = findFunction(module_, "probeCell");
+            auto instance = new backend(Program([module_]));
+
+            int* address;
+            instance.call(function_, &address, []);
+            *address = 9;
+
+            // The callee's return type never changes between two calls,
+            // so the second call hands back an address too, exactly like
+            // the first - there is no separate value-returning mode a
+            // caller can ask for instead.
+            int* secondAddress;
+            instance.call(function_, &secondAddress, []);
+            (*secondAddress).should == 9;
         }
-    });
-    auto function_ = findFunction(module_, "identity");
-
-    int result;
-    interpreter(module_).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "interpreter cannot call `identity` from the host: it " ~
-                "returns by `ref`");
+    }
 }

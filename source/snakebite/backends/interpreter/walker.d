@@ -356,77 +356,68 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void* returnPlace,
         void*[] args,
     ) {
-        runHostToGuest(function_, returnPlace, false, null, args, true);
+        runHostToGuest(function_, returnPlace, args);
     }
 
     // The interpreter's one host-to-guest entry. The program runner's
     // top-level call (`call`) and a callback's re-entry
     // (`callGuestFromHost`) both reach guest code only here - neither
-    // binds arguments on its own. `hasContext`/`context` name a
-    // delegate's own context word for a hidden `this`; `args` are
-    // host-to-guest arguments in native layout, one pointer per
-    // parameter, per `Backend.call`'s own contract - each pointer holds
-    // the address of storage for that parameter's native bytes, which
-    // for a `ref`/`out` parameter are the target's own address.
+    // binds arguments on its own. `args` are host-to-guest arguments in
+    // native layout, one pointer per parameter, per `Backend.call`'s own
+    // contract - each pointer holds the address of storage for that
+    // parameter's native bytes, which for a `ref`/`out` parameter are the
+    // target's own address. When the callee has a hidden `this`, `args[0]`
+    // is that same shape one more time, before the declared parameters:
+    // the address of a pointer-sized word holding the context - the one
+    // convention `CallPlan.call` and a callback's own `addresses` already
+    // use for it.
     //
-    // `rejectRefReturn` is true only for a plain host caller (`call`): it
-    // hands back a value-sized place and cannot read a `ref` result. A
-    // callback re-entry can be a guest virtual call landing on a
-    // `ref`-returning method through a native-shaped vtable slot; its own
-    // call site already knows how to read a `ref` result, so it is not
-    // rejected here.
+    // A `ref`-returning callee hands back the result's own address, not
+    // its value - the same word compiled D returns in `rax` - so
+    // `returnPlace` must be pointer-sized for one of those, exactly as a
+    // callback re-entry already required.
     //
     // This nests under the caller's own pending temporaries
-    // (`withTemporaryLifetime`, not the top-level `withCall`), and
-    // suspends the caller's expression state around the callee's body
-    // (`withNestedCall`) - the same protection a guest call site gives a
-    // callee it reaches mid-expression (`executeCall`). A callback can
-    // fire while an outer guest expression still owns pending
-    // temporaries; a top-level call owns none, so the nesting costs it
-    // nothing.
+    // (`withTemporaryLifetime`) rather than a fresh top-level lifetime: at
+    // true top level `_temporaries.length` is 0, so the nested form is
+    // already the same as starting one from empty, and every release path
+    // here runs in `scope(exit)`, so no earlier call can leave temporaries
+    // behind that a separate top-level backstop would need to clean up.
+    // This also suspends the caller's expression state around the
+    // callee's body (`withNestedCall`) - the same protection a guest call
+    // site gives a callee it reaches mid-expression (`executeCall`). A
+    // callback can fire while an outer guest expression still owns
+    // pending temporaries; a top-level call owns none, so the nesting
+    // costs it nothing.
     extern(D) private void runHostToGuest(
         FuncDeclaration function_,
         void* returnPlace,
-        bool hasContext,
-        void* context,
         scope const(void*)[] args,
-        bool rejectRefReturn,
     ) {
         import snakebite.frontend.compiler: withCompilerLock;
-        import snakebite.nativelayout: storeIntegral;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
 
         withCompilerLock({
             auto layout = layoutOf(function_);
             auto shape = callShapeOf(function_);
-            if (rejectRefReturn)
-                shape.adapter.rejectHostReferenceReturn(function_);
+            layout.checkHostArgumentCount(
+                args.length, function_, "interpreter");
             auto frame = _frames.push(layout.size, layout.alignment);
 
+            scope const(void*)[] declaredArguments = args;
             if (layout.hiddenThis.variable !is null) {
-                if (!hasContext)
-                    throw new SnakebiteException(
-                        text("interpreter cannot run `",
-                            function_.toString,
-                            "`: the host passed no context for its "
-                            ~ "hidden `this`"),
-                    );
                 storeIntegral(
                     frame.base + layout.hiddenThis.parameter.offset,
-                    cast(size_t) context,
+                    loadIntegral(args[0], size_t.sizeof, false),
                     size_t.sizeof,
                 );
+                declaredArguments = args[1 .. $];
             }
-
-            if (args.length != layout.parameters.length)
-                throw new SnakebiteException(
-                    text("interpreter expected ", layout.parameters.length,
-                        " host-to-guest argument(s) for `",
-                        function_.toString, "`, got ", args.length),
-                );
 
             try
                 _temporaries.withTemporaryLifetime({
-                    bindHostArguments(args, frame.base, layout, shape);
+                    bindHostArguments(
+                        declaredArguments, frame.base, layout, shape);
                     auto arguments = argumentSlots(frame.base, layout);
                     _temporaries.withNestedCall({
                         executeRaw(
@@ -824,8 +815,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallbackCall* call,
     ) {
         auto evaluator = cast(Evaluator) context;
-        auto function_ = cast(FuncDeclaration) cast(void*) call.function_;
-        evaluator.callGuestFromHost(function_, call);
+        evaluator.callGuestFromHost(call);
     }
 
     // The re-entry a pool entry (ADR-0003) reaches when host code calls a
@@ -833,10 +823,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // the program runner's top-level call: neither binds arguments on its
     // own. A `Throwable` the body throws unwinds through the host frames
     // untouched (ADR-0004).
-    extern(D) private void callGuestFromHost(
-        FuncDeclaration function_,
-        CallbackCall* call,
-    ) {
+    extern(D) private void callGuestFromHost(CallbackCall* call) {
         import core.thread: Thread;
 
         if (Thread.getThis.id != _ownerThread)
@@ -845,10 +832,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     ~ "own its evaluator (see issue #40)",
             );
 
-        runHostToGuest(
-            function_, call.returnPlace, call.hasContext, call.context,
-            call.arguments, false,
-        );
+        runHostToGuest(call.declaration, call.returnPlace, call.arguments);
     }
 
     private void destroyTemporary(Expression expression) {

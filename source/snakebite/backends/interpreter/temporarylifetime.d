@@ -57,15 +57,6 @@ public final class TemporaryLifetime {
         _destroy = destroy;
     }
 
-    // Runs a top-level call with a clean expression lifetime. This is also
-    // the unwind backstop for a guest call that exits before a statement
-    // visitor gets control again.
-    public void withCall(scope Action action) {
-        const state = _expressions.suspendCall;
-        scope (exit) _expressions.resumeCall(state);
-        withLifetime(0, action);
-    }
-
     public void withNestedCall(scope Action action) {
         const state = _expressions.suspendCall;
         scope (exit) _expressions.resumeCall(state);

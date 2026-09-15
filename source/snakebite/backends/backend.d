@@ -103,10 +103,23 @@ public abstract class Backend {
 
     // Invoke one guest function. `args` and the value written to
     // `returnPlace` are in native layout, exactly as compiled D would lay
-    // them out; `returnPlace` must be exactly the return type's size, and
-    // `null` means the result is discarded (e.g. a `void` function, or a
-    // caller that does not need the value). Type information travels only
-    // through `function_`'s dmd type, not through the untyped `void*[]`.
+    // them out; `null` for `returnPlace` means the result is discarded
+    // (e.g. a `void` function, or a caller that does not need the value).
+    // Type information travels only through `function_`'s dmd type, not
+    // through the untyped `void*[]`.
+    //
+    // `args[i]` points at the native bytes of parameter `i`; for a `ref`
+    // or `out` parameter those bytes are the target's own address, one
+    // pointer wide - the same convention a callback re-entry already
+    // uses. When `function_` has a hidden `this` (a member method or a
+    // nested function that reads an outer member's `this`), `args[0]` is
+    // that same shape one more time, before the declared parameters: the
+    // address of a pointer-sized word holding the context.
+    //
+    // For a value-returning callee, `returnPlace` must be exactly the
+    // return type's size. For a `ref`-returning callee, `returnPlace`
+    // must be pointer-sized: the callee hands back the result's own
+    // address, not its value, the same word compiled D returns in `rax`.
     //
     // A guest failure (a failed assert, an uncaught guest exception) throws
     // a host exception, the same as `eval`.

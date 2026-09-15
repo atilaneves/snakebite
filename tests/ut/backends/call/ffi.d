@@ -1167,6 +1167,46 @@ static foreach (form; AliasSeq!("value", "ref", "out", "lazy")) {
 }
 
 
+private extern(C) int snakebite_ut_delegate_throwCaughtAsException(
+    VoidCallback callback,
+) {
+    try {
+        callback();
+        return 0;
+    } catch (Exception exception) {
+        return typeid(exception) is typeid(Exception) ? 1 : 2;
+    }
+}
+
+
+// A guest `throw` inside a callback unwinds through the host frames
+// untouched (ADR-0004): a host `catch (Exception e)` must see the real
+// guest exception object, not this backend's own private wrapper for it.
+// Before a callback's re-entry shared `runHostToGuest` with the program
+// runner's top-level `call`, only `call` unwrapped that private wrapper;
+// a callback re-entry did not, so `typeid(e)` here would have named the
+// wrapper instead of the plain `Exception` the guest actually threw.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("callback.hostCatchesGuestException." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum code = q{
+            alias Callback = void delegate();
+            pragma(mangle, "snakebite_ut_delegate_throwCaughtAsException")
+            extern(C) int host(Callback);
+
+            int answer() {
+                Callback callback = () { throw new Exception("boom"); };
+                return host(callback);
+            }
+        };
+        1.shouldBeRetOf!(backend, code, "answer");
+    }
+}
+
+
 private int _nativeDelegateCalls;
 
 

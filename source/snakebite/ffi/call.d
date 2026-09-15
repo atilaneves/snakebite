@@ -262,21 +262,6 @@ public struct CallAdapter {
         return _returnFacts;
     }
 
-    // A host backend promises a value-sized return place, so it cannot accept
-    // a reference result as its direct return value.
-    public void rejectHostReferenceReturn(
-        imported!"dmd.func".FuncDeclaration function_,
-    ) const {
-        import snakebite.exception: SnakebiteException;
-        import std.conv: text;
-
-        if (_referenceResult)
-            throw new SnakebiteException(
-                text("interpreter cannot call `", function_.toString,
-                    "` from the host: it returns by `ref`"),
-            );
-    }
-
     // A ref return exposes a guest lvalue, while a value return exposes bytes.
     // The caller supplies both guest operations so the distinction stays
     // inside this package.
