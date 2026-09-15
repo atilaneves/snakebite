@@ -63,6 +63,70 @@ static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
     }
 }
 
+// One host-to-guest entry binds every argument class, not just a
+// `main`'s `string[]`: an integer, a pointer, a slice, and a struct all
+// reach the frame in native layout, whether the program runner's
+// top-level `call` or a callback's re-entry is the caller (issue #367).
+// This drives `Backend.call` directly, on a plain function rather than
+// `main`, since `shouldBeStatusOf`/`shouldBeRetOf` only ever pass
+// literal guest-to-guest arguments, never real host ones.
+private struct HostPair {
+    int a;
+    int b;
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("hostToGuestArguments.mixedParameterClasses." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        int number = 10;
+        int target = 5;
+        int* pointer = &target;
+        string label = "hi";
+        auto pair = HostPair(3, 4);
+
+        static if (is(backend == Native)) {
+            static int mix(int number, int* pointer, string label,
+                HostPair pair) {
+                return number + *pointer
+                    + cast(int) label.length + pair.a + pair.b;
+            }
+
+            mix(number, pointer, label, pair).should == 24;
+        } else {
+            import snakebite.frontend.dmd.functions: findFunction;
+
+            auto module_ = parseSnippet(q{
+                module hostToGuestArgumentsMixedParameterClasses;
+
+                struct Pair {
+                    int a;
+                    int b;
+                }
+
+                int mix(int number, int* pointer, string label, Pair pair) {
+                    return number + *pointer
+                        + cast(int) label.length + pair.a + pair.b;
+                }
+            });
+            auto backend_ = new backend(Program([module_]));
+
+            int result;
+            backend_.call(
+                findFunction(module_, "mix"), &result,
+                [
+                    cast(void*) &number, cast(void*) &pointer,
+                    cast(void*) &label, cast(void*) &pair,
+                ],
+            );
+
+            result.should == 24;
+        }
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("ret.int.77." ~ backend.stringof)
     @Tags(backend.stringof)
