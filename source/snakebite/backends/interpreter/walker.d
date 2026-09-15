@@ -307,6 +307,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import core.thread: Thread;
 
         _program = program;
+        _plans = PlanCache(program.dependencyImage);
         _nativeData = NativeData(&constantSymbolAddress);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned, &resolveTypeInfo,
             (declaration) => classRuntimeInfo(declaration),

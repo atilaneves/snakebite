@@ -976,6 +976,12 @@ public extern(C) bool executeIndirectCallPlan(
 // without hashing at all, but it needs somewhere on the call site to keep
 // it, which is the caller's business and not this package's.
 public struct PlanCache {
+    import snakebite.dependencyimage: DependencyImage;
+
+    public this(const(DependencyImage)* image) {
+        _resolver = Resolver(image);
+    }
+
     import dmd.func: FuncDeclaration;
     import dmd.mtype: TypeFunction;
 
