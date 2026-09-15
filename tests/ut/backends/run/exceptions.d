@@ -183,9 +183,7 @@ static foreach (backend; Matrix!()) {
 
 // `throw` is an expression, so it can be a branch of a ternary whose other
 // branch has a value.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("throwAsExpressionInTernary." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

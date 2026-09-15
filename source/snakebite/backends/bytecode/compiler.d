@@ -1087,15 +1087,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _finished = bodyFinished || cleanupFinished;
     }
 
-    override void visit(ThrowStatement statement) {
+    protected override void visitThrowStatement(ThrowStatement statement) {
+        compileThrow(statement.exp, statement.loc);
+    }
+
+    protected override void visitThrowExp(ThrowExp expression) {
+        compileThrow(expression.e1, expression.loc);
+    }
+
+    private void compileThrow(Expression expression, in Loc loc) {
         import dmd.astenums: Tclass;
 
-        if (statement.exp is null || statement.exp.type.ty != Tclass)
-            throw rejection(_function, statement.loc, statementText(statement));
+        if (expression is null || expression.type.ty != Tclass)
+            throw rejection(_function, loc, expression is null
+                ? "a null throw expression" : expressionText(expression));
 
-        const facts = TypeFacts.of(statement.exp.type);
+        const facts = TypeFacts.of(expression.type);
         const offset = reserveTemp(facts);
-        evalInto(statement.exp, offset, facts.size);
+        evalInto(expression, offset, facts.size);
         emit(&opThrow, offset, 0, 0);
         _finished = true;
     }

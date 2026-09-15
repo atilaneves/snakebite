@@ -1529,7 +1529,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         );
     }
 
-    override void visit(ThrowStatement statement) {
+    protected override void visitThrowStatement(ThrowStatement statement) {
         if (_controlFlow.seeking)
             return;
 
@@ -3939,7 +3939,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             new AssertError(failure.message, failure.file, failure.line));
     }
 
-    override void visit(ThrowExp expression) {
+    protected override void visitThrowExp(ThrowExp expression) {
         throwGuest(expression.e1);
     }
 

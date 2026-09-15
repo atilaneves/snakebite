@@ -7,7 +7,9 @@ import dmd.expression:
     ArrayLiteralExp, AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp,
     CmpExp, EqualExp,
     CatElemAssignExp, CatDcharAssignExp,
-    ConstructExp, Expression, IdentityExp, LoweredAssignExp, NewExp, TupleExp;
+    ConstructExp, Expression, IdentityExp, LoweredAssignExp, NewExp, ThrowExp,
+    TupleExp;
+import dmd.statement: ThrowStatement;
 import snakebite.backends.identity: IdentityPlan, identityPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import dmd.visitor: Visitor;
@@ -44,6 +46,17 @@ static foreach (name; __traits(allMembers, imported!"dmd.expression")) {
 // NewExp. Destination hooks keep that result alive across nested evaluation.
 extern(C++) package abstract class LoweringVisitor: Visitor {
     alias visit = Visitor.visit;
+
+    final override void visit(ThrowStatement statement) {
+        visitThrowStatement(statement);
+    }
+
+    final override void visit(ThrowExp expression) {
+        visitThrowExp(expression);
+    }
+
+    protected abstract void visitThrowStatement(ThrowStatement statement);
+    protected abstract void visitThrowExp(ThrowExp expression);
 
     // DMD's semantic pass records the complete runtime append operation in
     // `lowering`. An unlowered form belongs to backend code generation, such
