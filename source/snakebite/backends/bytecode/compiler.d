@@ -413,7 +413,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opFloatAdd, opFloatDivide, opFloatEqual, opFloatGreaterOrEqual,
         opFloatGreaterThan, opFloatLessOrEqual, opFloatLessThan,
         opFloatModulo, opFloatMultiply, opFloatNegate, opFloatNotEqual,
-        opFloatSubtract, opFloatToIntegralSigned, opFloatToIntegralUnsigned,
+        opFloatSubtract, opFloatToBool, opFloatToIntegralSigned,
+        opFloatToIntegralUnsigned,
         opFloatWidthCast, opFrameAddress, opGreaterOrEqualSigned,
         opGreaterOrEqualUnsigned, opGreaterThanSigned, opGreaterThanUnsigned,
         opIntegralToFloatSigned, opIntegralToFloatUnsigned,
@@ -4606,6 +4607,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 destOffset, sourceOffset, plan.destFacts.size,
                 plan.sourceFacts.size,
             );
+            return;
+        }
+
+        case floatToBool: {
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(&opFloatToBool, destOffset, sourceOffset,
+                plan.sourceFacts.size);
             return;
         }
 

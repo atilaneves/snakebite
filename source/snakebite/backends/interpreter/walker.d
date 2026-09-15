@@ -3358,7 +3358,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     protected override void visitUnloweredCast(CastExp expression) {
         import snakebite.backends.casts: classify, CastPlan;
         import snakebite.nativevalue:
-            floatingToIntegral, integralToFloating;
+            floatingToBool, floatingToIntegral, integralToFloating;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
         import std.conv: text;
@@ -3523,6 +3523,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 plan.sourceFacts.size,
                 plan.destFacts.isUnsigned,
             );
+            return;
+        }
+
+        case floatToBool: {
+            align(real.alignof) ubyte[real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            floatingToBool(_place, buffer.ptr, plan.sourceFacts.size);
             return;
         }
         }

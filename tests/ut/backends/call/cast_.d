@@ -467,6 +467,27 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// Floating truth conversion tests the value before integral truncation:
+// `cast(bool) 0.5` is true while zero remains false.
+static foreach (backend; Matrix!()) {
+    @("cast.bool.fractionalNonZeroIsTrue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                double source() { return 0.5; }
+                double zero() { return 0.0; }
+
+                bool result() {
+                    return cast(bool) source() && !cast(bool) zero();
+                }
+            },
+            "result",
+        );
+    }
+}
+
 
 // `cast(T) null` where `T` is a delegate: two words, both zero.
 static foreach (backend; Matrix!(

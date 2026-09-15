@@ -13,8 +13,8 @@ extern(C) void executeCallPlan(
 
 import snakebite.callarguments: CallArguments;
 import snakebite.nativevalue:
-    floatingToIntegral, integralToFloating, loadFloating, loadSigned,
-    loadUnsigned, storeFloating, storeIntegral;
+    floatingToBool, floatingToIntegral, integralToFloating, loadFloating,
+    loadSigned, loadUnsigned, storeFloating, storeIntegral;
 import object: Throwable, TypeInfo_Class;
 
 private alias storeWidth = storeIntegral;
@@ -1432,6 +1432,20 @@ private const(Instruction)* runFloatToIntegral(bool unsigned_, Decoded)(
 
 package alias opFloatToIntegralSigned = opFloatToIntegral!false;
 package alias opFloatToIntegralUnsigned = opFloatToIntegral!true;
+
+package alias opFloatToBool =
+    execute!(runFloatToBool, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runFloatToBool(Decoded)(
+    ref Decoded execution,
+) {
+    floatingToBool(
+        execution.destination,
+        execution.source,
+        execution.width,
+    );
+    return execution.next;
+}
 
 package alias opFloatWidthCast =
     execute!(runFloatWidthCast, OperandKind.storage, OperandKind.storage);

@@ -125,6 +125,14 @@ pragma(inline, true) public void floatingToIntegral(
     storeIntegral(destination, cast(ulong) converted, destinationSize);
 }
 
+pragma(inline, true) public void floatingToBool(
+    void* destination,
+    in void* source,
+    in size_t sourceSize,
+) @nogc nothrow {
+    storeIntegral(destination, loadFloating(source, sourceSize) != 0, 1);
+}
+
 // Whether an integral width has a native representation handled above.
 public bool isIntegralSize(in size_t size) @safe @nogc nothrow pure {
     return size == 1 || size == 2 || size == 4 || size == 8;
