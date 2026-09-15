@@ -182,3 +182,43 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("decodeFrontPreservesResultAndConsumesCodeUnits." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.utf: decodeFront;
+            void main() {
+                wchar[] input = ['A', 0xD83D, 0xDE00, 'Z'];
+                size_t count;
+                assert(decodeFront(input, count) == 'A');
+                assert(count == 1 && input.length == 3);
+                assert(decodeFront(input, count) == 0x1F600);
+                assert(count == 2 && input.length == 1);
+                assert(decodeFront(input) == 'Z');
+                assert(input.length == 0);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("postconditionReadsReturnedLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int checked(int value)
+            out (result) {
+                assert(result == value + 1);
+            }
+            do {
+                immutable answer = value + 1;
+                return answer;
+            }
+            void main() {
+                assert(checked(41) == 42);
+                assert(checked(8) == 9);
+            }
+        });
+    }
+}
