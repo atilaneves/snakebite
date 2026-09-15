@@ -1549,3 +1549,728 @@ static foreach (backend; Matrix!(
         );
     }
 }
+
+
+// The variadic shapes below (issue #334 step 5) mirror `tests/ut/ffi/
+// plan.d`'s own `called.variadic*` tests at the plan level - here,
+// through a guest call on every backend instead of `PlanCache` directly.
+// `_backend` distinguishes each native symbol's own linker name from its
+// plan-level counterpart in `ut.ffi.plan`, since both are `extern(C)` and
+// so share one flat, global symbol namespace in this test binary.
+
+// Always reads exactly nine `int`s past `first` - paired with a guest
+// call site that always passes exactly nine. Ten INTEGER-class words in
+// total: six fill the integer register file, and the last four spill to
+// the stack. Each extra is weighted by its own position (`i + 1`) before
+// being added: a plain sum reads the same total back whether the extras
+// arrive in order or two of them are swapped, so a plain sum cannot tell
+// a correct call from a misordered one (issue #334 step 5 review finding
+// 4) - `tests/ut/ffi/plan.d`'s own plan-level copy of this function has
+// the same reason.
+private extern(C) int snakebite_ut_variadic_sum_ints_backend(
+    int first, ...
+) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, first);
+    int total = first;
+    foreach (i; 0 .. 9)
+        total += (i + 1) * va_arg!int(args);
+    va_end(args);
+    return total;
+}
+
+
+// Reads its own count of extra arguments, so two call sites can pass it
+// a different number safely. Weighted by position, the same reason as
+// `snakebite_ut_variadic_sum_ints_backend`.
+private extern(C) int snakebite_ut_variadic_count_sum_backend(
+    int count, ...
+) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, count);
+    int total;
+    foreach (i; 0 .. count)
+        total += (i + 1) * va_arg!int(args);
+    va_end(args);
+    return total;
+}
+
+
+// Always reads exactly eight `double`s past `first` - nine SSE-class
+// words in total: eight fill the SSE register file (`%al` reports 8),
+// and the last one spills to the stack. Weighted by position, the same
+// reason as `snakebite_ut_variadic_sum_ints_backend`.
+private extern(C) double snakebite_ut_variadic_sum_doubles_backend(
+    double first, ...
+) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, first);
+    double total = first;
+    foreach (i; 0 .. 8)
+        total += (i + 1) * va_arg!double(args);
+    va_end(args);
+    return total;
+}
+
+
+private struct VariadicMixedPairBackend {
+    int integer;
+    double floating;
+}
+
+
+// Reads one `VariadicMixedPairBackend` - one INTEGER lane and one SSE
+// lane in the same eightbyte pair - as its one extra, variadic argument.
+private extern(C) long snakebite_ut_variadic_mixed_pair_backend(
+    int tag, ...
+) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, tag);
+    auto pair = va_arg!VariadicMixedPairBackend(args);
+    va_end(args);
+    return tag * 1_000_000L + pair.integer * 1000 + cast(long) pair.floating;
+}
+
+
+private struct VariadicBig24Backend {
+    long a;
+    long b;
+    long c;
+}
+
+
+// A 24-byte MEMORY-class extra - three eightbytes, past any register
+// pair the classifier ever tries - followed by a plain `int` extra:
+// the MEMORY extra spills to the stack whole, and the `int` after it
+// spills too, since nothing about a MEMORY-class extra changes either
+// register file's own count.
+private extern(C) long snakebite_ut_variadic_memory_then_int_backend(
+    int tag, ...
+) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, tag);
+    auto big = va_arg!VariadicBig24Backend(args);
+    int following = va_arg!int(args);
+    va_end(args);
+    return tag + big.a + big.b + big.c + following;
+}
+
+
+private struct VariadicSixExhaustPairBackend {
+    int a;
+    int b;
+}
+
+
+private struct VariadicSixExhaustTripleBackend {
+    long a;
+    long b;
+    long c;
+}
+
+
+// Six named `int`s already fill the whole integer register file before
+// any extra is classified: a `double` extra still has SSE register
+// room, but the pair (one INTEGER-class eightbyte), the plain `int`,
+// and the MEMORY-class triple all find the integer file exhausted and
+// spill to the stack, in program order alongside the double.
+private extern(C) long
+    snakebite_ut_variadic_six_ints_then_extras_backend(
+        int n0, int n1, int n2, int n3, int n4, int n5, ...
+) {
+    import core.stdc.stdarg;
+
+    va_list args;
+    va_start(args, n5);
+    double d = va_arg!double(args);
+    auto pair = va_arg!VariadicSixExhaustPairBackend(args);
+    int extraInt = va_arg!int(args);
+    auto triple = va_arg!VariadicSixExhaustTripleBackend(args);
+    va_end(args);
+    return n0 + n1 + n2 + n3 + n4 + n5
+        + cast(long) d + pair.a + pair.b + extraInt
+        + triple.a + triple.b + triple.c;
+}
+
+
+// Zero extras through the leaner, integer-only stub entry (chosen at
+// prepare time when there is no SSE argument register and no stack
+// word - `CallPlan._entry`'s own doc): the declared parameter is the
+// only word this call ever sends.
+private extern(C) int snakebite_ut_variadic_zero_extras_int_backend(
+    int a, ...
+) {
+    return a;
+}
+
+
+// Zero extras through the general stub entry: the one SSE-class
+// declared argument is why the general entry is chosen, even with no
+// extras at all.
+private extern(C) double
+    snakebite_ut_variadic_zero_extras_double_backend(double a, ...) {
+    return a;
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("variadic.tenIntsFourSpillToTheStack." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // 1 (`first`, unweighted) + sum((i + 1) * (i + 2)) for i in
+        // 0 .. 9, the values 2 .. 10 at positions 0 .. 8 of the weighted
+        // sum `snakebite_ut_variadic_sum_ints_backend` computes.
+        331.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_sum_ints_backend")
+                extern(C) int nativeSum(int first, ...);
+
+                int answer() {
+                    return nativeSum(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+                }
+            },
+            "answer",
+        );
+    }
+
+    @("variadic.nineDoublesOneSpills." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // Same weighted total as `ut.ffi.plan`'s own `called.variadic.
+        // nineDoublesOneSpills`.
+        241.0.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_sum_doubles_backend")
+                extern(C) double nativeSum(double first, ...);
+
+                double answer() {
+                    return nativeSum(
+                        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0);
+                }
+            },
+            "answer",
+        );
+    }
+
+    // A `float` local widens to `double` before it ever reaches the
+    // plan (dmd's own C default argument promotion) - `ut.ffi.plan`'s
+    // own `called.variadic.floatLiteralPromotedToDouble` checks the
+    // promoted `Type` directly; this checks the promoted call still
+    // answers correctly through a guest call on every backend.
+    @("variadic.floatLiteralPromotedToDouble." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // Same weighted total: the promoted `float` carries the same
+        // value, at the same position.
+        241.0.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_sum_doubles_backend")
+                extern(C) double nativeSum(double first, ...);
+
+                double answer() {
+                    float second = 2.0f;
+                    return nativeSum(
+                        1.0, second, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0);
+                }
+            },
+            "answer",
+        );
+    }
+
+    // One extra argument classifies to a mixed INTEGER/SSE eightbyte
+    // pair (issue #334 step 4's own shape), reached through a variadic
+    // call site instead of a named parameter.
+    @("variadic.mixedIntegerSSEStructArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3_007_002L.shouldBeRetOf!(
+            backend,
+            q{
+                struct VariadicMixedPair {
+                    int integer;
+                    double floating;
+                }
+
+                pragma(mangle, "snakebite_ut_variadic_mixed_pair_backend")
+                extern(C) long nativeMixedPair(int tag, ...);
+
+                long answer() {
+                    VariadicMixedPair value;
+                    value.integer = 7;
+                    value.floating = 2.5;
+                    return nativeMixedPair(3, value);
+                }
+            },
+            "answer",
+        );
+    }
+
+    // The same callee at two call sites in one guest function, passing a
+    // different number of extra arguments - one plan per call site
+    // (`ut.ffi.plan`'s own `called.variadic.
+    // sameCalleeTwoCallSitesDifferentArgumentCounts` checks this at the
+    // plan level; this exercises each backend's own call-site handling:
+    // the interpreter's call-site plan cache, and the bytecode
+    // compiler's own one-time-per-`CallExp` compilation).
+    @("variadic.sameCalleeTwoCallSitesDifferentArgumentCounts."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        // 41 (unweighted, one extra) + (1 * 1 + 2 * 2 + 3 * 3) (weighted,
+        // three extras).
+        55.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_count_sum_backend")
+                extern(C) int nativeCountSum(int count, ...);
+
+                int answer() {
+                    return nativeCountSum(1, 41) + nativeCountSum(3, 1, 2, 3);
+                }
+            },
+            "answer",
+        );
+    }
+
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    // A 24-byte MEMORY-class extra followed by a plain `int` extra.
+    @("variadic.memoryClassExtraThenInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        643L.shouldBeRetOf!(
+            backend,
+            q{
+                struct Big24 {
+                    long a;
+                    long b;
+                    long c;
+                }
+
+                pragma(mangle,
+                    "snakebite_ut_variadic_memory_then_int_backend")
+                extern(C) long nativeMemoryThenInt(int tag, ...);
+
+                long answer() {
+                    Big24 value;
+                    value.a = 100;
+                    value.b = 200;
+                    value.c = 300;
+                    return nativeMemoryThenInt(1, value, 42);
+                }
+            },
+            "answer",
+        );
+    }
+
+    // Six named `int`s exhaust the integer register file before a
+    // `double`, a pair, a plain `int`, and a MEMORY-class extra - all
+    // four spill to the stack (the double for lack of extras still
+    // reading from the SSE file, the other three for lack of integer
+    // registers), in program order.
+    @("variadic.sixIntsExhaustIntegerFileThenExtras." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        91L.shouldBeRetOf!(
+            backend,
+            q{
+                struct SixExhaustPair {
+                    int a;
+                    int b;
+                }
+
+                struct SixExhaustTriple {
+                    long a;
+                    long b;
+                    long c;
+                }
+
+                pragma(mangle,
+                    "snakebite_ut_variadic_six_ints_then_extras_backend")
+                extern(C) long nativeSixIntsThenExtras(
+                    int n0, int n1, int n2, int n3, int n4, int n5, ...);
+
+                long answer() {
+                    SixExhaustPair pair;
+                    pair.a = 8;
+                    pair.b = 9;
+                    SixExhaustTriple triple;
+                    triple.a = 11;
+                    triple.b = 12;
+                    triple.c = 13;
+                    return nativeSixIntsThenExtras(
+                        1, 2, 3, 4, 5, 6, 7.0, pair, 10, triple);
+                }
+            },
+            "answer",
+        );
+    }
+
+    // Zero extras through the integer-only stub entry.
+    @("variadic.zeroExtrasIntegerEntry." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle,
+                    "snakebite_ut_variadic_zero_extras_int_backend")
+                extern(C) int nativeZeroExtrasInt(int a, ...);
+
+                int answer() {
+                    return nativeZeroExtrasInt(42);
+                }
+            },
+            "answer",
+        );
+    }
+
+    // Zero extras through the general stub entry.
+    @("variadic.zeroExtrasGeneralEntry." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        3.5.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle,
+                    "snakebite_ut_variadic_zero_extras_double_backend")
+                extern(C) double nativeZeroExtrasDouble(double a, ...);
+
+                double answer() {
+                    return nativeZeroExtrasDouble(3.5);
+                }
+            },
+            "answer",
+        );
+    }
+
+    // A `long` extra past a `%ld` and an `int` extra past a `%d`: a
+    // value too large for 32 bits (`4_000_000_000L`) only prints back
+    // correctly if the plan wrote all eight bytes of the `long`'s own
+    // slot, not just the four an `int` extra would need.
+    @("variadic.longVersusIntWidths." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                import core.stdc.stdio: snprintf;
+                import core.stdc.string: memcmp;
+
+                bool answer() {
+                    char[32] buffer;
+                    char[8] format = "%ld %d\0";
+                    char[13] expected = "4000000000 7\0";
+                    long bigValue = 4_000_000_000L;
+                    int smallValue = 7;
+                    const length = snprintf(
+                        buffer.ptr, buffer.length, format.ptr,
+                        bigValue, smallValue);
+                    return length == 12
+                        && memcmp(buffer.ptr, expected.ptr, 12) == 0;
+                }
+            },
+            "answer",
+        );
+    }
+
+    // `byte`/`short`/`float` extras all promote before they ever reach
+    // the plan (dmd's own C default argument promotion): a `printf`-
+    // style callee only ever reads `int`/`double` off `va_arg`, so the
+    // classification this plan uses never even sees the narrower types.
+    @("variadic.byteShortFloatPromotion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                import core.stdc.stdio: snprintf;
+                import core.stdc.string: memcmp;
+
+                bool answer() {
+                    char[32] buffer;
+                    char[9] format = "%d %d %f\0";
+                    char[13] expected = "5 9 2.500000\0";
+                    byte smallByte = cast(byte) 5;
+                    short smallShort = cast(short) 9;
+                    float smallFloat = cast(float) 2.5;
+                    const length = snprintf(
+                        buffer.ptr, buffer.length, format.ptr,
+                        smallByte, smallShort, smallFloat);
+                    return length == 12
+                        && memcmp(buffer.ptr, expected.ptr, 12) == 0;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// `snprintf` into a guest buffer with `%d %s %f` and mixed integer,
+// pointer and `double` arguments - the comparison runs inside the guest
+// function itself and only the boolean answer crosses back, so this
+// needs no dynamic-array-return support from any backend to assert the
+// resulting string. `"42 hi 3.500000"` is exactly fourteen bytes, so the
+// comparison reads the full output with `memcmp` against a local copy of
+// the expected text, instead of slicing `buffer` (a fixed-size array) by
+// `snprintf`'s own runtime-returned `length`: that slice is a rejection
+// the bytecode compiler already gives for a plain slice-and-compare with
+// no FFI or variadic argument involved, and even a compile-time-constant
+// bound still hits it, since `compiler.d`'s own `visit(SliceExp)` falls
+// through to its generic rejection for *any* bounded slice of a static
+// array (issue #348) - `memcmp`, an ordinary native call, does not. A
+// local array literal's own `.ptr`, not a string literal's own `.ptr`
+// (`format`/`text` below show the same pattern already), since a string
+// literal's `.ptr` segfaults when passed to a native call on both
+// backends today, unrelated to this step.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("variadic.snprintf." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                import core.stdc.stdio: snprintf;
+                import core.stdc.string: memcmp;
+
+                bool answer() {
+                    char[64] buffer;
+                    char[9] format = "%d %s %f\0";
+                    char[3] text = "hi\0";
+                    char[15] expected = "42 hi 3.500000\0";
+                    const length = snprintf(
+                        buffer.ptr, buffer.length, format.ptr,
+                        42, text.ptr, 3.5);
+                    return length == 14
+                        && memcmp(buffer.ptr, expected.ptr, 14) == 0;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// D's own variadic kinds - untyped `_arguments` here, always
+// `extern(D)` - stay refused (issue #334 step 6 is untyped D variadics;
+// typesafe D variadics remain unimplemented). `ut.ffi.plan`'s own
+// `called.variadic.externDRefused` checks `CallPlan.prepare`'s own
+// message directly. On Bytecode this reaches a guest caller unchanged
+// (`Native` never reaches `CallPlan.prepare` at all - compiled D would
+// fail to *link* rather than raise this refusal - and `Ctfe` has no FFI
+// plan machinery of its own): `compileResolvedCall`'s own guest/native
+// split (`usesGuestBody`) already routes a body-less declaration like
+// this one to `compileNativeCall` regardless of linkage, and
+// `compileNativeCall`'s own variadic handling reaches `CallPlan.prepare`
+// the same way for any `VarArg.variadic` type.
+@("variadic.externDRefused.Bytecode")
+@Tags("Bytecode")
+unittest {
+    auto module_ = parseSnippet(q{
+        extern(D) int snakebite_ut_extern_d_variadic_ffi_backend(
+            int x, ...
+        );
+
+        int answer() {
+            return snakebite_ut_extern_d_variadic_ffi_backend(1, 2);
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+
+    int result;
+    new Bytecode(Program([module_])).call(function_, &result, [])
+        .shouldThrowWithMessage(
+            "ffi cannot call `" ~
+                "snakebite_ut_extern_d_variadic_ffi_backend" ~
+                "` as a variadic function: only an `extern(C)` " ~
+                "C-style variadic callee is supported");
+}
+
+
+// The interpreter's own `visit(CallExp)` routes a call to
+// `callVariadicNative` only when the callee's own linkage is `LINK.c`
+// (issue #334 step 5 review finding 6): without that check, a
+// guest-bodied `extern(D)` variadic function (D's own untyped
+// variadics, step 6's own scope) would also reach `callVariadicNative`,
+// whose "ffi cannot call ... as a variadic function" message would
+// misname a guest function as an FFI failure. This declaration has no
+// body either, so it cannot run as a guest function at all; falling
+// through to the ordinary call path (`bindFrame`) reaches its own,
+// honest arity-mismatch message instead - `arguments.length` counts 3,
+// not the 2 written at the call site, because dmd's own semantic
+// lowering of an `extern(D)` variadic call site inserts its own extra
+// argument ahead of the declared `TypeInfo[]`/typeid handling that step
+// 6 will read (`snakebite.backends.calls.arityMismatches`'s own doc).
+@("variadic.externDRefused.Interpreter")
+@Tags("Interpreter")
+unittest {
+    auto module_ = parseSnippet(q{
+        extern(D) int snakebite_ut_extern_d_variadic_ffi_backend(
+            int x, ...
+        );
+
+        int answer() {
+            return snakebite_ut_extern_d_variadic_ffi_backend(1, 2);
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+
+    int result;
+    interpreter(module_).call(function_, &result, [])
+        .shouldThrowWithMessage(
+            "interpreter: `snakebite_ut_extern_d_variadic_ffi_backend` " ~
+                "expects 1 argument(s), got 3");
+}
+
+
+// A function pointer or delegate extra argument has no callback pool
+// entry (ADR-0003) to turn it into a native-callable address - a named
+// parameter of that shape crosses through the bool-function bridge
+// instead (`snakebite.ffi.callback`), which a variadic extra argument
+// has no parameter to attach to (issue #9). `CallPlan.prepareVariadic`
+// refuses both shapes before either backend ever calls the native
+// callee; this checks the refusal reaches a guest caller unchanged.
+static foreach (Backend; AliasSeq!(Interpreter, Bytecode)) {
+    @("variadic.callbackExtraArgumentRefused." ~ Backend.stringof)
+    @Tags(Backend.stringof)
+    unittest {
+        auto functionPointerModule = parseSnippet(q{
+            pragma(mangle, "snakebite_ut_variadic_sum_ints_backend")
+            extern(C) int nativeSum(int first, ...);
+
+            int twice(int x) {
+                return x * 2;
+            }
+
+            int answer() {
+                int function(int) callback = &twice;
+                return nativeSum(1, callback);
+            }
+        });
+        auto functionPointerAnswer =
+            findFunction(functionPointerModule, "answer");
+
+        int result;
+        new Backend(Program([functionPointerModule]))
+            .call(functionPointerAnswer, &result, [])
+            .shouldThrowWithMessage(
+                "ffi cannot pass a function pointer or delegate as a " ~
+                    "variadic argument to `nativeSum`: it has no " ~
+                    "callback pool entry (ADR-0003)");
+
+        auto delegateModule = parseSnippet(q{
+            pragma(mangle, "snakebite_ut_variadic_sum_ints_backend")
+            extern(C) int nativeSum(int first, ...);
+
+            int answer() {
+                int delegate(int) callback = (int x) => x * 2;
+                return nativeSum(1, callback);
+            }
+        });
+        auto delegateAnswer = findFunction(delegateModule, "answer");
+
+        new Backend(Program([delegateModule]))
+            .call(delegateAnswer, &result, [])
+            .shouldThrowWithMessage(
+                "ffi cannot pass a function pointer or delegate as a " ~
+                    "variadic argument to `nativeSum`: it has no " ~
+                    "callback pool entry (ADR-0003)");
+    }
+}
+
+
+// Twenty-one argument words (one declared plus twenty extras) - more
+// than `CallPlan.Frame`'s own sixteen-word inline stack area - reaches
+// the heap fallback instead of any fixed-word refusal: master dropped
+// the argument-count limit this step used to hit here (`CallPlan.
+// _arguments`/`_moves` are dynamic arrays, `Frame`'s stack area falls
+// back to the heap past its own sixteen inline words), so a call this
+// wide just works, on every backend that reaches a plan.
+static foreach (Backend; AliasSeq!(Interpreter, Bytecode)) {
+    @("variadic.moreThanSixteenArgumentWords." ~ Backend.stringof)
+    @Tags(Backend.stringof)
+    unittest {
+        // sum((i + 1) * (i + 1)) for i in 0 .. 20, the weighted sum
+        // `snakebite_ut_variadic_count_sum_backend` computes over the
+        // values 1 .. 20 at positions 0 .. 19.
+        2870.shouldBeRetOf!(Backend, q{
+            pragma(mangle, "snakebite_ut_variadic_count_sum_backend")
+            extern(C) int nativeCountSum(int count, ...);
+
+            int answer() {
+                return nativeCountSum(
+                    20, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+                    16, 17, 18, 19, 20);
+            }
+        }, "answer");
+    }
+}
+
+
+// A variadic callee reached through a function pointer parameter, not a
+// name: the interpreter resolves it dynamically (`calleeOf`), exactly as
+// it would a direct call, so this reuses the same weighted-sum callee
+// and expected total as `variadic.tenIntsFourSpillToTheStack` above.
+// `compileIndirectCall` never opts `arityMismatches` into `allowExtra`
+// the way `compileNativeCall` does for a statically resolved callee
+// (`snakebite.backends.calls`'s own doc - only the two variadic-aware
+// call sites opt in, and an indirect call cannot know at compile time
+// whether its own runtime target will turn out to be one): a call
+// through a function pointer with more arguments than the pointer
+// type's own declared parameter list is refused there as an ordinary
+// arity mismatch, the same as any other indirect call with too many
+// arguments (issue #334 step 5 review, function-pointer scenario).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "compileIndirectCall's own arityMismatches check never opts "
+            ~ "into allowExtra, so a call through a function pointer "
+            ~ "with more arguments than the pointer type's own declared "
+            ~ "parameter list is refused there as an ordinary arity "
+            ~ "mismatch, not routed to a native plan"),
+)) {
+    @("variadic.calledThroughFunctionPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        331.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_sum_ints_backend")
+                extern(C) int nativeSum(int first, ...);
+
+                alias VariadicFp = extern(C) int function(int, ...);
+
+                int callThrough(VariadicFp fp) {
+                    return fp(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+                }
+
+                int answer() {
+                    return callThrough(&nativeSum);
+                }
+            },
+            "answer",
+        );
+    }
+}

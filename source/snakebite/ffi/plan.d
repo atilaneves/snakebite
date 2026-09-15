@@ -795,20 +795,41 @@ public struct PlanCache {
 
     // `function_`'s plan, prepared on its first call and reused after.
     //
-    // Returned by reference: the plan stays in the cache, and a caller
-    // only ever calls through it.
-    public ref const(CallPlan) of(
+    // Returned by pointer, the same kind `variadicOf`/`rawPlanOf` return:
+    // the plan stays in the cache, and a caller only ever calls through
+    // it.
+    public const(CallPlan)* of(
         imported!"dmd.func".FuncDeclaration function_,
     ) {
         if (auto cached = function_ in _plans)
-            return **cached;
+            return *cached;
 
         ++_preparations;
         auto plan = new CallPlan;
         *plan = prepare(function_, _resolver);
         plan._guestDelegates = guestDelegates;
         _plans[function_] = plan;
-        return *plan;
+        return plan;
+    }
+
+    // As `.of`, but for one call site of an `extern(C)` C-style variadic
+    // callee (`prepareVariadic`'s own doc): the plan depends on that
+    // call's own extra argument types, not on `function_` alone, so this
+    // never caches by declaration the way `_plans` does - it prepares a
+    // fresh plan on every call. A caller keeps the returned plan itself,
+    // alongside the call site it belongs to, to avoid paying that cost
+    // more than once per site: the interpreter keeps it next to the
+    // `CallExp` (`Evaluator.CallSitePlan`), and the bytecode compiler
+    // calls this only once, while compiling the one `CallSite` a guest
+    // `CallExp` ever produces.
+    public const(CallPlan)* variadicOf(
+        imported!"dmd.func".FuncDeclaration function_,
+        scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+    ) {
+        ++_preparations;
+        auto plan = new CallPlan;
+        *plan = prepareVariadic(function_, _resolver, extraArgumentTypes);
+        return plan;
     }
 
     // As `.of`, but for a raw address with no `FuncDeclaration` to key
@@ -858,6 +879,37 @@ private CallPlan prepare(
     imported!"dmd.func".FuncDeclaration function_,
     ref Resolver resolver,
 ) {
+    return prepareCommon(function_, resolver, null, false);
+}
+
+// As `prepare`, for one call site of an `extern(C)` C-style variadic
+// callee: `extraArgumentTypes` are that call's own extra arguments'
+// types, in call order, after the frontend has already applied C's
+// default argument promotions (`float` widens to `double`, an integral
+// narrower than `int` widens to `int`) - exactly the types the callee's
+// own `va_arg` will read. `PlanCache.variadicOf` is the one caller.
+//
+// The plan this builds is one call site's own shape, not `function_`'s
+// alone (ADR-0010's C-variadics paragraph; issue #334 step 5): two call
+// sites naming the same variadic function can pass different extra
+// arguments, and need different plans. This is never cached by
+// `function_` the way `PlanCache._plans` caches an ordinary plan - a
+// backend's own call-site cache (`PlanCache.of`'s own doc, issue #96) is
+// what makes a repeat call at the same site free instead.
+package CallPlan prepareVariadic(
+    imported!"dmd.func".FuncDeclaration function_,
+    ref Resolver resolver,
+    scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+) {
+    return prepareCommon(function_, resolver, extraArgumentTypes, true);
+}
+
+private CallPlan prepareCommon(
+    imported!"dmd.func".FuncDeclaration function_,
+    ref Resolver resolver,
+    scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+    in bool isVariadicCall,
+) {
     import snakebite.frontend.dmd.delegates: hasHiddenThis;
     import snakebite.druntime.constructoratomic: nativeTarget;
     import snakebite.ffi.abi:
@@ -882,19 +934,51 @@ private CallPlan prepare(
                     "`: it is not a function"),
             );
 
-        // A variadic callee is handed its arguments differently - on the
-        // System V AMD64 ABI the caller must also report how many SSE
-        // registers it used - so the fixed-arity call this plans would be
-        // the wrong call, not merely an incomplete one.
-        if (type.parameterList.varargs != VarArg.none)
+        auto target = nativeTarget(function_);
+
+        // The symbol's calling convention comes from its declared linkage,
+        // and `extern(D)` code built by the host's own compiler can read
+        // its parameters out of the registers in reverse order - an ABI
+        // fact about this process, not a routing decision about the
+        // callee. `isVariadicCall` below needs this fact too, to tell an
+        // `extern(C)` variadic callee from an `extern(D)` one, so this
+        // moves ahead of that check instead of running only for
+        // `_reversedArguments` further down.
+        const linkage = target.address is null
+            ? function_.resolvedLinkage : target.linkage;
+
+        // A variadic callee is handed its extra arguments differently -
+        // on the System V AMD64 ABI the caller must also report how many
+        // SSE registers it used (`%al`) - so a fixed-arity plan would be
+        // the wrong call, not merely an incomplete one. Only an
+        // `extern(C)` callee (`VarArg.variadic` with C linkage) is
+        // supported, and only through `prepareVariadic`, one call site at
+        // a time (this function's own doc). Every other variadic kind -
+        // D's untyped `_arguments` (issue #334 step 6) and typesafe
+        // `T t...`, both always `extern(D)` - stays refused here, even
+        // when `isVariadicCall` is set: only a genuine C-style variadic
+        // callee can ever satisfy that call.
+        const isCVariadic = type.parameterList.varargs == VarArg.variadic
+            && linkage == LINK.c;
+        if (isVariadicCall) {
+            if (!isCVariadic)
+                throw new Exception(
+                    text("ffi cannot call `", function_.toString,
+                        "` as a variadic function: only an `extern(C)` ",
+                        "C-style variadic callee is supported"),
+                );
+        } else if (type.parameterList.varargs != VarArg.none)
             throw new Exception(
                 text("ffi cannot call the variadic function `",
-                    function_.toString, "`"),
+                    function_.toString, "`: only an `extern(C)` C-style ",
+                    "variadic callee is supported, and only at its own ",
+                    "call site"),
             );
 
         const count = type.parameterList.length;
         const hasContext = hasHiddenThis(function_);
-        const argumentCount = count + hasContext;
+        const argumentCount =
+            count + hasContext + extraArgumentTypes.length;
         CallPlan plan;
         plan._arguments.length = argumentCount;
         // A `ref` return hands back the *address* of the result in the
@@ -910,25 +994,28 @@ private CallPlan prepare(
         plan._contextPrecedesHiddenReturnPointer =
             contextPrecedesHiddenReturnPointer;
 
-        auto target = nativeTarget(function_);
-
-        // The symbol's calling convention comes from its declared linkage,
-        // and `extern(D)` code built by the host's own compiler can read
-        // its parameters out of the registers in reverse order - an ABI
-        // fact about this process, not a routing decision about the
-        // callee.
-        const linkage = target.address is null
-            ? function_.resolvedLinkage : target.linkage;
         plan._reversedArguments = reversedDParameters
             && (linkage == LINK.d || linkage == LINK.default_);
 
         size_t argumentIndex;
+
+        // Places one argument's `ArgumentPlan` in `plan`, at the next
+        // available index - shared by the declared-parameter loop below
+        // and, for a variadic call site, the extra-argument loop after it,
+        // since both place an argument exactly the same way. `_arguments`
+        // and `_moves` are dynamic arrays with a heap fallback beyond the
+        // frame's inline stack area (see `CallArguments` and `Frame`), so
+        // no fixed word budget applies here any more.
+        void addArgument(in ArgumentPlan argument) {
+            plan._arguments[argumentIndex++] = argument;
+        }
+
         if (hasContext) {
             plan._hiddenContext = true;
-            plan._arguments[argumentIndex++] = ArgumentPlan(
+            addArgument(ArgumentPlan(
                 [Register(Register.Kind.pointer, 8), Register.init], 1,
                 false,
-            );
+            ));
         }
 
         foreach (i; 0 .. count) {
@@ -950,7 +1037,7 @@ private CallPlan prepare(
                     argumentIndex, isRef);
                 plan._hostName = function_.toString.idup;
             }
-            const argument = isRef
+            addArgument(isRef
                 ? ArgumentPlan(
                     [Register(Register.Kind.pointer, 8), Register.init], 1,
                     false,
@@ -964,8 +1051,36 @@ private CallPlan prepare(
                         2,
                         false,
                     )
-                : ArgumentPlan.of(type.parameterList[i].type);
-            plan._arguments[argumentIndex++] = argument;
+                : ArgumentPlan.of(type.parameterList[i].type));
+        }
+
+        // A variadic call site's own extra arguments classify exactly
+        // like a named parameter (ADR-0010's C-variadics paragraph):
+        // registers first, then the stack, in the same declaration-order
+        // pass `buildMoves` already gives every argument above -
+        // `argumentIndex` keeps counting up from where the declared
+        // parameters left off, so `buildMoves` never has to know where
+        // one group ends and the other begins.
+        //
+        // A function pointer or delegate extra argument is refused
+        // instead: a *parameter* of that shape crosses through the
+        // callback pool's per-function slot (ADR-0003), which a named
+        // parameter's type gives a way to install ahead of the call, but
+        // a variadic extra argument has no parameter for that slot to
+        // attach to. Passing one through here would hand the callee the
+        // guest's own function value's bytes, not a callable address
+        // (issue #9).
+        foreach (extraType; extraArgumentTypes) {
+            auto pointer = extraType.isTypePointer;
+            const isFunctionPointer =
+                pointer !is null && pointer.nextOf.isTypeFunction !is null;
+            if (isFunctionPointer || extraType.ty == Tdelegate)
+                throw new Exception(
+                    text("ffi cannot pass a function pointer or delegate ",
+                        "as a variadic argument to `", function_.toString,
+                        "`: it has no callback pool entry (ADR-0003)"),
+                );
+            addArgument(ArgumentPlan.of(extraType));
         }
 
         auto name = mangleExact(function_);

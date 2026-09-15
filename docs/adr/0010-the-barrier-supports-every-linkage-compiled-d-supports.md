@@ -5,12 +5,12 @@ status: accepted
 # The barrier supports every linkage compiled D supports
 
 A dub project can depend on arbitrary D, C, and C++ code. Today the
-barrier refuses C variadics, `extern(C++)`, and several parameter
-shapes. Guest code must behave like compiled D. The barrier may refuse
-a call only when a native link would also refuse it. The platform
-scope is Linux x86-64 System V for now. The plan that computes a call's
-shape is ABI-agnostic, so any other platform fails loudly instead of
-guessing.
+barrier refuses `extern(C++)`, several parameter shapes, and D-style
+variadics. Guest code must behave like compiled D. The barrier may
+refuse a call only when a native link would also refuse it. The
+platform scope is Linux x86-64 System V for now. The plan that computes
+a call's shape is ABI-agnostic, so any other platform fails loudly
+instead of guessing.
 
 **`extern(C)`**: every shape, including C variadics. The call stub
 sets `AL` to the count of SSE registers used, as the System V ABI

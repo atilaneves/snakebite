@@ -124,9 +124,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         Error, Exception, Throwable, TypeInfo_Class;
     import dmd.root.string: toDString;
     import dmd.astenums:
-        Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32, Tfloat64,
-        Tfloat80, Tnoreturn, Tint64, Tpointer, Tsarray, Ttuple, Tuns32,
-        Tuns8, Tvoid, Twchar;
+        LINK, Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32,
+        Tfloat64, Tfloat80, Tnoreturn, Tint64, Tpointer, Tsarray, Ttuple,
+        Tuns32, Tuns8, Tvoid, Twchar, VarArg;
     import dmd.arraytypes: Expressions;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
@@ -136,7 +136,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import dmd.identifier: Identifier;
     import dmd.init: ExpInitializer;
     import dmd.location: Loc;
-    import dmd.mtype: Type;
+    import dmd.mtype: Type, TypeFunction;
     import dmd.statement:
         BreakStatement, CaseStatement, Catch, CompoundStatement,
         ContinueStatement, DefaultStatement, DoStatement, ExpStatement,
@@ -699,7 +699,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         );
         if (!interprets) {
             const plan = callSite is null
-                ? &_plans.of(function_)
+                ? _plans.of(function_)
                 : callPlanOf(callSite, function_);
             callHost(
                 function_, plan, returnPlace, arguments, argumentCount,
@@ -776,18 +776,27 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             hostFunction, arguments[0 .. argumentCount], adapted,
         );
 
-        // Native code throws a real `Throwable`, not the `GuestException`
-        // wrapper a guest `throw` or a failed native `assert` produces
-        // (`throwGuest`, `visit(HaltStatement)`) - a guest `catch` only
-        // ever looks for that wrapper (`visit(TryCatchStatement)`). A
-        // callback re-entering the interpreter (`callBoolFunction` and
-        // friends) can also unwind through here with a `GuestException`
-        // already, or with a `SnakebiteException` reporting that the
-        // interpreter itself could not run the callback - both must reach
-        // the host exactly as thrown, not double-wrapped or reinterpreted
-        // as a guest-catchable exception.
+        callPlan(plan, returnPlace, adapted.values);
+    }
+
+    // Every crossing of the barrier through a `CallPlan` shares this catch
+    // chain (`callHost`, `throwArrayBounds`, `callVariadicNative`): native
+    // code throws a real `Throwable`, not the `GuestException` wrapper a
+    // guest `throw` or a failed native `assert` produces (`throwGuest`,
+    // `visit(HaltStatement)`) - a guest `catch` only ever looks for that
+    // wrapper (`visit(TryCatchStatement)`). A callback re-entering the
+    // interpreter (`callBoolFunction` and friends) can also unwind through
+    // here with a `GuestException` already, or with a `SnakebiteException`
+    // reporting that the interpreter itself could not run the callback -
+    // both must reach the host exactly as thrown, not double-wrapped or
+    // reinterpreted as a guest-catchable exception.
+    extern(D) private void callPlan(
+        const(CallPlan)* plan,
+        void* place,
+        scope const(void*)[] slots,
+    ) {
         try
-            plan.call(returnPlace, adapted.values);
+            plan.call(place, slots);
         catch (SnakebiteException exception)
             throw exception;
         catch (GuestException exception)
@@ -800,10 +809,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // or `_d_arraybounds_slicep`, see `snakebite.backends.elementaddress`
     // - the same one the bytecode compiler emits a call to. It never
     // returns, so every caller here only reaches this once its own bounds
-    // check already failed; wrapping its throw the same way `callHost`
-    // wraps any other native call lets a guest `catch (RangeError)` see
-    // it, instead of the interpreter's own refusal or a hand-built guest
-    // exception.
+    // check already failed; wrapping its throw through `callPlan`, the
+    // same as any other native call, lets a guest `catch (RangeError)`
+    // see it, instead of the interpreter's own refusal or a hand-built
+    // guest exception.
     extern(D) private void throwArrayBounds(
         string hookName,
         scope const(Register)[] parameterRegisters,
@@ -823,14 +832,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             [cast(const(void)*) &file, cast(const(void)*) &line]
             ~ extraArguments;
 
-        try
-            plan.call(null, arguments);
-        catch (SnakebiteException exception)
-            throw exception;
-        catch (GuestException exception)
-            throw exception;
-        catch (Throwable guest)
-            throw new GuestException(guest);
+        callPlan(plan, null, arguments);
     }
 
     extern(C) private static bool isGuestFunction(
@@ -878,6 +880,38 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallExp callSite,
         FuncDeclaration function_,
     ) {
+        return cachedCallPlan(
+            callSite, function_, () => _plans.of(function_));
+    }
+
+    // As `callPlanOf`, for one call site of an `extern(C)` C-style
+    // variadic callee: `extraArgumentTypes` are that call's own extra
+    // arguments' types (`CallPlan.prepareVariadic`'s own doc). The AST
+    // fixes a `CallExp`'s argument expressions, and so their types,
+    // once - `callSite` always names the same extra argument types on
+    // every visit - so keying this the same way `callPlanOf` keys an
+    // ordinary plan, by `(callSite, function_)` identity, is exactly
+    // right: `_plans.variadicOf` never has to run twice for the same
+    // call site.
+    extern(D) private const(CallPlan)* variadicCallPlanOf(
+        CallExp callSite,
+        FuncDeclaration function_,
+        scope Type[] extraArgumentTypes,
+    ) {
+        return cachedCallPlan(callSite, function_,
+            () => _plans.variadicOf(function_, extraArgumentTypes));
+    }
+
+    // The call-site cache (issue #96) shared by `callPlanOf` and
+    // `variadicCallPlanOf`: a call expression is one call site, even when
+    // a loop visits it many times, so the plan cache proper
+    // (`PlanCache._plans`/`.of`) stays the cold path, reached only once
+    // per site through `build`.
+    extern(D) private const(CallPlan)* cachedCallPlan(
+        CallExp callSite,
+        FuncDeclaration function_,
+        scope const(CallPlan)* delegate() build,
+    ) {
         if (_lastCallSitePlan._callSite is callSite
                 && _lastCallSitePlan._function is function_)
             return _lastCallSitePlan._plan;
@@ -892,7 +926,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         countForeignNameLookup;
-        const plan = &_plans.of(function_);
+        const plan = build();
         _callPlans ~= CallSitePlan(callSite, function_, plan);
         _lastCallSitePlan = _callPlans[$ - 1];
         return plan;
@@ -965,12 +999,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // Where the hidden context and each explicit parameter's bytes sit in
     // the frame the caller just filled: what the FFI needs to hand them
     // over, built from the layout this interpreter already computed.
+    // `extraCount` reserves that many more trailing slots, left unfilled,
+    // for a variadic call site's own extra arguments
+    // (`callVariadicNative`'s own doc) - zero for every ordinary call.
     extern(D) private CallArguments argumentSlots(
         ubyte* frameBase,
         const(FrameLayout)* layout,
+        in size_t extraCount = 0,
     ) {
         auto arguments = CallArguments(layout.parameters.length
-            + (layout.hiddenThis.variable !is null));
+            + (layout.hiddenThis.variable !is null) + extraCount);
         // const would make the address slots read-only.
         auto values = arguments.values;
         size_t count;
@@ -4413,13 +4451,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         in Loc loc,
         ubyte* frameBase,
         const(FrameLayout)* layout,
+        in bool allowExtra = false,
     ) {
         import dmd.astenums: STC;
         import snakebite.backends.calls: arityMismatches;
         import std.conv: text;
 
         auto parameterList = typeFunctionOf(function_).parameterList;
-        if (arityMismatches(parameterList, arguments))
+        if (arityMismatches(parameterList, arguments, allowExtra))
             throw new SnakebiteException(
                 text("interpreter: `", function_.toString, "` expects ",
                     parameterList.length, " argument(s), got ",
@@ -4670,6 +4709,25 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             : Callee(expression.f, null, false);
         auto function_ = callee.function_;
 
+        // A C-style variadic callee (issue #334 step 5) always reaches a
+        // native symbol - see `callVariadicNative`'s own doc - so this
+        // never joins the class-receiver/virtual-dispatch machinery
+        // below, which exists for guest method calls only. `linkage ==
+        // LINK.c` keeps this routing to only what step 5 actually
+        // supports: without it, a guest-bodied `extern(D)` variadic
+        // function (D's own untyped variadics, issue #334 step 6) would
+        // also reach `callVariadicNative`, and its own FFI refusal
+        // ("ffi cannot call ... as a variadic function") would misname a
+        // guest function as an FFI failure. Falling through instead
+        // reaches the ordinary call path below, whose own arity check
+        // gives an honest message until step 6 adds real support.
+        auto funcType = typeFunctionOf(function_);
+        if (funcType.parameterList.varargs == VarArg.variadic
+                && function_.resolvedLinkage == LINK.c) {
+            callVariadicNative(expression, function_, funcType);
+            return;
+        }
+
         void* classReceiver;
         bool hasClassReceiver;
         auto aggregate = function_.isThis;
@@ -4697,6 +4755,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             expression,
             function_,
             layout,
+            false,
             classReceiver,
             hasClassReceiver,
             callee.context,
@@ -4719,6 +4778,87 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             function_, _place, frame.base, layout, expression,
             function_.isCtorDeclaration() !is null,
         );
+    }
+
+    // Calls a C-style variadic callee (`VarArg.variadic`, always
+    // `extern(C)` - `CallPlan.prepare`'s own doc refuses every other
+    // variadic kind): always a native symbol, since nothing this backend
+    // interprets can have its `va_arg`-reading body walked correctly, so
+    // this never checks `usesGuestBody` the way `executeRaw` does.
+    //
+    // `funcType.parameterList`'s own, declared parameters bind into a
+    // frame exactly as any other call (`bindFrame`, passed `allowExtra`
+    // `true` below), so `expression.arguments` running longer than that
+    // declared list does not reject the call - the only caller of
+    // `arityMismatches` that opts into that (`snakebite.backends.calls`'s
+    // own doc). The hidden-`this`/declared-parameter portion of `slots`
+    // below comes from `argumentSlots`, the same helper an ordinary call
+    // uses. Every argument past that point is this call's own extra,
+    // variadic argument: it has no frame slot; each is evaluated here, in
+    // call order, into its own scratch storage past what `argumentSlots`
+    // already filled, and its own dmd `Type` - the frontend's own
+    // default-promoted call-site type (`float` to `double`, a
+    // narrower-than-`int` integral to `int`) - is what
+    // `variadicCallPlanOf` classifies it by.
+    //
+    // The plan is built first, from types alone, before anything is
+    // evaluated or bound: a refusal `variadicCallPlanOf` raises - a
+    // function pointer or delegate extra argument has no callback pool
+    // entry (`CallPlan.prepareCommon`'s own doc, issue #9) - then happens
+    // before this binds a frame or evaluates a single argument
+    // expression, so a call about to be refused never runs any of the
+    // guest code its own extra arguments would have evaluated (issue
+    // #334 step 5 review finding 2).
+    private void callVariadicNative(
+        CallExp expression,
+        FuncDeclaration function_,
+        TypeFunction funcType,
+    ) {
+        const declaredCount = funcType.parameterList.length;
+        auto arguments = expression.arguments;
+        const totalCount = arguments is null ? 0 : arguments.length;
+
+        Type[] extraTypes;
+        foreach (i; declaredCount .. totalCount)
+            extraTypes ~= (*arguments)[i].type;
+
+        auto plan = variadicCallPlanOf(expression, function_, extraTypes);
+
+        auto layout = layoutOf(function_);
+        auto frame = bindFrame(expression, function_, layout, true);
+        bindArguments(function_, arguments, expression.loc,
+            frame.base, layout, true);
+
+        // `slots` holds the hidden context, the declared parameters, and
+        // every extra argument, in that order - `argumentSlots` fills the
+        // first two, the same helper an ordinary call uses, reserving
+        // `totalCount - declaredCount` trailing slots for the extra
+        // arguments filled below. `CallArguments` keeps every slot
+        // inline for the common, small call and only reaches the heap
+        // once a call runs past its inline capacity (see its own doc),
+        // the same fallback the FFI plan itself relies on.
+        auto slots =
+            argumentSlots(frame.base, layout, totalCount - declaredCount);
+        auto values = slots.values;
+        size_t count =
+            layout.parameters.length + (layout.hiddenThis.variable !is null);
+
+        // One mark for every extra argument's own scratch storage: they
+        // are read by `callPlan` below and done with before this method
+        // returns, so LIFO release here, rather than each argument
+        // keeping its own `Frame`, is enough.
+        const mark = _frames.mark;
+        scope(exit) _frames.release(mark);
+
+        foreach (i; declaredCount .. totalCount) {
+            auto argument = (*arguments)[i];
+            const facts = factsOf(argument.type);
+            auto storage = _frames.reserve(facts.size, facts.alignment);
+            evaluate(argument, argument.type, facts, storage);
+            values[count++] = storage;
+        }
+
+        callPlan(plan, _place, values);
     }
 
     // `receiver`'s own dynamic `TypeInfo_Class`, read the same way `visit
@@ -4888,6 +5028,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallExp expression,
         FuncDeclaration function_,
         const(FrameLayout)* layout,
+        in bool allowExtra = false,
         void* classReceiver = null,
         bool hasClassReceiver = false,
         void* delegateContext = null,
@@ -4903,7 +5044,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // only a body has.
         auto parameterList = typeFunctionOf(function_).parameterList;
         auto arguments = expression.arguments;
-        if (arityMismatches(parameterList, arguments))
+        if (arityMismatches(parameterList, arguments, allowExtra))
             throw new SnakebiteException(
                 text("interpreter: `", function_.toString, "` expects ",
                     parameterList.length, " argument(s), got ",

@@ -36,8 +36,9 @@ native layout, so crossing the barrier never copies or converts.
 _Avoid_: marshalling, boxing
 
 **Plan**:
-The per-function description, computed once and then reused, of how a
-call crosses the barrier.
+The description, computed once and then reused, of how a call crosses
+the barrier: per function for an ordinary call, per call site for a
+C-variadic call, whose own extra arguments shape the plan too.
 _Avoid_: call descriptor, thunk
 
 **Resolver**:

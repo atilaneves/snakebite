@@ -51,12 +51,27 @@ public bool prefersGuestBody(
 // site makes before reading arguments positionally against parameters,
 // whether the callee is a resolved declaration, a bare `TypeFunction`
 // reached through a pointer or delegate value, or a constructor's own
-// parameter list.
+// parameter list. Typesafe `T t...` arrives as one array-typed argument
+// by the time this ever runs (the frontend already packed it), so this
+// stays exact for that variadic kind too.
+//
+// `allowExtra` opts a call site into accepting more arguments than
+// `parameterList.length`, positionally unmatched to any parameter: only
+// the two call sites that go on to read those extra arguments
+// themselves pass it - a C-style variadic call's own extra arguments
+// (issue #334 step 5), which `snakebite.ffi.plan.CallPlan.
+// prepareVariadic` is what actually classifies. Every other call site
+// stays exact, so none of them can silently drop arguments it never
+// reads.
 public bool arityMismatches(
     imported!"dmd.mtype".ParameterList parameterList,
     imported!"dmd.arraytypes".Expressions* arguments,
+    in bool allowExtra = false,
 ) {
-    return (arguments is null ? 0 : arguments.length) != parameterList.length;
+    const count = arguments is null ? 0 : arguments.length;
+    return allowExtra
+        ? count < parameterList.length
+        : count != parameterList.length;
 }
 
 private bool hasGuestDelegateArgument(

@@ -368,9 +368,13 @@ unittest {
 // glibc's own variadic prologue skips saving `%xmm0` into its register
 // save area and `%.1f` reads garbage instead.
 //
-// Stub level only: `prepare` refuses a variadic callee outright (see its
-// own `VarArg.none` check), so a plan never reaches this shape. Calling
-// a variadic function through a plan is step 5 of issue #334 (ADR-0010).
+// Stub level only, driving the raw `CallFrame` directly, the same way
+// every other test in this module does: `CallPlan.prepareVariadic`
+// (issue #334 step 5) now builds a plan for exactly this shape, but this
+// test exercises the stub's own `%al` handling in isolation from that
+// plan machinery. `ut.ffi.plan`'s own `called.variadic.snprintf` and
+// `ut.backends.call.ffi`'s `variadic.snprintf.*` drive the same callee
+// through a full plan and a guest call, respectively.
 @("variadicCallee.snprintf")
 unittest {
     import core.stdc.stdio: snprintf;
