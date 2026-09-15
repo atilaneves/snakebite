@@ -183,9 +183,7 @@ static foreach (backend; Matrix!()) {
 
 // `throw` is an expression, so it can be a branch of a ternary whose other
 // branch has a value.
-static foreach (backend; Matrix!(
-    BytecodeUnconfirmed,
-)) {
+static foreach (backend; Matrix!()) {
     @("throwAsExpressionInTernary." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -215,6 +213,70 @@ static foreach (backend; Matrix!(
                 }
 
                 assert(length == 8);
+            }
+        });
+    }
+}
+
+
+// The non-throwing arm can be first. The compiler must keep its return path
+// while the other arm ends in a throw.
+static foreach (backend; Matrix!()) {
+    @("throwAsExpressionInTernaryFalseArm." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int choose(bool shouldThrow) {
+                return shouldThrow
+                    ? 9
+                    : throw new Exception("false");
+            }
+
+            void main() {
+                assert(choose(true) == 9);
+
+                bool caught;
+                try {
+                    choose(false);
+                } catch (Exception exception) {
+                    caught = exception.msg == "false";
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+
+// When both arms throw, no path falls through the expression's caller, and
+// either thrown object must still reach the enclosing catch.
+static foreach (backend; Matrix!()) {
+    @("bothTernaryArmsThrow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int fail(bool left) {
+                return left
+                    ? throw new Exception("left")
+                    : throw new Exception("right");
+            }
+
+            void main() {
+                bool caughtLeft;
+                try {
+                    fail(true);
+                } catch (Exception exception) {
+                    caughtLeft = exception.msg == "left";
+                }
+                assert(caughtLeft);
+
+                bool caughtRight;
+                try {
+                    fail(false);
+                } catch (Exception exception) {
+                    caughtRight = exception.msg == "right";
+                }
+                assert(caughtRight);
             }
         });
     }

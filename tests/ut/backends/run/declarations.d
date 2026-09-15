@@ -9,6 +9,45 @@ module ut.backends.run.declarations;
 import ut.backends;
 
 
+static foreach (backend; Matrix!()) {
+    @("tupleLocalsInitializeEveryMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            import std.meta: AliasSeq;
+
+            struct First { int value = 17; }
+            struct Second { int value = 25; }
+
+            int result() {
+                AliasSeq!(First, Second) values;
+                return values[0].value + values[1].value;
+            }
+        }, "result");
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("localTemplateMixinInitializesInOrder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            mixin template Values() {
+                int first = seed;
+                int second = first + 2;
+            }
+
+            int result() {
+                int seed = 20;
+                mixin Values;
+                return first + second;
+            }
+        }, "result");
+    }
+}
+
+
 // Every `shared static this` runs before any `static this`, and each group
 // runs in declaration order.
 static foreach (backend; Matrix!(

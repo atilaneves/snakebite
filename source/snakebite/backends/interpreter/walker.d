@@ -88,6 +88,7 @@ private final class GuestException: Exception {
 
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
+import snakebite.backends.comparison: ComparisonPlan;
 import snakebite.backends.controlflow: ControlFlowState,
     cleanupCount, scopePath;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
@@ -1123,12 +1124,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     override void visit(TryFinallyStatement statement) {
         bool bodyRan;
+        Throwable pendingException;
         if (_controlFlow.seeking) {
             if (statement._body !is null)
                 statement._body.accept(this);
+            bodyRan = true;
+            if (_controlFlow.seeking && statement.finalbody !is null)
+                statement.finalbody.accept(this);
             if (_controlFlow.seeking)
                 return;
-            bodyRan = true;
         }
 
         try {
@@ -1140,6 +1144,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 if (statement._body !is null)
                     statement._body.accept(this);
             }
+        } catch (GuestException exception) {
+            pendingException = exception._guest;
         } finally {
             auto returned = _returned;
             auto continued = _continued;
@@ -1158,8 +1164,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _breakLabel = null;
             _controlFlow.clearTransfer;
 
-            if (statement.finalbody !is null)
-                statement.finalbody.accept(this);
+            runFinallyBody(statement.finalbody, pendingException);
 
             if (!_returned && !_continued && !_break
                     && !_controlFlow.hasTransfer) {
@@ -1170,6 +1175,45 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 _breakLabel = breakLabel;
                 _controlFlow = transfer;
             }
+        }
+    }
+
+    private void runFinallyBody(
+        Statement finalbody,
+        Throwable pendingException,
+    ) {
+        if (pendingException is null) {
+            runCleanupBody(finalbody);
+            return;
+        }
+
+        try {
+            try {
+                throw pendingException;
+            } finally {
+                runFinallyBodyRaw(finalbody);
+            }
+        } catch (Throwable exception) {
+            throw new GuestException(exception);
+        }
+    }
+
+    private void runFinallyBodyRaw(Statement finalbody) {
+        try {
+            runCleanupBody(finalbody);
+        } catch (GuestException exception) {
+            throw exception._guest;
+        }
+    }
+
+    private void runCleanupBody(Statement finalbody) {
+        if (finalbody is null)
+            return;
+
+        finalbody.accept(this);
+        while (_controlFlow.hasTransfer) {
+            _controlFlow.resume;
+            finalbody.accept(this);
         }
     }
 
@@ -1239,9 +1283,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         foreach (child; *statement.statements) {
             if (child !is null) {
                 child.accept(this);
-                if (_returned || _continued || _break
-                        || _controlFlow.hasTransfer)
+                if (_returned || _break || _controlFlow.hasTransfer)
                     return;
+
+                if (_continued) {
+                    if (_continueLabel !is null)
+                        return;
+
+                    _continued = false;
+                }
             }
         }
     }
@@ -1383,6 +1433,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     override void visit(LabelStatement statement) {
         _controlFlow.at(cast(void*) statement);
+        if (statement.statement !is null)
+            _controlFlow.at(cast(void*) statement.statement);
 
         auto previousLabel = _pendingLoopLabel;
         _pendingLoopLabel = statement.ident;
@@ -1528,7 +1580,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         );
     }
 
-    override void visit(ThrowStatement statement) {
+    protected override void visitThrowStatement(ThrowStatement statement) {
         if (_controlFlow.seeking)
             return;
 
@@ -1827,6 +1879,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         evaluate(expression, type, facts, buffer.ptr);
 
+        return *cast(void**) buffer.ptr;
+    }
+
+    private void* asReference(Expression expression, in TypeFacts facts) {
+        align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
+        assert(facts.size <= buffer.sizeof && facts.alignment <= buffer.alignof,
+            "a reference wider than a register reached the scratch buffer");
+        evaluate(expression, expression.type, facts, buffer.ptr);
         return *cast(void**) buffer.ptr;
     }
 
@@ -2280,50 +2340,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // Runs a local's initializer into the frame slot `layoutOf` already
     // gave it. `long sum = 0;` is a `DeclarationExp` here.
     override void visit(DeclarationExp expression) {
+        import snakebite.backends.declaration: forEachRuntimeVariable;
+
+        forEachRuntimeVariable(expression.declaration, (variable) {
+            initializeDeclaredVariable(variable, expression);
+        });
+    }
+
+    private void initializeDeclaredVariable(
+        VarDeclaration variable, DeclarationExp expression,
+    ) {
         import std.conv: text;
-
-        // Semantic analysis has already established a function-local
-        // struct's type, so declaring it needs no runtime action. DMD wraps a
-        // `static struct` in a storage-class declaration, which also needs no
-        // runtime action. Likewise,
-        // `alias Unqual_T = Unqual!T;` binds a name to a type, not
-        // storage, and `enum mask(ulong lo) = ...;` (an eponymous
-        // template, folded to its value at each `mask!x` use rather than
-        // run from here) binds a name to neither a type nor a value of
-        // its own - druntime's own append hooks declare both kinds in
-        // their own bodies, the same way an `import` inside a function
-        // body binds a name with nothing left to execute (see
-        // `visit(ImportStatement)`). A local `enum Direction : ubyte
-        // { north, south }` is the same story: semantic analysis has
-        // already folded every member into a constant, so a cast to
-        // `Direction` or a read of `Direction.north` never reaches this
-        // declaration at all. `Ctfe`, this interpreter's sibling
-        // backend, needs no special case of its own for any of these: it
-        // runs dmd's own `dinterpret.d`, which already knows a body can
-        // hold them. Any future backend that walks a body's AST itself,
-        // rather than handing it to dmd's engine, inherits the same
-        // need.
-        // A nested function declaration - `int lookup(string key) { ... }`
-        // written as a statement - likewise binds a name to a
-        // `FuncDeclaration` dmd has already resolved every call to, not
-        // storage this evaluator has to create: nothing runs until the
-        // guest calls `lookup`, at which point `visit(CallExp)` reaches
-        // it as `expression.f`, not through this declaration at all.
-        if (expression.declaration.isStructDeclaration !is null
-                || expression.declaration.isStorageClassDeclaration !is null
-                || expression.declaration.isAliasDeclaration !is null
-                || expression.declaration.isTemplateDeclaration !is null
-                || expression.declaration.isFuncDeclaration !is null
-                || expression.declaration.isEnumDeclaration !is null)
-            return;
-
-        auto variable = expression.declaration.isVarDeclaration;
-        if (variable is null)
-            throw new SnakebiteException(
-                text("interpreter cannot run declaration `",
-                    expression.toString, "`: only a local variable is ",
-                    "supported"),
-            );
 
         // A data-segment variable is initialised once, when the guest
         // first reaches it, not every time its declaration executes.
@@ -3009,14 +3036,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         storeIntegral(_place, truthOf(expression.e1) ? 0 : 1, _facts.size);
     }
 
-    override void visit(CmpExp expression) {
+    protected override void visitComparison(
+        CmpExp expression, in ComparisonPlan plan,
+    ) {
         import std.conv: text;
 
         with (EXP) switch (expression.op) {
-            case lessThan: return storeCmpExp!"<"(expression);
-            case lessOrEqual: return storeCmpExp!"<="(expression);
-            case greaterThan: return storeCmpExp!">"(expression);
-            case greaterOrEqual: return storeCmpExp!">="(expression);
+            case lessThan: return storeCmpExp!"<"(expression, plan);
+            case lessOrEqual: return storeCmpExp!"<="(expression, plan);
+            case greaterThan: return storeCmpExp!">"(expression, plan);
+            case greaterOrEqual: return storeCmpExp!">="(expression, plan);
             default:
                 throw new SnakebiteException(
                     text("interpreter cannot evaluate a `", expression.op,
@@ -3028,33 +3057,36 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // An ordering answers differently depending on how the operands were
     // read, so both are read with the signedness their own types give and
     // the comparison is then made in the one signedness they share.
-    private extern(D) void storeCmpExp(string op)(CmpExp expression) {
+    private extern(D) void storeCmpExp(string op)(
+        CmpExp expression, in ComparisonPlan plan,
+    ) {
         import snakebite.nativelayout: storeIntegral;
 
-        // dmd's usual arithmetic conversions give both operands the same
-        // type, so testing either one for a floating type is enough. The
-        // comparison itself is made at `real`'s own width, wide enough to
-        // hold every operand exactly, since D's floating ordering follows
-        // IEEE 754 rather than any integral signedness rule.
-        auto type = expression.e1.type;
-        if (type.ty == Tfloat32 || type.ty == Tfloat64
-                || type.ty == Tfloat80) {
-            const a = asFloating(expression.e1);
-            const b = asFloating(expression.e2);
-            const answer = mixin("a " ~ op ~ " b");
-            storeIntegral(_place, answer ? 1 : 0, _facts.size);
-            return;
+        with (ComparisonPlan.Kind) final switch (plan.kind) {
+            case floating: {
+                const a = asFloating(expression.e1);
+                const b = asFloating(expression.e2);
+                const answer = mixin("a " ~ op ~ " b");
+                storeIntegral(_place, answer ? 1 : 0, _facts.size);
+                return;
+            }
+            case reference: {
+                const a = cast(size_t) asReference(expression.e1, plan.facts);
+                const b = cast(size_t) asReference(expression.e2, plan.facts);
+                const answer = mixin("a " ~ op ~ " b");
+                storeIntegral(_place, answer ? 1 : 0, _facts.size);
+                return;
+            }
+            case integral: {
+                const a = asIntegral(expression.e1, plan.facts);
+                const b = asIntegral(expression.e2, plan.facts);
+                const answer = plan.facts.isUnsigned
+                    ? mixin("cast(ulong) a " ~ op ~ " cast(ulong) b")
+                    : mixin("a " ~ op ~ " b");
+                storeIntegral(_place, answer ? 1 : 0, _facts.size);
+                return;
+            }
         }
-
-        const aFacts = factsOf(expression.e1.type);
-        const bFacts = factsOf(expression.e2.type);
-        const a = asIntegral(expression.e1, aFacts);
-        const b = asIntegral(expression.e2, bFacts);
-        const answer = sharedSignedness(aFacts, bFacts, expression)
-            ? mixin("cast(ulong) a " ~ op ~ " cast(ulong) b")
-            : mixin("a " ~ op ~ " b");
-
-        storeIntegral(_place, answer ? 1 : 0, _facts.size);
     }
 
     override void visit(LogicalExp expression) {
@@ -3963,7 +3995,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             new AssertError(failure.message, failure.file, failure.line));
     }
 
-    override void visit(ThrowExp expression) {
+    protected override void visitThrowExp(ThrowExp expression) {
         throwGuest(expression.e1);
     }
 

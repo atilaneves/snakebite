@@ -333,7 +333,6 @@ static foreach (backend; Matrix!()) {
 // each one, rather than blitting the whole slice.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed),
-    Omit!(Interpreter, Because.unconfirmed),
 )) {
     @("sliceAssignRunsPostBlitPerElement." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -2919,10 +2918,7 @@ static foreach (backend; Matrix!()) {
 // static struct S`) nest one attribute declaration inside another (a
 // storage class alone merges into a single one, `@safe static` included);
 // the struct underneath still has no runtime action.
-static foreach (backend; Matrix!(
-    // the interpreter recurses through one attribute wrapper, not two
-    Omit!(Interpreter, Because.unconfirmed),
-)) {
+static foreach (backend; Matrix!()) {
     @("userAttributeOnStaticLocalStructDeclarationHasNoRuntimeAction." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -3184,10 +3180,7 @@ static foreach (backend; Matrix!()) {
 // on a plain `int`: `toImpl`'s `enumRep` reads the enum's own member names,
 // a `static` initializer dmd's CTFE folds to an `ArrayLiteralExp` of code
 // units rather than a `StringExp`.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "`assert(to!string(Color.green) == \"green\")` fails"),
-)) {
+static foreach (backend; Matrix!()) {
     @("toStringOnEnum." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

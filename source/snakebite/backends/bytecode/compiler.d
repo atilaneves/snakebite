@@ -7,6 +7,7 @@ import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
+import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.backends.fullexpression:
     FullExpressionKind, FullExpressionScope;
 import snakebite.backends.controlflow:
@@ -1086,15 +1087,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _finished = bodyFinished || cleanupFinished;
     }
 
-    override void visit(ThrowStatement statement) {
+    protected override void visitThrowStatement(ThrowStatement statement) {
+        compileThrow(statement.exp, statement.loc);
+    }
+
+    protected override void visitThrowExp(ThrowExp expression) {
+        compileThrow(expression.e1, expression.loc);
+    }
+
+    private void compileThrow(Expression expression, in Loc loc) {
         import dmd.astenums: Tclass;
 
-        if (statement.exp is null || statement.exp.type.ty != Tclass)
-            throw rejection(_function, statement.loc, statementText(statement));
+        if (expression is null || expression.type.ty != Tclass)
+            throw rejection(_function, loc, expression is null
+                ? "a null throw expression" : expressionText(expression));
 
-        const facts = TypeFacts.of(statement.exp.type);
+        const facts = TypeFacts.of(expression.type);
         const offset = reserveTemp(facts);
-        evalInto(statement.exp, offset, facts.size);
+        evalInto(expression, offset, facts.size);
         emit(&opThrow, offset, 0, 0);
         _finished = true;
     }
@@ -1933,40 +1943,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileEffect(expression);
     }
 
-    // Whether `declaration` binds a name for the semantic pass with no
-    // runtime action of its own: a struct/alias/template/function/enum
-    // declared inside a function body, none of which this compiler ever
-    // has to run code for. An `AttribDeclaration` (`static struct S {
-    // ... }`'s own node - the `static` attaches to the declaration this
-    // way rather than as a storage-class flag the way it does on a
-    // `VarDeclaration`) is the same kind of no-op exactly when every
-    // symbol it wraps is, recursed the same way a nested attribute
-    // (`@("tag") static struct S { ... }`, one `AttribDeclaration`
-    // wrapping another) already needs.
-    private bool isRuntimeNoopDeclaration(
-        imported!"dmd.dsymbol".Dsymbol declaration,
-    ) {
-        if (declaration.isStructDeclaration !is null
-                || declaration.isAliasDeclaration !is null
-                || declaration.isTemplateDeclaration !is null
-                || declaration.isFuncDeclaration !is null
-                || declaration.isEnumDeclaration !is null)
-            return true;
-
-        if (auto attribute = declaration.isAttribDeclaration) {
-            if (attribute.decl is null)
-                return true;
-
-            foreach (member; *attribute.decl)
-                if (!isRuntimeNoopDeclaration(member))
-                    return false;
-
-            return true;
-        }
-
-        return false;
-    }
-
     private size_t registerTemporary(
         VarDeclaration variable,
         Expression destructor,
@@ -1983,23 +1959,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // gave it - `int sum = 0;` is a `DeclarationExp` here, the same as in
     // the interpreter.
     private void compileDeclaration(DeclarationExp expression) {
-        // These declarations bind names for the semantic pass but have no
-        // runtime action, the same way an `import` inside a function body
-        // does. `static struct S { ... }` reaches here as an
-        // `AttribDeclaration` wrapping the actual `StructDeclaration` - a
-        // storage class attached to a non-variable declaration parses as
-        // the attribute holding it, not as a flag on the declaration
-        // itself the way `static int x;` sets `STC.static_` directly on
-        // its own `VarDeclaration` - so this recurses through one to
-        // reach the same no-op declarations underneath.
-        if (isRuntimeNoopDeclaration(expression.declaration))
-            return;
+        import snakebite.backends.declaration: forEachRuntimeVariable;
 
-        auto variable = expression.declaration.isVarDeclaration;
-        if (variable is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+        forEachRuntimeVariable(expression.declaration, (variable) {
+            compileDeclaredVariable(variable, expression);
+        });
+    }
 
+    private void compileDeclaredVariable(
+        VarDeclaration variable, DeclarationExp expression,
+    ) {
         if (variable.isDataseg) {
             staticAddressOf(variable);
             return;
@@ -4063,13 +4032,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(CondExp expression) {
+        import dmd.astenums: Tnoreturn;
+
+        if (_destination == discardResult && expression.type.ty == Tnoreturn) {
+            compileTernary(expression, discardResult, 0);
+            return;
+        }
+
         requireDestination(expression);
         compileTernary(expression, _destination, _width);
     }
 
-    override void visit(CmpExp expression) {
+    protected override void visitComparison(
+        CmpExp expression, in ComparisonPlan plan,
+    ) {
         requireDestination(expression);
-        compileComparison(expression, _destination);
+        compileComparison(expression, plan, _destination);
     }
 
     protected override void visitUnloweredEqual(EqualExp expression) {
@@ -4101,7 +4079,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        compileComparison(expression, _destination);
+        compileComparison(expression, comparisonPlan(expression), _destination);
     }
 
     override protected void visitIdentity(
@@ -4351,12 +4329,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `destOffset`'s own width, since the result is always a one-byte
     // `bool` - and the comparison opcode leaves its answer in the first
     // of those, copied out to `destOffset` only when it differs.
-    private void compileComparison(BinExp expression, in size_t destOffset) {
+    private void compileComparison(
+        BinExp expression, in ComparisonPlan plan, in size_t destOffset,
+    ) {
         import dmd.astenums: Tarray, Tclass, Tpointer, Tstruct;
         import dmd.typesem: toBasetype;
 
         auto operandType = expression.e1.type.toBasetype;
-        const operandFacts = TypeFacts.of(operandType);
+        const operandFacts = plan.facts;
 
         // `is`/`!is` on a struct or a dynamic array is always a raw byte
         // compare, over the operand's own native layout - dmd rewrites a
@@ -4389,90 +4369,95 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        // A class reference compares the same way a pointer does - `is`/
-        // `==` on two references is identity, the same one pointer width
-        // `opEqual` already reads either way; only `is`/`!is` (`identity`/
-        // `notIdentity`) are legal D syntax for a class reference, but the
-        // handler map below already answers those the same as `==`/`!=`.
-        if (operandType.ty == Tpointer || operandType.ty == Tclass) {
-            Instruction.Handler pointerHandler;
-            with (EXP) switch (expression.op) {
-                case lessThan:
-                    pointerHandler = &opLessThanUnsigned;
-                    break;
-                case lessOrEqual:
-                    pointerHandler = &opLessOrEqualUnsigned;
-                    break;
-                case greaterThan:
-                    pointerHandler = &opGreaterThanUnsigned;
-                    break;
-                case greaterOrEqual:
-                    pointerHandler = &opGreaterOrEqualUnsigned;
-                    break;
-                case equal, identity: pointerHandler = &opEqual; break;
-                case notEqual, notIdentity: pointerHandler = &opNotEqual;
-                    break;
-                default:
-                    throw rejection(_function, expression.loc,
-                        expressionText(expression));
+        with (ComparisonPlan.Kind) final switch (plan.kind) {
+            // A class reference compares the same way a pointer does - `is`/
+            // `==` on two references is identity, the same one pointer width
+            // `opEqual` already reads either way; only `is`/`!is` (`identity`/
+            // `notIdentity`) are legal D syntax for a class reference, but the
+            // handler map below already answers those the same as `==`/`!=`.
+            case reference: {
+                Instruction.Handler pointerHandler;
+                with (EXP) switch (expression.op) {
+                    case lessThan:
+                        pointerHandler = &opLessThanUnsigned;
+                        break;
+                    case lessOrEqual:
+                        pointerHandler = &opLessOrEqualUnsigned;
+                        break;
+                    case greaterThan:
+                        pointerHandler = &opGreaterThanUnsigned;
+                        break;
+                    case greaterOrEqual:
+                        pointerHandler = &opGreaterOrEqualUnsigned;
+                        break;
+                    case equal, identity: pointerHandler = &opEqual; break;
+                    case notEqual, notIdentity: pointerHandler = &opNotEqual;
+                        break;
+                    default:
+                        throw rejection(_function, expression.loc,
+                            expressionText(expression));
+                }
+
+                const leftOffset = reserveTemp(operandFacts);
+                evalInto(expression.e1, leftOffset, operandFacts.size);
+                const rightOffset = reserveTemp(operandFacts);
+                evalInto(expression.e2, rightOffset, operandFacts.size);
+                emit(pointerHandler, leftOffset, rightOffset, operandFacts.size);
+
+                if (destOffset != leftOffset)
+                    emit(&opCopy, destOffset, leftOffset, 1);
+                return;
             }
 
-            const leftOffset = reserveTemp(operandFacts);
-            evalInto(expression.e1, leftOffset, operandFacts.size);
-            const rightOffset = reserveTemp(operandFacts);
-            evalInto(expression.e2, rightOffset, operandFacts.size);
-            emit(pointerHandler, leftOffset, rightOffset, operandFacts.size);
+            // Host floating-point operators preserve D's NaN and signed-zero
+            // semantics for equality and ordering. Integral equality instead
+            // compares the stored bits, which would make a NaN equal itself and
+            // positive and negative zero unequal.
+            case floating: {
+                Instruction.Handler floatHandler;
+                with (EXP) switch (expression.op) {
+                    case lessThan: floatHandler = &opFloatLessThan; break;
+                    case lessOrEqual: floatHandler = &opFloatLessOrEqual; break;
+                    case greaterThan: floatHandler = &opFloatGreaterThan; break;
+                    case greaterOrEqual:
+                        floatHandler = &opFloatGreaterOrEqual; break;
+                    case equal: floatHandler = &opFloatEqual; break;
+                    case notEqual: floatHandler = &opFloatNotEqual; break;
+                    default:
+                        throw rejection(_function, expression.loc,
+                            expressionText(expression));
+                }
 
-            if (destOffset != leftOffset)
-                emit(&opCopy, destOffset, leftOffset, 1);
-            return;
-        }
+                const floatLeftOffset = reserveTemp(operandFacts);
+                evalInto(expression.e1, floatLeftOffset, operandFacts.size);
+                const floatRightOffset = reserveTemp(operandFacts);
+                evalInto(expression.e2, floatRightOffset, operandFacts.size);
+                emit(floatHandler, floatLeftOffset, floatRightOffset,
+                    operandFacts.size);
 
-        // Host floating-point operators preserve D's NaN and signed-zero
-        // semantics for equality and ordering. Integral equality instead
-        // compares the stored bits, which would make a NaN equal itself and
-        // positive and negative zero unequal.
-        if (isFloatingType(operandType)) {
-            Instruction.Handler floatHandler;
-            with (EXP) switch (expression.op) {
-                case lessThan: floatHandler = &opFloatLessThan; break;
-                case lessOrEqual: floatHandler = &opFloatLessOrEqual; break;
-                case greaterThan: floatHandler = &opFloatGreaterThan; break;
-                case greaterOrEqual:
-                    floatHandler = &opFloatGreaterOrEqual; break;
-                case equal: floatHandler = &opFloatEqual; break;
-                case notEqual: floatHandler = &opFloatNotEqual; break;
-                default:
-                    throw rejection(_function, expression.loc,
-                        expressionText(expression));
+                if (destOffset != floatLeftOffset)
+                    emit(&opCopy, destOffset, floatLeftOffset, 1);
+                return;
             }
 
-            const floatLeftOffset = reserveTemp(operandFacts);
-            evalInto(expression.e1, floatLeftOffset, operandFacts.size);
-            const floatRightOffset = reserveTemp(operandFacts);
-            evalInto(expression.e2, floatRightOffset, operandFacts.size);
-            emit(floatHandler, floatLeftOffset, floatRightOffset,
-                operandFacts.size);
+            case integral: {
+                if (!operandFacts.isIntegral || !isIntegralSize(operandFacts.size))
+                    throw rejection(_function, expression.loc,
+                        expressionText(expression));
 
-            if (destOffset != floatLeftOffset)
-                emit(&opCopy, destOffset, floatLeftOffset, 1);
-            return;
+                auto handler = comparisonHandler(expression, operandFacts.isUnsigned);
+
+                const leftOffset = reserveTemp(operandFacts);
+                evalInto(expression.e1, leftOffset, operandFacts.size);
+                const rightOffset = reserveTemp(operandFacts);
+                evalInto(expression.e2, rightOffset, operandFacts.size);
+                emit(handler, leftOffset, rightOffset, operandFacts.size);
+
+                if (destOffset != leftOffset)
+                    emit(&opCopy, destOffset, leftOffset, 1);
+                return;
+            }
         }
-
-        if (!operandFacts.isIntegral || !isIntegralSize(operandFacts.size))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        auto handler = comparisonHandler(expression, operandFacts.isUnsigned);
-
-        const leftOffset = reserveTemp(operandFacts);
-        evalInto(expression.e1, leftOffset, operandFacts.size);
-        const rightOffset = reserveTemp(operandFacts);
-        evalInto(expression.e2, rightOffset, operandFacts.size);
-        emit(handler, leftOffset, rightOffset, operandFacts.size);
-
-        if (destOffset != leftOffset)
-            emit(&opCopy, destOffset, leftOffset, 1);
     }
 
     // DMD's identity lowering is a native byte comparison.  The shared
@@ -4737,13 +4722,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const branchIndex = _instructions.length;
         emit(&opBranchFalse, conditionOffset, 0, conditionWidth_);
 
+        _finished = false;
         evalInto(expression.e1, destOffset, width);
-        const jumpIndex = _instructions.length;
-        emit(&opJump, 0, 0, 0);
+        const ifFinished = _finished;
+        size_t jumpIndex = size_t.max;
+        if (!ifFinished) {
+            jumpIndex = _instructions.length;
+            emit(&opJump, 0, 0, 0);
+        }
 
         _instructions[branchIndex].source = _instructions.length;
+        _finished = false;
         evalInto(expression.e2, destOffset, width);
-        _instructions[jumpIndex].destination = _instructions.length;
+        const elseFinished = _finished;
+        if (jumpIndex != size_t.max)
+            _instructions[jumpIndex].destination = _instructions.length;
+        _finished = ifFinished && elseFinished;
     }
 
     // `cast(T) x`. `snakebite.backends.casts.classify` has already turned
