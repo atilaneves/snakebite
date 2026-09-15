@@ -95,7 +95,17 @@ public alias CallEntry = extern(C) void function(
 // `snakebite.ffi.callback` check the label distances against these
 // constants at start-up, since the assembler's own `CB_*` defines cannot
 // be read from D.
-public enum callbackEntriesPerChunk = 128;
+//
+// 254 makes one whole chunk (254 entries + the 16-byte trailer + the
+// dispatch code, padded to one more entry-sized slot) exactly one 4 KiB
+// page, so `allocateChunk`'s `mmap`, which already rounds a chunk's size
+// up to a whole page, never wastes part of the page it maps. This must
+// stay the same number `CB_ENTRIES_PER_CHUNK` names in `sysv_amd64.S`:
+// druntime's page size is a run-time value, not a compile-time one, so
+// this cannot derive 254 the way the comment there works it out, and
+// repeats the literal instead - `shared static this`, below, is the
+// cross-check that keeps the two in agreement.
+public enum callbackEntriesPerChunk = 254;
 public enum callbackEntryBytes = 16;
 
 // The two words at the end of every chunk. `commonDelta` is the signed

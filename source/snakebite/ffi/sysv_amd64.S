@@ -306,9 +306,20 @@ snakebite_ffi_call_sysv_amd64_integer:
  * so no unwind information is needed for a copied chunk either. The
  * frame that does exist during a callback is `snakebite_ffi_callback_
  * common`'s, below, which carries full CFI (ADR-0004).
+ *
+ * CB_ENTRIES_PER_CHUNK is 254 so the whole chunk - entries, trailer and
+ * dispatch together - is exactly one 4 KiB page: 254 * CB_ENTRY_BYTES
+ * (4064) + the 16-byte trailer + dispatch padded to one more
+ * CB_ENTRY_BYTES slot (16) = 4096. `allocateChunk`'s `mmap` already
+ * rounds a chunk's size up to a whole page, so this size wastes none of
+ * the page it maps; the D side (`snakebite.ffi.sysv.
+ * callbackEntriesPerChunk`) cannot derive the same 254 at compile time,
+ * since druntime's page size is a run-time value, so it repeats this
+ * same literal instead, and `shared static this` in `snakebite.ffi.
+ * callback` cross-checks the two against each other at start-up.
  */
 
-#define CB_ENTRIES_PER_CHUNK 128
+#define CB_ENTRIES_PER_CHUNK 254
 #define CB_ENTRY_BYTES       16
 /* `CallFrame` is 168 bytes; rounded so `%rsp` stays 16-byte aligned. */
 #define CB_FRAME_BYTES       176
@@ -334,6 +345,10 @@ snakebite_ffi_callback_chunk_trailer:
     movq    (%r11), %rax
     addq    %r11, %rax
     jmp     *%rax
+    /* Pads dispatch (15 bytes) up to one CB_ENTRY_BYTES slot, so the
+     * chunk's total size comes out to a whole number of pages - see
+     * this section's own comment above. */
+    .balign CB_ENTRY_BYTES, 0xcc
 
     .globl  snakebite_ffi_callback_chunk_end
     .type   snakebite_ffi_callback_chunk_end, @object
