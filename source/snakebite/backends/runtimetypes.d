@@ -40,6 +40,21 @@ public struct RuntimeTypes {
         _initialValue = initialValue;
     }
 
+    // `_types` caches by `Type` identity, not only for a struct, class or
+    // enum's own `TypeInfo` - `build`'s `TypeTuple`, array and qualified
+    // (`const`/`shared`/...) branches below are covered by this same
+    // cache too, since they only ever run once per `Type` before their
+    // result lands in `_types` here. This matters for an `extern(D)`
+    // untyped variadic call site's own hidden `_arguments` (issue #334
+    // step 6): dmd's frontend builds one `TypeTuple` `Type` per call
+    // site, reused - the same object, not merely an equal one - on every
+    // execution of that site's `TypeidExp`, so `get` allocates a fresh
+    // `TypeInfo_Tuple` (and, for a `string` element, a fresh qualified
+    // wrapper) only the first time a given call site's `_arguments` is
+    // ever evaluated, never again after (verified: `core.memory.GC.
+    // allocatedInCurrentThread` is flat across 100 repeat calls of the
+    // same `extern(D)` untyped variadic call site, both an all-`int`
+    // tuple and a `string`-element one).
     public TypeInfo get(Type type) {
         if (auto cached = type in _types)
             return *cached;

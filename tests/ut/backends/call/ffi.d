@@ -2705,3 +2705,79 @@ static foreach (backend; Matrix!(
         );
     }
 }
+
+
+// `RuntimeTypes.get`'s own top-level cache (keyed by `Type` identity) is
+// generic - it already covers the `TypeTuple`/qualified-wrapper branches
+// `build` below fabricates for an `extern(D)` untyped variadic call
+// site's own hidden `_arguments`, not only a struct's own `TypeInfo`
+// (`RuntimeTypes.get`'s own doc): dmd's frontend builds one `TypeTuple`
+// per call site, the same `Type` object on every execution of that
+// site, so `get` only ever allocates a fresh `TypeInfo_Tuple` (and, for
+// a `string` extra here, a fresh qualified element wrapper) on the
+// first call. `Bytecode` never reaches `RuntimeTypes.get` for this at
+// all - `variadicOf` folds `_arguments` into a compile-time constant
+// once, when the call site itself compiles.
+@("variadic.externD.noAllocationOnRepeatedCall.Interpreter")
+@Tags("Interpreter")
+unittest {
+    import core.memory: GC;
+    import snakebite.backends.backend: Program;
+    import snakebite.backends.interpreter: Interpreter;
+
+    auto module_ = parseSnippet(q{
+        pragma(mangle, "snakebite_ut_dvariadic_string_backend")
+        extern(D) size_t stringLength(...);
+
+        size_t answer() {
+            return stringLength("hello");
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+    assert(function_ !is null, "No `answer` in the guest program");
+
+    auto interpreter_ = new Interpreter(Program([module_]));
+    size_t result;
+    // Warms the plan cache (`PlanCache.of`) and the type cache
+    // (`RuntimeTypes.get`) alike - only the steady state after this is
+    // the claim under test.
+    interpreter_.call(function_, &result, []);
+
+    const before = GC.allocatedInCurrentThread;
+    foreach (i; 0 .. 100)
+        interpreter_.call(function_, &result, []);
+    const after = GC.allocatedInCurrentThread;
+
+    after.should == before;
+}
+
+
+@("variadic.externD.noAllocationOnRepeatedCall.Bytecode")
+@Tags("Bytecode")
+unittest {
+    import core.memory: GC;
+    import snakebite.backends.backend: Program;
+    import snakebite.backends.bytecode: Bytecode;
+
+    auto module_ = parseSnippet(q{
+        pragma(mangle, "snakebite_ut_dvariadic_string_backend")
+        extern(D) size_t stringLength(...);
+
+        size_t answer() {
+            return stringLength("hello");
+        }
+    });
+    auto function_ = findFunction(module_, "answer");
+    assert(function_ !is null, "No `answer` in the guest program");
+
+    auto bytecode = new Bytecode(Program([module_]));
+    size_t result;
+    bytecode.call(function_, &result, []);
+
+    const before = GC.allocatedInCurrentThread;
+    foreach (i; 0 .. 100)
+        bytecode.call(function_, &result, []);
+    const after = GC.allocatedInCurrentThread;
+
+    after.should == before;
+}
