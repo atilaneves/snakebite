@@ -4170,8 +4170,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto info = *cast(TypeInfo_Class*) (*cast(void**) object);
         auto declaration = declarationOf(info);
-        if (declaration is null)
+        if (declaration is null) {
+            import snakebite.druntime.classfinalizer: _d_callfinalizer;
+
+            _d_callfinalizer(object);
             return;
+        }
 
         auto destructor = (*declaration).dtor;
         if (destructor !is null) {

@@ -25,6 +25,61 @@ public Object hostDispatchObject() {
 }
 
 
+public scope class LinkedScopeResource {
+    int* trace;
+    this(int* value) { trace = value; }
+    ~this() { ++*trace; }
+}
+
+
+private enum linkedClassesModule = q{
+    module ut.backends.run.classes;
+    Object hostDispatchObject();
+    scope class LinkedScopeResource {
+        int* trace;
+        this(int* value) { trace = value; }
+        ~this() { ++*trace; }
+    }
+};
+
+
+static foreach (BackendType; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "scope class allocation is not supported"),
+)) {
+    @("linkedScopeClassRunsDestructorAtScopeExit." ~ BackendType.stringof)
+    @Tags(BackendType.stringof)
+    unittest {
+        int result;
+        static if (is(BackendType == Native)) {
+            {
+                scope LinkedScopeResource value = new LinkedScopeResource(&result);
+            }
+        } else {
+            auto modules = parseSnippets([
+                q{
+                    module linked_scope_root;
+                    import ut.backends.run.classes: LinkedScopeResource;
+                    int answer() {
+                        int trace;
+                        {
+                            scope LinkedScopeResource value =
+                                new LinkedScopeResource(&trace);
+                        }
+                        return trace;
+                    }
+                },
+                linkedClassesModule,
+            ]);
+            auto function_ = findFunction(modules[0], "answer");
+            auto backend_ = new BackendType(Program([modules[0]]));
+            backend_.call(function_, &result, []);
+        }
+        result.should == 1;
+    }
+}
+
+
 @("hostCreatedObjectUsesVirtualGuestDispatch.Interpreter")
 @Tags(Interpreter.stringof)
 unittest {
@@ -37,10 +92,7 @@ unittest {
                 return hostDispatchObject().toHash;
             }
         },
-        q{
-            module ut.backends.run.classes;
-            Object hostDispatchObject();
-        },
+        linkedClassesModule,
     ]);
     auto function_ = findFunction(modules[0], "answer");
     auto backend = new Interpreter(Program([modules[0]]));
