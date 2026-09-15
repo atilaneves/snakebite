@@ -494,11 +494,10 @@ extern(C++) private final class LocalsCollector:
     }
 
     override void visit(DeclarationExp expression) {
-        auto variable = expression.declaration.isVarDeclaration;
-        if (variable is null)
-            return;
+        import snakebite.backends.declaration: runtimeVariables;
 
-        collectVariable(variable);
+        foreach (variable; runtimeVariables(expression.declaration))
+            collectVariable(variable);
     }
 
     // Every node `LoweringVisitor` follows into its own `lowering` shares

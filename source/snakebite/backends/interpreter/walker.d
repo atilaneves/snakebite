@@ -2291,59 +2291,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     override void visit(DeclarationExp expression) {
         import std.conv: text;
 
-        // Semantic analysis has already established a function-local
-        // struct's type, so declaring it needs no runtime action. DMD wraps a
-        // `static struct` in a storage-class declaration, which also needs no
-        // runtime action. Likewise,
-        // `alias Unqual_T = Unqual!T;` binds a name to a type, not
-        // storage, and `enum mask(ulong lo) = ...;` (an eponymous
-        // template, folded to its value at each `mask!x` use rather than
-        // run from here) binds a name to neither a type nor a value of
-        // its own - druntime's own append hooks declare both kinds in
-        // their own bodies, the same way an `import` inside a function
-        // body binds a name with nothing left to execute (see
-        // `visit(ImportStatement)`). A local `enum Direction : ubyte
-        // { north, south }` is the same story: semantic analysis has
-        // already folded every member into a constant, so a cast to
-        // `Direction` or a read of `Direction.north` never reaches this
-        // declaration at all. `Ctfe`, this interpreter's sibling
-        // backend, needs no special case of its own for any of these: it
-        // runs dmd's own `dinterpret.d`, which already knows a body can
-        // hold them. Any future backend that walks a body's AST itself,
-        // rather than handing it to dmd's engine, inherits the same
-        // need.
-        // A nested function declaration - `int lookup(string key) { ... }`
-        // written as a statement - likewise binds a name to a
-        // `FuncDeclaration` dmd has already resolved every call to, not
-        // storage this evaluator has to create: nothing runs until the
-        // guest calls `lookup`, at which point `visit(CallExp)` reaches
-        // it as `expression.f`, not through this declaration at all.
-        if (expression.declaration.isStructDeclaration !is null
-                || expression.declaration.isStorageClassDeclaration !is null
-                || expression.declaration.isAliasDeclaration !is null
-                || expression.declaration.isTemplateDeclaration !is null
-                || expression.declaration.isFuncDeclaration !is null
-                || expression.declaration.isEnumDeclaration !is null)
-            return;
+        import snakebite.backends.declaration: runtimeVariables;
 
-        auto variable = expression.declaration.isVarDeclaration;
-        if (variable is null)
-            throw new SnakebiteException(
-                text("interpreter cannot run declaration `",
-                    expression.toString, "`: only a local variable is ",
-                    "supported"),
-            );
-
+        auto variables = runtimeVariables(expression.declaration);
+        foreach (variable; variables) {
         // A data-segment variable is initialised once, when the guest
         // first reaches it, not every time its declaration executes.
         if (variable.isDataseg)
-            return;
+            continue;
 
         // `T value = void` requests storage without initialization. The
         // frame slot already exists, so executing this declaration performs
         // no write. Code must assign any bytes it reads, as in compiled D.
         if (variable._init.isVoidInitializer !is null)
-            return;
+            continue;
 
         auto expInitializer = variable._init.isExpInitializer;
         if (expInitializer is null)
@@ -2364,6 +2325,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             } else
                 evaluate(value, variable.type, slot);
         });
+        }
     }
 
     protected override void visitUnloweredConstruct(ConstructExp expression) {

@@ -1934,40 +1934,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileEffect(expression);
     }
 
-    // Whether `declaration` binds a name for the semantic pass with no
-    // runtime action of its own: a struct/alias/template/function/enum
-    // declared inside a function body, none of which this compiler ever
-    // has to run code for. An `AttribDeclaration` (`static struct S {
-    // ... }`'s own node - the `static` attaches to the declaration this
-    // way rather than as a storage-class flag the way it does on a
-    // `VarDeclaration`) is the same kind of no-op exactly when every
-    // symbol it wraps is, recursed the same way a nested attribute
-    // (`@("tag") static struct S { ... }`, one `AttribDeclaration`
-    // wrapping another) already needs.
-    private bool isRuntimeNoopDeclaration(
-        imported!"dmd.dsymbol".Dsymbol declaration,
-    ) {
-        if (declaration.isStructDeclaration !is null
-                || declaration.isAliasDeclaration !is null
-                || declaration.isTemplateDeclaration !is null
-                || declaration.isFuncDeclaration !is null
-                || declaration.isEnumDeclaration !is null)
-            return true;
-
-        if (auto attribute = declaration.isAttribDeclaration) {
-            if (attribute.decl is null)
-                return true;
-
-            foreach (member; *attribute.decl)
-                if (!isRuntimeNoopDeclaration(member))
-                    return false;
-
-            return true;
-        }
-
-        return false;
-    }
-
     private size_t registerTemporary(
         VarDeclaration variable,
         Expression destructor,
@@ -1993,17 +1959,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // itself the way `static int x;` sets `STC.static_` directly on
         // its own `VarDeclaration` - so this recurses through one to
         // reach the same no-op declarations underneath.
-        if (isRuntimeNoopDeclaration(expression.declaration))
-            return;
+        import snakebite.backends.declaration: runtimeVariables;
 
-        auto variable = expression.declaration.isVarDeclaration;
-        if (variable is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+        foreach (variable; runtimeVariables(expression.declaration)) {
 
         if (variable.isDataseg) {
             staticAddressOf(variable);
-            return;
+            continue;
         }
 
         // dmd always installs an `ExpInitializer` holding the type's own
@@ -2017,7 +1979,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             "a local variable declaration with no initializer at all");
 
         if (variable._init.isVoidInitializer !is null)
-            return;
+            continue;
 
         const emitDeclaration = () {
             const plan = TemporaryPlan.of(variable, expression,
@@ -2040,6 +2002,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         withFullExpression(FullExpressionKind.effect, expression,
             emitDeclaration,
         );
+        }
     }
 
     // Runs `variable`'s own initialiser into whichever storage its layout
