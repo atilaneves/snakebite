@@ -88,7 +88,7 @@ private final class GuestException: Exception {
 
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
-import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
+import snakebite.backends.comparison: ComparisonPlan;
 import snakebite.backends.controlflow: ControlFlowState,
     cleanupCount, scopePath;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
@@ -1831,21 +1831,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return *cast(void**) buffer.ptr;
     }
 
-    private void* asReference(Expression expression) {
-        import std.conv: text;
-
-        auto type = expression.type;
-        if (type.ty != Tpointer && type.ty != Tclass)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "` as a reference: its type is `", type.toString, "`"),
-            );
-
-        const facts = factsOf(type);
+    private void* asReference(Expression expression, in TypeFacts facts) {
         align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
         assert(facts.size <= buffer.sizeof && facts.alignment <= buffer.alignof,
             "a reference wider than a register reached the scratch buffer");
-        evaluate(expression, type, facts, buffer.ptr);
+        evaluate(expression, expression.type, facts, buffer.ptr);
         return *cast(void**) buffer.ptr;
     }
 
@@ -3054,27 +3044,31 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     ) {
         import snakebite.nativelayout: storeIntegral;
 
-        if (plan.kind == ComparisonPlan.Kind.floating) {
-            const a = asFloating(expression.e1);
-            const b = asFloating(expression.e2);
-            const answer = mixin("a " ~ op ~ " b");
-            storeIntegral(_place, answer ? 1 : 0, _facts.size);
-            return;
+        with (ComparisonPlan.Kind) final switch (plan.kind) {
+            case floating: {
+                const a = asFloating(expression.e1);
+                const b = asFloating(expression.e2);
+                const answer = mixin("a " ~ op ~ " b");
+                storeIntegral(_place, answer ? 1 : 0, _facts.size);
+                return;
+            }
+            case reference: {
+                const a = cast(size_t) asReference(expression.e1, plan.facts);
+                const b = cast(size_t) asReference(expression.e2, plan.facts);
+                const answer = mixin("a " ~ op ~ " b");
+                storeIntegral(_place, answer ? 1 : 0, _facts.size);
+                return;
+            }
+            case integral: {
+                const a = asIntegral(expression.e1, plan.facts);
+                const b = asIntegral(expression.e2, plan.facts);
+                const answer = plan.facts.isUnsigned
+                    ? mixin("cast(ulong) a " ~ op ~ " cast(ulong) b")
+                    : mixin("a " ~ op ~ " b");
+                storeIntegral(_place, answer ? 1 : 0, _facts.size);
+                return;
+            }
         }
-
-        const a = plan.kind == ComparisonPlan.Kind.reference
-            ? cast(long) asReference(expression.e1)
-            : asIntegral(expression.e1, plan.facts);
-        const b = plan.kind == ComparisonPlan.Kind.reference
-            ? cast(long) asReference(expression.e2)
-            : asIntegral(expression.e2, plan.facts);
-        const answer = plan.kind == ComparisonPlan.Kind.reference
-            ? mixin("cast(ulong) a " ~ op ~ " cast(ulong) b")
-            : sharedSignedness(plan.facts, plan.facts, expression)
-            ? mixin("cast(ulong) a " ~ op ~ " cast(ulong) b")
-            : mixin("a " ~ op ~ " b");
-
-        storeIntegral(_place, answer ? 1 : 0, _facts.size);
     }
 
     override void visit(LogicalExp expression) {

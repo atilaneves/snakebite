@@ -4394,90 +4394,95 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        // A class reference compares the same way a pointer does - `is`/
-        // `==` on two references is identity, the same one pointer width
-        // `opEqual` already reads either way; only `is`/`!is` (`identity`/
-        // `notIdentity`) are legal D syntax for a class reference, but the
-        // handler map below already answers those the same as `==`/`!=`.
-        if (plan.kind == ComparisonPlan.Kind.reference) {
-            Instruction.Handler pointerHandler;
-            with (EXP) switch (expression.op) {
-                case lessThan:
-                    pointerHandler = &opLessThanUnsigned;
-                    break;
-                case lessOrEqual:
-                    pointerHandler = &opLessOrEqualUnsigned;
-                    break;
-                case greaterThan:
-                    pointerHandler = &opGreaterThanUnsigned;
-                    break;
-                case greaterOrEqual:
-                    pointerHandler = &opGreaterOrEqualUnsigned;
-                    break;
-                case equal, identity: pointerHandler = &opEqual; break;
-                case notEqual, notIdentity: pointerHandler = &opNotEqual;
-                    break;
-                default:
-                    throw rejection(_function, expression.loc,
-                        expressionText(expression));
+        with (ComparisonPlan.Kind) final switch (plan.kind) {
+            // A class reference compares the same way a pointer does - `is`/
+            // `==` on two references is identity, the same one pointer width
+            // `opEqual` already reads either way; only `is`/`!is` (`identity`/
+            // `notIdentity`) are legal D syntax for a class reference, but the
+            // handler map below already answers those the same as `==`/`!=`.
+            case reference: {
+                Instruction.Handler pointerHandler;
+                with (EXP) switch (expression.op) {
+                    case lessThan:
+                        pointerHandler = &opLessThanUnsigned;
+                        break;
+                    case lessOrEqual:
+                        pointerHandler = &opLessOrEqualUnsigned;
+                        break;
+                    case greaterThan:
+                        pointerHandler = &opGreaterThanUnsigned;
+                        break;
+                    case greaterOrEqual:
+                        pointerHandler = &opGreaterOrEqualUnsigned;
+                        break;
+                    case equal, identity: pointerHandler = &opEqual; break;
+                    case notEqual, notIdentity: pointerHandler = &opNotEqual;
+                        break;
+                    default:
+                        throw rejection(_function, expression.loc,
+                            expressionText(expression));
+                }
+
+                const leftOffset = reserveTemp(operandFacts);
+                evalInto(expression.e1, leftOffset, operandFacts.size);
+                const rightOffset = reserveTemp(operandFacts);
+                evalInto(expression.e2, rightOffset, operandFacts.size);
+                emit(pointerHandler, leftOffset, rightOffset, operandFacts.size);
+
+                if (destOffset != leftOffset)
+                    emit(&opCopy, destOffset, leftOffset, 1);
+                return;
             }
 
-            const leftOffset = reserveTemp(operandFacts);
-            evalInto(expression.e1, leftOffset, operandFacts.size);
-            const rightOffset = reserveTemp(operandFacts);
-            evalInto(expression.e2, rightOffset, operandFacts.size);
-            emit(pointerHandler, leftOffset, rightOffset, operandFacts.size);
+            // Host floating-point operators preserve D's NaN and signed-zero
+            // semantics for equality and ordering. Integral equality instead
+            // compares the stored bits, which would make a NaN equal itself and
+            // positive and negative zero unequal.
+            case floating: {
+                Instruction.Handler floatHandler;
+                with (EXP) switch (expression.op) {
+                    case lessThan: floatHandler = &opFloatLessThan; break;
+                    case lessOrEqual: floatHandler = &opFloatLessOrEqual; break;
+                    case greaterThan: floatHandler = &opFloatGreaterThan; break;
+                    case greaterOrEqual:
+                        floatHandler = &opFloatGreaterOrEqual; break;
+                    case equal: floatHandler = &opFloatEqual; break;
+                    case notEqual: floatHandler = &opFloatNotEqual; break;
+                    default:
+                        throw rejection(_function, expression.loc,
+                            expressionText(expression));
+                }
 
-            if (destOffset != leftOffset)
-                emit(&opCopy, destOffset, leftOffset, 1);
-            return;
-        }
+                const floatLeftOffset = reserveTemp(operandFacts);
+                evalInto(expression.e1, floatLeftOffset, operandFacts.size);
+                const floatRightOffset = reserveTemp(operandFacts);
+                evalInto(expression.e2, floatRightOffset, operandFacts.size);
+                emit(floatHandler, floatLeftOffset, floatRightOffset,
+                    operandFacts.size);
 
-        // Host floating-point operators preserve D's NaN and signed-zero
-        // semantics for equality and ordering. Integral equality instead
-        // compares the stored bits, which would make a NaN equal itself and
-        // positive and negative zero unequal.
-        if (plan.kind == ComparisonPlan.Kind.floating) {
-            Instruction.Handler floatHandler;
-            with (EXP) switch (expression.op) {
-                case lessThan: floatHandler = &opFloatLessThan; break;
-                case lessOrEqual: floatHandler = &opFloatLessOrEqual; break;
-                case greaterThan: floatHandler = &opFloatGreaterThan; break;
-                case greaterOrEqual:
-                    floatHandler = &opFloatGreaterOrEqual; break;
-                case equal: floatHandler = &opFloatEqual; break;
-                case notEqual: floatHandler = &opFloatNotEqual; break;
-                default:
-                    throw rejection(_function, expression.loc,
-                        expressionText(expression));
+                if (destOffset != floatLeftOffset)
+                    emit(&opCopy, destOffset, floatLeftOffset, 1);
+                return;
             }
 
-            const floatLeftOffset = reserveTemp(operandFacts);
-            evalInto(expression.e1, floatLeftOffset, operandFacts.size);
-            const floatRightOffset = reserveTemp(operandFacts);
-            evalInto(expression.e2, floatRightOffset, operandFacts.size);
-            emit(floatHandler, floatLeftOffset, floatRightOffset,
-                operandFacts.size);
+            case integral: {
+                if (!operandFacts.isIntegral || !isIntegralSize(operandFacts.size))
+                    throw rejection(_function, expression.loc,
+                        expressionText(expression));
 
-            if (destOffset != floatLeftOffset)
-                emit(&opCopy, destOffset, floatLeftOffset, 1);
-            return;
+                auto handler = comparisonHandler(expression, operandFacts.isUnsigned);
+
+                const leftOffset = reserveTemp(operandFacts);
+                evalInto(expression.e1, leftOffset, operandFacts.size);
+                const rightOffset = reserveTemp(operandFacts);
+                evalInto(expression.e2, rightOffset, operandFacts.size);
+                emit(handler, leftOffset, rightOffset, operandFacts.size);
+
+                if (destOffset != leftOffset)
+                    emit(&opCopy, destOffset, leftOffset, 1);
+                return;
+            }
         }
-
-        if (!operandFacts.isIntegral || !isIntegralSize(operandFacts.size))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        auto handler = comparisonHandler(expression, operandFacts.isUnsigned);
-
-        const leftOffset = reserveTemp(operandFacts);
-        evalInto(expression.e1, leftOffset, operandFacts.size);
-        const rightOffset = reserveTemp(operandFacts);
-        evalInto(expression.e2, rightOffset, operandFacts.size);
-        emit(handler, leftOffset, rightOffset, operandFacts.size);
-
-        if (destOffset != leftOffset)
-            emit(&opCopy, destOffset, leftOffset, 1);
     }
 
     // DMD's identity lowering is a native byte comparison.  The shared
