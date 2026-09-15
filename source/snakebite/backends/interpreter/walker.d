@@ -125,7 +125,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         TypeInfo_Tuple;
     import dmd.root.string: toDString;
     import dmd.astenums:
-        LINK, Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32,
+        Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32,
         Tfloat64, Tfloat80, Tnoreturn, Tint64, Tpointer, Tsarray, Ttuple,
         Tuns32, Tuns8, Tvoid, Twchar, VarArg;
     import dmd.arraytypes: Expressions;
@@ -885,22 +885,29 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             callSite, function_, () => _plans.of(function_));
     }
 
-    // As `callPlanOf`, for one call site of an `extern(C)` C-style
-    // variadic callee: `extraArgumentTypes` are that call's own extra
-    // arguments' types (`CallPlan.prepareVariadic`'s own doc). The AST
-    // fixes a `CallExp`'s argument expressions, and so their types,
-    // once - `callSite` always names the same extra argument types on
-    // every visit - so keying this the same way `callPlanOf` keys an
-    // ordinary plan, by `(callSite, function_)` identity, is exactly
-    // right: `_plans.variadicOf` never has to run twice for the same
-    // call site.
+    // As `callPlanOf`, for one call site of an `extern(C)` C-style or
+    // `extern(D)` untyped variadic callee: `extraArgumentTypes`, called
+    // lazily, builds that call's own extra arguments' types (`CallPlan.
+    // prepareVariadic`'s own doc). The AST fixes a `CallExp`'s argument
+    // expressions, and so their types, once - `callSite` always names
+    // the same extra argument types on every visit - so keying this the
+    // same way `callPlanOf` keys an ordinary plan, by `(callSite,
+    // function_)` identity, is exactly right: `_plans.variadicOf` never
+    // has to run twice for the same call site. Laziness matters beyond
+    // that single `_plans.variadicOf` call: `cachedCallPlan`'s own
+    // `build` only ever runs on a cache miss, so a repeat call at an
+    // already-cached site never invokes `extraArgumentTypes` either,
+    // never re-walking `expression.arguments` or reallocating the array
+    // its own caller (`callVariadicNative`) would otherwise build afresh
+    // every call (issue #334 step 6's own
+    // `noAllocationOnRepeatedCall` regression test).
     extern(D) private const(CallPlan)* variadicCallPlanOf(
         CallExp callSite,
         FuncDeclaration function_,
-        scope Type[] extraArgumentTypes,
+        scope Type[] delegate() extraArgumentTypes,
     ) {
         return cachedCallPlan(callSite, function_,
-            () => _plans.variadicOf(function_, extraArgumentTypes));
+            () => _plans.variadicOf(function_, extraArgumentTypes()));
     }
 
     // The call-site cache (issue #96) shared by `callPlanOf` and
@@ -4748,21 +4755,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             : Callee(expression.f, null, false);
         auto function_ = callee.function_;
 
-        // A C-style variadic callee (issue #334 step 5) always reaches a
-        // native symbol - see `callVariadicNative`'s own doc - so this
-        // never joins the class-receiver/virtual-dispatch machinery
-        // below, which exists for guest method calls only. `linkage ==
-        // LINK.c` keeps this routing to only what step 5 actually
-        // supports: without it, a guest-bodied `extern(D)` variadic
-        // function (D's own untyped variadics, issue #334 step 6) would
-        // also reach `callVariadicNative`, and its own FFI refusal
-        // ("ffi cannot call ... as a variadic function") would misname a
-        // guest function as an FFI failure. Falling through instead
-        // reaches the ordinary call path below, whose own arity check
-        // gives an honest message until step 6 adds real support.
+        // A `VarArg.variadic` callee - `extern(C)` C-style (issue #334
+        // step 5), or `extern(D)` untyped (issue #334 step 6) - always
+        // reaches a native symbol, so this never joins the class-
+        // receiver/virtual-dispatch machinery below, which exists for
+        // guest method calls only: whatever the callee's own linkage,
+        // nothing this backend interprets can have a `va_arg`-reading
+        // body walked correctly (`callVariadicNative`'s own doc). A
+        // root-owned callee whose own body is meant to *run* - not merely
+        // exist so dmd's `semantic3` populates its hidden `_arguments`/
+        // `_argptr` locals - is refused inside `callVariadicNative`
+        // itself, naming that exact limitation, rather than misrouted
+        // here to the ordinary call path's own, unrelated arity-mismatch
+        // message (`callVariadicNative`'s own doc).
         auto funcType = typeFunctionOf(function_);
-        if (funcType.parameterList.varargs == VarArg.variadic
-                && function_.resolvedLinkage == LINK.c) {
+        if (funcType.parameterList.varargs == VarArg.variadic) {
             callVariadicNative(expression, function_, funcType);
             return;
         }
@@ -4908,11 +4915,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto arguments = expression.arguments;
         const totalCount = arguments is null ? 0 : arguments.length;
 
-        Type[] extraTypes;
-        foreach (i; declaredArgumentOffset + declaredCount .. totalCount)
-            extraTypes ~= (*arguments)[i].type;
+        // Only built on a cache miss - `variadicCallPlanOf`'s own doc -
+        // so a repeat call at the same site never re-walks `arguments`
+        // or reallocates this array.
+        Type[] extraTypes() {
+            Type[] types;
+            foreach (i; declaredArgumentOffset + declaredCount .. totalCount)
+                types ~= (*arguments)[i].type;
+            return types;
+        }
 
-        auto plan = variadicCallPlanOf(expression, function_, extraTypes);
+        auto plan = variadicCallPlanOf(expression, function_, &extraTypes);
 
         auto layout = layoutOf(function_);
         auto frame = bindFrame(
