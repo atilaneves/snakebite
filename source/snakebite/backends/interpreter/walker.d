@@ -1146,7 +1146,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             }
         } catch (GuestException exception) {
             pendingException = exception._guest;
-            throw exception;
         } finally {
             auto returned = _returned;
             auto continued = _continued;

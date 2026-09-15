@@ -1058,8 +1058,7 @@ static foreach (backend; Matrix!()) {
 }
 
 
-static foreach (backend; Matrix!(
-)) {
+static foreach (backend; Matrix!()) {
     @("tryFinally.throwingCleanupChainsExceptions." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1095,5 +1094,30 @@ static foreach (backend; Matrix!(
             (values[0] is values[1]).should == true;
             (values[0].next is values[2]).should == true;
         }
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("tryFinally.cleanupErrorReplacesBodyException." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(backend, q{
+            import core.exception: AssertError;
+
+            bool result() {
+                try {
+                    try {
+                        throw new Exception("body");
+                    } finally {
+                        throw new AssertError("cleanup");
+                    }
+                } catch (AssertError) {
+                    return true;
+                } catch (Exception) {
+                    return false;
+                }
+                return false;
+            }
+        }, "result");
     }
 }
