@@ -59,6 +59,7 @@ public PreparationReport prepareProject(
 public ExecutionReport executeBackend(
     in imported!"snakebite.backends".BackendName name,
     imported!"snakebite.backends".Program program,
+    in string[] hostArguments = null,
 ) {
     import snakebite.backends: makeBackend;
     import snakebite.backends.backend: run;
@@ -66,7 +67,7 @@ public ExecutionReport executeBackend(
 
     auto stopWatch = StopWatch(AutoStart.yes);
     scope backend = makeBackend(name, program);
-    const status = run(backend, program);
+    const status = run(backend, program, hostArguments);
     return ExecutionReport(
         status,
         stopWatch.peek,

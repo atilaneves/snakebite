@@ -2,6 +2,9 @@ module ut.backends.run.main;
 
 
 import ut.backends;
+import snakebite.backends.backend: Program, run;
+import snakebite.frontend.compiler: parseSnippet;
+import std.meta: AliasSeq;
 
 
 static foreach (backend; Matrix!()) {
@@ -38,6 +41,25 @@ static foreach (backend; Matrix!(
                 }
             },
         );
+    }
+}
+
+static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
+    @("ret.int.hostArguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        auto program = Program([parseSnippet(q{
+            int main(string[] args) {
+                if (args.length != 3)
+                    return 1;
+                return args[0] == "sb"
+                    && args[1] == "first"
+                    && args[2] == "second" ? 42 : 2;
+            }
+        })], "snakebite");
+        string[] hostArguments = ["sb", "first", "second"];
+
+        run(new backend(program), program, hostArguments).should == 42;
     }
 }
 
