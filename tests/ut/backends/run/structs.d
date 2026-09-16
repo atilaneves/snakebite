@@ -11,8 +11,6 @@ import ut.backends;
 
 // Compiled Variant methods call the handler stored in guest-initialized data.
 static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "native Variant construction calls a guest declaration address"),
     Omit!(Ctfe, Because.inexpressible,
         "Variant reinterprets its byte storage as the stored type"),
 )) {
@@ -3707,6 +3705,32 @@ static foreach (backend; Matrix!(
                 return () => value.saved == &value;
             }
             void main() { assert(make()()); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("discardAggregateIndirectResult." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Result { long[4] values; }
+            Result produce(ref int calls) {
+                ++calls;
+                return Result.init;
+            }
+            void main() {
+                int calls;
+                auto pointer = &produce;
+                pointer(calls);
+                Result nested() {
+                    ++calls;
+                    return Result.init;
+                }
+                auto callback = &nested;
+                callback();
+                assert(calls == 2);
+            }
         });
     }
 }

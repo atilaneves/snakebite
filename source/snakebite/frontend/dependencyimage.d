@@ -110,7 +110,8 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
     }
 
     override void visit(FuncDeclaration function_) {
-        if (function_ in _visited || function_.fbody is null)
+        if (function_ in _visited || function_.fbody is null
+                || function_.parent is null)
             return;
         _visited[function_] = true;
         if (auto instance = function_.parent.isTemplateInstance) {

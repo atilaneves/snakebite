@@ -285,6 +285,22 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("ret.int.disabledMainWithoutElse." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeStatusOf!(
+            backend,
+            q{
+                static if (false) {
+                    int main() { return 1; }
+                }
+                int main() { return 42; }
+            },
+        );
+    }
+}
+
 // A template instance contributes its expanded declarations to the module.
 // `main` must therefore be found there, as a compiled program finds it.
 static foreach (backend; Matrix!()) {

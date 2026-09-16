@@ -332,3 +332,30 @@ unittest {
     alias Answer = extern(C) int function();
     (cast(Answer) image.resolve("answer"))().should == 42;
 }
+
+static foreach (backend; Matrix!()) {
+    @("image.hashWithCtfeHelper." ~ backend.stringof)
+    @Serial
+    unittest {
+        enum code = q{
+            import core.internal.hash: hashOf;
+            struct Value { int number; }
+            int answer() {
+                auto value = Value(17);
+                return hashOf(value) == hashOf(Value(17)) ? 17 : 0;
+            }
+        };
+        static if (is(backend == Native)) {
+            mixin(code);
+            answer.should == 17;
+        } else {
+            auto module_ = parseSnippet(code);
+            auto program = Program([module_]);
+            imageSource(program);
+            scope instance = new backend(program);
+            int result;
+            instance.call(findFunction(module_, "answer"), &result, []);
+            result.should == 17;
+        }
+    }
+}
