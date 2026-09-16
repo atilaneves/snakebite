@@ -25,11 +25,31 @@ private enum atomicSource = q{
     export __gshared auto retained = &atomicLoad!(MemoryOrder.seq, int);
 };
 
+// Tests in this module build many small images from the same handful of
+// sources. The cache in prepareImage keys on content and compiler
+// identity and publishes with an atomic rename, so one directory is safe
+// to share across different sources: a test with new source still gets
+// its own cache entry, and a repeat of the same source hits the cache
+// instead of paying for a fresh compile and link. Tests that check the
+// cache directory is empty after a failed build keep their own sandbox
+// instead (image.compileFailure, image.linkFailure, image.compilerFamily).
+private string sharedImageCache() {
+    static string directory;
+    if (directory is null) {
+        import std.file: mkdirRecurse;
+        import std.path: buildPath;
+        import std.file: tempDir;
+
+        directory = buildPath(tempDir(), "snakebite-image-test-cache");
+        mkdirRecurse(directory);
+    }
+    return directory;
+}
+
 @("image.atomicLoad.cache")
 @Serial
 unittest {
-    const sandbox = Sandbox();
-    const directory = sandbox.sandboxPath;
+    const directory = sharedImageCache;
     auto image = prepareImage(atomicSource, directory);
     const stamp = timeLastModified(image.path);
     auto reused = prepareImage(atomicSource, directory);
@@ -51,8 +71,7 @@ unittest {
 @("image.sourceChange")
 @Serial
 unittest {
-    const sandbox = Sandbox();
-    const directory = sandbox.sandboxPath;
+    const directory = sharedImageCache;
     auto first = prepareImage("export extern(C) int answer() { return 1; }", directory);
     auto second = prepareImage("export extern(C) int answer() { return 2; }", directory);
     first.path.should.not == second.path;
@@ -124,7 +143,7 @@ unittest {
 @Serial
 unittest {
     const sandbox = Sandbox();
-    const directory = sandbox.sandboxPath;
+    const directory = sharedImageCache;
     const input = sandbox.inSandboxPath("settings");
     sandbox.writeFile("settings", "first");
     auto first = prepareImage(atomicSource, directory,
@@ -140,8 +159,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     @("image.atomicLoad." ~ backend.stringof)
     @Serial
     unittest {
-        const sandbox = Sandbox();
-        const directory = sandbox.sandboxPath;
+        const directory = sharedImageCache;
         auto image = prepareImage(atomicSource, directory);
         shared int value = 42;
         static if (is(backend == Native)) {
@@ -169,8 +187,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 @("image.moduleConstructor")
 @Serial
 unittest {
-    const sandbox = Sandbox();
-    const directory = sandbox.sandboxPath;
+    const directory = sharedImageCache;
     auto image = prepareImage(q{
         module image;
         __gshared int value;
@@ -225,11 +242,10 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             mixin(code);
             answer.should == 17;
         } else {
-            const sandbox = Sandbox();
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
             const source = imageSource(program);
-            auto image = prepareImage(source, sandbox.sandboxPath,
+            auto image = prepareImage(source, sharedImageCache,
                 defaultCompiler, null, null, null, ["-w", "-checkaction=context"]);
             alias FetchAdd = __traits(getOverloads, core.atomic, "atomicFetchAdd", true)[0];
             image.resolve(FetchAdd!(MemoryOrder.seq, int).mangleof)
@@ -321,13 +337,12 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 @("image.compilerArguments")
 @Serial
 unittest {
-    const sandbox = Sandbox();
     auto image = prepareImage(q{
         module image;
         version (ImageSetting) {} else static assert(false, "missing version");
         debug {} else static assert(false, "missing debug");
         export extern(C) int answer() { return 42; }
-    }, sandbox.sandboxPath, defaultCompiler, null, null, null,
+    }, sharedImageCache, defaultCompiler, null, null, null,
         ["-debug", "-version=ImageSetting"]);
     alias Answer = extern(C) int function();
     (cast(Answer) image.resolve("answer"))().should == 42;
