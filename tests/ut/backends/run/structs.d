@@ -9,6 +9,23 @@ module ut.backends.run.structs;
 import ut.backends;
 
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read runtime TypeInfo"),
+)) {
+    @("structTypeInfo.qualifiedName." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.algorithm: endsWith;
+            struct Value { int number; }
+            void main() {
+                assert(typeid(Value).toString.endsWith(".Value"));
+            }
+        });
+    }
+}
+
+
 // Compiled Variant methods call the handler stored in guest-initialized data.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,

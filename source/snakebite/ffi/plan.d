@@ -60,7 +60,7 @@ public struct CallPlan {
     // so they share `word64`; `copy` is the rare aggregate eightbyte
     // narrower than 8 bytes, the only case that still needs a byte count.
     private enum Load : ubyte {
-        word64, zero8, zero16, zero32, sign8, sign16, sign32, copy,
+        word64, zero8, zero16, zero32, sign8, sign16, sign32, copy, address,
     }
 
     // One eightbyte's source and destination, fixed at prepare time. The
@@ -382,6 +382,10 @@ public struct CallPlan {
                     (move.destinationOffset - stackBase) / size_t.sizeof]
                 : *cast(const(size_t)*)
                     (frameBytes + move.destinationOffset);
+            if (move.load == Load.address) {
+                addresses[move.parameterIndex] = cast(void*) word;
+                continue;
+            }
             memcpy(
                 scratch + _argumentOffsets[move.parameterIndex]
                     + move.byteOffset,
@@ -434,7 +438,7 @@ public struct CallPlan {
     // its forward `Load` reads.
     private static size_t widthOf(in Move move) {
         final switch (move.load) with (Load) {
-            case word64: return 8;
+            case word64, address: return 8;
             case zero8, sign8: return 1;
             case zero16, sign16: return 2;
             case zero32, sign32: return 4;
@@ -539,6 +543,7 @@ public struct CallPlan {
     pragma(inline, false)
     private static size_t loadRare(in Move move, const(ubyte)* src) {
         final switch (move.load) with (Load) {
+            case address: return cast(size_t) src;
             case word64: return *cast(size_t*) src;
             case zero8:  return *cast(ubyte*) src;
             case zero16: return *cast(ushort*) src;
@@ -824,6 +829,10 @@ public struct CallPlan {
         else
             foreach (i; spilled[0 .. spilledCount])
                 addSpilled(i);
+
+        foreach (ref move; _moves[0 .. moveCount])
+            if (_arguments[move.parameterIndex].indirect)
+                move.load = Load.address;
 
         _moveCount = moveCount;
         _sseCount = floatingCount;
@@ -1572,7 +1581,7 @@ private CallPlan _shapeOf(
                         2,
                         false,
                     )
-                : ArgumentPlan.of(type.parameterList[i].type));
+                : ArgumentPlan.ofParameter(type.parameterList[i].type));
         }
 
         // A variadic call site's own extra arguments classify exactly
@@ -1595,7 +1604,7 @@ private CallPlan _shapeOf(
             if (isFunctionPointer || isDelegate)
                 plan._callbackArguments ~= CallPlan.CallbackArgument(
                     argumentIndex, false, isDelegate);
-            addArgument(ArgumentPlan.of(extraType));
+            addArgument(ArgumentPlan.ofParameter(extraType));
         }
 
         plan._parameterCount = argumentCount;

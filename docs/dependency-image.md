@@ -34,10 +34,10 @@ and build the project again. The first run also makes this check to establish
 archives for the host compiler and shared image. Dub build hooks run when dub
 builds the project; they do not run on a dependency cache hit.
 
-The project owns the image through a reference-counted handle. Project copies
-retain it; `Program` and `Resolver` borrow it. Keep the project alive until its
-backends, callbacks, and returned objects have been destroyed. The benchmark
-reports image preparation time separately from frontend and execution time.
+The image remains mapped until the executable exits, including after the
+loading thread exits. `Project`, `Program`, and `Resolver` hold descriptions of
+that image. The benchmark reports image preparation time separately from
+frontend and execution time.
 
 ## Direct use
 
@@ -56,7 +56,7 @@ auto image = prepareImage(q{
 auto program = Program(rootModules);
 program.dependencyImage = &image;
 scope backend = new Bytecode(program);
-// Run the program while image is alive.
+// Run the program with the prepared image.
 ```
 
 Guest code imports and calls `core.internal.atomic.atomicLoad` directly. The
@@ -67,9 +67,9 @@ Prepare the image before constructing any backend. Each backend searches the
 image handle first, then the process symbols. Symbol misses and call plans stay
 cached. There is no compile step on symbol lookup.
 
-`DependencyImage` cannot be copied. It owns a loader reference and releases that
-reference when its scope ends. Direct callers must keep it alive for all uses of
-the code and data it contains.
+`DependencyImage` is a copyable description. Its scope does not control the
+image lifetime. The native loader retains the image with `RTLD_NODELETE`, while
+druntime still performs D module initialization and thread cleanup.
 
 ## Compiler and runtime
 

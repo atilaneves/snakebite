@@ -8,6 +8,25 @@ import snakebite.frontend.compiler: parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction;
 
 
+static foreach (backend; Matrix!()) {
+    @("pointers.classReference.dereference." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Value { int number = 42; }
+            void main() {
+                auto value = new Value;
+                auto pointer = &value;
+                assert(*pointer is value);
+                assert((*pointer).number == 42);
+                value = null;
+                assert(*pointer is null);
+            }
+        });
+    }
+}
+
+
 private alias BoolCallback = extern(D) bool function();
 
 

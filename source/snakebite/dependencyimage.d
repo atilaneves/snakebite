@@ -4,14 +4,11 @@ module snakebite.dependencyimage;
 private:
 
 
-// A prepared image owns its loader reference. Keep it alive until all
-// backends, callbacks and values that use its code have been destroyed.
-// Build before constructing a backend: symbol misses are cached.
+// A project's dependency image stays loaded until the executable exits.
+// This value describes the image; its scope does not limit that lifetime.
 public struct DependencyImage {
     private void* _handle;
     private string _path;
-
-    @disable this(this);
 
     public string path() @safe @nogc nothrow pure const return scope {
         return _path;
@@ -24,16 +21,9 @@ public struct DependencyImage {
         if (_handle is null)
             return null;
         dlerror;
-        // const qualifies the owner, not the loader's opaque handle.
+        // const qualifies this description, not the loader's opaque handle.
         const address = dlsym(cast(void*) _handle, name.toStringz);
         return dlerror is null ? cast(void*) address : null;
-    }
-
-    ~this() {
-        import core.runtime: Runtime;
-
-        if (_handle !is null)
-            Runtime.unloadLibrary(_handle);
     }
 }
 
@@ -154,8 +144,9 @@ public DependencyImage prepareImage(
 
 private DependencyImage loadImage(in string path) {
     import core.runtime: Runtime;
-    import core.sys.posix.dlfcn: dlerror;
-    import std.string: fromStringz;
+    import core.sys.posix.dlfcn:
+        dlclose, dlerror, dlopen, RTLD_LAZY, RTLD_NODELETE;
+    import std.string: fromStringz, toStringz;
     import std.conv: text;
 
     DependencyImage image;
@@ -164,6 +155,13 @@ private DependencyImage loadImage(in string path) {
     if (image._handle is null)
         require(false, text("Cannot load dependency image ", path,
             ": ", dlerror.fromStringz));
+    // druntime releases a thread's library references when that thread exits.
+    // Symbols must remain valid for the executable after the loading thread ends.
+    const pinned = dlopen(path.toStringz, RTLD_LAZY | RTLD_NODELETE);
+    if (pinned is null)
+        require(false, text("Cannot retain dependency image ", path,
+            ": ", dlerror.fromStringz));
+    dlclose(cast(void*) pinned);
     return image;
 }
 

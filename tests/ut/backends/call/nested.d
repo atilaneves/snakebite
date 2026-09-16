@@ -4,6 +4,79 @@ module ut.backends.call.nested;
 import ut.backends;
 
 
+static foreach (backend; Matrix!()) {
+    @("nested.associativeForeach.callsOuterFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int result = 42;
+                void check() { assert(result == 42); }
+                auto callback = () {
+                    int[int] values = [1: 2];
+                    foreach (_, ref value; values) check();
+                };
+                callback();
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot return closures"),
+)) {
+    @("nested.closure.retainsCapturedObjectDuringCollection." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: GC;
+            class Box {
+                int value;
+                this(int number) { value = number; }
+            }
+            Box delegate() make(int number) {
+                auto box = new Box(number);
+                return () => box;
+            }
+            void main() {
+                auto first = make(42);
+                foreach (number; 0 .. 100) {
+                    auto other = make(number);
+                    assert(other().value == number);
+                }
+                GC.collect();
+                assert(GC.addrOf(cast(void*) first()) !is null);
+                assert(first().value == 42);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot return closures"),
+)) {
+    @("nested.returnedDelegate.callsOuterTemplate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int delegate() make() {
+                int helper()() { return 42; }
+                int delegate() result;
+                void add() { result = () => helper!()(); }
+                add();
+                return result;
+            }
+            void main() {
+                auto value = make();
+                assert(value() == 42);
+            }
+        });
+    }
+}
+
+
 // The non-escaping case: `bump` is called while `main`'s own frame is
 // still on the interpreter's frame stack, so reading and then writing
 // `counter` through the static chain reaches the same storage a compiled

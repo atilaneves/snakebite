@@ -21,8 +21,6 @@ public struct Project {
     public string directory;
     public SourceSet sources;
     public imported!"snakebite.backends".Program program;
-    private imported!"std.typecons".RefCounted!(
-        imported!"snakebite.dependencyimage".DependencyImage) _image;
 }
 
 
@@ -278,7 +276,8 @@ private string dmdFlagsForOption(in string option) {
 
 public void prepareDependencies(ref Project project) {
     import snakebite.frontend.dependencyimage: imageSource, imageInputs;
-    import snakebite.dependencyimage: ProjectImageCache, prepareImage, defaultCompiler;
+    import snakebite.dependencyimage:
+        DependencyImage, ProjectImageCache, prepareImage, defaultCompiler;
     import std.path: buildPath;
 
     import std.conv: text;
@@ -301,8 +300,9 @@ public void prepareDependencies(ref Project project) {
         }
         return source;
     }
-    if (cache.restore(project._image.refCountedPayload, &generateSource)) {
-        project.program.dependencyImage = &project._image.refCountedPayload();
+    auto image = new DependencyImage;
+    if (cache.restore(*image, &generateSource)) {
+        project.program.dependencyImage = image;
         return;
     }
     if (project.sources.linkerFiles.length && isDubProject(project.directory)) {
@@ -314,7 +314,7 @@ public void prepareDependencies(ref Project project) {
     generateSource;
     if (!source.length && !project.sources.linkerFiles.length)
         return;
-    project._image.refCountedPayload = prepareImage(
+    *image = prepareImage(
         source.length ? source : "module snakebite_dependency_image;\n",
         directory, defaultCompiler,
         imageInputs(project.program), project.sources.importPaths,
@@ -323,9 +323,9 @@ public void prepareDependencies(ref Project project) {
         project.sources.linkerFiles, project.sources.linkerFlags);
     import snakebite.dub: dubInputs;
 
-    cache.save(project._image.refCountedPayload.path, source,
+    cache.save(image.path, source,
         imageInputs(project.program) ~ project.sources.linkerFiles
         ~ (isDubProject(project.directory)
             ? dubInputs(project.directory, project.sources.dubDescription) : null));
-    project.program.dependencyImage = &project._image.refCountedPayload();
+    project.program.dependencyImage = image;
 }
