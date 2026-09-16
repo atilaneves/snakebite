@@ -38,9 +38,14 @@ import std.conv: text;
 // thread's compile reading back another's operand, type or AST node
 // produces a value (or an unrelated compile failure) that belongs to no
 // function here.
-private enum functionCount = 64;
-private enum threadCount = 32;
-private enum rounds = 30;
+// Small enough for CI to afford (finding 12, issue #278 review): 8
+// threads racing to compile 16 functions for the first time, across 6
+// freshly worded rounds, still gives every thread a distinct pair of
+// cold functions per round - the same race, at a size that used to
+// cost 30 rounds * 32 threads before this test could run there at all.
+private enum functionCount = 16;
+private enum threadCount = 8;
+private enum rounds = 6;
 private static immutable elementTypes = [
     "ubyte", "short", "int", "long", "float", "double",
 ];
@@ -77,7 +82,6 @@ private long expectedResult(in size_t index) {
     return 3 * index + 0 + 1 + 2;
 }
 
-@HiddenTest
 @("compileFunction.concurrentCompilesOfDifferentFunctionsAgree")
 unittest {
     import core.atomic: atomicLoad, atomicOp, atomicStore;
