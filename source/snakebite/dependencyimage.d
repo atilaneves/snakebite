@@ -58,7 +58,6 @@ public DependencyImage prepareImage(
     import std.digest: toHexString;
     import std.file: exists, mkdirRecurse, read, rename, rmdirRecurse, write;
     import std.path: absolutePath, buildPath;
-    import std.process: execute;
     import std.string: fromStringz;
     import std.uuid: randomUUID;
 
@@ -78,13 +77,12 @@ public DependencyImage prepareImage(
         ~ importPaths.map!(path => "-I" ~ path).array
         ~ stringImportPaths.map!(path => "-J" ~ path).array;
     const executable = compilerPath(compiler);
-    const identity = execute([executable, "--version"]);
-    require(identity.status == 0, "Cannot identify image compiler: " ~ identity.output);
+    const identityOutput = compilerIdentity(executable);
     import std.algorithm: startsWith;
     version (DigitalMars)
-        require(identity.output.startsWith("DMD"), "Image compiler must be DMD");
+        require(identityOutput.startsWith("DMD"), "Image compiler must be DMD");
     else version (LDC)
-        require(identity.output.startsWith("LDC"), "Image compiler must be LDC");
+        require(identityOutput.startsWith("LDC"), "Image compiler must be LDC");
 
     // The image must emit transitive template bodies too, including runtime
     // helpers introduced by assertion lowering. No guest object supplies them.
@@ -100,7 +98,7 @@ public DependencyImage prepareImage(
         static assert(false, "Dependency images require DMD or LDC");
     }
     string fingerprint = text("snakebite-image-v1\n", executable, "\n",
-        read(executable).sha256Of.toHexString, "\n", identity.output,
+        read(executable).sha256Of.toHexString, "\n", identityOutput,
         "\n", __VERSION__, "\n", compileFlags, "\n", linkFlags,
         "\n", importFlags, "\n", source.length, ":", source);
     foreach (input; inputs)
@@ -155,6 +153,29 @@ private void runCompiler(in string phase, in string[] command) {
         error.next = new Exception(text("Command: ", command, "\n", result.output));
         throw error;
     }
+}
+
+
+// The compiler's identity does not change while a process runs (the
+// installation at a given path is assumed immutable, see the doc comment
+// on prepareImage above), so probe it once per executable, not once per
+// image build.
+private __gshared string[string] _compilerIdentityCache;
+private __gshared Object _compilerIdentityMutex = new Object();
+
+private string compilerIdentity(in string executable) {
+    import std.process: execute;
+
+    synchronized (_compilerIdentityMutex) {
+        if (auto found = executable in _compilerIdentityCache)
+            return *found;
+    }
+    const identity = execute([executable, "--version"]);
+    require(identity.status == 0, "Cannot identify image compiler: " ~ identity.output);
+    synchronized (_compilerIdentityMutex) {
+        _compilerIdentityCache[executable] = identity.output;
+    }
+    return identity.output;
 }
 
 
