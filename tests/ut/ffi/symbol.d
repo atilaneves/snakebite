@@ -80,6 +80,22 @@ unittest {
     (cast(Answer) second.resolve("answer"))().should == 2;
 }
 
+@("image.symbolSurvivesImageScope")
+@Serial
+unittest {
+    alias Answer = extern(C) int function();
+    Answer answer;
+    {
+        auto image = prepareImage(
+            "export extern(C) int retainedAnswer() { return 381; }",
+            sharedImageCache,
+        );
+        answer = cast(Answer) image.resolve("retainedAnswer");
+    }
+    answer.should.not == null;
+    answer().should == 381;
+}
+
 @("image.compileFailure")
 @Serial
 unittest {
@@ -282,13 +298,12 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             enum moduleName = "image_project_atomic_" ~ backend.stringof;
             const source = "module " ~ moduleName ~ ";\n" ~ code;
             sandbox.writeFile(moduleName ~ ".d", source);
-            // The project must retain the image after the preparation report
-            // is destroyed, and across backend construction and execution.
-            auto project = prepareProject(sandbox.sandboxPath).project;
-            project.program.dependencyImage.should.not == null;
-            scope instance = new backend(project.program);
-            run(instance, project.program).should == 0;
-            const path = project.program.dependencyImage.path;
+            // A program can outlive the project that prepared its image.
+            auto program = prepareProject(sandbox.sandboxPath).project.program;
+            program.dependencyImage.should.not == null;
+            scope instance = new backend(program);
+            run(instance, program).should == 0;
+            const path = program.dependencyImage.path;
             const stamp = timeLastModified(path);
             sandbox.writeFile(moduleName ~ ".d", source ~ "\n");
             auto reused = prepareProject(sandbox.sandboxPath).project;

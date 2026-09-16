@@ -286,7 +286,8 @@ public BackendReport benchmark(
         const compilation = execution.compilation;
         report.hasCompile = report.hasCompile || compilation.hasCompiler;
         if (round >= warmup) {
-            write(result.output);
+            if (round == warmup || result.status != 0)
+                write(result.output);
             report.passed = report.passed && result.status == 0;
             times ~= execution.runTime;
             if (compilation.hasCompiler)

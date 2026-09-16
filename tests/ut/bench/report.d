@@ -78,3 +78,19 @@ unittest {
     result.status.should == summary.length;
     result.output.canFind(summary).should == true;
 }
+
+@("inProcessSummary.restoresReassignedStdout")
+@Serial
+unittest {
+    import bench.capture: captureStdout;
+    import std.stdio: File, stdout;
+
+    auto original = stdout;
+    scope(exit) stdout = original;
+    auto redirected = File.tmpfile;
+    captureStdout({
+        stdout = redirected;
+        return 0;
+    });
+    stdout.fileno.should == original.fileno;
+}

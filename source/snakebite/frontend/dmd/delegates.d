@@ -119,16 +119,10 @@ public FuncDeclaration outerFunctionOf(Dsymbol symbol) {
 // or `type` is not actually `Tdelegate` (a plain function pointer takes
 // neither backend's delegate path at all).
 //
-// `needsContext` is `false` when `function_` reads nothing from any
-// enclosing scope (`outerVars` empty and `functionNeedsClosure` false): its
-// delegate value's context word is always null, whatever backend fills it
-// in, and `contextOwner` is left `null` too since nothing ever reads it.
-// When `needsContext` is `true`, `contextOwner` is the function whose
-// context (frame or heap closure, `functionNeedsClosure(contextOwner)`
-// decides which) the delegate's context word must resolve to - `null`
-// there instead means `function_` is nested directly in module scope with
-// something to capture, which cannot happen: only a function nested in
-// another function ever has `outerVars`/needs a closoure of its own.
+// A hidden context can be needed by a call to another nested function,
+// even when this function reads no outer variables itself. Keep that link
+// whenever the frontend gives the function a hidden context parameter.
+// `contextOwner` identifies the enclosing frame or heap closure it needs.
 public struct DelegateTarget {
     public FuncDeclaration function_;
     public bool needsContext;
@@ -154,7 +148,7 @@ public DelegateTarget delegateTargetOf(
             receiver !is null && receiver.isSuperExp is null
                 && function_.isVirtualMethod);
 
-    if (function_.outerVars.length == 0 && !functionNeedsClosure(function_))
+    if (!hasHiddenThis(function_))
         return DelegateTarget(function_, false, null);
 
     auto contextOwner = outerFunctionOf(function_);

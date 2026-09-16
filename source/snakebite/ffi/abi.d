@@ -117,6 +117,7 @@ public struct ArgumentPlan {
     // MEMORY-class only: the value's ABI alignment in bytes. The stack
     // planner uses this to insert padding before an aligned value.
     public size_t memoryAlignment;
+    public bool indirect;
 
     public size_t memoryWords() const @safe @nogc nothrow pure scope {
         return (memoryBytes + 7) / 8;
@@ -134,6 +135,24 @@ public struct ArgumentPlan {
     // number for this to track, and refusing here still gives a clearer
     // message than an unbounded allocation would.
     private enum size_t maxMemoryBytes = 64 * size_t.sizeof;
+
+    public static ArgumentPlan ofParameter(imported!"dmd.mtype".Type type) {
+        version (LDC) {
+            import dmd.dsymbolsem: isPOD;
+            import dmd.typesem: baseElemOf;
+
+            auto structType = type.baseElemOf.isTypeStruct;
+            if (structType !is null && !structType.sym.isPOD) {
+                // LDC passes non-POD values through an invisible reference.
+                auto plan = ArgumentPlan(
+                    [Register(Register.Kind.pointer, 8), Register.init], 1,
+                );
+                plan.indirect = true;
+                return plan;
+            }
+        }
+        return of(type);
+    }
 
     public static ArgumentPlan of(imported!"dmd.mtype".Type type) {
         auto plan = aggregatePlan(type);

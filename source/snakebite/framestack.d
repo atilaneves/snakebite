@@ -42,7 +42,7 @@ public struct FrameStack {
     private size_t _limit;
     private size_t _reservation;
     private size_t _used;
-    private ubyte[][] _allocations;
+    private void[][] _allocations;
     // Every base address handed to `GC.addRange` so far: one per grown
     // chunk (see `commit`), each removed in turn when this frame stack
     // goes out of scope.
@@ -238,10 +238,11 @@ public struct FrameStack {
         if (alignment == 0 || alignment > pageSize)
             throw new Exception("frame stack cannot honor this alignment");
 
-        auto allocation = new ubyte[](size + alignment - 1);
+        // Captured values can own the only references to other GC objects.
+        auto allocation = new void[](size + alignment - 1);
         _allocations ~= allocation;
         const start = -cast(size_t) allocation.ptr & (alignment - 1);
-        return allocation.ptr + start;
+        return cast(ubyte*) allocation.ptr + start;
     }
 
     private void popTo(in Mark mark) {
