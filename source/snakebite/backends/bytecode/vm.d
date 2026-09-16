@@ -12,7 +12,7 @@ extern(C) void executeCallPlan(
 );
 
 extern(C) bool executeIndirectCallPlan(
-    const(void)* opaquePlan, const(void)* address, void* returnPlace,
+    const(void)* opaquePlan, ref const(void)* address, void* returnPlace,
     scope const(void*)* arguments, size_t argumentCount,
 );
 
@@ -760,7 +760,7 @@ private const(Instruction)* runCall(Decoded)(
         return callFunction(execution, site, site.callee);
     case indirect:
         auto callee =
-            *cast(const(Function)**) (execution.storage(site.calleeSlotOffset));
+            *cast(const(void)**) (execution.storage(site.calleeSlotOffset));
         if (site.nativePlan !is null) {
             auto arguments = CallArguments(site.args.length);
             auto values = arguments.values;
@@ -770,7 +770,7 @@ private const(Instruction)* runCall(Decoded)(
                     execution.destination, values.ptr, values.length))
                 return execution.next;
         }
-        return callFunction(execution, site, callee);
+        return callFunction(execution, site, cast(const(Function)*) callee);
     case native:
         auto arguments = CallArguments(site.args.length);
         // const would make the address slots read-only.

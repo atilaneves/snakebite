@@ -456,7 +456,7 @@ public struct CallbackBridge {
     }
 
     // The guest word behind one of this bridge's own entries, or null.
-    public const(void)* wordOf(const(void)* entry) {
+    public const(void)* wordOf(const(void)* entry) const {
         auto word = entry in _wordOfEntry;
         return word is null ? null : *word;
     }

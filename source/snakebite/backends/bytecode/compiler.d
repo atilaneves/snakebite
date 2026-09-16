@@ -106,7 +106,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         Declaration symbol,
     ) {
         if (auto function_ = symbol.isFuncDeclaration)
-            return cast(void*) compileFunction(function_);
+            return callableAddress(function_, 0);
 
         return _plans.resolve(nativeSymbolName(symbol));
     }
@@ -302,18 +302,28 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             declaration,
             _classRuntime,
             Hooks(
-                &methodAddress,
+                &callableAddress,
                 &fillFieldInits,
                 &_runtimeTypes.linkedClassInfo,
             ),
         );
     }
 
-    private void* methodAddress(FuncDeclaration method, ptrdiff_t adjustment) {
+    // Function pointers can reach host code inside aggregates or through
+    // pointers to guest data, where the call barrier cannot replace them.
+    private void* callableAddress(FuncDeclaration method, ptrdiff_t adjustment) {
         import dmd.dsymbolsem: isAbstract;
+        import dmd.astenums: VarArg;
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         if (method.isAbstract)
             return null;
+        // Untyped variadic calls require the argument types at each call
+        // site, so they cannot use a fixed callback entry.
+        if (typeFunctionOf(method).parameterList.varargs == VarArg.variadic
+                && adjustment == 0)
+            return cast(void*) compileFunction(method);
+
         const(void)* word;
         if (_callSelection.usesGuestBody(method, null, &isGuestFunction,
                 hasNativeSymbol(method), "bytecode compiler")) {
@@ -3173,13 +3183,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (expression.fd is null)
                 return visit(cast(Expression) expression);
 
-            // Same run-time value as `visit(SymOffExp)`'s function case
-            // above: the compiled callee, not the literal's own
-            // declaration.
-            auto compiled = _bytecode.compileFunction(expression.fd);
-            _bytecode.registerGuestWord(expression.fd, compiled);
+            const address = _bytecode.callableAddress(expression.fd, 0);
             emit(&opConstant, _destination,
-                addConstant(cast(long) cast(size_t) compiled), _width);
+                addConstant(cast(long) cast(size_t) address), _width);
             return;
         }
 
@@ -3201,9 +3207,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // own doc), this resolves that decision to instructions in this
     // compiler's own representation - `contextAddressOf` walks the same
     // static chain `compileCall`'s hidden-`this` argument already follows
-    // for an ordinary call to a nested function, and the function word is
-    // the compiled callee, the same `const(Function)*` `visit(SymOffExp)`'s
-    // function case stores for a plain function pointer.
+    // for an ordinary call to a nested function. Its function word is a
+    // callable address, so host code can invoke a delegate stored in guest
+    // data without changing its representation.
     private void compileDelegateValue(
         DelegateTarget target, Expression expression,
     ) {
@@ -3240,10 +3246,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        auto compiled = _bytecode.compileFunction(target.function_);
-        _bytecode.registerGuestWord(target.function_, compiled);
+        const address = _bytecode.callableAddress(target.function_, 0);
         emit(&opConstant, _destination + delegateFunctionOffset,
-            addConstant(cast(long) cast(size_t) compiled), size_t.sizeof);
+            addConstant(cast(long) cast(size_t) address), size_t.sizeof);
     }
 
     // `dg.ptr`/`dg.funcptr`: dmd reads either word straight out of the
@@ -5933,12 +5938,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t symbolAddress(SymOffExp expression) {
             if (auto function_ = expression.var.isFuncDeclaration) {
                 const result = compiler.reserveTemp(compiler.pointerFacts);
-                // A guest function pointer is the compiled callee's stable
-                // bytecode address, which is the value the VM call path uses.
-                auto compiled = compiler._bytecode.compileFunction(function_);
-                compiler._bytecode.registerGuestWord(function_, compiled);
+                const address = compiler._bytecode.callableAddress(function_, 0);
                 compiler.emit(&opConstant, result,
-                    compiler.addConstant(cast(long) cast(size_t) compiled),
+                    compiler.addConstant(cast(long) cast(size_t) address),
                     size_t.sizeof);
                 return result;
             }

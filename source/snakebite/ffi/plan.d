@@ -956,12 +956,18 @@ public extern(C) void executeCallPlan(
 }
 
 public extern(C) bool executeIndirectCallPlan(
-    const(void)* opaquePlan, const(void)* address, void* returnPlace,
+    const(void)* opaquePlan, ref const(void)* address, void* returnPlace,
     scope const(void*)* arguments, size_t argumentCount,
 ) {
     const plan = cast(const(CallPlan)*) opaquePlan;
-    if (plan._callbacks !is null && plan._callbacks.contains(address))
-        return false;
+    if (plan._callbacks !is null) {
+        if (const word = plan._callbacks.wordOf(address)) {
+            address = word;
+            return false;
+        }
+        if (plan._callbacks.contains(address))
+            return false;
+    }
     plan.callAt(address, returnPlace, arguments[0 .. argumentCount]);
     return true;
 }
