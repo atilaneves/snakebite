@@ -42,13 +42,14 @@ public DependencyImage prepareImage(
     in string[] compilerArguments = null,
 ) {
     import core.runtime: Runtime;
-    import core.sys.posix.dlfcn: dlerror;
+    import core.sys.posix.dlfcn:
+        dlclose, dlerror, dlopen, RTLD_LAZY, RTLD_NODELETE;
     import std.conv: text;
     import std.digest.sha: sha256Of;
     import std.digest: toHexString;
     import std.file: exists, mkdirRecurse, read, rename, rmdirRecurse, write;
     import std.path: absolutePath, buildPath;
-    import std.string: fromStringz;
+    import std.string: fromStringz, toStringz;
     import std.uuid: randomUUID;
 
     import std.algorithm.iteration: map;
@@ -120,6 +121,13 @@ public DependencyImage prepareImage(
     if (image._handle is null)
         require(false, text("Cannot load dependency image ", destination,
             ": ", dlerror.fromStringz));
+    // druntime releases a thread's library references when that thread exits.
+    // Symbols must remain valid for the executable after the loading thread ends.
+    const pinned = dlopen(destination.toStringz, RTLD_LAZY | RTLD_NODELETE);
+    if (pinned is null)
+        require(false, text("Cannot retain dependency image ", destination,
+            ": ", dlerror.fromStringz));
+    dlclose(cast(void*) pinned);
     return image;
 }
 

@@ -7,6 +7,7 @@ import snakebite.dependencyimage: defaultCompiler, prepareImage;
 import std.file: timeLastModified;
 import core.atomic: atomicStore, MemoryOrder;
 import core.internal.atomic: atomicLoad;
+import core.thread: Thread;
 import snakebite.exception: SnakebiteException;
 import ut.backends;
 import snakebite.backends.backend: Program, run;
@@ -92,6 +93,25 @@ unittest {
         );
         answer = cast(Answer) image.resolve("retainedAnswer");
     }
+    answer.should.not == null;
+    answer().should == 381;
+}
+
+@("image.symbolSurvivesLoadingThread")
+@Serial
+unittest {
+    alias Answer = extern(C) int function();
+    Answer answer;
+    const directory = sharedImageCache;
+    auto thread = new Thread({
+        auto image = prepareImage(
+            "export extern(C) int threadRetainedAnswer() { return 381; }",
+            directory,
+        );
+        answer = cast(Answer) image.resolve("threadRetainedAnswer");
+    });
+    thread.start;
+    thread.join;
     answer.should.not == null;
     answer().should == 381;
 }
