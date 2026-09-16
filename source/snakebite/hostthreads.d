@@ -122,7 +122,6 @@ public ThreadID attachedThread() {
 
 
 private extern(C) void rt_moduleTlsCtor();
-private extern(C) void rt_moduleTlsDtor();
 
 
 // What to run on the calling thread when it ends. A thread druntime
@@ -183,23 +182,24 @@ private void markForeign() {
     pthread_setspecific(foreignKey, cast(void*) 1);
 }
 
-// A `pthread` key destructor: druntime's own documentation for
-// `thread_detachThis` (threadbase.d) asks every caller to run
-// `rt_moduleTlsDtor` and then the GC's own per-thread cleanup before
-// detaching. A key destructor that throws terminates the process, so
-// this is `nothrow` and never lets a hook's exception (finding 2.3)
+// A `pthread` key destructor: druntime's documentation for
+// `thread_detachThis` (threadbase.d) says a caller MAY also run
+// `rt_moduleTlsDtor` and then the GC's own per-thread cleanup first,
+// but compiled D itself never does this for a foreign thread - it
+// calls only `thread_attachThis` on entry and `thread_detachThis`
+// before the thread exits. Many foreign threads attaching and
+// detaching under concurrent collections crashed inside the GC's own
+// per-thread cleanup, `cleanupThread`, reached only through that
+// extra, non-public call - and only that call, never `thread_detachThis`
+// alone, in every crash a stress run caught. This releases this
+// project's own per-thread state (`runThreadEndHooks`) and then
+// detaches through the same, sole public entry point compiled D uses,
+// nothing more. A key destructor that throws terminates the process,
+// so this is `nothrow` and never lets a hook's exception (finding 2.3)
 // reach `pthread`.
 private extern(C) void detachForeign(void*) nothrow {
-    import core.internal.gc.proxy: gc_getProxy;
     import core.thread: thread_detachThis;
 
     runThreadEndHooks;
-
-    try
-        rt_moduleTlsDtor;
-    catch (Throwable throwable)
-        report("rt_moduleTlsDtor", throwable);
-
-    gc_getProxy.cleanupThread(Thread.getThis);
     thread_detachThis;
 }
