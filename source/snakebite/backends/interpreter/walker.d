@@ -389,7 +389,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     version(unittest) private size_t _staticLookups;
     // A guest pointer can live in an unscanned frame, so the evaluator keeps
     // each backing allocation reachable for as long as guest state can be.
-    private ubyte[][] _allocations;
+    private void[][] _allocations;
     private Cache!(Catch, TypeInfo_Class) _catchTypes;
     private RuntimeTypes* _runtimeTypes;
     // dmd gives every `arr[... $ ...]` a `lengthVar` declaration for its
@@ -728,12 +728,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativelayout: storeIntegral;
         const closureLayout = closureLayoutOf(function_);
         const padding = closureLayout.alignment - 1;
-        auto allocation = new ubyte[](closureLayout.size + padding);
+        // Captured values can own the only references to other GC objects.
+        auto allocation = new void[](closureLayout.size + padding);
         _allocations ~= allocation;
 
         const start = -cast(size_t) allocation.ptr
             & (closureLayout.alignment - 1);
-        auto closure = allocation.ptr + start;
+        auto closure = cast(ubyte*) allocation.ptr + start;
         memset(closure, 0, closureLayout.size);
 
         if (layout.hiddenThis.variable !is null)
@@ -3758,39 +3759,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // where `*p = ...` writes.
     override void visit(PtrExp expression) {
         import core.stdc.string: memcpy;
-        import snakebite.nativelayout: loadIntegral, storeIntegral;
-
-        if (_type.ty == Tpointer && expression.e1.type.ty == Tclass) {
-            auto object = classReferenceOf(expression.e1);
-            if (object is null) {
-                storeIntegral(_place, 0, _facts.size);
-                return;
-            }
-
-            // `object.classinfo`: word 0 is the vtable, whose own slot 0
-            // is the classinfo pointer - real native layout, so this
-            // reads the object's own dynamic `TypeInfo_Class` the same
-            // way for a guest object (`finishNew` already left one there)
-            // and a native one.
-            auto vtable = cast(void*) loadIntegral(
-                object, size_t.sizeof, false);
-            storeIntegral(
-                _place,
-                vtable is null
-                    ? 0 : loadIntegral(vtable, size_t.sizeof, false),
-                _facts.size,
-            );
-            return;
-        }
-
-        if (_type.ty == Tclass && expression.e1.type.ty == Tpointer) {
-            storeIntegral(
-                _place,
-                cast(size_t) asPointer(expression.e1),
-                _facts.size,
-            );
-            return;
-        }
 
         memcpy(_place, asPointer(expression.e1), _facts.size);
     }

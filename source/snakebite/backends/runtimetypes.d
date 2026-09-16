@@ -284,12 +284,9 @@ public struct RuntimeTypes {
         if (auto cached = declaration in _structs)
             return *cached;
 
-        import dmd.common.outbuffer: OutBuffer;
-        import dmd.mangle: mangleToBuffer;
+        import dmd.root.string: toDString;
         auto info = new TypeInfo_Struct;
-        OutBuffer mangled;
-        mangleToBuffer(declaration, mangled);
-        info.mangledName = mangled[].idup;
+        info.mangledName = declaration.type.deco.toDString.idup;
         info.m_init = cast(byte[]) _initialValue(
             declaration.type, declaration.loc,
         ).dup;

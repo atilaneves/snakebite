@@ -21,7 +21,7 @@ public struct Program {
     imported!"dmd.func".FuncDeclaration[] moduleConstructors;
     Main main;
     string name;
-    // Prepared before backend construction; the owner outlives all backends.
+    // Prepared for this project's execution before any guest code runs.
     const(DependencyImage)* dependencyImage;
 
     // The entry point is found the way a compiled build finds it: the first

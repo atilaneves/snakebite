@@ -99,6 +99,8 @@ public struct Register {
 // A hidden-pointer return (`needsHiddenReturnPointer`) still bypasses this
 // entirely and never builds a MEMORY `ArgumentPlan` for the return value.
 public struct ArgumentPlan {
+    private import dmd.mtype: Type;
+
     private enum ValueClass {
         none,
         integer,
@@ -117,6 +119,7 @@ public struct ArgumentPlan {
     // MEMORY-class only: the value's ABI alignment in bytes. The stack
     // planner uses this to insert padding before an aligned value.
     public size_t memoryAlignment;
+    public bool indirect;
 
     public size_t memoryWords() const @safe @nogc nothrow pure scope {
         return (memoryBytes + 7) / 8;
@@ -135,7 +138,25 @@ public struct ArgumentPlan {
     // message than an unbounded allocation would.
     private enum size_t maxMemoryBytes = 64 * size_t.sizeof;
 
-    public static ArgumentPlan of(imported!"dmd.mtype".Type type) {
+    public static ArgumentPlan ofParameter(Type type) {
+        version (LDC) {
+            import dmd.dsymbolsem: isPOD;
+            import dmd.typesem: baseElemOf;
+
+            auto structType = type.baseElemOf.isTypeStruct;
+            if (structType !is null && !structType.sym.isPOD) {
+                // LDC passes non-POD values through an invisible reference.
+                auto plan = ArgumentPlan(
+                    [Register(Register.Kind.pointer, 8), Register.init], 1,
+                );
+                plan.indirect = true;
+                return plan;
+            }
+        }
+        return of(type);
+    }
+
+    public static ArgumentPlan of(Type type) {
         auto plan = aggregatePlan(type);
         if (plan.memory)
             validateMemoryParameter(type, plan);

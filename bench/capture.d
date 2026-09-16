@@ -14,6 +14,7 @@ CapturedRun captureStdout(scope int delegate() run) {
     import std.typecons: Yes;
 
     auto capture = File.tmpfile;
+    auto originalStdout = stdout;
     stdout.flush;
     fflush(null);
 
@@ -27,6 +28,8 @@ CapturedRun captureStdout(scope int delegate() run) {
     try
         status = run();
     finally {
+        stdout.flush;
+        stdout = originalStdout;
         stdout.flush;
         fflush(null);
         enforce(dup2(savedStdout, STDOUT_FILENO) >= 0, "cannot restore stdout");

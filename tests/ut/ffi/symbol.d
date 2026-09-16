@@ -7,6 +7,7 @@ import snakebite.dependencyimage: defaultCompiler, prepareImage;
 import std.file: timeLastModified;
 import core.atomic: atomicStore, MemoryOrder;
 import core.internal.atomic: atomicLoad;
+import core.thread: Thread;
 import snakebite.exception: SnakebiteException;
 import ut.backends;
 import snakebite.backends.backend: Program, run;
@@ -78,6 +79,41 @@ unittest {
     alias Answer = extern(C) int function();
     (cast(Answer) first.resolve("answer"))().should == 1;
     (cast(Answer) second.resolve("answer"))().should == 2;
+}
+
+@("image.symbolSurvivesImageScope")
+@Serial
+unittest {
+    alias Answer = extern(C) int function();
+    Answer answer;
+    {
+        auto image = prepareImage(
+            "export extern(C) int retainedAnswer() { return 381; }",
+            sharedImageCache,
+        );
+        answer = cast(Answer) image.resolve("retainedAnswer");
+    }
+    answer.should.not == null;
+    answer().should == 381;
+}
+
+@("image.symbolSurvivesLoadingThread")
+@Serial
+unittest {
+    alias Answer = extern(C) int function();
+    Answer answer;
+    const directory = sharedImageCache;
+    auto thread = new Thread({
+        auto image = prepareImage(
+            "export extern(C) int threadRetainedAnswer() { return 381; }",
+            directory,
+        );
+        answer = cast(Answer) image.resolve("threadRetainedAnswer");
+    });
+    thread.start;
+    thread.join;
+    answer.should.not == null;
+    answer().should == 381;
 }
 
 @("image.compileFailure")
@@ -282,13 +318,12 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             enum moduleName = "image_project_atomic_" ~ backend.stringof;
             const source = "module " ~ moduleName ~ ";\n" ~ code;
             sandbox.writeFile(moduleName ~ ".d", source);
-            // The project must retain the image after the preparation report
-            // is destroyed, and across backend construction and execution.
-            auto project = prepareProject(sandbox.sandboxPath).project;
-            project.program.dependencyImage.should.not == null;
-            scope instance = new backend(project.program);
-            run(instance, project.program).should == 0;
-            const path = project.program.dependencyImage.path;
+            // A program can outlive the project that prepared its image.
+            auto program = prepareProject(sandbox.sandboxPath).project.program;
+            program.dependencyImage.should.not == null;
+            scope instance = new backend(program);
+            run(instance, program).should == 0;
+            const path = program.dependencyImage.path;
             const stamp = timeLastModified(path);
             sandbox.writeFile(moduleName ~ ".d", source ~ "\n");
             auto reused = prepareProject(sandbox.sandboxPath).project;
