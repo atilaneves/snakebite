@@ -43,6 +43,10 @@ public struct FrameStack {
     private size_t _reservation;
     private size_t _used;
     private ubyte[][] _allocations;
+    // Every base address handed to `GC.addRange` so far: one per grown
+    // chunk (see `commit`), each removed in turn when this frame stack
+    // goes out of scope.
+    private ubyte*[] _registeredRanges;
     private TemporaryStack _cleanups;
     // This thread's own copies of the thread-local guest variables the
     // bytecode VM has touched (finding 1.3): a `FrameStack` already
@@ -102,13 +106,15 @@ public struct FrameStack {
         }
 
         GC.addRange(_base, _committed);
+        _registeredRanges ~= _base;
     }
 
     ~this() @system {
         import core.memory: pageSize;
         import core.sys.posix.sys.mman: munmap;
 
-        GC.removeRange(_base);
+        foreach (registered; _registeredRanges)
+            GC.removeRange(registered);
         if (_base !is null)
             assert(
                 munmap(_base, _reservation + pageSize) == 0,
@@ -258,8 +264,22 @@ public struct FrameStack {
             ) != 0)
             throw new Exception("could not grow the frame stack");
 
-        GC.removeRange(_base);
-        GC.addRange(_base, committed);
+        // Growing used to unregister the whole committed range and then
+        // register the bigger one back (`GC.removeRange` then
+        // `GC.addRange`). That opened a window with nothing registered
+        // for bytes that were already live - already holding a guest
+        // pointer some other frame still needs - so a collection that
+        // ran inside the window skipped scanning them and could free
+        // storage this thread was still using. Registering only the
+        // newly committed bytes, at their own base address, never
+        // unregisters anything already live: the range for the bytes
+        // committed so far stays registered the whole time, and the
+        // fresh range covers exactly the bytes this call is about to
+        // hand out for the first time - nothing in between is ever
+        // dropped from the GC's sight.
+        auto grown = _base + _committed;
+        GC.addRange(grown, committed - _committed);
+        _registeredRanges ~= grown;
         _committed = committed;
     }
 
