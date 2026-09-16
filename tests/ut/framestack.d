@@ -87,18 +87,41 @@ unittest {
 // suites (finding for issue #40).
 private void growSurvivesConcurrentCollection() @system {
     import core.memory: GC, pageSize;
-    import core.atomic: atomicLoad, atomicStore;
+    import core.atomic: atomicLoad, atomicStore, atomicOp;
     import core.thread: Thread;
+    import core.time: MonoTime, seconds;
 
     static final class Box {
         int value;
         this(int value) { this.value = value; }
     }
 
+    // The collector loop must stay bounded on its own, with no wait
+    // and no pause between calls: its job is to run `GC.collect` as
+    // many times as it can while the main loop below grows a frame
+    // stack. Without a cap, this loop used to run for as long as the
+    // rest of the whole test binary took, which is why one test could
+    // cost minutes: every `GC.collect` here stops every thread in the
+    // process, not only this one, and a slower process (kcov, a busy
+    // machine) does not make the loop do less work, it makes each
+    // collection more expensive while the loop keeps running just as
+    // long (issue #40 review, finding 1). Two independent caps close
+    // that off: `maxCollections` is well above what 50 grow points
+    // need to catch the bug most runs, and `deadline` is a hard wall
+    // -clock ceiling on this test's own cost that holds even when a
+    // single collection itself is slow, which a count alone cannot
+    // promise.
+    enum maxCollections = 20;
+    enum deadline = 2.seconds;
     shared bool stop = false;
+    shared uint collections = 0;
+    const started = MonoTime.currTime;
     auto collector = new Thread({
-        while (!atomicLoad(stop))
+        while (!atomicLoad(stop) && atomicLoad(collections) < maxCollections
+                && MonoTime.currTime - started < deadline) {
             GC.collect();
+            atomicOp!"+="(collections, 1);
+        }
     });
     collector.start;
     scope(exit) {
@@ -136,6 +159,7 @@ private void growSurvivesConcurrentCollection() @system {
 
 
 @("push.growSurvivesConcurrentCollection")
+@Serial
 unittest {
     growSurvivesConcurrentCollection;
 }
