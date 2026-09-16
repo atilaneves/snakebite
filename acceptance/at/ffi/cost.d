@@ -141,99 +141,97 @@ unittest {
         plan.call(&result, slots[]);
     }
 
-    // 15 rounds, not 5: pinning (above) removes almost all of the noise,
-    // but a handful of extra rounds is cheap insurance against whatever
-    // pinning does not catch - a pause for a signal, a page fault, a GC
-    // collection triggered by an earlier, unrelated part of the process.
+    // Time each batch on its own, and keep the smallest batch time on
+    // each side. A busy sibling core slows the cheap baseline loop more
+    // than it slows the barrier loop, so the total time for each side
+    // no longer scales the same way under load. Measured on
+    // 2026-09-16: dividing the two totals read 4.0x alone but 1.68x
+    // next to `at.bench.timing`, the real condition inside `bin/at` -
+    // the same build, the same barrier, no change but the load.
+    //
+    // The smallest batch on each side is the batch that saw the least
+    // contention. There are `n / batch` batches per round, interleaved
+    // baseline then barrier, so both sides get an uncontended batch in
+    // the same short window. Dividing the two smallest times then
+    // stays close to the clean ratio, even under load.
+    //
+    // This is not the smallest of several ratios, which the old code
+    // used to reject for good reason: that divides one noisy number by
+    // another noisy number. Taking the minimum on each side first, and
+    // dividing only once, removes the noise before the division.
     size_t sink;
-    double[15] baselines;
-    double[15] barriers;
-    double[15] ratios;
-    foreach (sample; 0 .. ratios.length) {
-        auto baselineWatch = StopWatch(AutoStart.no);
-        auto barrierWatch = StopWatch(AutoStart.no);
+    struct Round { double baseline; double barrier; double ratio; }
+    Round[15] rounds;
+    auto watch = StopWatch(AutoStart.no);
+    foreach (sample; 0 .. rounds.length) {
+        double baselineFloor = double.infinity;
+        double barrierFloor = double.infinity;
         foreach (_; 0 .. n / batch) {
-            baselineWatch.start;
+            watch.reset;
+            watch.start;
             foreach (i; 0 .. batch) {
                 result = direct(*directArgument);
                 sink += cast(size_t) result;
             }
-            baselineWatch.stop;
+            watch.stop;
+            const baselineBatch =
+                watch.peek.total!"nsecs" / cast(double) batch;
+            if (baselineBatch < baselineFloor)
+                baselineFloor = baselineBatch;
 
-            barrierWatch.start;
+            watch.reset;
+            watch.start;
             foreach (i; 0 .. batch) {
                 plan.call(&result, slots[]);
                 sink += cast(size_t) result;
             }
-            barrierWatch.stop;
+            watch.stop;
+            const barrierBatch =
+                watch.peek.total!"nsecs" / cast(double) batch;
+            if (barrierBatch < barrierFloor)
+                barrierFloor = barrierBatch;
         }
-        baselines[sample] = baselineWatch.peek.total!"nsecs"
-            / cast(double) n;
-        barriers[sample] = barrierWatch.peek.total!"nsecs"
-            / cast(double) n;
-        ratios[sample] = barriers[sample] / baselines[sample];
+        rounds[sample] =
+            Round(baselineFloor, barrierFloor, barrierFloor / baselineFloor);
     }
-    sort(baselines[]);
-    sort(barriers[]);
-    sort(ratios[]);
-    // The median of 15 rounds, not the smallest: measurement on
-    // 2026-09-16 (see below) found this ratio moves both up and down
-    // with real, ordinary machine conditions - taking the smallest
-    // round would not report a "clean" floor, it would report
-    // whichever direction of that swing happened to be luckiest, which
-    // is not the barrier's cost either. 15 rounds, not 5, because
-    // pinning (above) already removes the one-directional warm-up and
-    // migration spikes this gate used to see, and the rounds within one
-    // run are otherwise close to each other (see below) - the extra
-    // rounds are cheap insurance against a single round catching a
-    // brief pause, not a search for a favourable one.
-    const median = ratios.length / 2;
-    writefln("  baseline %5.2f ns, barrier %5.2f ns, median-of-15 ratio %.6fx",
-        baselines[median], barriers[median], ratios[median]);
+    // 15 rounds, not 5: pinning (above) removes almost all of the
+    // noise, but a handful of extra rounds is cheap insurance against
+    // whatever pinning does not catch - a pause for a signal, a page
+    // fault, a GC collection triggered elsewhere in the process.
+    //
+    // Sort by ratio, and read the median round as a whole. Sorting
+    // each column on its own, as the old code did, prints a baseline
+    // and a barrier that never shared a round with the printed ratio.
+    sort!((a, b) => a.ratio < b.ratio)(rounds[]);
+    const median = rounds.length / 2;
+    writefln("  baseline %5.2f ns, barrier %5.2f ns, median-of-%d ratio %.6fx",
+        rounds[median].baseline, rounds[median].barrier, rounds.length,
+        rounds[median].ratio);
 
     result.should == 42;
     // `-release` strips `assert`, so this stays a `should` check: without
     // it, an optimiser that folds the baseline loop away would pass silently.
     sink.should.not == 0;
 
-    // Recalibrated 2026-09-16, on the machine this gate actually runs on,
-    // under real load rather than an idle, pinned machine as before - that
-    // condition does not occur here or on GitHub Actions. This dev
-    // machine runs several agents' builds and test suites at once, so
-    // "quiet" here still means real, unplanned contention.
+    // maxRatio is set from the floor above, not from a total. Measured
+    // on 2026-09-16, `timeout 120 bin/at -d at.ffi.cost.barrier.overhead`,
+    // on a machine already busy with other work (load average 6 to 28):
     //
-    // Two rounds of 30-run measurements (`bin/at -d -s
-    // at.ffi.cost.barrier.overhead`), one with 16 extra busy loops of
-    // our own (one per core) layered on top of the ambient load, one
-    // without, gave this ratio a wide range even with no change to the
-    // barrier at all: from 0.6x to 4.14x (worst case any run reached
-    // even after `@Flaky` used all 5 retries), load average 5-14 on 16
-    // cores throughout. This is not one-directional noise around a
-    // fixed cost: which end of that range a given run lands on tracks
-    // real machine conditions (how many other cores are busy at that
-    // moment) more than it tracks the ratio's own sample count, and it
-    // can swing either way - a run's baseline half or its barrier half
-    // can each come out faster or slower than the other run's, not
-    // just both together. Against the old 3.5 bound, 10 of 60 runs
-    // still failed after every retry; the old bound was simply too
-    // tight for the top of that range, which is the spurious failure
-    // this gate kept showing.
+    //   alone, 5 runs:                                 floor ratio 3.56-3.67x
+    //   next to `at.bench.timing` (`bin/at`'s real mix), 5 runs: 3.56x
     //
-    // maxRatio widened to 4.5: clear of the top of the measured range
-    // (4.14) with margin. A barrier made deliberately slower in a
-    // scratch build (one extra redundant dispatch per call, reverted
-    // before this commit) reliably pushed the ratio to 5.0-5.6x and
-    // failed the gate under ordinary ambient load - but under the same
-    // 16-busy-loop condition that produced the low end of the range
-    // above, that same slowdown sometimes read as low as 1.4x, because
-    // the induced load moves a regression's ratio the same way it
-    // moves a clean build's. No fixed bound on this ratio can be both
-    // tight enough to catch every regression under arbitrary added
-    // load and loose enough to never fail a clean build under it; 4.5
-    // is chosen to do the former reliably under the load this test has
-    // actually been seen to run under (the measurements above), which
-    // is what made it fail spuriously, rather than under load well
-    // beyond that.
+    // The floor stays close to 3.6x in both conditions. Load no longer
+    // moves it the way it moved the old ratio of totals (see above).
+    //
+    // A barrier with its dispatch doubled (one extra call to `_entry`
+    // in `plan.d`, reverted before this commit) read a floor ratio of
+    // 5.2-5.4x, alone and next to `at.bench.timing` alike, 3 runs each.
+    // Clean and doubled stay apart by a wide margin in both conditions,
+    // so 4.5 sits safely between them and stays a useful bound.
+    //
+    // `build/ci.sh` runs `bin/at -s '@timing'` on its own, after the
+    // rest of the suite, so this test never shares the machine with
+    // `bin/at`'s other, non-timing acceptance tests either.
     enum maxRatio = 4.5;
     // `-release` strips `assert`, so the gate is a `should` check, not an
     // `assert`. `bin/at` is always built with `-O`, so the ratio measures
@@ -243,5 +241,5 @@ unittest {
     // `should` proxy has no `<`: `double.should < x` does not compile
     // (relational operators route through `opCmp`, which `Should` does
     // not define), so this stays the free-function form.
-    ratios[median].shouldBeSmallerThan(maxRatio);
+    rounds[median].ratio.shouldBeSmallerThan(maxRatio);
 }
