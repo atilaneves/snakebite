@@ -26,8 +26,8 @@ link dependency chain, including members that no template reference uses. Dub
 linker files, linker flags, and system libraries are also supplied to the link.
 The root package is not linked into the image.
 
-Snakebite records dependency source contents, recipes, build settings, and
-archive contents in `.snakebite/dub-dependencies`. An unchanged dependency set
+Snakebite records hashes of dependency sources, recipes, build settings, and
+archives in `.snakebite/dub-dependencies`. An unchanged dependency set
 skips `dub build`. A change to root source contents alone also skips that build.
 A missing archive, changed dependency, or changed build setting makes dub check
 and build the project again. The first run also makes this check to establish
@@ -91,15 +91,25 @@ Project preparation supplies imported source files as cache inputs.
 The cache key includes build flags, import paths, generated source, frontend
 version, compiler path, compiler executable content, compiler version output,
 linker arguments, and the paths and contents of `inputs` and `linkerFiles`.
-Callers must list any extra
-source or configuration files used by the generated source. The compiler's
+Callers must list any extra source or configuration files used by the generated
+source. The compiler's
 runtime headers and libraries are assumed unchanged within an installation.
 
-A cache hit skips compilation and linking. It still identifies the compiler,
-hashes the inputs, and loads the image. Builds use unique temporary directories
-and publish completed libraries with an atomic rename. A failed build does not
-publish an image. Concurrent builders can duplicate work but cannot expose a
-partially linked library.
+Project preparation first checks `.snakebite/images/project.json`. This records
+the image path, build settings, and file metadata for the compiler, dependency
+inputs, archives, and root sources. If they are unchanged, preparation loads the
+existing image directly. It does not discover templates, probe the compiler, or
+read and hash input contents. File identity, size, modification time, and change
+time detect replaced files and same-size edits with restored modification times.
+
+If only root source metadata changed, preparation checks whether the generated
+template references changed. If they did not, it reuses the image and updates
+the root metadata. Otherwise, it uses the content-based image cache described
+above. Direct calls to `prepareImage` also use that content-based cache.
+
+Builds use unique temporary directories and publish completed libraries with an
+atomic rename. A failed build does not publish an image. Concurrent builders can
+duplicate work but cannot expose a partially linked library.
 
 Compiler errors name the failed phase. Their exception cause retains the command
 and compiler output. Loader errors include the library path. The cache directory

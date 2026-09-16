@@ -3,7 +3,7 @@ module ut.ffi.symbol;
 
 import ut;
 import snakebite.ffi: Resolver;
-import snakebite.dependencyimage: defaultCompiler, prepareImage;
+import snakebite.dependencyimage: DependencyImage, ProjectImageCache, defaultCompiler, prepareImage;
 import std.file: timeLastModified;
 import core.atomic: atomicStore, MemoryOrder;
 import core.internal.atomic: atomicLoad;
@@ -18,7 +18,7 @@ import snakebite.frontend.dmd.functions: findFunction;
 import std.file: dirEntries, SpanMode;
 import std.array: array;
 import std.process: execute;
-import std.file: exists, readText, remove;
+import std.file: exists, readText, remove, setTimes;
 import std.path: buildPath;
 
 private enum atomicSource = q{
@@ -468,4 +468,37 @@ static foreach (backend; Matrix!()) {
         archive.exists.should == true;
         rebuilt.program.dependencyImage.path.should == changedPath;
     }
+}
+
+
+@("image.projectCacheSkipsPreparation")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("root.d", "root");
+    sandbox.writeFile("dependency.d", "before");
+    const root = sandbox.inSandboxPath("root.d");
+    const dependency = sandbox.inSandboxPath("dependency.d");
+    const directory = sandbox.sandboxPath;
+    auto image = prepareImage(atomicSource, directory);
+    auto cache = ProjectImageCache(directory, "settings", [root]);
+    cache.save(image.path, atomicSource, [dependency]);
+    auto next = ProjectImageCache(directory, "settings", [root]);
+    DependencyImage hit;
+    string unexpectedSource() {
+        throw new Exception("An unchanged image must skip source generation");
+    }
+    next.restore(hit, &unexpectedSource).should == true;
+    hit.path.should == image.path;
+
+    sandbox.writeFile("root.d", "changed root");
+    next.restore(hit, () => atomicSource).should == true;
+    auto changedSettings = ProjectImageCache(directory, "other settings", [root]);
+    changedSettings.restore(hit, () => atomicSource).should == false;
+
+    // A preserved mtime and size must not hide a changed dependency.
+    const stamp = timeLastModified(dependency);
+    sandbox.writeFile("dependency.d", "after!");
+    setTimes(dependency, stamp, stamp);
+    next.restore(hit, () => atomicSource).should == false;
 }

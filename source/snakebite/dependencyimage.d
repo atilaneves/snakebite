@@ -53,14 +53,11 @@ public DependencyImage prepareImage(
     in string[] linkerFiles = null,
     in string[] linkerArguments = null,
 ) {
-    import core.runtime: Runtime;
-    import core.sys.posix.dlfcn: dlerror;
     import std.conv: text;
     import std.digest.sha: sha256Of;
     import std.digest: toHexString;
     import std.file: exists, mkdirRecurse, read, rename, rmdirRecurse, write;
     import std.path: absolutePath, buildPath;
-    import std.string: fromStringz;
     import std.uuid: randomUUID;
 
     import std.algorithm.iteration: map;
@@ -151,11 +148,21 @@ public DependencyImage prepareImage(
         // builders publish equivalent complete files with atomic rename.
         rename(imagePath, destination);
     }
+    return loadImage(destination);
+}
+
+
+private DependencyImage loadImage(in string path) {
+    import core.runtime: Runtime;
+    import core.sys.posix.dlfcn: dlerror;
+    import std.string: fromStringz;
+    import std.conv: text;
+
     DependencyImage image;
-    image._path = destination;
-    image._handle = Runtime.loadLibrary(destination);
+    image._path = path;
+    image._handle = Runtime.loadLibrary(path);
     if (image._handle is null)
-        require(false, text("Cannot load dependency image ", destination,
+        require(false, text("Cannot load dependency image ", path,
             ": ", dlerror.fromStringz));
     return image;
 }
@@ -234,4 +241,116 @@ private void require(in bool condition, in string message) {
 
     if (!condition)
         throw new SnakebiteException(message);
+}
+
+
+// Unchanged projects need only metadata checks and a loader reference.
+// A root edit can reuse the same image if it requests the same templates.
+public struct ProjectImageCache {
+    private string _path;
+    private string _settings;
+    private string[] _roots;
+
+    public this(in string directory, in string settings, in string[] roots) {
+        import std.path: buildPath;
+        import std.conv: text;
+
+        _path = buildPath(directory, "project.json");
+        _settings = sourceDigest(text("snakebite-project-image-v1", __VERSION__, settings));
+        _roots = roots.dup;
+    }
+
+    public bool restore(ref DependencyImage image, scope string delegate() source) {
+        import std.file: exists, readText;
+        import std.json: parseJSON;
+
+        if (!_path.exists)
+            return false;
+        auto record = parseJSON(_path.readText);
+        if (record["settings"].str != _settings
+                || record["compiler"].str != compilerPath(defaultCompiler))
+            return false;
+        foreach (path, stamp; record["inputs"].object)
+            if (fileStamp(path) != stamp.str)
+                return false;
+        const roots = fileStamps(_roots);
+        const rootChanged = roots != record["roots"];
+        if (rootChanged && sourceDigest(source()) != record["source"].str)
+            return false;
+        image = loadImage(record["image"].str);
+        if (rootChanged) {
+            record["roots"] = roots;
+            publish(record.toString);
+        }
+        return true;
+    }
+
+    private void publish(in string contents) const {
+        import std.file: mkdirRecurse, rename, write;
+        import std.path: dirName;
+        import std.uuid: randomUUID;
+        import std.conv: text;
+
+        _path.dirName.mkdirRecurse;
+        const temporary = text(_path, ".", randomUUID);
+        temporary.write(contents);
+        rename(temporary, _path);
+    }
+
+    public void save(in string path, in string source, in string[] inputs) const {
+        import std.json: JSONValue;
+
+        const compiler = compilerPath(defaultCompiler);
+        JSONValue record;
+        record["settings"] = _settings;
+        record["compiler"] = compiler;
+        record["roots"] = fileStamps(_roots);
+        record["inputs"] = fileStamps(inputs ~ [compiler, path]);
+        record["source"] = sourceDigest(source);
+        record["image"] = path;
+        publish(record.toString);
+    }
+}
+
+
+private string sourceDigest(in string source) @safe pure nothrow {
+    import std.digest.sha: sha256Of;
+    import std.digest: toHexString;
+
+    return source.sha256Of.toHexString.idup;
+}
+
+
+private imported!"std.json".JSONValue fileStamps(in string[] paths) {
+    import std.json: JSONValue;
+    import std.path: absolutePath;
+
+    // An empty set must remain an object so a reader can iterate its keys.
+    string[string] empty;
+    auto result = JSONValue(empty);
+    foreach (path; paths) {
+        const absolute = path.absolutePath;
+        result[absolute] = fileStamp(absolute);
+    }
+    return result;
+}
+
+
+// ctime and inode catch same-size edits with restored mtimes and atomic
+// replacements. Access time is excluded because reads must not invalidate us.
+private string fileStamp(in string path) {
+    import core.sys.posix.sys.stat: stat, stat_t;
+    import core.stdc.errno: errno, ENOENT, ENOTDIR;
+    import std.exception: errnoEnforce;
+    import std.string: toStringz;
+    import std.conv: text;
+
+    stat_t info;
+    const status = stat(path.toStringz, &info);
+    if (status != 0 && (errno == ENOENT || errno == ENOTDIR))
+        return "missing";
+    errnoEnforce(status == 0, "Cannot inspect image input " ~ path);
+    return text(info.st_dev, ":", info.st_ino, ":", info.st_size, ":",
+        info.st_mtim.tv_sec, ":", info.st_mtim.tv_nsec, ":",
+        info.st_ctim.tv_sec, ":", info.st_ctim.tv_nsec);
 }

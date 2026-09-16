@@ -195,6 +195,16 @@ private string dependencyFingerprint(in string directory, in DubDescription desc
     import std.process: environment;
     import snakebite.dependencyimage: defaultCompiler;
 
+    return text("snakebite-dub-v1", defaultCompiler, __VERSION__,
+        environment.get("DFLAGS", ""), environment.get("LFLAGS", ""),
+        description.value.toString,
+        fileFingerprint(dubInputs(directory, description))).sha256Of.toHexString.idup;
+}
+
+
+public string[] dubInputs(in string directory, in DubDescription description) {
+    import std.path: buildPath;
+
     const value = description.value;
     string[] files = [buildPath(directory, "dub.selections.json")];
     foreach (package_; value["packages"].array) {
@@ -207,16 +217,15 @@ private string dependencyFingerprint(in string directory, in DubDescription desc
             continue;
         foreach (file; package_["files"].array) {
             const role = file["role"].str;
-            if (role == "source" || role == "import" || role == "stringImport")
+            if (role == "source" || role == "import" || role == "import_"
+                    || role == "stringImport")
                 files ~= buildPath(path, file["path"].str);
         }
     }
     foreach (target; value["targets"].array)
         foreach (file; target["buildSettings"]["extraDependencyFiles"].array)
             files ~= file.str;
-    return text("snakebite-dub-v1", defaultCompiler, __VERSION__,
-        environment.get("DFLAGS", ""), environment.get("LFLAGS", ""),
-        value.toString, fileFingerprint(files)).sha256Of.toHexString.idup;
+    return files;
 }
 
 

@@ -278,24 +278,54 @@ private string dmdFlagsForOption(in string option) {
 
 public void prepareDependencies(ref Project project) {
     import snakebite.frontend.dependencyimage: imageSource, imageInputs;
-    import snakebite.dependencyimage: prepareImage, defaultCompiler;
+    import snakebite.dependencyimage: ProjectImageCache, prepareImage, defaultCompiler;
     import std.path: buildPath;
 
+    import std.conv: text;
+    import std.json: JSONValue;
+    import std.process: environment;
+
+    const directory = buildPath(project.directory, ".snakebite", "images");
+    const settings = text(project.sources.flags, project.sources.importPaths,
+        project.sources.stringImportPaths, project.sources.linkerFlags,
+        project.sources.linkerFiles, JSONValue(project.sources.sourceOverrides),
+        project.sources.dubDescription.value, environment.get("DFLAGS", ""),
+        environment.get("LFLAGS", ""));
+    auto cache = ProjectImageCache(directory, settings, project.sources.files);
+    string source;
+    bool sourcePrepared;
+    string generateSource() {
+        if (!sourcePrepared) {
+            source = imageSource(project.program);
+            sourcePrepared = true;
+        }
+        return source;
+    }
+    if (cache.restore(project._image.refCountedPayload, &generateSource)) {
+        project.program.dependencyImage = &project._image.refCountedPayload();
+        return;
+    }
     if (project.sources.linkerFiles.length && isDubProject(project.directory)) {
         import snakebite.dub: buildDubDependencies;
 
         buildDubDependencies(project.directory, project.sources.dubDescription,
             project.sources.linkerFiles);
     }
-    const source = imageSource(project.program);
+    generateSource;
     if (!source.length && !project.sources.linkerFiles.length)
         return;
     project._image.refCountedPayload = prepareImage(
         source.length ? source : "module snakebite_dependency_image;\n",
-        buildPath(project.directory, ".snakebite", "images"), defaultCompiler,
+        directory, defaultCompiler,
         imageInputs(project.program), project.sources.importPaths,
         project.sources.stringImportPaths,
         project.sources.flags.compilerArguments,
         project.sources.linkerFiles, project.sources.linkerFlags);
+    import snakebite.dub: dubInputs;
+
+    cache.save(project._image.refCountedPayload.path, source,
+        imageInputs(project.program) ~ project.sources.linkerFiles
+        ~ (isDubProject(project.directory)
+            ? dubInputs(project.directory, project.sources.dubDescription) : null));
     project.program.dependencyImage = &project._image.refCountedPayload();
 }
