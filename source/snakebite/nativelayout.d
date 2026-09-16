@@ -228,20 +228,45 @@ public bool isStoredLiteral(imported!"dmd.expression".Expression value) {
 
 // Owns constant storage and its referenced data for the backend's lifetime.
 public struct NativeData {
+    // Holds `SharedTable`s and a `PerThread` (finding 2.4): a copy of
+    // either would share storage with the original until one side
+    // changed it.
+    @disable this(this);
+
     import dmd.aggregate: AggregateDeclaration;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression: Expression;
     import dmd.location: Loc;
     import dmd.mtype: Type;
 
+    import snakebite.hostthreads: PerThread;
+    import snakebite.sharedtable: SharedTable;
+    import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
+
     private SymbolAddress _symbolAddress;
+    // Written under the compiler lock only, like every miss below.
     private void[][] _blocks;
     private void[] _available;
-    private void[][VarDeclaration] _statics;
-    private const(void)[][Type] _defaults;
+    // Read without a lock by every thread that runs guest code
+    // (ADR-0006). A `shared`/`__gshared`/`immutable` variable's storage
+    // is published once it is initialised; until then only
+    // `_pendingStatics`, which the initialising thread alone reads,
+    // knows it, so an initializer that refers to its own variable finds
+    // the storage.
+    private SharedTable!(VarDeclaration, void[]) _statics;
+    private void[][VarDeclaration] _pendingStatics;
+    private SharedTable!(Type, const(void)[]) _defaults;
+    // A thread-local variable's template: the bytes its storage starts
+    // with on every thread, built once under the lock like `_statics`
+    // (finding 1.3). `_tls` is this thread's own copies, made from that
+    // template on this thread's own first touch of each variable - never
+    // shared, so `TlsSlots.slotFor` takes no lock.
+    private SharedTable!(VarDeclaration, TlsDescriptor) _tlsDescriptors;
+    private PerThread!(TlsSlots*) _tls;
 
     public this(SymbolAddress symbolAddress) {
         _symbolAddress = symbolAddress;
+        _tls = PerThread!(TlsSlots*)(() => new TlsSlots);
     }
 
     public void write(
@@ -260,8 +285,16 @@ public struct NativeData {
         if (auto found = type in _defaults)
             return *found;
 
-        const bytes = value(type, initialExpression(type, loc));
-        _defaults[type] = bytes;
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        const(void)[] bytes;
+        withCompilerLock({
+            if (auto found = type in _defaults)
+                bytes = *found;
+            else
+                bytes = *_defaults.insert(
+                    type, value(type, initialExpression(type, loc)));
+        });
         return bytes;
     }
 
@@ -276,27 +309,33 @@ public struct NativeData {
     }
 
     private void[] reserve(in TypeFacts facts) {
-        // Slots cannot move: constants can hold addresses of other slots.
-        const needed = facts.size + facts.alignment - 1;
-        if (_available.length < needed) {
-            import std.algorithm: max;
+        import snakebite.frontend.compiler: withCompilerLock;
 
-            _available = new void[max(4096, needed)];
-            _blocks ~= _available;
-        }
-        const start = -cast(size_t) _available.ptr & (facts.alignment - 1);
-        auto bytes = _available[start .. start + facts.size];
-        _available = _available[start + facts.size .. $];
+        void[] bytes;
+        withCompilerLock({
+            // Slots cannot move: constants can hold addresses of other
+            // slots.
+            const needed = facts.size + facts.alignment - 1;
+            if (_available.length < needed) {
+                import std.algorithm: max;
+
+                _available = new void[max(4096, needed)];
+                _blocks ~= _available;
+            }
+            const start =
+                -cast(size_t) _available.ptr & (facts.alignment - 1);
+            bytes = _available[start .. start + facts.size];
+            _available = _available[start + facts.size .. $];
+        });
         return bytes;
     }
 
+    // `variable`'s storage: this thread's own copy if it is thread-local
+    // (finding 1.3 - compiled D gives every thread its own copy of a
+    // module-level or `static` local that is not `shared`/`__gshared`),
+    // otherwise the one copy every thread shares.
     public void[] storageOf(VarDeclaration variable) {
-        import core.stdc.string: memcpy;
         import dmd.astenums: STC;
-        import dmd.expressionsem: getConstInitializer;
-
-        if (auto found = variable in _statics)
-            return *found;
 
         const facts = TypeFacts.of(variable.type);
         if (variable.storage_class & STC.extern_) {
@@ -305,10 +344,71 @@ public struct NativeData {
             assert(address !is null);
             return address[0 .. facts.size];
         }
+
+        if (variable.isThreadlocal)
+            return _tls.current.slotFor(tlsDescriptorOf(variable));
+
+        if (auto found = variable in _statics)
+            return *found;
+
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        void[] bytes;
+        withCompilerLock({
+            if (auto found = variable in _statics) {
+                bytes = *found;
+                return;
+            }
+            bytes = buildInitialBytes(variable, facts);
+            _statics.insert(variable, bytes);
+        });
+        return bytes;
+    }
+
+    // The bytes every thread's own copy of a thread-local variable
+    // starts from, and the identity `TlsSlots.slotFor` keys that copy
+    // by - built once, under the lock, and read without one after that
+    // (like `_statics`). The bytecode compiler bakes a pointer to this
+    // into an `opTls*` instruction operand in place of a resolved
+    // address (finding 1.3): a thread-local variable's address is never
+    // a compile-time constant, the same way it never is in compiled D.
+    public const(TlsDescriptor)* tlsDescriptorOf(VarDeclaration variable) {
+        if (auto found = variable in _tlsDescriptors)
+            return found;
+
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        const(TlsDescriptor)* descriptor;
+        withCompilerLock({
+            if (auto found = variable in _tlsDescriptors) {
+                descriptor = found;
+                return;
+            }
+            const facts = TypeFacts.of(variable.type);
+            const bytes = buildInitialBytes(variable, facts);
+            descriptor = _tlsDescriptors.insert(variable, TlsDescriptor(
+                cast(const(void)*) variable, bytes.ptr, bytes.length));
+        });
+        return descriptor;
+    }
+
+    // Reserves and fills a variable's own storage bytes: called under
+    // the compiler lock, for a `shared`/`__gshared` variable's one and
+    // only storage, or for a thread-local variable's template. A
+    // recursive call for the same variable - its own initializer refers
+    // to it - finds the reservation `_pendingStatics` is already holding
+    // for it, rather than reserving a second time.
+    private void[] buildInitialBytes(VarDeclaration variable, in TypeFacts facts) {
+        import core.stdc.string: memcpy;
+        import dmd.expressionsem: getConstInitializer;
+
+        if (auto pending = variable in _pendingStatics)
+            return *pending;
+
         auto bytes = reserve(facts);
-        // A static initializer can refer to its own storage.
-        _statics[variable] = bytes;
-        scope (failure) _statics.remove(variable);
+        _pendingStatics[variable] = bytes;
+        scope (exit) _pendingStatics.remove(variable);
+
         if (variable._init is null) {
             const initial = initialValue(variable.type, variable.loc);
             memcpy(bytes.ptr, initial.ptr, bytes.length);
@@ -322,9 +422,26 @@ public struct NativeData {
         return bytes;
     }
 
+    // Only for a constant initializer (`storeValue`'s address-of case):
+    // the address this call bakes in is read back by every thread, so
+    // it must be one every thread agrees on. A `shared`/`__gshared`
+    // variable's storage qualifies; a thread-local variable's does not
+    // - `storageOf` would hand back this compiling thread's own copy,
+    // baked in for every other thread to read as if it were theirs
+    // (finding 14). dmd rejects most expressions that would reach this
+    // with a thread-local variable (its address is not a compile-time
+    // constant there either), so this is a clear failure instead of a
+    // silent one for whatever is left.
     private void* addressOf(Declaration symbol) {
-        if (auto variable = symbol.isVarDeclaration)
+        import std.conv: text;
+
+        if (auto variable = symbol.isVarDeclaration) {
+            if (variable.isThreadlocal)
+                throw new Exception(text(
+                    "cannot bake the address of thread-local variable `",
+                    variable.toChars, "` into a constant initializer"));
             return storageOf(variable).ptr;
+        }
         return _symbolAddress(symbol);
     }
 

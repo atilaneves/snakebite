@@ -984,6 +984,10 @@ public extern(C) bool executeIndirectCallPlan(
 public struct PlanCache {
     import snakebite.dependencyimage: DependencyImage;
 
+    // Holds `SharedTable`s (finding 2.4): a copy would share their
+    // storage with the original until one side grows.
+    @disable this(this);
+
     public this(const(DependencyImage)* image) {
         _resolver = Resolver(image);
     }
@@ -1007,22 +1011,38 @@ public struct PlanCache {
         return _callbacks !is null && _callbacks.contains(word);
     }
 
+    // `TypeFunction`, not `const(TypeFunction)`: a `SharedTable` entry
+    // assigns its whole key by value on insert, which a `const` field
+    // would refuse.
     private struct Signature {
-        const(TypeFunction) type;
+        TypeFunction type;
         bool context;
     }
-    private CallPlan*[Signature] _signatures;
+    // Read without a lock by every thread that runs guest code
+    // (ADR-0006); a signature's plan is prepared once, on its first
+    // indirect call.
+    private SharedTable!(Signature, CallPlan*) _signatures;
 
     public const(CallPlan)* signatureOf(
         TypeFunction type, in bool context,
     ) {
-        const key = Signature(type, context);
-        if (auto plan = key in _signatures)
-            return *plan;
-        auto plan = new CallPlan;
-        *plan = _shapeOf(type, context, type.linkage, null, false);
-        plan._callbacks = _callbacks;
-        _signatures[key] = plan;
+        auto key = Signature(type, context);
+        if (auto cached = key in _signatures)
+            return *cached;
+
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        CallPlan* plan;
+        withCompilerLock({
+            if (auto cached = key in _signatures) {
+                plan = *cached;
+                return;
+            }
+            plan = new CallPlan;
+            *plan = _shapeOf(type, context, type.linkage, null, false);
+            plan._callbacks = _callbacks;
+            plan = *_signatures.insert(key, plan);
+        });
         return plan;
     }
 
@@ -1052,11 +1072,16 @@ public struct PlanCache {
         _callbacks.register(word, declaration);
     }
 
-    private CallPlan*[imported!"dmd.func".FuncDeclaration] _plans;
-    private CallPlan*[string] _rawPlans;
-    private bool[imported!"dmd.func".FuncDeclaration] _nativeSymbols;
+    import dmd.func: FuncDeclaration;
+    import snakebite.sharedtable: SharedTable;
+
+    // Read without a lock by every thread that runs guest code
+    // (ADR-0006); a plan is prepared once, on its first use.
+    private SharedTable!(FuncDeclaration, CallPlan*) _plans;
+    private SharedTable!(string, CallPlan*) _rawPlans;
+    private SharedTable!(FuncDeclaration, bool) _nativeSymbols;
     private Resolver _resolver;
-    private size_t _preparations;
+    private shared size_t _preparations;
     version(unittest) private size_t _nativeSymbolLookups;
 
     // Resolves a linker name through the cache shared by this backend's
@@ -1078,12 +1103,21 @@ public struct PlanCache {
         if (auto cached = function_ in _nativeSymbols)
             return *cached;
 
-        version(unittest) ++_nativeSymbolLookups;
-        auto target = nativeTarget(function_);
-        const found = target.address !is null || resolve(
-            mangleExact(function_).fromStringz,
-        ) !is null;
-        _nativeSymbols[function_] = found;
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        bool found;
+        withCompilerLock({
+            if (auto cached = function_ in _nativeSymbols) {
+                found = *cached;
+                return;
+            }
+            version(unittest) ++_nativeSymbolLookups;
+            auto target = nativeTarget(function_);
+            found = target.address !is null || resolve(
+                mangleExact(function_).fromStringz,
+            ) !is null;
+            _nativeSymbols.insert(function_, found);
+        });
         return found;
     }
 
@@ -1107,7 +1141,15 @@ public struct PlanCache {
     // overwritten, so a cache that rebuilt a plan on every call would
     // still hand back the same address every time.
     public size_t preparations() const {
-        return _preparations;
+        import core.atomic: atomicLoad;
+
+        return atomicLoad(_preparations);
+    }
+
+    private void countPreparation() {
+        import core.atomic: atomicOp;
+
+        atomicOp!"+="(_preparations, 1);
     }
 
     // `function_`'s plan, prepared on its first call and reused after.
@@ -1121,11 +1163,20 @@ public struct PlanCache {
         if (auto cached = function_ in _plans)
             return *cached;
 
-        ++_preparations;
-        auto plan = new CallPlan;
-        *plan = prepare(function_, _resolver);
-        plan._callbacks = _callbacks;
-        _plans[function_] = plan;
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        CallPlan* plan;
+        withCompilerLock({
+            if (auto cached = function_ in _plans) {
+                plan = *cached;
+                return;
+            }
+            countPreparation;
+            plan = new CallPlan;
+            *plan = prepare(function_, _resolver);
+            plan._callbacks = _callbacks;
+            plan = *_plans.insert(function_, plan);
+        });
         return plan;
     }
 
@@ -1144,10 +1195,18 @@ public struct PlanCache {
         imported!"dmd.func".FuncDeclaration function_,
         scope imported!"dmd.mtype".Type[] extraArgumentTypes,
     ) {
-        ++_preparations;
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        // Never cached (this method's own doc), so every call - not only
+        // a cache miss - touches dmd (finding 1.2) and must take the
+        // lock. This is still a compile-time-triggered path: a caller
+        // reaches it once per call site, not once per guest call.
         auto plan = new CallPlan;
-        *plan = prepareVariadic(function_, _resolver, extraArgumentTypes);
-        plan._callbacks = _callbacks;
+        withCompilerLock({
+            countPreparation;
+            *plan = prepareVariadic(function_, _resolver, extraArgumentTypes);
+            plan._callbacks = _callbacks;
+        });
         return plan;
     }
 
@@ -1178,11 +1237,20 @@ public struct PlanCache {
         if (address is null)
             return null;
 
-        ++_preparations;
-        auto plan = new CallPlan;
-        *plan = CallPlan.ofRawAddress(
-            address, parameterRegisters, returnRegister);
-        _rawPlans[name] = plan;
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        CallPlan* plan;
+        withCompilerLock({
+            if (auto cached = name in _rawPlans) {
+                plan = *cached;
+                return;
+            }
+            countPreparation;
+            plan = new CallPlan;
+            *plan = CallPlan.ofRawAddress(
+                address, parameterRegisters, returnRegister);
+            plan = *_rawPlans.insert(name, plan);
+        });
         return plan;
     }
 

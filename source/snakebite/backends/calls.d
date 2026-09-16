@@ -8,10 +8,33 @@ private:
 // Argument-dependent guest requirements must run before symbol resolution:
 // a host body cannot read a captured guest frame.
 public struct CallSelection {
+    // Holds a `SharedTable` (finding 2.4): a copy would share its
+    // storage with the original until one side grows.
+    @disable this(this);
+
     import dmd.func: FuncDeclaration;
     import dmd.arraytypes: Expressions;
 
-    private bool[FuncDeclaration] _preferences;
+    import snakebite.sharedtable: SharedTable;
+
+    // The three dmd-touching questions `usesGuestBody` answers about a
+    // function alone, without its call site's own arguments: whether a
+    // C-style variadic call must always go native, whether the function
+    // nests inside another (so it needs this backend's own static
+    // chain), and the same-declaration preference every call falls back
+    // to otherwise. All three come from `dmd.astenums`/`typeFunctionOf`/
+    // `outerFunctionOf`/`isInstantiated`, which touch dmd's shared,
+    // mutable frontend state (finding 1.2), so they are decided once per
+    // function, under the compiler lock, and read back without one.
+    private struct Decision {
+        bool variadicRejects;
+        bool hasOuter;
+        bool prefers;
+    }
+
+    // Read without a lock by every thread that runs guest code
+    // (ADR-0006); a decision is built once per function.
+    private SharedTable!(FuncDeclaration, Decision) _decisions;
 
     public bool usesGuestBody(
         FuncDeclaration function_,
@@ -20,36 +43,65 @@ public struct CallSelection {
         lazy bool hasNativeSymbol,
         in string backend,
     ) {
+        if (function_.fbody is null)
+            return false;
+
+        if (auto cached = function_ in _decisions)
+            return decide(*cached, arguments, isGuest);
+
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        Decision decision;
+        withCompilerLock({
+            if (auto found = function_ in _decisions) {
+                decision = *found;
+                return;
+            }
+            decision = buildDecision(function_, hasNativeSymbol, isGuest);
+            _decisions.insert(function_, decision);
+        });
+        return decide(decision, arguments, isGuest);
+    }
+
+    // Called under the compiler lock only: every dmd query a function's
+    // decision needs, resolved once and never again.
+    private static Decision buildDecision(
+        FuncDeclaration function_,
+        lazy bool hasNativeSymbol,
+        scope bool delegate(FuncDeclaration) isGuest,
+    ) {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import snakebite.frontend.dmd.delegates: outerFunctionOf;
 
-        if (function_.fbody is null)
-            return false;
-
         const type = typeFunctionOf(function_);
         if (type.parameterList.varargs == VarArg.variadic
                 && (!type.isDstyleVariadic || hasNativeSymbol))
-            return false;
-
-        if (hasGuestDelegateArgument(arguments, isGuest))
-            return true;
+            return Decision(true, false, false);
 
         // This includes siblings and deeper nested callees: every static
         // chain points into frames whose offsets belong to this backend.
         if (outerFunctionOf(function_) !is null)
-            return true;
-
-        if (auto cached = function_ in _preferences)
-            return *cached;
+            return Decision(false, true, false);
 
         // A root-owned body must run as guest even when its linker name
         // is in the host (notably _Dmain). A template can reuse the host
         // instantiation; a missing template symbol leaves its guest body.
         const prefers = function_.isInstantiated() !is null
             ? !hasNativeSymbol : isGuest(function_);
-        _preferences[function_] = prefers;
-        return prefers;
+        return Decision(false, false, prefers);
+    }
+
+    private static bool decide(
+        in Decision decision,
+        Expressions* arguments,
+        scope bool delegate(FuncDeclaration) isGuest,
+    ) {
+        if (decision.variadicRejects)
+            return false;
+        if (hasGuestDelegateArgument(arguments, isGuest))
+            return true;
+        return decision.hasOuter || decision.prefers;
     }
 }
 

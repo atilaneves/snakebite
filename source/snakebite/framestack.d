@@ -4,6 +4,7 @@ module snakebite.framestack;
 private:
 
 import snakebite.backends.temporarystack: TemporaryStack;
+import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
 
 
 public enum defaultFrameCapacity = 1024 * 1024;
@@ -42,7 +43,18 @@ public struct FrameStack {
     private size_t _reservation;
     private size_t _used;
     private ubyte[][] _allocations;
+    // Every base address handed to `GC.addRange` so far: one per grown
+    // chunk (see `commit`), each removed in turn when this frame stack
+    // goes out of scope.
+    private ubyte*[] _registeredRanges;
     private TemporaryStack _cleanups;
+    // This thread's own copies of the thread-local guest variables the
+    // bytecode VM has touched (finding 1.3): a `FrameStack` already
+    // belongs to exactly one thread (ADR-0006), so `tlsSlotFor` needs no
+    // lock. `opTls*` (`snakebite.backends.bytecode.vm`) bakes a
+    // `TlsDescriptor*` into its instruction operand instead of a
+    // resolved address, and resolves it through this on every access.
+    private TlsSlots _tls;
 
     @disable this(this);
 
@@ -94,13 +106,15 @@ public struct FrameStack {
         }
 
         GC.addRange(_base, _committed);
+        _registeredRanges ~= _base;
     }
 
     ~this() @system {
         import core.memory: pageSize;
         import core.sys.posix.sys.mman: munmap;
 
-        GC.removeRange(_base);
+        foreach (registered; _registeredRanges)
+            GC.removeRange(registered);
         if (_base !is null)
             assert(
                 munmap(_base, _reservation + pageSize) == 0,
@@ -205,6 +219,14 @@ public struct FrameStack {
         popTo(mark);
     }
 
+    // This thread's own storage for a thread-local guest variable,
+    // starting from `descriptor`'s template on this thread's own first
+    // touch of it (finding 1.3). No lock: this `FrameStack`, like the
+    // `Vm` that owns it, belongs to exactly one thread.
+    public void[] tlsSlotFor(const(TlsDescriptor)* descriptor) {
+        return _tls.slotFor(descriptor);
+    }
+
     // Allocates aligned storage whose lifetime is the lifetime of this
     // frame stack. Used for closure objects, which can outlive the frame
     // that created them while a delegate still refers to them.
@@ -231,9 +253,24 @@ public struct FrameStack {
         import core.memory: pageSize;
         import core.sys.posix.sys.mman: PROT_READ, PROT_WRITE, mprotect;
 
-        const committed = roundUpToPage(end);
-        if (committed <= _committed)
+        const needed = roundUpToPage(end);
+        if (needed <= _committed)
             return;
+
+        // Double what is committed so far until it covers `end`, capped
+        // at `_reservation` (`push` already checked `end` fits there).
+        // A grow step that committed exactly what the caller asked for
+        // registered one GC range per page a slow-growing call chain
+        // ever touched - up to about 262000 ranges for one thread's
+        // 1 GiB reservation, on a process-wide list every registration
+        // locks and every collection walks. Doubling makes the number
+        // of grow steps, and so the number of ranges, logarithmic in
+        // the reservation instead of linear in the page count
+        // (finding 4).
+        size_t committed = _committed;
+        while (committed < needed)
+            committed = committed >= _reservation / 2
+                ? _reservation : committed * 2;
 
         if (mprotect(
                 _base + _committed,
@@ -242,8 +279,22 @@ public struct FrameStack {
             ) != 0)
             throw new Exception("could not grow the frame stack");
 
-        GC.removeRange(_base);
-        GC.addRange(_base, committed);
+        // Growing used to unregister the whole committed range and then
+        // register the bigger one back (`GC.removeRange` then
+        // `GC.addRange`). That opened a window with nothing registered
+        // for bytes that were already live - already holding a guest
+        // pointer some other frame still needs - so a collection that
+        // ran inside the window skipped scanning them and could free
+        // storage this thread was still using. Registering only the
+        // newly committed bytes, at their own base address, never
+        // unregisters anything already live: the range for the bytes
+        // committed so far stays registered the whole time, and the
+        // fresh range covers exactly the bytes this call is about to
+        // hand out for the first time - nothing in between is ever
+        // dropped from the GC's sight.
+        auto grown = _base + _committed;
+        GC.addRange(grown, committed - _committed);
+        _registeredRanges ~= grown;
         _committed = committed;
     }
 

@@ -8,20 +8,28 @@ private:
 // metadata and its identity for the backend's lifetime, while reusing real
 // host metadata whenever it is available.
 public struct RuntimeTypes {
+    // Holds `SharedTable`s (finding 2.4): a copy would share their
+    // storage with the original until one side grows.
+    @disable this(this);
+
     import dmd.dclass: ClassDeclaration;
     import dmd.denum: EnumDeclaration;
     import dmd.location: Loc;
     import dmd.dstruct: StructDeclaration;
     import dmd.dsymbol: Dsymbol;
     import dmd.mtype: Type;
-    import object: TypeInfo, TypeInfo_Class, TypeInfo_Interface, TypeInfo_Struct;
+    import object:
+        TypeInfo, TypeInfo_Class, TypeInfo_Interface, TypeInfo_Struct;
+    import snakebite.sharedtable: SharedTable;
 
     private bool delegate(Dsymbol) const _isRootOwned;
     private void* delegate(const(char)[]) _resolve;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
     private const(void)[] delegate(Type, Loc) _initialValue;
-    private TypeInfo[Type] _types;
-    private TypeInfo_Struct[StructDeclaration] _structs;
+    // Read without a lock by every thread that runs guest code
+    // (ADR-0006); an entry is built once, under the compiler lock.
+    private SharedTable!(Type, TypeInfo) _types;
+    private SharedTable!(StructDeclaration, TypeInfo_Struct) _structs;
 
     // `isRootOwned` is the owning `Program`'s own decision
     // (`Program.isRootOwned`), not a copy of its root module list: a
@@ -69,9 +77,18 @@ public struct RuntimeTypes {
         if (auto cached = type in _types)
             return *cached;
 
-        auto info = build(type);
-        if (info !is null)
-            _types[type] = info;
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        TypeInfo info;
+        withCompilerLock({
+            if (auto cached = type in _types)
+                info = *cached;
+            else {
+                info = build(type);
+                if (info !is null)
+                    info = *_types.insert(type, info);
+            }
+        });
         return info;
     }
 
@@ -280,8 +297,7 @@ public struct RuntimeTypes {
         if (declaration.hasPointerField)
             info.m_flags = TypeInfo_Struct.StructFlags.hasPointers;
         setSysVArgTypes(info, declaration.type);
-        _structs[declaration] = info;
-        return info;
+        return *_structs.insert(declaration, info);
     }
 }
 
