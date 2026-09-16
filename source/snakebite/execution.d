@@ -18,6 +18,7 @@ public struct PreparationReport {
     public imported!"core.time".Duration discovery;
     // The frontend itself: initialisation, parsing, semantic analysis.
     public imported!"core.time".Duration duration;
+    public imported!"core.time".Duration imageDuration;
 }
 
 
@@ -36,9 +37,10 @@ public PreparationReport prepareProject(
     in string directory,
     in string[] importPaths = null,
     in string[] stringImportPaths = null,
+    in bool nativeDependencies = true,
 ) {
     import snakebite.frontend.compiler: Snippets, initialize;
-    import snakebite.project: loadProject, sourceSet;
+    import snakebite.project: loadProject, sourceSet, prepareDependencies;
     import std.datetime.stopwatch: AutoStart, StopWatch;
 
     // Two costs a user pays before any backend runs, timed apart: finding
@@ -52,7 +54,11 @@ public PreparationReport prepareProject(
     stopWatch.reset;
     initialize(Snippets.no);
     auto project = loadProject(directory, sources);
-    return PreparationReport(project, discovery, stopWatch.peek);
+    const frontendDuration = stopWatch.peek;
+    stopWatch.reset;
+    if (nativeDependencies)
+        prepareDependencies(project);
+    return PreparationReport(project, discovery, frontendDuration, stopWatch.peek);
 }
 
 

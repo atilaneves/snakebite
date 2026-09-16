@@ -6,6 +6,7 @@ private:
 
 public int main(string[] args) {
     import snakebite.cli: parseArgs;
+    import snakebite.backends: BackendName;
     import snakebite.execution: executeBackend, prepareProject;
     import std.stdio: stderr, write;
 
@@ -21,6 +22,7 @@ public int main(string[] args) {
             parsed.options.projectDirectory,
             parsed.options.importPaths,
             parsed.options.stringImportPaths,
+            parsed.options.backend != BackendName.ctfe,
         );
         const report = executeBackend(
             parsed.options.backend,
@@ -51,6 +53,7 @@ private void printStatistics(
         milliseconds(preparation.discovery),
     );
     writefln("frontend time: %8.1f ms", milliseconds(preparation.duration));
+    writefln("image time:    %8.1f ms", milliseconds(preparation.imageDuration));
     writefln("run time:      %8.1f ms", milliseconds(report.runTime));
     if (report.compilation.hasCompiler)
         writefln(
