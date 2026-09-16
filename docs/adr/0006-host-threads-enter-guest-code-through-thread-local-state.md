@@ -41,3 +41,14 @@ is not how compiled D behaves.
 `synchronized` is not used, per project rule. Locks use `core.sync`
 primitives, and only on slow paths. Each backend must release a
 thread's state when the thread ends.
+
+Automatic attach inherits druntime's own attach race (issue #40
+review, finding 3): `thread_attachThis` allocates a `Thread` object
+before the thread is registered, and a collection that runs in that
+window can free it. Compiled D opens this window only where the
+programmer wrote `thread_attachThis` by hand; a backend that attaches
+a foreign thread by itself, on every such thread's first entry, opens
+it far more often. The race is druntime's, not this project's - it
+also reproduces through a bare `pthread` making the same two calls,
+with no backend involved - so it is reported upstream rather than
+worked around here.

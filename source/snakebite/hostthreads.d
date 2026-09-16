@@ -15,13 +15,17 @@ import core.thread: Thread, ThreadID;
 // finalizer, because the GC finalizes garbage in no fixed order.
 //
 // A thread's own state lives only in that thread's own thread-local
-// table (`_held`), never in anything another thread can reach: nothing
-// here keeps a table of every thread's state, so nothing here keeps a
-// backend alive through a thread that entered it once and moved on, and
-// no stale entry can survive for a later thread that happens to get the
-// same reused `ThreadID`. `current` reads that table directly, with no
-// lock, on every call after this thread's first. Only the first call on
-// a thread, which creates this thread's own state, calls
+// table (`_held`), never in anything another thread can reach: no
+// stale entry can survive for a later thread that happens to get the
+// same reused `ThreadID`, and no thread ever sees another thread's
+// entry. This is a lifetime of its own, though, not a weak one: the
+// thread's own table holds every backend's state it ever entered, so a
+// long-lived thread - a task pool worker, `main` - keeps every backend
+// it ever entered alive for as long as the thread itself lives, even
+// after the backend that made a given state is otherwise unreachable
+// (finding 5, issue #40 review). `current` reads that table directly,
+// with no lock, on every call after this thread's first. Only the
+// first call on a thread, which creates this thread's own state, calls
 // `attachedThread` to make sure druntime knows the thread (ADR-0005).
 //
 // `State` is a class or a pointer to a struct. `destroy` is applied to
@@ -44,6 +48,15 @@ public struct PerThread(State) {
     private Core* _core;
     private static Held[size_t] _held;
     private static bool _hooked;
+    // The last `(core, state)` pair `current` returned on this thread,
+    // checked before the associative-array lookup below. Almost every
+    // callback in a run comes from the same backend as the one before
+    // it, so this turns almost every entry into one integer compare
+    // instead of a hash and a probe (finding 11). `size_t.max` never
+    // matches a real `_core.id` (it starts at 1, see `nextId`), so an
+    // empty cache never looks like a hit.
+    private static size_t _cachedId = size_t.max;
+    private static State _cachedState;
 
     @disable this();
     @disable this(this);
@@ -60,8 +73,14 @@ public struct PerThread(State) {
     // and no call to `attachedThread`, once this thread already holds
     // one (ADR-0006's fast path).
     public State current() {
-        if (auto held = _core.id in _held)
+        if (_core.id == _cachedId)
+            return _cachedState;
+
+        if (auto held = _core.id in _held) {
+            _cachedId = _core.id;
+            _cachedState = held.state;
             return held.state;
+        }
 
         return enter;
     }
@@ -75,6 +94,8 @@ public struct PerThread(State) {
 
         auto state = _core.create();
         _held[_core.id] = Held(state);
+        _cachedId = _core.id;
+        _cachedState = state;
         return state;
     }
 
@@ -89,6 +110,17 @@ public struct PerThread(State) {
         foreach (held; _held)
             release(held.state);
         _held = null;
+        // Drop the cache along with the table: a state it still points
+        // to is about to be destroyed, and a later entry on the same
+        // thread must go through `enter` again to notice.
+        _cachedId = size_t.max;
+        _cachedState = State.init;
+        // Let a later entry on this same thread register a fresh hook.
+        // Without this, a thread that enters guest code again after its
+        // hooks already ran - a `pthread` key destructor can run before
+        // other destructors that then call guest code - would make a
+        // state nothing ever releases (finding 10).
+        _hooked = false;
     }
 }
 
@@ -122,12 +154,17 @@ public ThreadID attachedThread() {
 
 
 private extern(C) void rt_moduleTlsCtor();
+private extern(C) void rt_moduleTlsDtor();
 
 
 // What to run on the calling thread when it ends. A thread druntime
 // created runs these from the module destructor below. A thread this
-// module attached runs them from its `pthread` key destructor, which is
-// the one hook such a thread offers.
+// module attached runs them from its `pthread` key destructor
+// (`detachForeign`), through `rt_moduleTlsDtor`, which reaches this
+// module's own destructor the same way it reaches every other
+// module's - never by calling `runThreadEndHooks` itself, which would
+// be this module hand-rolling one piece of `rt_moduleTlsDtor` on the
+// side (finding 6).
 private alias ThreadEndHook = void function();
 private ThreadEndHook[] threadEndHooks;
 
@@ -152,14 +189,23 @@ private void report(in char[] what, Throwable throwable) nothrow {
     fprintf(stderr, "\n");
 }
 
+// Runs every hook this thread registered, then and only then. The
+// array is taken out of `threadEndHooks` before any hook runs, so a
+// hook that enters guest code again and registers a fresh hook of its
+// own - or a second, unexpected call to this same function on this
+// thread - never appends to, or reads, the list this call is still
+// iterating: each call owns its own local copy, and a second call
+// finds nothing left to run instead of a hook whose target is already
+// gone (finding 2).
 private void runThreadEndHooks() nothrow {
-    foreach (hook; threadEndHooks) {
+    auto hooks = threadEndHooks;
+    threadEndHooks = null;
+    foreach (hook; hooks) {
         try
             hook();
         catch (Throwable throwable)
             report("a thread-end hook", throwable);
     }
-    threadEndHooks = null;
 }
 
 static ~this() {
@@ -191,15 +237,21 @@ private void markForeign() {
 // detaching under concurrent collections crashed inside the GC's own
 // per-thread cleanup, `cleanupThread`, reached only through that
 // extra, non-public call - and only that call, never `thread_detachThis`
-// alone, in every crash a stress run caught. This releases this
-// project's own per-thread state (`runThreadEndHooks`) and then
-// detaches through the same, sole public entry point compiled D uses,
-// nothing more. A key destructor that throws terminates the process,
-// so this is `nothrow` and never lets a hook's exception (finding 2.3)
-// reach `pthread`.
+// alone, in every crash a stress run caught. This runs `rt_moduleTlsDtor`
+// - every module's thread-local destructors, this one's own
+// `static ~this` (`runThreadEndHooks`) included - the same call
+// `attachedThread` made on entry was `rt_moduleTlsCtor`, so attach and
+// detach run the same pair compiled D documents, symmetric this time
+// (finding 6), then detaches through the same, sole public entry point
+// compiled D uses, nothing more. A key destructor that throws
+// terminates the process, so this is `nothrow` and never lets a
+// destructor's exception (finding 2.3) reach `pthread`.
 private extern(C) void detachForeign(void*) nothrow {
     import core.thread: thread_detachThis;
 
-    runThreadEndHooks;
+    try
+        rt_moduleTlsDtor;
+    catch (Throwable throwable)
+        report("rt_moduleTlsDtor on a foreign thread's detach", throwable);
     thread_detachThis;
 }
