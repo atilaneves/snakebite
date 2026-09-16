@@ -55,33 +55,51 @@ unittest {
     auto function_ = findFunction(guestModule, "abs");
     assert(function_ !is null, "No function `abs` in the guest program");
 
-    // Pin this thread to the core the OS already placed it on, for the
-    // rest of the test. A migration to another core mid-measurement -
-    // easy to trigger on a machine that is never idle, since something
-    // else is competing for the other cores - moves the tight timing
-    // loop to cold cache on the new core. That cost lands on whichever
-    // half of a round is running at the time, baseline or barrier, and
-    // the ratio then reports it as if it were the barrier's own cost.
-    // Measured on 2026-09-16, comparing 20-round runs with and without
-    // this pinning, under the same real load: unpinned, a run could
-    // start with several consecutive rounds near 4.0x before dropping
-    // to a steady ~2.5x, or could stay near 4.0x for the entire run,
-    // mid-run, for no change in what the run was doing. Pinned, that
-    // mid-run step disappeared - the rounds within one run settled down
-    // to being close to each other (see the median rationale below).
-    // What pinning does not remove is the run-to-run range described
-    // below: that comes from real contention on the very core this
-    // thread is pinned to, which pinning cannot avoid, only migration.
+    // Pin this thread to one core, then put the old mask back on exit.
+    // A core migration mid-loop moves the tight loop to a cold cache.
+    // That cost lands on baseline or barrier, whichever runs at that
+    // moment, and the ratio then reports it as the barrier's own cost.
+    // `bin/at` runs test modules on a pool of worker threads. A mask
+    // left pinned would follow the worker into every later test, and
+    // could pin two workers to the same core.
     version (linux) {
         import core.sys.linux.sched:
-            cpu_set_t, CPU_SET, sched_getcpu, sched_setaffinity;
+            cpu_set_t, CPU_SET, sched_getaffinity, sched_setaffinity;
 
-        const cpu = sched_getcpu();
-        if (cpu >= 0) {
-            cpu_set_t mask;
-            CPU_SET(cpu, &mask);
-            cast(void) sched_setaffinity(0, cpu_set_t.sizeof, &mask);
+        cpu_set_t oldMask;
+        const savedMask =
+            sched_getaffinity(0, cpu_set_t.sizeof, &oldMask) == 0;
+        scope(exit) if (savedMask)
+            cast(void) sched_setaffinity(0, cpu_set_t.sizeof, &oldMask);
+
+        // `sched_getcpu` exists only for glibc and musl. `version
+        // (linux)` alone covers other C runtimes too, so it is not
+        // enough of a guard for this one function.
+        version (CRuntime_Glibc) enum canPin = true;
+        else version (CRuntime_Musl) enum canPin = true;
+        else enum canPin = false;
+
+        static if (canPin) {
+            import core.sys.linux.sched: sched_getcpu;
+
+            const cpu = sched_getcpu();
+            if (cpu >= 0) {
+                cpu_set_t mask;
+                CPU_SET(cpu, &mask);
+                if (sched_setaffinity(0, cpu_set_t.sizeof, &mask) != 0)
+                    writefln("  warning: could not pin to core %d", cpu);
+            } else {
+                writefln("  warning: sched_getcpu failed; running unpinned");
+            }
+        } else {
+            writefln(
+                "  warning: this C runtime has no sched_getcpu; " ~
+                "running unpinned");
         }
+    } else {
+        writefln(
+            "  warning: no CPU pinning on this platform; the gate's " ~
+            "bound assumes pinning");
     }
 
     // Enough iterations for a stable ratio and no more: this runs in
