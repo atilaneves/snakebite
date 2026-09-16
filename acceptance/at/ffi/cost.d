@@ -55,7 +55,53 @@ unittest {
     auto function_ = findFunction(guestModule, "abs");
     assert(function_ !is null, "No function `abs` in the guest program");
 
-    PlanCache cache;
+    // Pin this thread to one core, then put the old mask back on exit.
+    // A core migration mid-loop moves the tight loop to a cold cache.
+    // That cost lands on baseline or barrier, whichever runs at that
+    // moment, and the ratio then reports it as the barrier's own cost.
+    // `bin/at` runs test modules on a pool of worker threads. A mask
+    // left pinned would follow the worker into every later test, and
+    // could pin two workers to the same core.
+    version (linux) {
+        import core.sys.linux.sched:
+            cpu_set_t, CPU_SET, sched_getaffinity, sched_setaffinity;
+
+        cpu_set_t oldMask;
+        const savedMask =
+            sched_getaffinity(0, cpu_set_t.sizeof, &oldMask) == 0;
+        scope(exit) if (savedMask)
+            cast(void) sched_setaffinity(0, cpu_set_t.sizeof, &oldMask);
+
+        // `sched_getcpu` exists only for glibc and musl. `version
+        // (linux)` alone covers other C runtimes too, so it is not
+        // enough of a guard for this one function.
+        version (CRuntime_Glibc) enum canPin = true;
+        else version (CRuntime_Musl) enum canPin = true;
+        else enum canPin = false;
+
+        static if (canPin) {
+            import core.sys.linux.sched: sched_getcpu;
+
+            const cpu = sched_getcpu();
+            if (cpu >= 0) {
+                cpu_set_t mask;
+                CPU_SET(cpu, &mask);
+                if (sched_setaffinity(0, cpu_set_t.sizeof, &mask) != 0)
+                    writefln("  warning: could not pin to core %d", cpu);
+            } else {
+                writefln("  warning: sched_getcpu failed; running unpinned");
+            }
+        } else {
+            writefln(
+                "  warning: this C runtime has no sched_getcpu; " ~
+                "running unpinned");
+        }
+    } else {
+        writefln(
+            "  warning: no CPU pinning on this platform; the gate's " ~
+            "bound assumes pinning");
+    }
+
     // Enough iterations for a stable ratio and no more: this runs in
     // `ci.sh` on every build, so it buys its stability cheaply.
     enum n = 1_000_000;
@@ -86,6 +132,8 @@ unittest {
     // measured as if the barrier had cost it.
     const(void)*[1] slots = [&argument];
     const int* directArgument = cast(const int*) slots[0];
+
+    PlanCache cache;
     const plan = cache.of(function_);
 
     foreach (i; 0 .. 2_000) {
@@ -93,62 +141,98 @@ unittest {
         plan.call(&result, slots[]);
     }
 
+    // Time each batch on its own, and keep the smallest batch time on
+    // each side. A busy sibling core slows the cheap baseline loop more
+    // than it slows the barrier loop, so the total time for each side
+    // no longer scales the same way under load. Measured on
+    // 2026-09-16: dividing the two totals read 4.0x alone but 1.68x
+    // next to `at.bench.timing`, the real condition inside `bin/at` -
+    // the same build, the same barrier, no change but the load.
+    //
+    // The smallest batch on each side is the batch that saw the least
+    // contention. There are `n / batch` batches per round, interleaved
+    // baseline then barrier, so both sides get an uncontended batch in
+    // the same short window. Dividing the two smallest times then
+    // stays close to the clean ratio, even under load.
+    //
+    // This is not the smallest of several ratios, which the old code
+    // used to reject for good reason: that divides one noisy number by
+    // another noisy number. Taking the minimum on each side first, and
+    // dividing only once, removes the noise before the division.
     size_t sink;
-    double[5] baselines;
-    double[5] barriers;
-    double[5] ratios;
-    foreach (sample; 0 .. ratios.length) {
-        auto baselineWatch = StopWatch(AutoStart.no);
-        auto barrierWatch = StopWatch(AutoStart.no);
+    struct Round { double baseline; double barrier; double ratio; }
+    Round[15] rounds;
+    auto watch = StopWatch(AutoStart.no);
+    foreach (sample; 0 .. rounds.length) {
+        double baselineFloor = double.infinity;
+        double barrierFloor = double.infinity;
         foreach (_; 0 .. n / batch) {
-            baselineWatch.start;
+            watch.reset;
+            watch.start;
             foreach (i; 0 .. batch) {
                 result = direct(*directArgument);
                 sink += cast(size_t) result;
             }
-            baselineWatch.stop;
+            watch.stop;
+            const baselineBatch =
+                watch.peek.total!"nsecs" / cast(double) batch;
+            if (baselineBatch < baselineFloor)
+                baselineFloor = baselineBatch;
 
-            barrierWatch.start;
+            watch.reset;
+            watch.start;
             foreach (i; 0 .. batch) {
                 plan.call(&result, slots[]);
                 sink += cast(size_t) result;
             }
-            barrierWatch.stop;
+            watch.stop;
+            const barrierBatch =
+                watch.peek.total!"nsecs" / cast(double) batch;
+            if (barrierBatch < barrierFloor)
+                barrierFloor = barrierBatch;
         }
-        baselines[sample] = baselineWatch.peek.total!"nsecs"
-            / cast(double) n;
-        barriers[sample] = barrierWatch.peek.total!"nsecs"
-            / cast(double) n;
-        ratios[sample] = barriers[sample] / baselines[sample];
+        rounds[sample] =
+            Round(baselineFloor, barrierFloor, barrierFloor / baselineFloor);
     }
-    sort(baselines[]);
-    sort(barriers[]);
-    sort(ratios[]);
-    writefln("  baseline %5.2f ns, barrier %5.2f ns, ratio %.6fx",
-        baselines[2], barriers[2], ratios[2]);
+    // 15 rounds, not 5: pinning (above) removes almost all of the
+    // noise, but a handful of extra rounds is cheap insurance against
+    // whatever pinning does not catch - a pause for a signal, a page
+    // fault, a GC collection triggered elsewhere in the process.
+    //
+    // Sort by ratio, and read the median round as a whole. Sorting
+    // each column on its own, as the old code did, prints a baseline
+    // and a barrier that never shared a round with the printed ratio.
+    sort!((a, b) => a.ratio < b.ratio)(rounds[]);
+    const median = rounds.length / 2;
+    writefln("  baseline %5.2f ns, barrier %5.2f ns, median-of-%d ratio %.6fx",
+        rounds[median].baseline, rounds[median].barrier, rounds.length,
+        rounds[median].ratio);
 
     result.should == 42;
     // `-release` strips `assert`, so this stays a `should` check: without
     // it, an optimiser that folds the baseline loop away would pass silently.
     sink.should.not == 0;
 
-    // Fixed from independent runs of a known-good revision: mean + 3 sample
-    // standard deviations, rounded up. Do not let a candidate's own noise
-    // raise its limit.
+    // maxRatio is set from the floor above, not from a total. Measured
+    // on 2026-09-16, `timeout 120 bin/at -d at.ffi.cost.barrier.overhead`,
+    // on a machine already busy with other work (load average 6 to 28):
     //
-    // Recalibrated against master (fe58792): 15 runs of `bin/at -d
-    // at.ffi.cost` on an otherwise idle machine, one core pinned so the OS
-    // could not migrate the tight timing loop mid-measurement - an unpinned
-    // run can swap cores between the baseline half of a round and the
-    // barrier half, which moves the printed ratio far more than the
-    // barrier's own cost does. Printed ratios: 3.065571, 3.288746,
-    // 3.291122, 3.293928, 3.294434, 3.295138, 3.297399, 3.298807, 3.300118,
-    // 3.301615, 3.302570, 3.302705, 3.303412, 3.303819, 3.305789. Mean
-    // 3.283, sample standard deviation 0.060, mean + 3 sd = 3.464, rounded
-    // up to one decimal. The old 2.40 predated the optimised bin/at build
-    // (see "Build the acceptance tests optimised"); it never matched this
-    // build's own steady state and only passed when a retry got lucky.
-    enum maxRatio = 3.5;
+    //   alone, 5 runs:                                 floor ratio 3.56-3.67x
+    //   next to `at.bench.timing` (`bin/at`'s real mix), 5 runs: 3.56x
+    //
+    // The floor stays close to 3.6x in both conditions. Load no longer
+    // moves it the way it moved the old ratio of totals (see above).
+    //
+    // A barrier with its dispatch doubled (one extra call to `_entry`
+    // in `plan.d`, reverted before this commit) read a floor ratio of
+    // 5.2-5.4x, alone and next to `at.bench.timing` alike, 3 runs each.
+    // Clean and doubled stay apart by a wide margin in both conditions,
+    // so 4.5 sits safely between them and stays a useful bound.
+    //
+    // `build/ci.sh` runs `bin/at -s '@timing'` on its own, after the
+    // rest of the suite, so this test never shares the machine with
+    // `bin/at`'s other, non-timing acceptance tests either.
+    enum maxRatio = 4.5;
     // `-release` strips `assert`, so the gate is a `should` check, not an
     // `assert`. `bin/at` is always built with `-O`, so the ratio measures
     // the barrier itself rather than the cost of an unoptimised build.
@@ -157,5 +241,5 @@ unittest {
     // `should` proxy has no `<`: `double.should < x` does not compile
     // (relational operators route through `opCmp`, which `Should` does
     // not define), so this stays the free-function form.
-    ratios[2].shouldBeSmallerThan(maxRatio);
+    rounds[median].ratio.shouldBeSmallerThan(maxRatio);
 }
