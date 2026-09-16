@@ -9,6 +9,33 @@ module ut.backends.run.structs;
 import ut.backends;
 
 
+// Compiled Variant methods call the handler stored in guest-initialized data.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "native Variant construction calls a guest declaration address"),
+    Omit!(Ctfe, Because.inexpressible,
+        "Variant reinterprets its byte storage as the stored type"),
+)) {
+    @("variantCopyCallsStoredHandler." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.variant: Variant;
+            struct Value { int number; }
+            void main() {
+                auto original = Variant(42);
+                auto copy = original;
+                assert(copy.get!int == 42);
+
+                auto aggregate = Variant(Value(17));
+                auto aggregateCopy = aggregate;
+                assert(aggregateCopy.get!Value.number == 17);
+            }
+        });
+    }
+}
+
+
 // Native D initializes the receiver before evaluating constructor arguments.
 // Arming it after the call must preserve that original lifetime order.
 static foreach (backend; Matrix!(

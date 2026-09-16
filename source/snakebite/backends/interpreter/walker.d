@@ -233,6 +233,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // worked out on that function's first call and reused by every call
     // after it - the same cold-path-once shape as `_layouts`.
     private PlanCache _plans;
+    private FuncDeclaration[const(void)*] _callableDeclarations;
     private ThreadID _ownerThread;
     // A call expression is one call site, even when a loop visits it many
     // times. The plan cache remains the cold path; this side cache keeps
@@ -732,12 +733,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
     }
 
-    // `visit(SymOffExp)`/`visit(FuncExp)` store a function pointer's value
-    // as the `FuncDeclaration` itself, and register that word with the
-    // plan cache (`registerGuestWord`). `calleeOf` resolves the word when
-    // guest code calls it; the plan swaps it for a pool entry (ADR-0003)
-    // when it crosses to host code, and `invokeCallback` is the re-entry
-    // that entry reaches. This evaluator supplies only that re-entry.
     private void callHost(
         FuncDeclaration hostFunction,
         const(CallPlan)* plan,
@@ -1743,12 +1738,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _nativeData.write(_type, _facts, expression, _place);
     }
 
-    // A function literal as a value. The function word holds the
-    // declaration itself rather than a machine address, because this
-    // backend has no machine code for the literal - `calleeOf` reads it
-    // back when the value is called. A capturing literal carries the
-    // enclosing frame or closure as its context, and that storage remains
-    // reachable through `_allocations` when the enclosing call returns.
+    // Stored function pointers must also be callable from host code when
+    // they arrive inside an aggregate or through a pointer to guest data.
+    // The barrier cannot replace function words hidden in that storage.
     override void visit(FuncExp expression) {
         import snakebite.frontend.dmd.delegates: delegateTargetOf;
         import snakebite.nativelayout:
@@ -1771,9 +1763,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     text("interpreter cannot evaluate `", expression.toString,
                         "`: it has no destination"),
                 );
-            registerGuestWord(literal);
             storeIntegral(
-                bytes, cast(size_t) cast(void*) literal, size_t.sizeof);
+                bytes, cast(size_t) callableAddress(literal, 0), size_t.sizeof);
             return;
         }
 
@@ -1783,8 +1774,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     // `&nested` is lowered by dmd to a DelegateExp whose expression is the
     // nested function itself. Its context is the enclosing frame or heap
-    // closure, just as for a delegate literal. The function declaration is
-    // retained in the function word for the interpreter to resolve later.
+    // closure, just as for a delegate literal.
     override void visit(DelegateExp expression) {
         import snakebite.frontend.dmd.delegates: delegateTargetOf;
 
@@ -1793,14 +1783,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             expression, _place);
     }
 
-    // Shared tail of `visit(FuncExp)`/`visit(DelegateExp)`: once
-    // `snakebite.frontend.dmd.delegates.delegateTargetOf` has decided what the
-    // delegate value needs (see its own doc), this resolves that decision
-    // to actual bytes - the interpreter's own context representation
-    // (`tryContextOf`, a native pointer) and its own function-word
-    // convention (the `FuncDeclaration` itself, since this backend has no
-    // machine code for a guest function - `calleeOf` reads it back when the
-    // value is called).
+    // A delegate keeps its native context word so compiled code can pass
+    // that context back through the callback entry without conversion.
     private void storeDelegateValue(
         DelegateTarget target,
         Expression expression,
@@ -1845,10 +1829,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void* address;
         if (target.virtualDispatch)
             address = _virtualAddress(target.function_, cast(void*) context);
-        else {
-            registerGuestWord(target.function_);
-            address = cast(void*) target.function_;
-        }
+        else
+            address = callableAddress(target.function_, 0);
         storeIntegral(bytes + delegateFunctionOffset,
             cast(size_t) address, size_t.sizeof);
     }
@@ -2163,10 +2145,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     extern(D) private void* constantSymbolAddress(Declaration symbol) {
-        if (auto function_ = symbol.isFuncDeclaration) {
-            registerGuestWord(function_);
-            return cast(void*) function_;
-        }
+        if (auto function_ = symbol.isFuncDeclaration)
+            return callableAddress(function_, 0);
 
         return _plans.resolve(nativeSymbolName(symbol));
     }
@@ -2666,10 +2646,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         Evaluator evaluator;
 
         public void* symbolAddress(SymOffExp expression) {
-            if (auto function_ = expression.var.isFuncDeclaration) {
-                evaluator.registerGuestWord(function_);
-                return cast(void*) function_;
-            }
+            if (auto function_ = expression.var.isFuncDeclaration)
+                return evaluator.callableAddress(function_, 0);
 
             if (auto typeInfo = expression.var.isTypeInfoDeclaration)
                 return cast(void*) evaluator._runtimeTypes.get(typeInfo.tinfo);
@@ -3620,11 +3598,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // `FuncDeclaration` instead: dmd only lowers a nested function's
     // address to a `DelegateExp` (a nested function may need its
     // enclosing frame or closure as context), never a module-level one,
-    // so a plain function pointer here has no context word to carry. This
-    // backend has no machine code for an interpreted function, so, exactly
-    // as `visit(FuncExp)` already does for a function pointer, the
-    // function word is the declaration itself, and `calleeOf` resolves it
-    // back when the pointer is called.
+    // so a plain function pointer here has no context word to carry.
     override void visit(SymOffExp expression) {
         import snakebite.nativelayout: storeIntegral;
 
@@ -4278,7 +4252,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             declaration,
             _classRuntime,
             Hooks(
-                &methodAddress,
+                &callableAddress,
                 (decl, base) => fillFieldInits(decl, base),
                 &_runtimeTypes.linkedClassInfo,
                 (decl, info) {
@@ -4288,13 +4262,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         );
     }
 
-    extern(D) private void* methodAddress(
+    extern(D) private void* callableAddress(
         FuncDeclaration method, ptrdiff_t adjustment,
     ) {
         import dmd.dsymbolsem: isAbstract;
 
         if (method.isAbstract)
             return null;
+
+        // Untyped variadic calls need the argument types from their call
+        // site. The callback bridge cannot prepare a fixed entry for them.
+        if (typeFunctionOf(method).parameterList.varargs == VarArg.variadic
+                && adjustment == 0) {
+            registerGuestWord(method);
+            return cast(void*) method;
+        }
+
         const(void)* word;
         if (_callSelection.usesGuestBody(method, null,
                 (callee) => _program.isInterpreted(callee),
@@ -4302,7 +4285,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             registerGuestWord(method);
             word = cast(void*) method;
         }
-        return _plans.callableAddress(word, method, adjustment);
+        // const would qualify the pointee, but the caller needs void*.
+        auto address = _plans.callableAddress(word, method, adjustment);
+        if (adjustment == 0)
+            _callableDeclarations[address] = method;
+        return address;
     }
 
     // The guest declaration `info` was generated for, or `null` for a
@@ -4825,9 +4812,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     // The callee of a call dmd left unresolved: one reached through a
     // value rather than a name, which for this interpreter means either a
-    // delegate or a plain function pointer. Either way the function word
-    // holds the declaration `visit(FuncExp)`/`visit(SymOffExp)` stored,
-    // read back here. A delegate's context word is passed directly into
+    // delegate or a plain function pointer. Stored values hold callable
+    // addresses; callback writeback can also return a registered guest
+    // word. A delegate's context word is passed directly into
     // the callee's hidden context slot, since the delegate may be called
     // after the function that created it has returned; a function pointer
     // has no context word, so it never carries one.
@@ -4852,6 +4839,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                         "`: the function pointer is null"),
                 );
 
+            if (auto declaration = cast(void*) function_ in _callableDeclarations)
+                return Callee(*declaration, null, false);
             if (!_plans.isGuestWord(cast(void*) function_))
                 return Callee(null, null, false, cast(void*) function_,
                     deref.type.isTypeFunction);
@@ -4883,6 +4872,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: the delegate is null"),
             );
 
+        if (auto declaration = cast(void*) function_ in _callableDeclarations)
+            return Callee(*declaration, cast(void*) context, true);
         if (!_plans.isGuestWord(cast(void*) function_))
             return Callee(null, cast(void*) context, true,
                 cast(void*) function_, callee.type.nextOf.isTypeFunction);
