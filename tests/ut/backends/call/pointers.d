@@ -1151,8 +1151,22 @@ static foreach (backend; Matrix!(
             mixin(parallelismFunctionsSource);
             mixin(parallelismFunctionArraySource);
 
-            auto results = taskPool.amap!(
-                (i) => parallelismTestFunctions[i]())(
+            // `amap!fun` is a member of `TaskPool` (so it already needs
+            // `this`); a `fun` that also closes over this unittest's own
+            // frame gives it a second context, which DMD 2.108+
+            // deprecates ("requires a dual-context"). A `static` nested
+            // function takes no frame of its own, so it costs `amap`
+            // only the one context it already needs; `__gshared` is what
+            // lets a worker thread, not this one, read it.
+            __gshared typeof(parallelismTestFunctions)
+                sharedParallelismTestFunctions;
+            sharedParallelismTestFunctions = parallelismTestFunctions;
+
+            static long callParallelismTestFunction(size_t i) {
+                return sharedParallelismTestFunctions[i]();
+            }
+
+            auto results = taskPool.amap!callParallelismTestFunction(
                 parallelismFunctionCount.iota);
         } else {
             auto modules = parseSnippets([
@@ -1168,11 +1182,21 @@ static foreach (backend; Matrix!(
             }
             auto backend_ = new backend(Program([modules[0]]));
 
-            auto results = taskPool.amap!((i) {
+            // Same reasoning as the `Native` branch above.
+            __gshared typeof(functions) sharedParallelismFunctions;
+            sharedParallelismFunctions = functions;
+            __gshared backend sharedParallelismBackend;
+            sharedParallelismBackend = backend_;
+
+            static long callGuestParallelismFunction(size_t i) {
                 long result;
-                backend_.call(functions[i], &result, []);
+                sharedParallelismBackend.call(
+                    sharedParallelismFunctions[i], &result, []);
                 return result;
-            })(parallelismFunctionCount.iota);
+            }
+
+            auto results = taskPool.amap!callGuestParallelismFunction(
+                parallelismFunctionCount.iota);
         }
 
         results.equal(

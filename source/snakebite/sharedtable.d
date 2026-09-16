@@ -53,6 +53,15 @@ public struct SharedTable(Key, Value) {
         return find(key);
     }
 
+    // Same lookup, callable on a `const` table (finding: DMD, unlike
+    // LDC, needs this overload written out - it does not always accept
+    // the mutable `in` above for a `const` instance). No lock, the same
+    // as the mutable lookup; the pointer comes back `const` so a
+    // `const` caller cannot write through it.
+    public const(Value)* opBinaryRight(string op: "in")(Key key) const {
+        return find(key);
+    }
+
     // The value stored for `key`, or null.
     public Value* find(Key key) {
         auto storage = atomicLoad!(MemoryOrder.acq)(_storage);
@@ -71,9 +80,29 @@ public struct SharedTable(Key, Value) {
         }
     }
 
-    // Whether `key` has a stored value. `find` cannot serve a `const`
-    // caller, since it hands back a mutable pointer into the table; this
-    // walks the same probe sequence without doing that.
+    // The `const` twin of `find`, for a `const` table. The same
+    // lock-free walk; the pointer it hands back is `const` so it stays
+    // read-only for a caller that only has a `const` table.
+    public const(Value)* find(Key key) const {
+        auto storage = atomicLoad!(MemoryOrder.acq)(_storage);
+        if (storage is null)
+            return null;
+
+        const mask = storage.entries.length - 1;
+        auto index = hashOf(key) & mask;
+        while (true) {
+            auto entry = &storage.entries[index];
+            if (!atomicLoad!(MemoryOrder.acq)(entry.ready))
+                return null;
+            if (same(entry.key, key))
+                return entry.value;
+            index = (index + 1) & mask;
+        }
+    }
+
+    // Whether `key` has a stored value. `find`'s `const` overload could
+    // answer this too, but a caller that only wants a yes/no should not
+    // have to spell out and then throw away a pointer.
     public bool contains(Key key) const {
         auto storage = atomicLoad!(MemoryOrder.acq)(_storage);
         if (storage is null)
