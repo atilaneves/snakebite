@@ -422,9 +422,26 @@ public struct NativeData {
         return bytes;
     }
 
+    // Only for a constant initializer (`storeValue`'s address-of case):
+    // the address this call bakes in is read back by every thread, so
+    // it must be one every thread agrees on. A `shared`/`__gshared`
+    // variable's storage qualifies; a thread-local variable's does not
+    // - `storageOf` would hand back this compiling thread's own copy,
+    // baked in for every other thread to read as if it were theirs
+    // (finding 14). dmd rejects most expressions that would reach this
+    // with a thread-local variable (its address is not a compile-time
+    // constant there either), so this is a clear failure instead of a
+    // silent one for whatever is left.
     private void* addressOf(Declaration symbol) {
-        if (auto variable = symbol.isVarDeclaration)
+        import std.conv: text;
+
+        if (auto variable = symbol.isVarDeclaration) {
+            if (variable.isThreadlocal)
+                throw new Exception(text(
+                    "cannot bake the address of thread-local variable `",
+                    variable.toChars, "` into a constant initializer"));
             return storageOf(variable).ptr;
+        }
         return _symbolAddress(symbol);
     }
 
