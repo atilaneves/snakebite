@@ -11,6 +11,8 @@ public struct SourceSet {
     public string[] linkerFlags;
     public imported!"snakebite.frontend.compiler".FrontendFlags flags;
     public string[string] sourceOverrides;
+    public string[] linkerFiles;
+    public imported!"snakebite.dub".DubDescription dubDescription;
 }
 
 
@@ -119,31 +121,35 @@ private SourceSet bareSourceSet(
 
 
 private SourceSet dubSourceSet(in string directory) {
-    import snakebite.dub: DubConfig, dubDescribe;
+    import snakebite.dub: dubDescribeProject;
     import snakebite.frontend.compiler: FrontendFlags;
     import std.algorithm.iteration: filter, map;
     import std.array: array;
     import std.conv: text;
     import std.file: readText;
 
-    // One describe for everything: each call is a dub process (which spawns
-    // the compiler too), and eight of them cost as much as the frontend.
-    const described = dubDescribe(
-        directory,
-        [
-            "source-files", "dflags", "versions", "debug-versions", "options",
-            "import-paths", "string-import-paths", "lflags",
-        ],
-        DubConfig.test,
-    );
-    const files = described[0];
-    const dflags = described[1];
-    const versions = described[2];
-    const debugVersions = described[3];
-    const options = described[4];
-    const importPaths = described[5];
-    const stringImportPaths = described[6];
-    const lflags = described[7];
+    auto description = dubDescribeProject(directory); // Stored in the mutable SourceSet.
+    import std.json: JSONValue;
+    JSONValue settings;
+    foreach (target; description.value["targets"].array)
+        if (target["rootPackage"].str == description.value["rootPackage"].str)
+            settings = target["buildSettings"];
+
+    string[] values(in string key) {
+        return settings[key].array.map!(value => value.str).array;
+    }
+    import std.algorithm: endsWith;
+    const isLinkerFile = (string path) => path.endsWith(".a", ".o", ".so");
+    const files = values("sourceFiles").filter!(path => !isLinkerFile(path)).array;
+    const linkerFiles = values("linkerFiles")
+        ~ values("sourceFiles").filter!(isLinkerFile).array;
+    const dflags = values("dflags");
+    const versions = values("versions");
+    const debugVersions = values("debugVersions");
+    const options = values("options");
+    const importPaths = values("importPaths");
+    const stringImportPaths = values("stringImportPaths");
+    const lflags = values("lflags");
 
     if (files.length == 0)
         throw new Exception(text("dub describe found no sources in ", directory));
@@ -169,9 +175,12 @@ private SourceSet dubSourceSet(in string directory) {
         files.dup,
         importPaths.dup,
         stringImportPaths.dup,
-        lflags.dup,
+        lflags.map!(flag => "-L" ~ flag).array
+            ~ values("libs").map!(library => "-L-l" ~ library).array,
         FrontendFlags(compilerArguments),
         sourceOverrides,
+        linkerFiles.dup,
+        description,
     );
 }
 
@@ -272,13 +281,21 @@ public void prepareDependencies(ref Project project) {
     import snakebite.dependencyimage: prepareImage, defaultCompiler;
     import std.path: buildPath;
 
+    if (project.sources.linkerFiles.length && isDubProject(project.directory)) {
+        import snakebite.dub: buildDubDependencies;
+
+        buildDubDependencies(project.directory, project.sources.dubDescription,
+            project.sources.linkerFiles);
+    }
     const source = imageSource(project.program);
-    if (!source.length)
+    if (!source.length && !project.sources.linkerFiles.length)
         return;
-    project._image.refCountedPayload = prepareImage(source,
+    project._image.refCountedPayload = prepareImage(
+        source.length ? source : "module snakebite_dependency_image;\n",
         buildPath(project.directory, ".snakebite", "images"), defaultCompiler,
         imageInputs(project.program), project.sources.importPaths,
         project.sources.stringImportPaths,
-        project.sources.flags.compilerArguments);
+        project.sources.flags.compilerArguments,
+        project.sources.linkerFiles, project.sources.linkerFlags);
     project.program.dependencyImage = &project._image.refCountedPayload();
 }

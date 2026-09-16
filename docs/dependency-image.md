@@ -16,8 +16,23 @@ the calling convention. Overloaded templates are instantiated separately with
 
 Root-defined templates stay in the guest. Instances that require private names,
 guest-local types, or a captured context cannot be compiled in the image and
-keep the normal backend fallback. Discovery does not yet build or link dub
-dependency archives.
+keep the normal backend fallback.
+
+For dub projects, the same `dub describe` call supplies root sources and the
+full dependency description. Snakebite uses the host compiler with `dub build
+--deep` to build missing or changed dependencies with position-independent
+code. The image includes every member of every static archive in the transitive
+link dependency chain, including members that no template reference uses. Dub
+linker files, linker flags, and system libraries are also supplied to the link.
+The root package is not linked into the image.
+
+Snakebite records dependency source contents, recipes, build settings, and
+archive contents in `.snakebite/dub-dependencies`. An unchanged dependency set
+skips `dub build`. A change to root source contents alone also skips that build.
+A missing archive, changed dependency, or changed build setting makes dub check
+and build the project again. The first run also makes this check to establish
+archives for the host compiler and shared image. Dub build hooks run when dub
+builds the project; they do not run on a dependency cache hit.
 
 The project owns the image through a reference-counted handle. Project copies
 retain it; `Program` and `Resolver` borrow it. Keep the project alive until its
@@ -75,7 +90,8 @@ Project preparation supplies imported source files as cache inputs.
 
 The cache key includes build flags, import paths, generated source, frontend
 version, compiler path, compiler executable content, compiler version output,
-and the paths and contents of explicit `inputs`. Callers must list any extra
+linker arguments, and the paths and contents of `inputs` and `linkerFiles`.
+Callers must list any extra
 source or configuration files used by the generated source. The compiler's
 runtime headers and libraries are assumed unchanged within an installation.
 
@@ -97,4 +113,6 @@ backends, cache reuse, source and input changes, compiler and linker failure,
 compiler family checks, and D module construction. The atomic tests call
 druntime's real `atomicLoad!int` and `atomicFetchAdd!int`. They also check
 automatic project preparation, image lifetime, and cache reuse. CTFE cannot
-execute loaded native code.
+execute loaded native code. The dub fixture checks the full backend matrix,
+transitive archive members, paths with spaces, missing archives, changed
+dependency sources, and reuse after a root source edit.

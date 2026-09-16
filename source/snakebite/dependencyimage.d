@@ -50,6 +50,8 @@ public DependencyImage prepareImage(
     in string[] importPaths = null,
     in string[] stringImportPaths = null,
     in string[] compilerArguments = null,
+    in string[] linkerFiles = null,
+    in string[] linkerArguments = null,
 ) {
     import core.runtime: Runtime;
     import core.sys.posix.dlfcn: dlerror;
@@ -97,11 +99,29 @@ public DependencyImage prepareImage(
     } else {
         static assert(false, "Dependency images require DMD or LDC");
     }
+    // A linker response file stops DMD from moving archives
+    // outside the whole-archive pair. Guest calls do not create undefined
+    // symbols in image.o, so ordinary archive extraction loses their code.
+    import std.algorithm: endsWith;
+    string[] dependencyFlags;
+    bool[string] linked;
+    foreach (file; linkerFiles) {
+        const path = file.absolutePath;
+        if (path in linked)
+            continue;
+        linked[path] = true;
+        if (path.endsWith(".a"))
+            dependencyFlags ~= ["--whole-archive", path,
+                "--no-whole-archive"];
+        else
+            dependencyFlags ~= path;
+    }
     string fingerprint = text("snakebite-image-v1\n", executable, "\n",
         read(executable).sha256Of.toHexString, "\n", identityOutput,
         "\n", __VERSION__, "\n", compileFlags, "\n", linkFlags,
-        "\n", importFlags, "\n", source.length, ":", source);
-    foreach (input; inputs)
+        "\n", importFlags, "\n", dependencyFlags, "\n", linkerArguments,
+        "\n", source.length, ":", source);
+    foreach (input; inputs ~ linkerFiles)
         fingerprint ~= text("\n", input.absolutePath.length, ":",
             input.absolutePath, ":", read(input).sha256Of.toHexString);
     const directory = cacheDirectory.absolutePath;
@@ -118,8 +138,15 @@ public DependencyImage prepareImage(
             __VERSION__, ", \"Image compiler must match the host compiler version\");\n"));
         runCompiler("compilation", [executable] ~ compileFlags ~ importFlags
             ~ [sourcePath, "-of=" ~ objectPath]);
-        runCompiler("linking", [executable] ~ linkFlags
-            ~ [objectPath, "-of=" ~ imagePath]);
+        import std.array: join;
+        import std.string: replace;
+        const responsePath = staging.buildPath("linker.rsp");
+        responsePath.write(dependencyFlags.map!(argument =>
+            "\"" ~ argument.replace("\\", "\\\\").replace("\"", "\\\"") ~ "\"")
+            .join("\n"));
+        runCompiler("linking", [executable] ~ linkFlags ~ linkerArguments
+            ~ ["-Xcc=-Wl,@linker.rsp"]
+            ~ [objectPath, "-of=" ~ imagePath], staging);
         // Readers must never observe a partially linked image. Concurrent
         // builders publish equivalent complete files with atomic rename.
         rename(imagePath, destination);
@@ -140,11 +167,13 @@ else version (LDC)
     public enum defaultCompiler = "ldc2";
 
 
-private void runCompiler(in string phase, in string[] command) {
-    import std.process: execute;
+private void runCompiler(
+    in string phase, in string[] command, in string directory = null,
+) {
+    import std.process: Config, execute;
     import std.conv: text;
 
-    const result = execute(command);
+    const result = execute(command, null, Config.none, size_t.max, directory);
     if (result.status != 0) {
         import snakebite.exception: SnakebiteException;
 
