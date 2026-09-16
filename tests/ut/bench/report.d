@@ -1,9 +1,15 @@
 module ut.bench.report;
 
 
+import bench.capture: captureStdout;
 import bench.report:
-    BackendReport, TimingStatistics, orderByMedianRunTime, updateTestCounts;
+    BackendReport, TimingStatistics, milliseconds, orderByMedianRunTime,
+    timingStatistics, updateTestCounts;
+import core.sys.posix.unistd: systemWrite = write, STDOUT_FILENO;
 import core.time: dur, hnsecs, msecs;
+import std.algorithm.iteration: map;
+import std.algorithm.searching: canFind;
+import std.stdio: File, stdout;
 import ut;
 
 
@@ -21,8 +27,6 @@ unittest {
 
 @("compileSummary.providesMinimumAndMedian")
 unittest {
-    import bench.report: timingStatistics;
-
     const statistics = timingStatistics([3.msecs, 1.msecs, 2.msecs]);
 
     statistics.minimum.should == 1.msecs;
@@ -33,8 +37,6 @@ unittest {
 
 @("milliseconds.doesNotRoundNonzeroToZero")
 unittest {
-    import bench.report: milliseconds;
-
     milliseconds(1.hnsecs).should == "0.1 us";
     milliseconds(dur!"usecs"(1)).should == "1.0 us";
     milliseconds(1.msecs).should == "1.0 ms";
@@ -43,8 +45,6 @@ unittest {
 
 @("table.ordersBackendsByMedianRunTime")
 unittest {
-    import std.algorithm.iteration: map;
-
     BackendReport[] reports = [
         BackendReport(
             name: "slow",
@@ -64,10 +64,6 @@ unittest {
 
 @("inProcessSummary.capturesNativeStdout")
 unittest {
-    import bench.capture: captureStdout;
-    import core.sys.posix.unistd: systemWrite = write, STDOUT_FILENO;
-    import std.algorithm.searching: canFind;
-
     enum summary = "22 test(s) run, 0 failed.\n";
     const result = captureStdout({
         return cast(int) systemWrite(
@@ -82,9 +78,6 @@ unittest {
 @("inProcessSummary.restoresReassignedStdout")
 @Serial
 unittest {
-    import bench.capture: captureStdout;
-    import std.stdio: File, stdout;
-
     auto original = stdout;
     scope(exit) stdout = original;
     auto redirected = File.tmpfile;

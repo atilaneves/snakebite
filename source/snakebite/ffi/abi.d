@@ -99,6 +99,8 @@ public struct Register {
 // A hidden-pointer return (`needsHiddenReturnPointer`) still bypasses this
 // entirely and never builds a MEMORY `ArgumentPlan` for the return value.
 public struct ArgumentPlan {
+    private import dmd.mtype: Type;
+
     private enum ValueClass {
         none,
         integer,
@@ -136,7 +138,7 @@ public struct ArgumentPlan {
     // message than an unbounded allocation would.
     private enum size_t maxMemoryBytes = 64 * size_t.sizeof;
 
-    public static ArgumentPlan ofParameter(imported!"dmd.mtype".Type type) {
+    public static ArgumentPlan ofParameter(Type type) {
         version (LDC) {
             import dmd.dsymbolsem: isPOD;
             import dmd.typesem: baseElemOf;
@@ -154,7 +156,7 @@ public struct ArgumentPlan {
         return of(type);
     }
 
-    public static ArgumentPlan of(imported!"dmd.mtype".Type type) {
+    public static ArgumentPlan of(Type type) {
         auto plan = aggregatePlan(type);
         if (plan.memory)
             validateMemoryParameter(type, plan);
