@@ -5,10 +5,14 @@ import ut;
 import snakebite.ffi: Resolver;
 import snakebite.dependencyimage: defaultCompiler, prepareImage;
 import std.file: timeLastModified;
-import core.atomic: atomicStore;
+import core.atomic: atomicStore, MemoryOrder;
+import core.internal.atomic: atomicLoad;
 import snakebite.exception: SnakebiteException;
 import ut.backends;
-import snakebite.backends.backend: Program;
+import snakebite.backends.backend: Program, run;
+import snakebite.execution: prepareProject;
+import snakebite.frontend.dependencyimage: imageSource;
+import core.atomic;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.file: dirEntries, SpanMode;
@@ -16,10 +20,9 @@ import std.array: array;
 
 private enum atomicSource = q{
     module image;
-    import core.atomic: atomicLoad;
-    export extern(C) int image_atomic_load(shared int* value) {
-        return atomicLoad(*value);
-    }
+    import core.atomic: MemoryOrder;
+    import core.internal.atomic: atomicLoad;
+    export __gshared auto retained = &atomicLoad!(MemoryOrder.seq, int);
 };
 
 @("image.atomicLoad.cache")
@@ -33,13 +36,13 @@ unittest {
     reused.path.should == image.path;
     timeLastModified(reused.path).should == stamp;
     auto resolver = Resolver(&reused);
-    alias Load = extern(C) int function(shared int*);
-    const load = cast(Load) resolver.resolve("image_atomic_load");
+    alias Load = typeof(&atomicLoad!(MemoryOrder.seq, int));
+    const load = cast(Load) resolver.resolve(atomicLoad!(MemoryOrder.seq, int).mangleof);
     load.should.not == null;
     shared int value;
     foreach (expected; [0, 42, -7, int.min, int.max]) {
         atomicStore(value, expected);
-        load(&value).should == expected;
+        load(cast(int*) &value).should == expected;
     }
     resolver.resolve("abs").should.not == null;
     resolver.resolve("image_missing_symbol").should == null;
@@ -142,13 +145,14 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
         auto image = prepareImage(atomicSource, directory);
         shared int value = 42;
         static if (is(backend == Native)) {
-            alias Load = extern(C) int function(shared int*);
-            (cast(Load) image.resolve("image_atomic_load"))(&value).should == 42;
+            alias Load = typeof(&atomicLoad!(MemoryOrder.seq, int));
+            const load = cast(Load) image.resolve(atomicLoad!(MemoryOrder.seq, int).mangleof);
+            load(cast(int*) &value).should == 42;
         } else {
             auto module_ = parseSnippet(q{
-                extern(C) int image_atomic_load(shared int*);
+                import core.internal.atomic: atomicLoad;
                 int answer(shared int* value) {
-                    return image_atomic_load(value);
+                    return atomicLoad(cast(int*) value);
                 }
             });
             auto program = Program([module_]);
@@ -199,4 +203,132 @@ unittest {
         ).should == null;
 
     resolver.lookups.should == 1;
+}
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "atomicFetchAdd casts a runtime pointer to an integer"))) {
+    @("image.discoveredAtomicFetchAdd." ~ backend.stringof)
+    @Serial
+    unittest {
+        enum code = q{
+            import core.atomic: atomicFetchAdd;
+            import std.algorithm.comparison: min, max;
+            int answer() {
+                shared int value = 17;
+                ulong amount = 4;
+                const previous = atomicFetchAdd(value, min(amount, max(amount, 2UL)));
+                assert(value == 21);
+                return previous;
+            }
+        };
+        static if (is(backend == Native)) {
+            mixin(code);
+            answer.should == 17;
+        } else {
+            const sandbox = Sandbox();
+            auto module_ = parseSnippet(code);
+            auto program = Program([module_]);
+            const source = imageSource(program);
+            auto image = prepareImage(source, sandbox.sandboxPath,
+                defaultCompiler, null, null, null, ["-w", "-checkaction=context"]);
+            alias FetchAdd = __traits(getOverloads, core.atomic, "atomicFetchAdd", true)[0];
+            image.resolve(FetchAdd!(MemoryOrder.seq, int).mangleof)
+                .should.not == null;
+            program.dependencyImage = &image;
+            scope instance = new backend(program);
+            int result;
+            instance.call(findFunction(module_, "answer"), &result, []);
+            result.should == 17;
+        }
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "atomicFetchAdd casts a runtime pointer to an integer"))) {
+    @("image.projectAtomicFetchAdd." ~ backend.stringof)
+    @Serial
+    unittest {
+        enum code = q{
+            import core.atomic: atomicFetchAdd;
+            int main() {
+                shared int value = 17;
+                assert(atomicFetchAdd(value, 4) == 17);
+                assert(value == 21);
+                return 0;
+            }
+        };
+        static if (is(backend == Native)) {
+            mixin(code);
+            main.should == 0;
+        } else {
+            const sandbox = Sandbox();
+            enum moduleName = "image_project_atomic_" ~ backend.stringof;
+            const source = "module " ~ moduleName ~ ";\n" ~ code;
+            sandbox.writeFile(moduleName ~ ".d", source);
+            // The project must retain the image after the preparation report
+            // is destroyed, and across backend construction and execution.
+            auto project = prepareProject(sandbox.sandboxPath).project;
+            project.program.dependencyImage.should.not == null;
+            scope instance = new backend(project.program);
+            run(instance, project.program).should == 0;
+            const path = project.program.dependencyImage.path;
+            const stamp = timeLastModified(path);
+            sandbox.writeFile(moduleName ~ ".d", source ~ "\n");
+            auto reused = prepareProject(sandbox.sandboxPath).project;
+            reused.program.dependencyImage.path.should == path;
+            timeLastModified(path).should == stamp;
+            scope second = new backend(reused.program);
+            run(second, reused.program).should == 0;
+        }
+    }
+}
+
+
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE executes cached syntax, not a replacement native image"))) {
+    @("image.dependencyEdit." ~ backend.stringof)
+    @Serial
+    unittest {
+        static if (is(backend == Native)) {
+            int answer(T)() { return 7; }
+            answer!int.should == 7;
+        } else {
+            const sandbox = Sandbox();
+            enum moduleName = "image_dependency_" ~ backend.stringof;
+            sandbox.writeFile("app/root_" ~ moduleName ~ ".d",
+                "module root_" ~ moduleName ~ ";\nimport " ~ moduleName
+                ~ "; int main() { return answer!int(); }");
+            const dependencyPath = "deps/" ~ moduleName ~ ".d";
+            const prefix = "module " ~ moduleName ~ ";\n";
+            sandbox.writeFile(dependencyPath, prefix ~ "int answer(T)() { return 7; }");
+            const directory = sandbox.inSandboxPath("app");
+            const imports = [sandbox.inSandboxPath("deps")];
+            auto project = prepareProject(directory, imports).project;
+            const firstPath = project.program.dependencyImage.path;
+            scope first = new backend(project.program);
+            run(first, project.program).should == 7;
+            sandbox.writeFile(dependencyPath, prefix ~ "int answer(T)() { return 9; }");
+            auto changed = prepareProject(directory, imports).project;
+            changed.program.dependencyImage.path.should.not == firstPath;
+            scope second = new backend(changed.program);
+            run(second, changed.program).should == 9;
+        }
+    }
+}
+
+
+@("image.compilerArguments")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    auto image = prepareImage(q{
+        module image;
+        version (ImageSetting) {} else static assert(false, "missing version");
+        debug {} else static assert(false, "missing debug");
+        export extern(C) int answer() { return 42; }
+    }, sandbox.sandboxPath, defaultCompiler, null, null, null,
+        ["-debug", "-version=ImageSetting"]);
+    alias Answer = extern(C) int function();
+    (cast(Answer) image.resolve("answer"))().should == 42;
 }

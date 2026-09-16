@@ -199,6 +199,7 @@ private imported!"snakebite.execution".PreparationReport loadProject(
         options.projectDirectory,
         options.importPaths,
         options.stringImportPaths,
+        selected(options, "interpreter") || selected(options, "bytecode"),
     );
 }
 
@@ -331,6 +332,7 @@ private string headerLine(
         "   ", discoveryLabel(preparation), " ",
         milliseconds(preparation.discovery),
         "   frontend ", milliseconds(preparation.duration),
+        "   dependency image ", milliseconds(preparation.imageDuration),
         "   ", hostCompiler,
         "   ", options.warmup, "+", options.runs, " runs",
     );

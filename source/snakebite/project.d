@@ -19,6 +19,8 @@ public struct Project {
     public string directory;
     public SourceSet sources;
     public imported!"snakebite.backends".Program program;
+    private imported!"std.typecons".RefCounted!(
+        imported!"snakebite.dependencyimage".DependencyImage) _image;
 }
 
 
@@ -262,4 +264,21 @@ private string dmdFlagsForOption(in string option) {
         case "color": return "-color";
         default: return null;
     }
+}
+
+
+public void prepareDependencies(ref Project project) {
+    import snakebite.frontend.dependencyimage: imageSource, imageInputs;
+    import snakebite.dependencyimage: prepareImage, defaultCompiler;
+    import std.path: buildPath;
+
+    const source = imageSource(project.program);
+    if (!source.length)
+        return;
+    project._image.refCountedPayload = prepareImage(source,
+        buildPath(project.directory, ".snakebite", "images"), defaultCompiler,
+        imageInputs(project.program), project.sources.importPaths,
+        project.sources.stringImportPaths,
+        project.sources.flags.compilerArguments);
+    project.program.dependencyImage = &project._image.refCountedPayload();
 }

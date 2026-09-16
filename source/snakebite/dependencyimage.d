@@ -47,6 +47,9 @@ public DependencyImage prepareImage(
     in string cacheDirectory,
     in string compiler = defaultCompiler,
     in string[] inputs = null,
+    in string[] importPaths = null,
+    in string[] stringImportPaths = null,
+    in string[] compilerArguments = null,
 ) {
     import core.runtime: Runtime;
     import core.sys.posix.dlfcn: dlerror;
@@ -59,6 +62,21 @@ public DependencyImage prepareImage(
     import std.string: fromStringz;
     import std.uuid: randomUUID;
 
+    import std.algorithm.iteration: map;
+    import std.array: array;
+
+    string imageArgument(string argument) {
+        version (LDC) {
+            import std.algorithm: startsWith;
+            if (argument == "-debug" || argument.startsWith("-version=")
+                    || argument.startsWith("-debug="))
+                return "-d" ~ argument;
+        }
+        return argument;
+    }
+    const importFlags = compilerArguments.map!imageArgument.array
+        ~ importPaths.map!(path => "-I" ~ path).array
+        ~ stringImportPaths.map!(path => "-J" ~ path).array;
     const executable = compilerPath(compiler);
     const identity = execute([executable, "--version"]);
     require(identity.status == 0, "Cannot identify image compiler: " ~ identity.output);
@@ -68,12 +86,14 @@ public DependencyImage prepareImage(
     else version (LDC)
         require(identity.output.startsWith("LDC"), "Image compiler must be LDC");
 
+    // The image must emit transitive template bodies too, including runtime
+    // helpers introduced by assertion lowering. No guest object supplies them.
     version (DigitalMars) {
-        const compileFlags = ["-c", "-fPIC", "-O"];
+        const compileFlags = ["-c", "-fPIC", "-O", "-allinst"];
         const linkFlags = ["-shared", "-defaultlib=libphobos2.so",
             "-L--no-undefined"];
     } else version (LDC) {
-        const compileFlags = ["-c", "-relocation-model=pic", "-O"];
+        const compileFlags = ["-c", "-relocation-model=pic", "-O", "-allinst"];
         const linkFlags = ["-shared", "-link-defaultlib-shared",
             "-L--no-undefined"];
     } else {
@@ -82,7 +102,7 @@ public DependencyImage prepareImage(
     string fingerprint = text("snakebite-image-v1\n", executable, "\n",
         read(executable).sha256Of.toHexString, "\n", identity.output,
         "\n", __VERSION__, "\n", compileFlags, "\n", linkFlags,
-        "\n", source.length, ":", source);
+        "\n", importFlags, "\n", source.length, ":", source);
     foreach (input; inputs)
         fingerprint ~= text("\n", input.absolutePath.length, ":",
             input.absolutePath, ":", read(input).sha256Of.toHexString);
@@ -98,7 +118,7 @@ public DependencyImage prepareImage(
         const imagePath = staging.buildPath("image.so");
         sourcePath.write(source ~ text("\nstatic assert(__VERSION__ == ",
             __VERSION__, ", \"Image compiler must match the host compiler version\");\n"));
-        runCompiler("compilation", [executable] ~ compileFlags
+        runCompiler("compilation", [executable] ~ compileFlags ~ importFlags
             ~ [sourcePath, "-of=" ~ objectPath]);
         runCompiler("linking", [executable] ~ linkFlags
             ~ [objectPath, "-of=" ~ imagePath]);
