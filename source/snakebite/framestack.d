@@ -253,9 +253,24 @@ public struct FrameStack {
         import core.memory: pageSize;
         import core.sys.posix.sys.mman: PROT_READ, PROT_WRITE, mprotect;
 
-        const committed = roundUpToPage(end);
-        if (committed <= _committed)
+        const needed = roundUpToPage(end);
+        if (needed <= _committed)
             return;
+
+        // Double what is committed so far until it covers `end`, capped
+        // at `_reservation` (`push` already checked `end` fits there).
+        // A grow step that committed exactly what the caller asked for
+        // registered one GC range per page a slow-growing call chain
+        // ever touched - up to about 262000 ranges for one thread's
+        // 1 GiB reservation, on a process-wide list every registration
+        // locks and every collection walks. Doubling makes the number
+        // of grow steps, and so the number of ranges, logarithmic in
+        // the reservation instead of linear in the page count
+        // (finding 4).
+        size_t committed = _committed;
+        while (committed < needed)
+            committed = committed >= _reservation / 2
+                ? _reservation : committed * 2;
 
         if (mprotect(
                 _base + _committed,
