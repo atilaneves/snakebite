@@ -52,3 +52,33 @@ it far more often. The race is druntime's, not this project's - it
 also reproduces through a bare `pthread` making the same two calls,
 with no backend involved - so it is reported upstream rather than
 worked around here.
+
+## Known limitation
+
+`thread_attachThis` allocates its `Thread` object, then registers it.
+Between those two steps, druntime does not yet know the attaching
+thread exists, so a `GC.collect` that runs on another thread in that
+window does not suspend it or scan its stack. The new `Thread` object
+has no other root, so the collect frees it, and the attaching thread
+crashes on its own next use of it.
+
+This reproduces in plain compiled D, with no snakebite code on the
+stack: a bare `pthread` that calls `thread_attachThis` by hand, beside
+another thread that calls `GC.collect`, crashes the same way. It is a
+druntime bug, not a bug in this project.
+
+unit-threaded's parallel task pool runs many unittest bodies at the
+same time, so an explicit `GC.collect` one test starts can land inside
+the attach window a wholly different, concurrently running test just
+opened. Running the thread and frame stack tests together used to
+fail about a third of the time this way (crashes, hangs, and wrong
+values, all traced to this one window). The fix does not close the
+window - only druntime can do that - it keeps every explicit collect
+in this test binary from ever running while any thread's attach is
+open, and keeps a new attach from opening while a collect is running,
+through `tests/ut/threadsync.d`. Each foreign-thread test signals once
+its own attach is done, before it allocates anything; each explicit
+collect waits out any open attach first. This avoids the window
+rather than masking it: the tests still prove a guest allocation on a
+foreign thread survives a collection started from another thread, not
+that the collection was skipped.
