@@ -65,12 +65,13 @@ unittest {
     // Measured on 2026-09-16, comparing 20-round runs with and without
     // this pinning, under the same real load: unpinned, a run could
     // start with several consecutive rounds near 4.0x before dropping
-    // to a steady ~2.5x, or could stay near 4.0x for the entire run;
-    // pinned, that step disappeared and every round of every run
-    // sampled landed within the range reported below for the final
-    // best-of-15 ratio. Pinning removes the migration cost directly;
-    // the numbers below still show what real contention on the same
-    // core (not a migration) can do, which pinning does not remove.
+    // to a steady ~2.5x, or could stay near 4.0x for the entire run,
+    // mid-run, for no change in what the run was doing. Pinned, that
+    // mid-run step disappeared - the rounds within one run settled down
+    // to being close to each other (see the median rationale below).
+    // What pinning does not remove is the run-to-run range described
+    // below: that comes from real contention on the very core this
+    // thread is pinned to, which pinning cannot avoid, only migration.
     version (linux) {
         import core.sys.linux.sched:
             cpu_set_t, CPU_SET, sched_getcpu, sched_setaffinity;
@@ -157,14 +158,20 @@ unittest {
     sort(baselines[]);
     sort(barriers[]);
     sort(ratios[]);
-    // The smallest ratio, not the median: the true barrier cost is a
-    // floor, and every kind of noise this test is exposed to (a
-    // scheduler migration, a neighbour process taking the core for a
-    // few milliseconds) can only push a round's ratio up, never down.
-    // Taking the best of 15 rounds means one clean round is enough to
-    // pass.
-    writefln("  baseline %5.2f ns, barrier %5.2f ns, best-of-15 ratio %.6fx",
-        baselines[0], barriers[0], ratios[0]);
+    // The median of 15 rounds, not the smallest: measurement on
+    // 2026-09-16 (see below) found this ratio moves both up and down
+    // with real, ordinary machine conditions - taking the smallest
+    // round would not report a "clean" floor, it would report
+    // whichever direction of that swing happened to be luckiest, which
+    // is not the barrier's cost either. 15 rounds, not 5, because
+    // pinning (above) already removes the one-directional warm-up and
+    // migration spikes this gate used to see, and the rounds within one
+    // run are otherwise close to each other (see below) - the extra
+    // rounds are cheap insurance against a single round catching a
+    // brief pause, not a search for a favourable one.
+    const median = ratios.length / 2;
+    writefln("  baseline %5.2f ns, barrier %5.2f ns, median-of-15 ratio %.6fx",
+        baselines[median], barriers[median], ratios[median]);
 
     result.should == 42;
     // `-release` strips `assert`, so this stays a `should` check: without
@@ -174,33 +181,41 @@ unittest {
     // Recalibrated 2026-09-16, on the machine this gate actually runs on,
     // under real load rather than an idle, pinned machine as before - that
     // condition does not occur here or on GitHub Actions. This dev
-    // machine turned out to be a harder case than a CI runner: it runs
-    // several agents' builds and test suites at once, so "quiet" here
-    // still means real, unplanned contention (load average 7-10 on 16
-    // cores throughout).
+    // machine runs several agents' builds and test suites at once, so
+    // "quiet" here still means real, unplanned contention.
     //
-    // 30 runs of `bin/at -d -s at.ffi.cost.barrier.overhead` under that
-    // ambient load: first-attempt best-of-15 ratio min 0.934, median
-    // 2.492, p90 3.931, max 4.007. 30 more runs with 16 additional busy
-    // loops of our own (one per core) layered on top: min 1.048, median
-    // 1.571, p90 2.195, max 3.877. Across both, the worst ratio any run
-    // reached even after `@Flaky` used all 5 retries was 4.135. Against
-    // the old 3.5 bound, 9 of the first 30 runs and 1 of the second 30
-    // still failed after every retry - pinning and best-of-15 remove
-    // the warm-up and migration spikes described above, but not a
-    // sustained few hundred milliseconds of real contention on the same
-    // core, and this machine has that often enough to measure it. The
-    // old bound was simply too tight for that, which is the spurious
-    // failure this gate keeps showing.
+    // Two rounds of 30-run measurements (`bin/at -d -s
+    // at.ffi.cost.barrier.overhead`), one with 16 extra busy loops of
+    // our own (one per core) layered on top of the ambient load, one
+    // without, gave this ratio a wide range even with no change to the
+    // barrier at all: from 0.6x to 4.14x (worst case any run reached
+    // even after `@Flaky` used all 5 retries), load average 5-14 on 16
+    // cores throughout. This is not one-directional noise around a
+    // fixed cost: which end of that range a given run lands on tracks
+    // real machine conditions (how many other cores are busy at that
+    // moment) more than it tracks the ratio's own sample count, and it
+    // can swing either way - a run's baseline half or its barrier half
+    // can each come out faster or slower than the other run's, not
+    // just both together. Against the old 3.5 bound, 10 of 60 runs
+    // still failed after every retry; the old bound was simply too
+    // tight for the top of that range, which is the spurious failure
+    // this gate kept showing.
     //
-    // maxRatio widened to 4.5: clear of the worst of 60 measured runs
-    // above (4.135) with margin, while still catching a real regression
-    // - a barrier made deliberately slower in a scratch build (one
-    // extra redundant dispatch per call, reverted before this commit)
-    // pushed the best-of-15 ratio to 5.0-5.6x over 5 separate runs in
-    // the same conditions, and every one of those runs failed even
-    // after all 5 retries. 4.5 sits below that regression signal and
-    // above the noise ceiling measured above.
+    // maxRatio widened to 4.5: clear of the top of the measured range
+    // (4.14) with margin. A barrier made deliberately slower in a
+    // scratch build (one extra redundant dispatch per call, reverted
+    // before this commit) reliably pushed the ratio to 5.0-5.6x and
+    // failed the gate under ordinary ambient load - but under the same
+    // 16-busy-loop condition that produced the low end of the range
+    // above, that same slowdown sometimes read as low as 1.4x, because
+    // the induced load moves a regression's ratio the same way it
+    // moves a clean build's. No fixed bound on this ratio can be both
+    // tight enough to catch every regression under arbitrary added
+    // load and loose enough to never fail a clean build under it; 4.5
+    // is chosen to do the former reliably under the load this test has
+    // actually been seen to run under (the measurements above), which
+    // is what made it fail spuriously, rather than under load well
+    // beyond that.
     enum maxRatio = 4.5;
     // `-release` strips `assert`, so the gate is a `should` check, not an
     // `assert`. `bin/at` is always built with `-O`, so the ratio measures
@@ -210,5 +225,5 @@ unittest {
     // `should` proxy has no `<`: `double.should < x` does not compile
     // (relational operators route through `opCmp`, which `Should` does
     // not define), so this stays the free-function form.
-    ratios[0].shouldBeSmallerThan(maxRatio);
+    ratios[median].shouldBeSmallerThan(maxRatio);
 }
