@@ -91,6 +91,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         import core.thread: Thread;
 
         super(program);
+        _plans = PlanCache(program.dependencyImage);
         _nativeData = NativeData(&constantSymbolAddress);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &classRuntimeInfo,

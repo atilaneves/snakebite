@@ -8,7 +8,15 @@ private:
 // addresses and missing symbols, so a missing template instance is not
 // looked up again on every call.
 public struct Resolver {
+    import snakebite.dependencyimage: DependencyImage;
+
+    private const(DependencyImage)* _image;
     private void*[string] _addresses;
+
+    // The owner must outlive this resolver and every address it returns.
+    public this(const(DependencyImage)* image) {
+        _image = image;
+    }
     version(unittest) private size_t _lookups;
 
     public void* resolve(in char[] name) {
@@ -16,7 +24,9 @@ public struct Resolver {
             return *cached;
 
         version(unittest) ++_lookups;
-        auto address = symbolAddress(name);
+        auto address = _image is null ? null : _image.resolve(name);
+        if (address is null)
+            address = symbolAddress(name);
         _addresses[name.idup] = address;
         return address;
     }

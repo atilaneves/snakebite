@@ -9,6 +9,8 @@ private:
 // dub-aware driver asks dub for import paths and flags and builds one of
 // these.
 public struct Program {
+    import snakebite.dependencyimage: DependencyImage;
+
     // `func` is null when the program has no `main`, which is not an error: a
     // bare directory of `.d` files can be a library.
     struct Main {
@@ -19,6 +21,8 @@ public struct Program {
     imported!"dmd.func".FuncDeclaration[] moduleConstructors;
     Main main;
     string name;
+    // Prepared before backend construction; the owner outlives all backends.
+    const(DependencyImage)* dependencyImage;
 
     // The entry point is found the way a compiled build finds it: the first
     // root module declaring a module-level `main`.
