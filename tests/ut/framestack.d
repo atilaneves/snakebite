@@ -90,6 +90,7 @@ private void growSurvivesConcurrentCollection() @system {
     import core.atomic: atomicLoad, atomicStore, atomicOp;
     import core.thread: Thread;
     import core.time: MonoTime, seconds;
+    import ut.threadsync: beginExplicitCollect, endExplicitCollect;
 
     static final class Box {
         int value;
@@ -116,10 +117,19 @@ private void growSurvivesConcurrentCollection() @system {
     shared bool stop = false;
     shared uint collections = 0;
     const started = MonoTime.currTime;
+    // Each `GC.collect` is gated through `ut.threadsync` so it never
+    // overlaps a foreign thread's attach in a wholly different test
+    // unit-threaded happens to run at the same time (a druntime bug,
+    // not one of this test's own - see ADR-0006's "Known
+    // limitation"). The gate is taken once per collection, not once
+    // for the whole loop, so a foreign attach only ever waits between
+    // collections, never for the full two seconds.
     auto collector = new Thread({
         while (!atomicLoad(stop) && atomicLoad(collections) < maxCollections
                 && MonoTime.currTime - started < deadline) {
+            beginExplicitCollect();
             GC.collect();
+            endExplicitCollect();
             atomicOp!"+="(collections, 1);
         }
     });

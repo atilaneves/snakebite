@@ -180,16 +180,25 @@ private extern(C) void* runForeign(void* argument) {
 }
 
 // Runs `callback` on a thread druntime does not know: one `pthread_create`
-// made, the way a C library would.
+// made, the way a C library would. That thread's first guest entry
+// attaches it to druntime (ADR-0006), so this holds the
+// `ut.threadsync` gate open from before `pthread_create` until guest
+// code confirms the attach is done by calling
+// `snakebite_ut_signal_foreign_attached` (finding: the thread tests'
+// own explicit collects raced this attach when tests ran together).
 public extern(C) int snakebite_ut_int_callback_on_foreign_thread(
     IntDelegate callback,
 ) {
     import core.sys.posix.pthread: pthread_create, pthread_join, pthread_t;
+    import ut.threadsync: beginForeignAttach, endForeignAttach;
 
+    beginForeignAttach();
     auto call = new ForeignCall(callback);
     pthread_t thread;
-    if (pthread_create(&thread, null, &runForeign, call) != 0)
+    if (pthread_create(&thread, null, &runForeign, call) != 0) {
+        endForeignAttach();
         throw new Exception("pthread_create failed");
+    }
     pthread_join(thread, null);
     if (call.thrown !is null)
         throw call.thrown;
@@ -197,10 +206,27 @@ public extern(C) int snakebite_ut_int_callback_on_foreign_thread(
 }
 
 
-// A full collection, run on a thread other than the caller's.
+// Called from guest code as the first statement after a foreign
+// thread's first guest entry, once its attach (automatic or by hand)
+// has finished, to close the `ut.threadsync` window
+// `snakebite_ut_int_callback_on_foreign_thread` opened.
+public extern(C) void snakebite_ut_signal_foreign_attached() {
+    import ut.threadsync: endForeignAttach;
+
+    endForeignAttach();
+}
+
+
+// A full collection, run on a thread other than the caller's. Gated
+// through `ut.threadsync` so it never overlaps a foreign thread's
+// attach, wherever in the process that attach is happening.
 public extern(C) void snakebite_ut_collect_on_other_thread() {
     import core.memory: GC;
     import core.thread: Thread;
+    import ut.threadsync: beginExplicitCollect, endExplicitCollect;
+
+    beginExplicitCollect();
+    scope(exit) endExplicitCollect();
 
     auto thread = new Thread({
         GC.collect;
@@ -242,6 +268,7 @@ private enum hostCallbackDeclarations = q{
     extern(C) void snakebite_ut_join_thread(VoidDelegate);
     extern(C) int snakebite_ut_int_callback_on_thread(IntDelegate);
     extern(C) int snakebite_ut_int_callback_on_foreign_thread(IntDelegate);
+    extern(C) void snakebite_ut_signal_foreign_attached();
     extern(C) void snakebite_ut_collect_on_other_thread();
 };
 
@@ -910,7 +937,8 @@ static foreach (backend; Matrix!(
 private enum collectOnForeignThreadCode = q{
     import ut.backends.call.pointers:
         snakebite_ut_collect_on_other_thread,
-        snakebite_ut_int_callback_on_foreign_thread;
+        snakebite_ut_int_callback_on_foreign_thread,
+        snakebite_ut_signal_foreign_attached;
 
     class Box {
         int value;
@@ -919,6 +947,11 @@ private enum collectOnForeignThreadCode = q{
 
     int answer() {
         int work() {
+            // Attach is already done: guest code cannot run before
+            // it. Say so before allocating, so the host side knows
+            // it can now let an explicit collect elsewhere proceed.
+            snakebite_ut_signal_foreign_attached();
+
             auto box = new Box(41);
             snakebite_ut_collect_on_other_thread();
             return box.value + 1;
@@ -940,7 +973,8 @@ private enum collectOnForeignThreadCode = q{
 private enum collectOnForeignThreadNativeCode = q{
     import ut.backends.call.pointers:
         snakebite_ut_collect_on_other_thread,
-        snakebite_ut_int_callback_on_foreign_thread;
+        snakebite_ut_int_callback_on_foreign_thread,
+        snakebite_ut_signal_foreign_attached;
     import core.thread: thread_attachThis, thread_detachThis;
 
     class Box {
@@ -952,6 +986,11 @@ private enum collectOnForeignThreadNativeCode = q{
         int work() {
             thread_attachThis();
             scope(exit) thread_detachThis();
+
+            // Say the attach is done before allocating, so the host
+            // side knows it can now let an explicit collect elsewhere
+            // proceed.
+            snakebite_ut_signal_foreign_attached();
 
             auto box = new Box(41);
             snakebite_ut_collect_on_other_thread();
