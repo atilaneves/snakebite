@@ -48,6 +48,27 @@ public struct SharedTable(Key, Value) {
     }
 
     private Storage* _storage;
+    private shared(Mutex) _lock;
+
+    // This table's own insert lock, made the first time any thread
+    // needs it and published for every later caller to reuse. Before
+    // this, every `SharedTable` in the process shared one insert lock
+    // (finding 9): a `PlanCache` miss in one backend waited on a
+    // symbol-resolver miss in another, on paths that never call each
+    // other and have nothing to do with one another. `bootstrapLock`
+    // only ever guards the moment a table's own lock is being made,
+    // never an insert itself, so creating two tables' locks at once on
+    // two threads cannot make one wait for the other's insert.
+    private Mutex lockOf() {
+        if (auto existing = atomicLoad!(MemoryOrder.acq)(_lock))
+            return cast(Mutex) existing;
+
+        bootstrapLock.lock;
+        scope(exit) bootstrapLock.unlock;
+        if (_lock is null)
+            atomicStore!(MemoryOrder.rel)(_lock, cast(shared(Mutex)) new Mutex);
+        return cast(Mutex) _lock;
+    }
 
     public Value* opBinaryRight(string op: "in")(Key key) {
         return find(key);
@@ -123,8 +144,9 @@ public struct SharedTable(Key, Value) {
     // Stores `value` for `key` unless the key already has one, and
     // returns the value the table holds after this call.
     public Value* insert(Key key, Value value) {
-        lock.lock;
-        scope(exit) lock.unlock;
+        auto tableLock = lockOf();
+        tableLock.lock;
+        scope(exit) tableLock.unlock;
 
         if (auto found = find(key))
             return found;
@@ -161,7 +183,8 @@ public struct SharedTable(Key, Value) {
     // The number of keys stored.
     public size_t length() const {
         auto storage = atomicLoad!(MemoryOrder.acq)(_storage);
-        return storage is null ? 0 : storage.used;
+        return storage is null
+            ? 0 : atomicLoad!(MemoryOrder.raw)(storage.used);
     }
 
     private void grow() {
@@ -207,11 +230,12 @@ public struct SharedTable(Key, Value) {
 }
 
 
-// One lock for every table's inserts: an insert holds it for one probe
-// and one allocation, and never calls out, so no table's insert can
-// wait for another table.
-private __gshared Mutex lock;
+// Guards only the moment a `SharedTable` makes its own insert lock
+// (`lockOf`), never an insert itself: every table gets a lock of its
+// own (finding 9), and this one is held for as long as `new Mutex`
+// takes, nothing more.
+private __gshared Mutex bootstrapLock;
 
 shared static this() {
-    lock = new Mutex;
+    bootstrapLock = new Mutex;
 }

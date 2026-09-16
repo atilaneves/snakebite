@@ -472,7 +472,13 @@ public struct CallbackBridge {
             }
         });
 
-        return registered.entry;
+        // A plain read here would be racing the `atomicStore` above:
+        // this thread's own write is visible to itself either way, but
+        // another thread's `entryOf` call for the same word, arriving
+        // just after `withCompilerLock` released the lock, needs the
+        // acquire load to be certain it sees the stored entry and not
+        // a stale `null` (finding 8).
+        return atomicLoad!(MemoryOrder.acq)(registered.entry);
     }
 
     // The guest word behind one of this bridge's own entries, or null.
