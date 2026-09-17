@@ -5201,8 +5201,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `callee`'s own compiled override, read out of the object's instance
     // vtable at its declared `vtblIndex` - `classRuntimeInfo` already laid
     // that table out in the same slots dmd itself assigns every virtual
-    // method (`vtbl[0]` is the classinfo pointer, so a real method index
-    // is never `0`), so this is nothing more than the same pointer
+    // method. For a plain D class `vtbl[0]` is the classinfo pointer, so
+    // a real method index there is never `0`; for an `extern(C++)` class
+    // (`ClassDeclaration.vtblOffset` returns `0`, not `1` - the Itanium
+    // ABI has no classinfo slot) the very first virtual method is itself
+    // at index `0`, so only a negative index - `isVirtualMethod` false -
+    // is ever wrong. This is nothing more than the same pointer
     // arithmetic `compileFieldAddress` already does for a field's own
     // offset, just through the object's vptr instead of the object
     // itself.
@@ -5210,7 +5214,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression expression, in size_t objectOffset, FuncDeclaration callee,
     ) {
         const index = callee.vtblIndex;
-        if (index <= 0)
+        if (index < 0)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 

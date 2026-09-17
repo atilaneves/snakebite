@@ -1483,7 +1483,7 @@ private CallPlan _shapeOf(
         plan._hiddenReturnPointer =
             !returnsRef && needsHiddenReturnPointer(type.nextOf);
         plan._contextPrecedesHiddenReturnPointer =
-            contextPrecedesHiddenReturnPointer;
+            contextPrecedesHiddenReturnPointer(linkage);
 
         // An `extern(D)` untyped variadic callee never reverses its
         // argument registers, even when `reversedDParameters` reverses

@@ -32,6 +32,16 @@ public struct DependencyImage {
 // imported source or other file supplied by the caller, so edits invalidate
 // the cache. The compiler installation is assumed immutable at a given
 // path and version. No shell interprets source paths or compiler arguments.
+//
+// `cppSource`, when not empty, is one C++ translation unit compiled by
+// `cxxCompiler` (the system C++ compiler - `c++` by default, or `$CXX`
+// - `defaultCxxCompiler` reads it) into the same shared object as
+// `source`: one build, one cache entry, one loader. This is how a test
+// C++ library reaches the image (issue #336): the D side declares its
+// functions and classes `extern(C++)` and calls them like any other
+// resolved symbol. The C++ compiler's own identity and flags join the
+// cache key, next to the D compiler's, so a different C++ toolchain or
+// flag set never reuses another one's image.
 public DependencyImage prepareImage(
     in string source,
     in string cacheDirectory,
@@ -42,6 +52,9 @@ public DependencyImage prepareImage(
     in string[] compilerArguments = null,
     in string[] linkerFiles = null,
     in string[] linkerArguments = null,
+    in string cppSource = null,
+    in string cxxCompiler = defaultCxxCompiler,
+    in string[] cxxCompilerArguments = null,
 ) {
     import std.conv: text;
     import std.digest.sha: sha256Of;
@@ -111,6 +124,31 @@ public DependencyImage prepareImage(
     foreach (input; inputs ~ linkerFiles)
         fingerprint ~= text("\n", input.absolutePath.length, ":",
             input.absolutePath, ":", read(input).sha256Of.toHexString);
+
+    // The C++ compiler is only ever asked for when a caller actually
+    // wants C++ code in the image - a build with no `cppSource` probes
+    // no C++ toolchain and its fingerprint is byte-for-byte what it was
+    // before this parameter existed.
+    const hasCppSource = cppSource.length != 0;
+    string cxxExecutable;
+    string cxxRuntimeLibrary;
+    if (hasCppSource) {
+        cxxExecutable = compilerPath(cxxCompiler);
+        const cxxIdentity = compilerIdentity(cxxExecutable);
+        // Clang's driver links `libc++` unless told otherwise; every other
+        // `c++` this project has seen (gcc, and clang configured to gcc's
+        // default) links `libstdc++`. The C++ runtime this pulls in is what
+        // gives the image `operator new`/`delete`, RTTI and the exception
+        // personality routine a thrown C++ exception (issue #336 step 5)
+        // needs.
+        import std.algorithm: canFind;
+        cxxRuntimeLibrary = cxxIdentity.canFind("clang") ? "c++" : "stdc++";
+        fingerprint ~= text("\ncxx:", cxxExecutable, "\n",
+            read(cxxExecutable).sha256Of.toHexString, "\n", cxxIdentity,
+            "\n", cxxCompilerArguments, "\n", cxxRuntimeLibrary,
+            "\n", cppSource.length, ":", cppSource);
+    }
+
     const directory = cacheDirectory.absolutePath;
     directory.mkdirRecurse;
     const destination = directory.buildPath(fingerprint.sha256Of.toHexString ~ ".so");
@@ -125,6 +163,24 @@ public DependencyImage prepareImage(
             __VERSION__, ", \"Image compiler must match the host compiler version\");\n"));
         runCompiler("compilation", [executable] ~ compileFlags ~ importFlags
             ~ [sourcePath, "-of=" ~ objectPath]);
+
+        string[] objectPaths = [objectPath];
+        string[] extraLinkFlags;
+        if (hasCppSource) {
+            const cppSourcePath = staging.buildPath("image.cpp");
+            const cppObjectPath = staging.buildPath("image_cpp.o");
+            cppSourcePath.write(cppSource);
+            runCompiler("C++ compilation", [cxxExecutable, "-c", "-fPIC",
+                "-O2", "-std=c++17"] ~ cxxCompilerArguments
+                ~ [cppSourcePath, "-o", cppObjectPath]);
+            objectPaths ~= cppObjectPath;
+            // A library flag must trail every object file that needs
+            // symbols from it, or a traditional linker's one-pass symbol
+            // search misses them - so this joins the response file's own
+            // dependency archives, not `linkFlags`, which comes first.
+            extraLinkFlags ~= "-L-l" ~ cxxRuntimeLibrary;
+        }
+
         import std.array: join;
         import std.string: replace;
         const responsePath = staging.buildPath("linker.rsp");
@@ -133,7 +189,7 @@ public DependencyImage prepareImage(
             .join("\n"));
         runCompiler("linking", [executable] ~ linkFlags ~ linkerArguments
             ~ ["-Xcc=-Wl,@linker.rsp"]
-            ~ [objectPath, "-of=" ~ imagePath], staging);
+            ~ objectPaths ~ extraLinkFlags ~ ["-of=" ~ imagePath], staging);
         // Readers must never observe a partially linked image. Concurrent
         // builders publish equivalent complete files with atomic rename.
         rename(imagePath, destination);
@@ -170,6 +226,15 @@ version (DigitalMars)
     public enum defaultCompiler = "dmd";
 else version (LDC)
     public enum defaultCompiler = "ldc2";
+
+
+// The system C++ compiler: `$CXX` when set, `c++` otherwise - the same
+// rule a Makefile uses.
+public string defaultCxxCompiler() {
+    import std.process: environment;
+
+    return environment.get("CXX", "c++");
+}
 
 
 private void runCompiler(
