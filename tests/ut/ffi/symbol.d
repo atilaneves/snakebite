@@ -515,6 +515,69 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 }
 
 
+static foreach (backend; Matrix!()) {
+    @("image.narrowTemplateArguments." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        enum moduleName = "image_narrow_" ~ backend.stringof;
+        sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+            "module " ~ moduleName ~ ";\n" ~ q{
+                struct Selection(ushort value) { int member = value; }
+                int read(T)(T value) { return value.member; }
+                int number(short value)() { return value; }
+                int literal(string value)() { return value == "!cast(ushort)1u"; }
+            });
+        sandbox.writeFile("app/root_" ~ moduleName ~ ".d",
+            "module root_" ~ moduleName ~ ";\nimport " ~ moduleName ~ ";\n" ~ q{
+            int main() {
+                assert(read(Selection!1()) == 1);
+                assert(number!(-2)() == -2);
+                assert(literal!"!cast(ushort)1u"() == 1);
+                return 0;
+            }
+        });
+        const imports = [sandbox.inSandboxPath("deps")];
+        static if (is(backend == Native)) {
+            const executable = sandbox.inSandboxPath("test");
+            const result = execute([defaultCompiler, "-I" ~ imports[0],
+                sandbox.inSandboxPath("app/root_" ~ moduleName ~ ".d"), "-of=" ~ executable]);
+            result.status.shouldEqual(0, result.output);
+            execute([executable]).status.should == 0;
+        } else {
+            auto project = prepareProject(sandbox.inSandboxPath("app"), imports).project;
+            scope instance = new backend(project.program);
+            run(instance, project.program).should == 0;
+        }
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("image.constructorLocalTypes." ~ backend.stringof)
+    @Serial
+    unittest {
+        enum code = q{
+            import std.bigint: BigInt;
+            int answer() { return BigInt("123").toInt; }
+        };
+        static if (is(backend == Native)) {
+            mixin(code);
+            answer.should == 123;
+        } else {
+            auto module_ = parseSnippet(code);
+            auto program = Program([module_]);
+            auto image = prepareImage(imageSource(program), sharedImageCache);
+            program.dependencyImage = &image;
+            scope instance = new backend(program);
+            int result;
+            instance.call(findFunction(module_, "answer"), &result, []);
+            result.should == 123;
+        }
+    }
+}
+
+
 @("image.templateArgumentImports")
 @Serial
 unittest {

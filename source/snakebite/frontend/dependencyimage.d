@@ -165,7 +165,8 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
         if (auto instance = function_.parent.isTemplateInstance) {
             if (instance.tempdecl !is null
                     && !_program.isRootOwned(instance.tempdecl)
-                    && !function_.needThis && !function_.isNested) {
+                    && !function_.needThis && !function_.isNested
+                    && !hasFunctionLocalType(instance)) {
                 const name = instance.tempdecl.getModule.toPrettyChars.fromStringz.idup;
                 _imports[name] = true;
                 import dmd.dtemplate: getType;
@@ -188,12 +189,12 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
                     }
                 }
                 import std.string: indexOf;
-                const spelling = instance.toChars.fromStringz;
+                const spelling = sourceSpelling(instance.toChars.fromStringz);
                 const arguments = spelling[spelling.indexOf('!') .. $].idup;
-                const scopeName = instance.tempdecl.parent.toPrettyChars(true).fromStringz;
+                const scopeName = sourceSpelling(instance.tempdecl.parent.toPrettyChars(true).fromStringz);
                 const reference = text("__traits(getOverloads, ", scopeName,
                     ", \"", instance.tempdecl.ident.toString, "\", true)");
-                const key = instance.toPrettyChars(true).fromStringz.idup;
+                const key = sourceSpelling(instance.toPrettyChars(true).fromStringz);
                 if (key !in _references)
                     _references[key] = Reference(reference, arguments);
                 _references[key].functions ~= function_;
@@ -242,4 +243,70 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
     override void visit(FuncExp expression) {
         expression.fd.accept(this);
     }
+}
+
+
+// Function-local types cannot be named from an independent module. Their
+// enclosing dependency body can still instantiate them when it is compiled.
+private bool hasFunctionLocalType(imported!"dmd.dtemplate".TemplateInstance instance) {
+    import dmd.dtemplate: getType;
+    import dmd.typesem: nextOf, toDsymbol;
+
+    foreach (argument; *instance.tiargs) {
+        for (auto type = getType(argument); type !is null; type = type.nextOf) {
+            for (auto symbol = type.toDsymbol(null); symbol !is null; symbol = symbol.parent)
+                if (symbol.isFuncDeclaration)
+                    return true;
+        }
+    }
+    return false;
+}
+
+
+// DMD's diagnostic printer abbreviates single integer template arguments,
+// even when their type requires a cast. Such casts require parentheses in
+// source. Token boundaries keep nested instances and string arguments intact.
+private string sourceSpelling(in char[] spelling) {
+    import dmd.lexer: Lexer;
+    import dmd.globals: global;
+    import dmd.tokens: TOK;
+
+    const input = spelling ~ "\0";
+    scope lexer = new Lexer(null, input.ptr, 0, spelling.length,
+        false, false, global.errorSink, &global.compileEnv);
+    string result;
+    size_t copied;
+    lexer.nextToken;
+    while (lexer.token.value != TOK.endOfFile) {
+        if (lexer.token.value != TOK.not) {
+            lexer.nextToken;
+            continue;
+        }
+        lexer.nextToken;
+        if (lexer.token.value != TOK.cast_)
+            continue;
+        const start = lexer.token.ptr - input.ptr;
+        // Folded pointer and enum values can have more than one cast.
+        while (lexer.token.value == TOK.cast_) {
+            lexer.nextToken;
+            assert(lexer.token.value == TOK.leftParenthesis);
+            size_t depth;
+            do {
+                if (lexer.token.value == TOK.leftParenthesis)
+                    ++depth;
+                else if (lexer.token.value == TOK.rightParenthesis)
+                    --depth;
+                assert(lexer.token.value != TOK.endOfFile);
+                lexer.nextToken;
+            } while (depth);
+        }
+        if (lexer.token.value == TOK.min || lexer.token.value == TOK.add)
+            lexer.nextToken;
+        lexer.nextToken;
+        const end = lexer.token.ptr - input.ptr;
+        result ~= spelling[copied .. start] ~ "(" ~ spelling[start .. end] ~ ")";
+        copied = end;
+    }
+    result ~= spelling[copied .. $];
+    return result;
 }

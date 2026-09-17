@@ -18,7 +18,8 @@ public struct CastPlan {
         // Bit-identical representations: a plain move of `destFacts.size`
         // bytes. Covers class<->class upcasts, class<->pointer, AA<->AA,
         // pointer<->pointer, equal-width float<->float, equal-width
-        // integral<->integral and equal-element-width array<->array.
+        // integral<->integral, delegate<->delegate and
+        // equal-element-width array<->array.
         copy,
         // DMD leaves proven upcasts unlowered so code generation can apply
         // the native reference adjustment. Null stays null.
@@ -62,7 +63,8 @@ public struct CastPlan {
 public CastPlan classify(
     imported!"dmd.mtype".Type sourceType, imported!"dmd.mtype".Type destType,
 ) {
-    import dmd.astenums: Tbool, Taarray, Tclass, Tnull, Tpointer, Tsarray;
+    import dmd.astenums:
+        Tbool, Taarray, Tclass, Tdelegate, Tnull, Tpointer, Tsarray;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: mutableOf, nextOf;
     import snakebite.nativelayout: isIntegralSize;
@@ -82,6 +84,11 @@ public CastPlan classify(
     }
 
     if (sourceType.ty == Taarray && destType.ty == Taarray)
+        return CastPlan(CastPlan.Kind.copy, sourceFacts, destFacts);
+
+    // DMD has checked the conversion. Function attributes do not change
+    // a delegate's context and function words.
+    if (sourceType.ty == Tdelegate && destType.ty == Tdelegate)
         return CastPlan(CastPlan.Kind.copy, sourceFacts, destFacts);
 
     if ((sourceType.ty == Tclass && destType.ty == Tpointer)

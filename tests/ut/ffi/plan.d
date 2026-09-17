@@ -1431,36 +1431,43 @@ unittest {
 }
 
 
-private struct TooBigMemory {
+private struct LargeMemory {
     size_t[65] words;
 }
 
 
-// A MEMORY-class argument whose size (520 bytes) exceeds `abi.
-// ArgumentPlan.maxMemoryBytes` (512 bytes, `maxStackWords` whole
-// eightbytes, issue #334 step 3) - refused with a clear message rather
-// than only failing later, and more vaguely, against `prepare`'s own
-// generic `words > maxStackWords` check. As with the alignment refusal
-// above, nothing needs to resolve `snakebite_ut_too_big_memory`
-// natively: this throws before symbol resolution.
-@("called.memoryClassParameter.refusedSize")
+private extern(C) size_t snakebite_ut_large_memory(LargeMemory value) {
+    size_t result;
+    foreach (i, word; value.words)
+        result += (i + 1) * word;
+    return result;
+}
+
+
+// The first whole eightbyte past the former 512-byte limit must reach
+// the native callee, with every word in its original position.
+@("called.memoryClassParameter.largeArgument")
 unittest {
     auto guestModule = parseSnippet(q{
-        struct TooBigMemory {
+        struct LargeMemory {
             size_t[65] words;
         }
 
-        extern(C) void snakebite_ut_too_big_memory(TooBigMemory value);
+        extern(C) size_t snakebite_ut_large_memory(LargeMemory value);
     });
     auto function_ =
-        findFunction(guestModule, "snakebite_ut_too_big_memory");
+        findFunction(guestModule, "snakebite_ut_large_memory");
     assert(function_ !is null,
-        "No `snakebite_ut_too_big_memory` in the guest program");
+        "No `snakebite_ut_large_memory` in the guest program");
 
     PlanCache cache;
-    cache.of(function_).shouldThrowWithMessage(
-        "ffi cannot pass a value of type `TooBigMemory`: its 520 bytes " ~
-            "exceed the 512-byte limit for a MEMORY-class argument");
+    LargeMemory value;
+    foreach (i, ref word; value.words)
+        word = i + 1;
+    size_t result;
+    cache.of(function_).call(&result, [cast(const void*) &value]);
+
+    result.should == 65 * 66 * 131 / 6;
 }
 
 
