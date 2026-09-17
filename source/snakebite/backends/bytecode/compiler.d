@@ -5312,8 +5312,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto parent = callee.toParent2();
             auto parentFunction =
                 parent is null ? null : parent.isFuncDeclaration;
-            if (parentFunction is null)
-                throw rejection(_function, expression.loc, "a static chain");
+            if (parentFunction is null) {
+                const context = reserveTemp(pointerFacts);
+                emit(&opConstant, context, addConstant(0), size_t.sizeof);
+                return context;
+            }
             return contextAddressOf(parentFunction);
         }
 
