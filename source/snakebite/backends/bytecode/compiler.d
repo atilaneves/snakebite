@@ -97,7 +97,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     public this(const Program program) {
         super(program);
         _plans = PlanCache(program.dependencyImage);
-        _nativeData = NativeData(&constantSymbolAddress);
+        _nativeData = NativeData(&constantSymbolAddress, &classRuntimeInfo);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
