@@ -9,6 +9,33 @@ import std.path: buildPath;
 import std.process: Config, execute, thisProcessID;
 
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read static constructor counters"),
+)) {
+    @("moduleConstructorsRunOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        checkStartup!backend("constructors", [q{
+            module probe;
+            __gshared int sharedCalls;
+            int threadCalls;
+            shared static this() {
+                ++sharedCalls;
+            }
+            static this() {
+                assert(sharedCalls == 1);
+                ++threadCalls;
+            }
+            unittest {
+                assert(sharedCalls == 1);
+                assert(threadCalls == 1);
+            }
+        }], [], 0, ["1 modules passed unittests"], []);
+    }
+}
+
+
 static foreach (backend; Matrix!()) {
     @("templateMixinTests." ~ backend.stringof)
     @Tags(backend.stringof)

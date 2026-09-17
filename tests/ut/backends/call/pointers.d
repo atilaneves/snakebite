@@ -436,6 +436,38 @@ static foreach (backend; Matrix!()) {
 }
 
 
+static foreach (backend; Matrix!()) {
+    @("pointers.dynamicArray.voidArrayToStructPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Value { int number; }
+
+            void[] storage(Value[] values, ref int calls) {
+                ++calls;
+                return values;
+            }
+
+            void main() {
+                Value[] values = [Value(42), Value(7)];
+                int calls;
+                auto pointer = cast(Value*) storage(values, calls);
+                assert(calls == 1);
+                assert(pointer is values.ptr);
+                assert(pointer[1].number == 7);
+                pointer[0].number = 99;
+                assert(values[0].number == 99);
+
+                void[] empty = values[1 .. 1];
+                assert(cast(Value*) empty is values.ptr + 1);
+                void[] absent;
+                assert(cast(Value*) absent is null);
+            }
+        });
+    }
+}
+
+
 // The same round trip as above, for an element wider than one byte -
 // `cast(int*) arr` still reads the array's pointer word, not `arr[0]`'s
 // address plus some byte offset.

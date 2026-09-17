@@ -60,6 +60,7 @@ public SourceSet sourceSet(
     in string directory,
     in string[] importPaths,
     in string[] stringImportPaths,
+    in string[] versions = null,
 ) {
     import std.conv: text;
     import std.file: exists, isDir;
@@ -72,9 +73,13 @@ public SourceSet sourceSet(
     // directory, e.g. as `-I` flags to a subprocess run elsewhere.
     const normalized = directory.absolutePath.buildNormalizedPath;
 
-    return isDubProject(normalized)
-        ? dubSourceSet(normalized)
-        : bareSourceSet(normalized, importPaths, stringImportPaths);
+    if (isDubProject(normalized))
+        return dubSourceSet(normalized, versions);
+
+    auto sources = bareSourceSet(normalized, importPaths, stringImportPaths);
+    foreach (identifier; versions)
+        sources.flags.compilerArguments ~= "-version=" ~ identifier;
+    return sources;
 }
 
 
@@ -118,14 +123,14 @@ private SourceSet bareSourceSet(
 }
 
 
-private SourceSet dubSourceSet(in string directory) {
+private SourceSet dubSourceSet(in string directory, in string[] versions) {
     import snakebite.dub: dubDescribeProject;
     import snakebite.frontend.compiler: FrontendFlags;
     import std.algorithm.iteration: filter, map;
     import std.array: array;
     import std.conv: text;
 
-    auto description = dubDescribeProject(directory); // Stored in the mutable SourceSet.
+    auto description = dubDescribeProject(directory, versions); // Stored in the mutable SourceSet.
     import std.json: JSONValue;
     JSONValue settings;
     foreach (target; description.value["targets"].array)
@@ -141,7 +146,6 @@ private SourceSet dubSourceSet(in string directory) {
     const linkerFiles = values("linkerFiles")
         ~ values("sourceFiles").filter!(isLinkerFile).array;
     const dflags = values("dflags");
-    const versions = values("versions");
     const debugVersions = values("debugVersions");
     const options = values("options");
     const importPaths = values("importPaths");
@@ -152,7 +156,7 @@ private SourceSet dubSourceSet(in string directory) {
         throw new Exception(text("dub describe found no sources in ", directory));
 
     string[] compilerArguments = dflags.dup;
-    compilerArguments ~= versions
+    compilerArguments ~= values("versions")
         .map!(version_ => "-version=" ~ version_)
         .array;
     compilerArguments ~= debugVersions

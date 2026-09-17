@@ -235,7 +235,7 @@ private bool isNonTriviallyCopyable(imported!"dmd.mtype".Type type) {
 
 private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
     import dmd.astenums:
-        Taarray, Tclass, Tfloat32, Tfloat64, Tpointer, Tvoid;
+        Taarray, Tclass, Tfloat32, Tfloat64, Tnull, Tpointer, Tvoid;
     import dmd.typesem: alignsize, isIntegral, isUnsigned, size;
     import std.algorithm: min;
 
@@ -250,7 +250,8 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
         return plan;
     }
 
-    if (type.ty == Tpointer || type.ty == Tclass || type.ty == Taarray) {
+    if (type.ty == Tpointer || type.ty == Tclass || type.ty == Taarray
+            || type.ty == Tnull) {
         plan.registers[0] = Register(Register.Kind.pointer, 8);
         plan.count = 1;
         return plan;
@@ -337,7 +338,7 @@ private void classify(
 ) {
     import dmd.astenums:
         Tarray, Tclass, Tcomplex32, Tcomplex64, Tdelegate, Tfloat32,
-        Tfloat64, Tpointer, Tsarray;
+        Tfloat64, Tnull, Tpointer, Tsarray;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: alignsize, isIntegral, nextOf, size;
 
@@ -364,7 +365,8 @@ private void classify(
         return;
     }
 
-    if (type.ty == Tpointer || type.ty == Tclass || type.ty == Tdelegate) {
+    if (type.ty == Tpointer || type.ty == Tclass || type.ty == Tdelegate
+            || type.ty == Tnull) {
         foreach (i; 0 .. (bytes + 7) / 8)
             merge(classes, offset + i * 8, 8,
                 ArgumentPlan.ValueClass.integer, memory);

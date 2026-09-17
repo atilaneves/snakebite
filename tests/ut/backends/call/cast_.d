@@ -35,6 +35,36 @@ static foreach (backend; Matrix!(
 
 
 static foreach (backend; Matrix!()) {
+    @("cast.nullValueToString." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            typeof(null) value(ref int calls) {
+                ++calls;
+                return null;
+            }
+
+            string convert(typeof(null) source) {
+                return cast(string) source;
+            }
+
+            void main() {
+                int calls;
+                string result = "old value";
+                result = cast(string) value(calls);
+                assert(calls == 1);
+                assert(result.length == 0);
+                assert(result.ptr is null);
+                result = convert(null);
+                assert(result.length == 0);
+                assert(result.ptr is null);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
     @("cast.staticArrayToSliceAliasesStorage." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

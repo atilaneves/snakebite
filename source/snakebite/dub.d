@@ -75,12 +75,20 @@ public string fetchProject(in string packageName) {
 }
 
 
-public DubDescription dubDescribeProject(in string directory) {
+public DubDescription dubDescribeProject(
+    in string directory, in string[] versions = null,
+) {
     import std.json: parseJSON;
     import snakebite.dependencyimage: defaultCompiler;
 
-    const result = describe(directory, ["--compiler=" ~ defaultCompiler], DubConfig.test);
-    return DubDescription(parseJSON(result.output), result.buildArguments.dup);
+    import std.algorithm.iteration: map;
+    import std.array: array;
+
+    const versionArguments = versions.map!(v => "--d-version=" ~ v).array;
+    const result = describe(directory,
+        ["--compiler=" ~ defaultCompiler] ~ versionArguments, DubConfig.test);
+    return DubDescription(parseJSON(result.output),
+        (result.buildArguments ~ versionArguments).dup);
 }
 
 

@@ -10,6 +10,7 @@ import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.file: mkdirRecurse, tempDir;
 import std.path: buildPath;
+import std.process: Config, execute;
 
 
 // The C++ test library for issue #336: free functions over integers,
@@ -819,11 +820,16 @@ static foreach (backendName; ["Interpreter", "Bytecode"]) {
     unittest {
         import std.algorithm: canFind;
         import std.file: thisExePath;
-        import std.process: execute;
 
+        const sandbox = Sandbox();
+        sandbox.writeFile("parent-fixture", "must survive child startup");
         string[string] env = [childBackendVar: backendName];
+        // unit-threaded clears its sandbox tree at process startup.
+        // The child needs a separate working directory to protect ours.
         const result = execute(
-            [thisExePath, "ut.ffi.cpp.cpp.exception.child"], env);
+            [thisExePath, "ut.ffi.cpp.cpp.exception.child"], env,
+            Config.none, size_t.max, sandbox.sandboxPath);
+        sandbox.shouldExist("parent-fixture");
 
         // Compiled D, calling `throws_exception()` inside a
         // `catch (Throwable)`, prints

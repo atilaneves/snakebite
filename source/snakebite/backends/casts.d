@@ -62,13 +62,16 @@ public struct CastPlan {
 public CastPlan classify(
     imported!"dmd.mtype".Type sourceType, imported!"dmd.mtype".Type destType,
 ) {
-    import dmd.astenums: Tbool, Taarray, Tclass, Tpointer, Tsarray;
+    import dmd.astenums: Tbool, Taarray, Tclass, Tnull, Tpointer, Tsarray;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: mutableOf, nextOf;
     import snakebite.nativelayout: isIntegralSize;
 
     const sourceFacts = TypeFacts.of(sourceType);
     const destFacts = TypeFacts.of(destType);
+
+    if (sourceType.ty == Tnull)
+        return CastPlan(CastPlan.Kind.zero, sourceFacts, destFacts);
 
     if (sourceType.ty == Tclass && destType.ty == Tclass) {
         auto plan = CastPlan(

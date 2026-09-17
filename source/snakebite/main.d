@@ -28,6 +28,7 @@ public int main(string[] args) {
             parsed.options.importPaths,
             parsed.options.stringImportPaths,
             parsed.options.backend != BackendName.ctfe,
+            parsed.options.versions,
         );
         const report = executeBackend(
             parsed.options.backend,

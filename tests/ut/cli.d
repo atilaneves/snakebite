@@ -7,6 +7,19 @@ import std.algorithm.searching: startsWith;
 import ut;
 
 
+@("versionOptions")
+unittest {
+    const result = parseArgs([
+        "sb", "-version=AutomemAsan", "--version=Extra", "project",
+        "--", "-version=GuestOnly",
+    ]);
+
+    result.status.should == 0;
+    result.options.versions.should == ["AutomemAsan", "Extra"];
+    result.options.programArguments.should == ["-version=GuestOnly"];
+}
+
+
 @("programArgumentsAfterSeparator")
 unittest {
     const result = parseArgs([

@@ -176,6 +176,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         void* returnPlace,
         scope const(void*)[] args,
     ) {
+        initializeThread;
         const layout = hostLayoutOf(function_);
         layout.checkHostArgumentCount(args.length, function_, "bytecode");
 
@@ -869,30 +870,37 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // that index in once they know it, but never resolve it to an
     // address themselves, since `_instructions` can still grow (and so
     // move, on a reallocation) at any point before `build` returns. Once
-    // it has stopped growing, out-of-range indices are refused - the
-    // compiler's own bug, since every index this compiler itself ever
-    // wrote names a position within the same, single pass of
-    // instructions, but refused here rather than trusted, since a wrong
-    // one would otherwise send the VM to run whatever instructions
-    // happen to sit at that address instead of failing loudly - and the
-    // rest are rewritten from that index to the address it names, which
-    // is what every branch opcode above expects to find.
+    // it has stopped growing, invalid indices are refused so the VM
+    // cannot execute memory outside the function. A cleanup may branch
+    // to its exclusive end, even one past the last instruction: the VM
+    // stops at that address before it reads an instruction.
     private void resolveBranches() {
         import std.conv: text;
 
-        foreach (ref instruction; _instructions) {
+        foreach (index, ref instruction; _instructions) {
             auto target = branchTargetField(instruction);
             if (target is null)
                 continue;
 
-            if (*target >= _instructions.length)
+            if (*target > _instructions.length
+                    || (*target == _instructions.length
+                        && !isCleanupEndBranch(index, *target)))
                 throw new SnakebiteException(text(
                     "bytecode compiler produced an out-of-range branch " ~
                     "target ", *target, " for `", _function.toString, "`",
                 ));
 
-            *target = cast(size_t) &_instructions[*target];
+            *target = cast(size_t) instructionAt(*target);
         }
+    }
+
+    private bool isCleanupEndBranch(in size_t index, in size_t target) const {
+        foreach (handler; _exceptionHandlers)
+            if (handler._cleanupEnd == target
+                    && index >= handler._handler && index < target)
+                return true;
+
+        return false;
     }
 
     private size_t* branchTargetField(ref Instruction instruction) {
@@ -2736,11 +2744,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `AssignExp` reaching here is already safe to treat as a raw byte
     // copy.
     //
-    // When the right side is not itself an array, this is instead
-    // `p[a .. b] = v;`'s scalar-fill shape (dmd's own `blockAssign`,
-    // e.g. `core/internal/newaa.d`'s `(cast(ubyte*)&entry.value)[0 ..
-    // V.sizeof] = 0` zeroing a newly allocated AA entry's value): `v` is
-    // evaluated once, then broadcast into every element through
+    // DMD's `blockAssign` marks `p[a .. b] = v;` as a scalar fill,
+    // even when the element is itself an array. The value `v` is
+    // evaluated once, then copied into every element through
     // `opSliceFill`, the run-time counterpart to `compileSliceAssign`'s
     // own compile-time-unrolled scalar fill for a static array.
     private void compileDynamicSliceAssign(
@@ -2748,6 +2754,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t resolvedTarget = size_t.max,
     ) {
         import dmd.astenums: Tarray, Tpointer, Tvoid;
+        import dmd.expression: MemorySet;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
         if (target.e1.type.ty != Tarray && target.e1.type.ty != Tpointer)
@@ -2768,7 +2775,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (resolvedTarget == size_t.max)
             evalInto(target, destSliceOffset, arrayFacts.size);
 
-        if (expression.e2.type.ty != Tarray) {
+        if (expression.memset == MemorySet.blockAssign
+                || expression.e2.type.ty != Tarray) {
             if (elementType.ty == Tvoid)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
@@ -4948,7 +4956,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         case zero:
-            return evalInto(expression.e1, destOffset, width);
+            if (expression.e1.isNullExp is null)
+                compileEffect(expression.e1);
+            emit(&opZero, destOffset, 0, width);
+            return;
 
         case floatWidth: {
             const sourceOffset = plan.sourceFacts.size > plan.destFacts.size

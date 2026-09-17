@@ -10,6 +10,40 @@ import ut.backends;
 
 
 static foreach (backend; Matrix!()) {
+    @("conditionalScopeExitAtFunctionEnd." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int make(ref int value, bool cleanup, bool fail) {
+                scope(exit) {
+                    if (cleanup) value += 1;
+                }
+                if (fail) throw new Exception("failure");
+                return 42;
+            }
+
+            void main() {
+                foreach (cleanup; [false, true]) {
+                    int value;
+                    assert(make(value, cleanup, false) == 42);
+                    assert(value == (cleanup ? 1 : 0));
+
+                    bool caught;
+                    try {
+                        make(value, cleanup, true);
+                    } catch (Exception exception) {
+                        caught = exception.msg == "failure";
+                    }
+                    assert(caught);
+                    assert(value == (cleanup ? 2 : 0));
+                }
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
     @("catchMatchesGuestClassByBaseType." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

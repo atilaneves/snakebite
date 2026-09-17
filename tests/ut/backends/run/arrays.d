@@ -9,6 +9,36 @@ module ut.backends.run.arrays;
 import ut.backends;
 
 
+static foreach (backend; Matrix!()) {
+    @("sliceFillWithArrayElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int[] value(ref int calls, int[] source) {
+                ++calls;
+                return source;
+            }
+
+            void main() {
+                int[][] arrays = [[1], [2], [3], [4]];
+                int[] source = [7, 8];
+                int calls;
+                arrays[1 .. 3] = value(calls, source);
+                assert(calls == 1);
+                assert(arrays[0] == [1]);
+                assert(arrays[3] == [4]);
+                assert(arrays[1] is source);
+                assert(arrays[2] is source);
+                arrays[1][0] = 9;
+                assert(arrays[2][0] == 9);
+                arrays[1 .. 1] = value(calls, source);
+                assert(calls == 2);
+            }
+        });
+    }
+}
+
+
 // A module-level array is initialised before anything runs, so a callee
 // that touches it first still sees its contents.
 static foreach (backend; Matrix!(
