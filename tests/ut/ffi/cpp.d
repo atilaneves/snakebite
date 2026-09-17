@@ -300,9 +300,13 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             scope instance = new backend(program);
 
             int result;
-            (() => instance.call(
-                findFunction(module_, "callUninstantiated"), &result, []))()
-                .shouldThrowWithMessage("it is not in this process");
+            try {
+                instance.call(
+                    findFunction(module_, "callUninstantiated"), &result, []);
+                assert(false, "expected ffi to refuse the missing symbol");
+            } catch (Exception exception) {
+                "it is not in this process".shouldBeIn(exception.msg);
+            }
         }
     }
 }
@@ -370,7 +374,8 @@ static foreach (backendName; ["Interpreter", "Bytecode"]) {
         import std.process: execute;
 
         string[string] env = [childBackendVar: backendName];
-        const result = execute([thisExePath, "cpp.exception.child"], env);
+        const result = execute(
+            [thisExePath, "ut.ffi.cpp.cpp.exception.child"], env);
 
         result.output.canFind(caughtMarker).should == false;
         // Either the process is killed by a signal (`std.process.wait`
