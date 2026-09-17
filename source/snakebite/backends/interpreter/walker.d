@@ -788,6 +788,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallExp callSite = null,
     ) {
         auto arguments = argumentSlots(frameBase, layout);
+        auto adapter = callShapeOf(function_).adapter;
+        ubyte* receiver;
 
         scope void executeCallee(
             scope void* place,
@@ -799,12 +801,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     arguments.ptr, arguments.length,
                 );
             });
+            // A constructor's ref-qualified ABI result is its receiver.
+            // An interpreted body has no return statement that stores it.
+            if (adapter.isVoid && adapter.isReferenceResult)
+                *cast(void**) place = receiver;
         }
 
         import snakebite.backends.temporary: constructTemporary;
         import snakebite.nativelayout: loadIntegral;
 
-        ubyte* receiver;
         CallResult result;
         constructTemporary(function_, {
             receiver = cast(ubyte*) loadIntegral(
@@ -819,7 +824,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             } else if (callSite !is null)
                 bindArguments(function_, callSite.arguments, callSite.loc,
                     frameBase, layout);
-            result = callShapeOf(function_).adapter.invoke(
+            result = adapter.invoke(
                 returnPlace, arguments.values, &executeCallee);
         }, { _temporaries.armConstructor(receiver); });
         return result;
@@ -1285,13 +1290,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(UnrolledLoopStatement statement) {
+        // A tuple `foreach` is a real loop for labelled control flow too.
+        auto loopLabel = _pendingLoopLabel;
+        _pendingLoopLabel = null;
+
         if (statement.statements is null)
             return;
 
         foreach (child; *statement.statements) {
             if (child !is null) {
                 child.accept(this);
-                if (!_controlFlow.continuesLoop)
+                if (_controlFlow.leavesLoop(loopLabel))
                     return;
             }
         }

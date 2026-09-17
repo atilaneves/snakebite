@@ -105,6 +105,51 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `chain` combines a ref-qualified constructor with tuple `foreach` loops.
+// Its saved length and its iteration must include both source ranges.
+static foreach (backend; Matrix!()) {
+    @("nested.constructor.chainSavePreservesBothRanges." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        44.shouldBeRetOf!(backend, q{
+            import std.range: chain;
+            import std.range.primitives: walkLength;
+            struct Box {
+                int[] elements;
+                long length;
+
+                auto opSlice() const {
+                    return elements[0 .. cast(size_t) length];
+                }
+
+                auto join(T)(auto ref T other) const
+                    if (is(T == Box)) {
+                    return chain(
+                        () @trusted { return this[]; }(),
+                        () @trusted { return other[]; }(),
+                    );
+                }
+
+            }
+
+            int value() {
+                Box first;
+                first.elements = [1, 2, 3];
+                first.length = 3;
+                Box second;
+                second.elements = [4];
+                second.length = 1;
+                auto joined = first.join(second);
+                const savedLength = joined.save.walkLength;
+                int iteratedLength;
+                foreach (element; joined)
+                    ++iteratedLength;
+                return cast(int) savedLength * 10 + iteratedLength;
+            }
+        }, "value");
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("nested.recursiveGuestCall.countsDown." ~ backend.stringof)
     @Tags(backend.stringof)
