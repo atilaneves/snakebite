@@ -32,13 +32,13 @@ public CliResult parseArgs(string[] args) {
         result.options.programArguments = args[separator + 1 .. $].dup;
         args = args[0 .. separator];
     }
-    string backendName = "interpreter";
+    string backendName = "bytecode";
 
     typeof(getopt(args)) helpInfo;
     try {
         helpInfo = getopt(
             args,
-            "b|backend", "Select the backend (default: interpreter).",
+            "b|backend", "Select the backend (default: bytecode).",
                 &backendName,
             "I|import-path", "Add an import path.",
                 &result.options.importPaths,
@@ -77,7 +77,7 @@ private enum helpText =
     "Pass arguments after -- to the program (for example: -- -d).\n" ~
     "\n" ~
     "Options:\n" ~
-    "  -b, --backend <name>      Select the backend (default: interpreter)\n" ~
+    "  -b, --backend <name>      Select the backend (default: bytecode)\n" ~
     "                            valid: "
         ~ imported!"snakebite.backends".validBackendNames ~ "\n" ~
     "  -I, --import-path <path>  Add an import path for a bare directory\n" ~

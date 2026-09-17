@@ -22,14 +22,12 @@ public struct ReplCliResult {
 }
 
 
-// Parse the REPL's command line. The default backend is `interpreter`:
-// it is the only backend with no compile step, so it starts fastest.
 public ReplCliResult parseReplArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
     import std.getopt: getopt, GetOptException;
 
     ReplCliResult result;
-    string backendName = "interpreter";
+    string backendName = "bytecode";
 
     typeof(getopt(args)) helpInfo;
     try {
@@ -42,7 +40,7 @@ public ReplCliResult parseReplArgs(string[] args) {
             "I", "Add an import path.", (string _, string val) {
                 result.options.importPaths ~= val;
             },
-            "b|backend", "Select the backend (default: interpreter).",
+            "b|backend", "Select the backend (default: bytecode).",
                 &backendName,
             "l", "Stay interactive after loading file arguments.",
                 &result.options.liveAfterFiles,
@@ -76,7 +74,7 @@ private enum helpText =
     "Options:\n" ~
     "  -c <command>          Run one D expression and exit\n" ~
     "  -I <path>             Add an import path\n" ~
-    "  -b, --backend <name>  Select the backend (default: interpreter)\n" ~
+    "  -b, --backend <name>  Select the backend (default: bytecode)\n" ~
     "                        valid: "
         ~ imported!"snakebite.backends".validBackendNames ~ "\n" ~
     "  -l                    Stay interactive after loading file arguments\n" ~

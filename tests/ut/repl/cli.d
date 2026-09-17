@@ -6,12 +6,12 @@ import snakebite.backends: BackendName;
 import snakebite.repl.cli: parseReplArgs;
 
 
-@("backend.defaultsToInterpreter")
+@("backend.defaultsToBytecode")
 unittest {
     const result = parseReplArgs(["sb"]);
 
     result.status.should == 0;
-    result.options.backend.should == BackendName.interpreter;
+    result.options.backend.should == BackendName.bytecode;
 }
 
 
