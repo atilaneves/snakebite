@@ -103,9 +103,6 @@ import snakebite.exception: SnakebiteException;
 // failures travel as `SnakebiteException` and continue through the host
 // unchanged.
 private final class GuestException: Exception {
-    // A native catch frame owns one reference to a ref-counted Throwable.
-    // This wrapper keeps another reference after that frame ends, until a
-    // guest catch slot or a native rethrow takes it.
     private Throwable _guest;
 
     public this(Throwable guest) {
@@ -1220,17 +1217,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        Throwable cleanupException;
         try {
-            runCleanupBody(finalbody);
-        } catch (GuestException exception) {
-            cleanupException = exception.take;
-        } catch (Throwable exception) {
-            cleanupException = exception;
-        }
+            import snakebite.backends.exceptions: unwindFinally;
 
-        throw new GuestException(Throwable.chainTogether(
-            pendingException, cleanupException));
+            unwindFinally(pendingException, {
+                try
+                    runCleanupBody(finalbody);
+                catch (GuestException exception)
+                    throw exception.take;
+            });
+        } catch (Throwable exception) {
+            throw new GuestException(exception);
+        }
     }
 
     private void runCleanupBody(Statement finalbody) {
