@@ -21,6 +21,12 @@ unittest {
 }
 
 
+@("isExpressionCell.acceptsTerminatingSemicolon")
+unittest {
+    isExpressionCell("answer();").should == true;
+}
+
+
 @("isExpressionCell.rejectsLocalDeclaration")
 unittest {
     // `int x = 1;` parses as a `DeclarationExp`, not a plain expression:
