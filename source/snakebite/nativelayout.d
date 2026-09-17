@@ -234,8 +234,9 @@ public struct NativeData {
     @disable this(this);
 
     import dmd.aggregate: AggregateDeclaration;
+    import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration, VarDeclaration;
-    import dmd.expression: Expression;
+    import dmd.expression: ClassReferenceExp, Expression, StructLiteralExp;
     import dmd.location: Loc;
     import dmd.mtype: Type;
 
@@ -244,6 +245,10 @@ public struct NativeData {
     import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
 
     private SymbolAddress _symbolAddress;
+    private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
+    // Read and written only under the compiler lock. Key by the object,
+    // not a reference expression, to preserve aliases and cycles.
+    private void*[StructLiteralExp] _classValues;
     // Written under the compiler lock only, like every miss below.
     private void[][] _blocks;
     private void[] _available;
@@ -264,8 +269,12 @@ public struct NativeData {
     private SharedTable!(VarDeclaration, TlsDescriptor) _tlsDescriptors;
     private PerThread!(TlsSlots*) _tls;
 
-    public this(SymbolAddress symbolAddress) {
+    public this(
+        SymbolAddress symbolAddress,
+        TypeInfo_Class delegate(ClassDeclaration) classInfo,
+    ) {
         _symbolAddress = symbolAddress;
+        _classInfo = classInfo;
         _tls = PerThread!(TlsSlots*)(() => new TlsSlots);
     }
 
@@ -275,7 +284,40 @@ public struct NativeData {
         Expression expression,
         void* place,
     ) {
-        storeValue(type, facts, expression, place, &addressOf);
+        storeValue(type, facts, expression, place, &addressOf, &this);
+    }
+
+    private void* classValue(ClassReferenceExp value) {
+        import core.stdc.string: memcpy;
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        void* address;
+        withCompilerLock({
+            if (auto found = value.value in _classValues) {
+                address = *found;
+                return;
+            }
+            const info = _classInfo(value.originalClass);
+            auto bytes = new void[info.m_init.length]; // Must remain writable.
+            memcpy(bytes.ptr, info.m_init.ptr, bytes.length);
+            address = bytes.ptr;
+            // Register before fields: compile-time objects can form cycles.
+            _classValues[value.value] = address;
+            scope (failure) _classValues.remove(value.value);
+            for (auto declaration = value.originalClass;
+                    declaration !is null; declaration = declaration.baseClass) {
+                foreach (field; declaration.fields) {
+                    const index = value.findFieldIndexByName(field);
+                    assert(index >= 0);
+                    // Frontend expression APIs require mutable AST nodes.
+                    auto element = (*value.value.elements)[index];
+                    if (element !is null)
+                        write(field.type, TypeFacts.of(field.type), element,
+                            cast(ubyte*) address + field.offset);
+                }
+            }
+        });
+        return address;
     }
 
     public const(void)[] initialValue(
@@ -499,8 +541,9 @@ private void storeValue(
     imported!"dmd.expression".Expression value,
     void* place,
     scope SymbolAddress symbolAddress,
+    NativeData* nativeData = null,
 ) {
-    storeValue(type, TypeFacts.of(type), value, place, symbolAddress);
+    storeValue(type, TypeFacts.of(type), value, place, symbolAddress, nativeData);
 }
 
 public void storeValue(
@@ -518,6 +561,7 @@ private void storeValue(
     imported!"dmd.expression".Expression value,
     void* place,
     scope SymbolAddress symbolAddress,
+    NativeData* nativeData = null,
 ) {
     import core.stdc.string: memcpy, memset;
     import dmd.astenums: Tarray, Tfloat32, Tfloat64, Tfloat80, Tsarray;
@@ -541,13 +585,14 @@ private void storeValue(
     if (auto variable = value.isVarExp) {
         if (auto symbol = variable.var.isSymbolDeclaration) {
             storeValue(type, facts, initialExpression(symbol.dsym.type,
-                value.loc), place, symbolAddress);
+                value.loc), place, symbolAddress, nativeData);
             return;
         }
     }
 
     if (auto vector = value.isVectorExp) {
-        storeValue(type.isTypeVector.basetype, vector.e1, place, symbolAddress);
+        storeValue(type.isTypeVector.basetype, vector.e1, place,
+            symbolAddress, nativeData);
         return;
     }
 
@@ -560,7 +605,7 @@ private void storeValue(
             auto literal = wholeArray ? value.isArrayLiteralExp : null;
             foreach (i; 0 .. cast(size_t) array.dim.toInteger)
                 storeValue(array.next, literal is null ? value : literal[i],
-                    bytes + i * elementSize, symbolAddress);
+                    bytes + i * elementSize, symbolAddress, nativeData);
             return;
         }
     }
@@ -575,6 +620,15 @@ private void storeValue(
     if (auto literal = value.isFuncExp) {
         assert(symbolAddress !is null);
         *cast(void**) place = symbolAddress(literal.fd);
+        return;
+    }
+
+    if (auto reference = value.isClassReferenceExp) {
+        assert(nativeData !is null);
+        const address = nativeData.classValue(reference);
+        int offset;
+        type.isTypeClass.sym.isBaseOf(reference.originalClass, &offset);
+        *cast(void**) place = cast(ubyte*) address + offset;
         return;
     }
 
@@ -599,7 +653,7 @@ private void storeValue(
         auto data = new void[literal.elements.length * elementSize];
         foreach (i; 0 .. literal.elements.length)
             storeValue(type.nextOf, literal[i],
-                cast(ubyte*) data.ptr + i * elementSize, symbolAddress);
+                cast(ubyte*) data.ptr + i * elementSize, symbolAddress, nativeData);
         storeIntegral(bytes + arrayLengthOffset, literal.elements.length,
             size_t.sizeof);
         *cast(void**) (bytes + arrayPointerOffset) = data.ptr;
@@ -611,7 +665,7 @@ private void storeValue(
         // that encoding here, not from the destination's byte count.
         assert(value.toInteger == 0);
         storeValue(type, facts, initialExpression(type, value.loc), place,
-            symbolAddress);
+            symbolAddress, nativeData);
         return;
     }
 
@@ -631,7 +685,7 @@ private void storeValue(
                 storeIntegral(bytes + field.offset, bits, fieldBytes);
             } else
                 storeValue(field.type, element, bytes + field.offset,
-                    symbolAddress);
+                    symbolAddress, nativeData);
         }
         return;
     }
