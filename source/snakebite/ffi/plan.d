@@ -1033,6 +1033,8 @@ public struct PlanCache {
     public const(CallPlan)* signatureOf(
         TypeFunction type, in bool context,
     ) {
+        import dmd.astenums: VarArg;
+
         auto key = Signature(type, context);
         if (auto cached = key in _signatures)
             return *cached;
@@ -1046,7 +1048,11 @@ public struct PlanCache {
                 return;
             }
             plan = new CallPlan;
-            *plan = _shapeOf(type, context, type.linkage, null, false);
+            // These indirect calls pass only the declared parameters.
+            // A C variadic call with no extra arguments still needs its
+            // variadic ABI plan (including the SSE register count).
+            *plan = _shapeOf(type, context, type.linkage, null,
+                type.parameterList.varargs == VarArg.variadic);
             plan._callbacks = _callbacks;
             plan = *_signatures.insert(key, plan);
         });

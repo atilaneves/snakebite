@@ -9,6 +9,29 @@ module ut.backends.run.delegates;
 import ut.backends;
 
 
+static foreach (backend; Matrix!()) {
+    @("pointerToVariadicDelegateCaller." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdarg;
+            struct Counter {
+                int value;
+                extern(C) void add(int amount, ...) { value += amount; }
+            }
+            void invoke(Counter* counter) {
+                auto add = &counter.add;
+                add(17);
+            }
+            void main() {
+                auto invokePointer = &invoke;
+                assert(invokePointer !is null);
+            }
+        });
+    }
+}
+
+
 // A function literal that reads no enclosing local needs no context, so
 // binding it to a delegate variable makes a (null, function) pair. Each
 // call binds the parameter afresh, so repeated calls see their own
