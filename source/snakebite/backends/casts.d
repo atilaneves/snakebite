@@ -143,10 +143,9 @@ public CastPlan classify(
             && sourceType.nextOf.mutableOf.equals(destType.nextOf.mutableOf))
         return CastPlan(CastPlan.Kind.sarrayToPointer, sourceFacts, destFacts);
 
-    // `arr.ptr`: the same lowering, over a dynamic array.
-    if (sourceFacts.isDynamicArray && destType.ty == Tpointer
-            && destType.nextOf !is null
-            && sourceType.nextOf.mutableOf.equals(destType.nextOf.mutableOf))
+    // Both `arr.ptr` and an explicit pointer cast preserve the array's
+    // data address, even when the destination has a different element type.
+    if (sourceFacts.isDynamicArray && destType.ty == Tpointer)
         return CastPlan(CastPlan.Kind.sliceToPointer, sourceFacts, destFacts);
 
     if (sourceFacts.isDynamicArray && destFacts.isDynamicArray)
