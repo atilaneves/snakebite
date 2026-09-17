@@ -48,6 +48,33 @@ public struct DubDescription {
 }
 
 
+public string fetchProject(in string packageName) {
+    import std.process: Config, execute;
+    import std.string: strip;
+
+    const fetched = execute(["dub", "fetch", packageName], null, Config.none);
+    if (fetched.status != 0)
+        throw new Exception("dub fetch failed for `" ~ packageName ~ "`:\n"
+            ~ fetched.output);
+
+    const described = execute([
+        "dub", "describe", packageName,
+        "--data=working-directory", "--data-list",
+    ], null, Config.none);
+    if (described.status != 0)
+        throw new Exception("dub describe failed for `" ~ packageName ~ "`:\n"
+            ~ described.output);
+
+    const directories = parseDescribeList(described.output);
+    if (directories.length != 1)
+        throw new Exception(
+            "dub describe returned no project directory for `"
+            ~ packageName ~ "`",
+        );
+    return directories[0].strip;
+}
+
+
 public DubDescription dubDescribeProject(in string directory) {
     import std.json: parseJSON;
     import snakebite.dependencyimage: defaultCompiler;

@@ -95,7 +95,7 @@ private Options parseOptions(string[] args) {
         defaultGetoptPrinter(
             "usage: bench [options] [benchmark]\n\n"
             ~ "A benchmark is a name under examples/ (default "
-            ~ defaultBenchmark ~ ") or a path to a project directory.",
+            ~ defaultBenchmark ~ "), a project directory, or a Dub package.",
             result.options,
         );
         options.helpWanted = true;
@@ -109,25 +109,29 @@ private Options parseOptions(string[] args) {
     return options;
 }
 
-// A benchmark is named, not spelled out: `ct-easy` means `examples/ct-easy`.
-// A path to a directory still works, for projects outside `examples/`.
+// A benchmark name first means a directory under `examples/`, then an
+// existing directory, then a package fetched from the Dub registry.
 private string projectDirectory(in string nameOrPath) {
     import std.array: join;
     import std.conv: text;
     import std.file: exists, isDir;
     import std.path: absolutePath, buildNormalizedPath;
 
-    if (nameOrPath.exists && nameOrPath.isDir)
-        return nameOrPath.absolutePath.buildNormalizedPath;
-
     const candidate = buildNormalizedPath(examplesDirectory, nameOrPath);
     if (candidate.exists && candidate.isDir)
         return candidate;
 
-    throw new Exception(text(
-        "unknown benchmark `", nameOrPath, "`; known: ",
-        benchmarkNames.join(", "),
-    ));
+    if (nameOrPath.exists && nameOrPath.isDir)
+        return nameOrPath.absolutePath.buildNormalizedPath;
+
+    import snakebite.dub: fetchProject;
+    try
+        return fetchProject(nameOrPath);
+    catch (Exception exception)
+        throw new Exception(text(
+            "unknown benchmark `", nameOrPath, "`; known: ",
+            benchmarkNames.join(", "), "\n", exception.msg,
+        ));
 }
 
 // Not every benchmark suits every backend - a backend that cannot run one

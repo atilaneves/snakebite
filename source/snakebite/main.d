@@ -7,7 +7,9 @@ private:
 public int main(string[] args) {
     import snakebite.cli: parseArgs;
     import snakebite.backends: BackendName;
+    import snakebite.dub: fetchProject;
     import snakebite.execution: executeBackend, prepareProject;
+    import std.file: exists, isDir;
     import std.stdio: stderr, write;
 
     const parsed = parseArgs(args);
@@ -18,8 +20,11 @@ public int main(string[] args) {
         return parsed.status;
 
     try {
+        string projectDirectory = parsed.options.projectDirectory;
+        if (!projectDirectory.exists || !projectDirectory.isDir)
+            projectDirectory = fetchProject(projectDirectory);
         auto preparation = prepareProject(
-            parsed.options.projectDirectory,
+            projectDirectory,
             parsed.options.importPaths,
             parsed.options.stringImportPaths,
             parsed.options.backend != BackendName.ctfe,
