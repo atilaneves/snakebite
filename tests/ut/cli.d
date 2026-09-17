@@ -10,7 +10,7 @@ import ut;
 @("versionOptions")
 unittest {
     const result = parseArgs([
-        "sb", "-version=AutomemAsan", "--version=Extra", "project",
+        "sb", "--version=AutomemAsan", "--version=Extra", "project",
         "--", "-version=GuestOnly",
     ]);
 

@@ -27,6 +27,7 @@ struct Options {
     string[] declared;          // what the benchmark itself asks for
     string[] importPaths;       // bare directories only; dub knows its own
     string[] stringImportPaths; // ditto
+    string[] versions;
     string projectDirectory;
     bool helpWanted;
 }
@@ -89,6 +90,8 @@ private Options parseOptions(string[] args) {
         ~ "repeatable.", &options.importPaths,
         "string-import-path|J", "String import path for a bare directory of "
         ~ ".d files; repeatable.", &options.stringImportPaths,
+        "version", "Define a version identifier (repeatable).",
+        &options.versions,
     );
 
     if (result.helpWanted) {
@@ -204,6 +207,7 @@ private imported!"snakebite.execution".PreparationReport loadProject(
         options.importPaths,
         options.stringImportPaths,
         selected(options, "interpreter") || selected(options, "bytecode"),
+        options.versions,
     );
 }
 

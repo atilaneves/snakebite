@@ -22,10 +22,11 @@ static foreach (backend; Matrix!()) {
             version (Extra) {} else static assert(false);
             int main() { return 42; }
         });
-        const versions = ["-version=AutomemAsan", "-version=Extra"];
-        static if (is(backend == Native))
+        static if (is(backend == Native)) {
+            const versions = ["-version=AutomemAsan", "-version=Extra"];
             const result = execute(["dmd"] ~ versions ~ ["-run", source]);
-        else {
+        } else {
+            const versions = ["--version=AutomemAsan", "--version=Extra"];
             static if (is(backend == Interpreter))
                 enum name = "interpreter";
             else static if (is(backend == Bytecode))
@@ -91,7 +92,7 @@ static foreach (backend; Matrix!(
                 enum name = "ctfe";
             const result = execute([
                 buildPath(getcwd, "bin", "sb"), "-b", name,
-                "-version=AutomemAsan", app,
+                "--version=AutomemAsan", app,
             ]);
         }
         if (result.status != 0)

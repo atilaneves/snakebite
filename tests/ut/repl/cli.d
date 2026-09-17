@@ -6,6 +6,17 @@ import snakebite.backends: BackendName;
 import snakebite.repl.cli: parseReplArgs;
 
 
+@("versionOptions")
+unittest {
+    const result = parseReplArgs([
+        "sb-repl", "--version=AutomemAsan", "--version=Extra",
+    ]);
+
+    result.status.should == 0;
+    result.options.versions.should == ["AutomemAsan", "Extra"];
+}
+
+
 @("backend.defaultsToBytecode")
 unittest {
     const result = parseReplArgs(["sb"]);

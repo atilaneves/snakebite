@@ -9,6 +9,7 @@ public struct ReplOptions {
     public bool hasCommand;
     public string command;
     public string[] importPaths;
+    public string[] versions;
     public string projectDirectory;
     public string dubProject;
     public bool showHelp;
@@ -42,6 +43,8 @@ public ReplCliResult parseReplArgs(string[] args) {
             "I", "Add an import path.", (string _, string val) {
                 result.options.importPaths ~= val;
             },
+            "version", "Define a version identifier (repeatable).",
+                &result.options.versions,
             "project", "Use import paths from a DUB project.",
                 &result.options.projectDirectory,
             "dub", "Fetch and use a DUB project.",
@@ -80,6 +83,7 @@ private enum helpText =
     "Options:\n" ~
     "  -c <command>          Run one D expression and exit\n" ~
     "  -I <path>             Add an import path\n" ~
+    "  --version=<identifier> Define a version identifier (repeatable)\n" ~
     "  --project <directory> Use import paths from a DUB project\n" ~
     "  --dub <project>       Fetch and use a DUB project\n" ~
     "  -b, --backend <name>  Select the backend (default: bytecode)\n" ~

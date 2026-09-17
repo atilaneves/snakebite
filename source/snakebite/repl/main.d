@@ -39,7 +39,7 @@ public int main(string[] args) {
         }
         if (projectDirectory.length != 0) {
             auto projectSources = sourceSet(
-                projectDirectory, [], [],
+                projectDirectory, [], [], parsed.options.versions,
             );
             auto project = loadProject(
                 projectDirectory, projectSources,
