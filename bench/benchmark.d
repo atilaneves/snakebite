@@ -1,9 +1,9 @@
 // Benchmark harness for snakebite backends. Point it at a benchmark - a name
 // under `examples/`, like `ct-easy`, or a path to any other project - and it
 // runs the backends that benchmark declares in its `bench.backends` file
-// (all of them if it has none), which `--backend` and `--exclude` still
-// override. The frontend parses and semantically analyses the project
-// once, reported as `frontend` in the header so it never pollutes the
+// (dmd, bytecode, and interpreter if it has none), which `--backend` and
+// `--exclude` still override. The frontend parses and semantically analyses
+// the project once, reported as `frontend` in the header so it never pollutes
 // per-backend numbers. Each backend then runs the whole program through
 // `Backend.run` - the backend does whatever compiled D would do, the
 // harness never collects or runs tests itself - and the table reports the
@@ -82,7 +82,7 @@ private Options parseOptions(string[] args) {
         "runs|r", "How many measured runs (default 10).", &options.runs,
         "warmup|w", "How many warmup runs (default 1).", &options.warmup,
         "backend|b", "Benchmark only this backend; repeatable (default: "
-        ~ "what the benchmark declares, else all).",
+        ~ "what the benchmark declares, else dmd, bytecode, and interpreter).",
         &options.backends,
         "exclude|e", "Do not benchmark this backend; repeatable. Applies "
         ~ "after --backend.", &options.excluded,
@@ -108,6 +108,8 @@ private Options parseOptions(string[] args) {
     options.projectDirectory =
         projectDirectory(args.length > 1 ? args[1] : defaultBenchmark);
     options.declared = declaredBackends(options.projectDirectory);
+    if (options.declared is null)
+        options.declared = ["dmd", "bytecode", "interpreter"];
 
     return options;
 }
@@ -140,7 +142,7 @@ private string projectDirectory(in string nameOrPath) {
 // Not every benchmark suits every backend - a backend that cannot run one
 // yet would only ever report FAIL there. Each benchmark says which backends
 // to run in a `bench.backends` file, one name per line, `#` comments and
-// blank lines ignored. No file means all of them.
+// blank lines ignored. No file means dmd, bytecode, and interpreter.
 private string[] declaredBackends(in string directory) {
     import std.algorithm.iteration: filter, map, splitter;
     import std.algorithm.searching: canFind, startsWith;
