@@ -9,6 +9,32 @@ module ut.backends.run.control;
 import ut.backends;
 
 static foreach (backend; Matrix!()) {
+    @("staticForeachSwitchCases." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Visibility { public_, private_, protected_, export_, package_ }
+            Visibility visibility(string name) {
+                switch (name) with (Visibility) {
+                default: throw new Exception("unknown");
+                case "direct": return public_;
+                static foreach (item; ["public", "private", "protected", "export", "package"]) {
+                    case item: return mixin(item ~ "_");
+                }
+                }
+            }
+            void main() {
+                assert(visibility("direct") == Visibility.public_);
+                assert(visibility("export") == Visibility.export_);
+                assert(visibility("private") == Visibility.private_);
+                try { visibility("unknown"); assert(false); }
+                catch (Exception) {}
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
     @("stringSwitchInsideForeach." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

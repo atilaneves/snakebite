@@ -1313,7 +1313,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(CaseStatement statement) {
         recordCaseTarget(statement);
         _finished = false;
-        compileStatement(statement.statement);
+        compileSwitchBody(statement.statement);
     }
 
     override void visit(DefaultStatement statement) {
@@ -1322,7 +1322,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         recordDefaultTarget(_switchStack[$ - 1]);
         _finished = false;
-        compileStatement(statement.statement);
+        compileSwitchBody(statement.statement);
     }
 
     override void visit(GotoCaseStatement statement) {
