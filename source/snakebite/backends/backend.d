@@ -186,7 +186,6 @@ public int run(
     Program program,
     in string[] hostArguments = null,
 ) {
-    *backend._threadInitialized.current = true;
     if (runModuleConstructors(backend, program.moduleConstructors))
         return 1;
 
@@ -202,6 +201,7 @@ package(snakebite) int runModuleConstructors(
     import snakebite.exception: SnakebiteException;
     import std.stdio: stderr;
 
+    *backend._threadInitialized.current = true;
     foreach (constructor; constructors) {
         try
             backend.call(constructor, null, []);
