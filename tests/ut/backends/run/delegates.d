@@ -11,6 +11,34 @@ import ut.backends;
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot access delegate function pointers"),
+)) {
+    @("assignDelegateFieldsBeforeNestedCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Counter {
+                int value;
+                int read() { return value; }
+            }
+            int invoke(Counter* counter) {
+                int delegate() callback;
+                callback.funcptr = &Counter.read;
+                callback.ptr = counter;
+                int helper() { return callback(); }
+                return helper();
+            }
+            void main() {
+                Counter counter = Counter(42);
+                assert(invoke(&counter) == 42);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read callable TypeInfo fields"),
 )) {
     @("callableTypeInfo." ~ backend.stringof)

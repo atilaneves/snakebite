@@ -5839,6 +5839,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return storageValue(expression);
         }
 
+        public size_t storageDelegateWord(size_t base, in size_t offset) {
+            if (offset == 0)
+                return base;
+            const result = compiler.reserveTemp(compiler.pointerFacts);
+            compiler.emit(&opConstant, result,
+                compiler.addConstant(cast(long) offset), size_t.sizeof);
+            compiler.emit(&opAdd, result, base, size_t.sizeof);
+            return result;
+        }
+
         public size_t storageArrayLength(
             ArrayLengthExp expression, size_t base,
         ) {

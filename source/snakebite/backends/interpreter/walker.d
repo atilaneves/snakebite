@@ -2620,6 +2620,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return evaluator.valueCallAddress(expression);
         }
 
+        public void* storageDelegateWord(void* base, in size_t offset) {
+            return cast(ubyte*) base + offset;
+        }
+
         public void* storageArrayLength(
             ArrayLengthExp expression, void* base,
         ) {
