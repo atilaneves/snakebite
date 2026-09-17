@@ -869,30 +869,37 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // that index in once they know it, but never resolve it to an
     // address themselves, since `_instructions` can still grow (and so
     // move, on a reallocation) at any point before `build` returns. Once
-    // it has stopped growing, out-of-range indices are refused - the
-    // compiler's own bug, since every index this compiler itself ever
-    // wrote names a position within the same, single pass of
-    // instructions, but refused here rather than trusted, since a wrong
-    // one would otherwise send the VM to run whatever instructions
-    // happen to sit at that address instead of failing loudly - and the
-    // rest are rewritten from that index to the address it names, which
-    // is what every branch opcode above expects to find.
+    // it has stopped growing, invalid indices are refused so the VM
+    // cannot execute memory outside the function. A cleanup may branch
+    // to its exclusive end, even one past the last instruction: the VM
+    // stops at that address before it reads an instruction.
     private void resolveBranches() {
         import std.conv: text;
 
-        foreach (ref instruction; _instructions) {
+        foreach (index, ref instruction; _instructions) {
             auto target = branchTargetField(instruction);
             if (target is null)
                 continue;
 
-            if (*target >= _instructions.length)
+            if (*target > _instructions.length
+                    || (*target == _instructions.length
+                        && !isCleanupEndBranch(index, *target)))
                 throw new SnakebiteException(text(
                     "bytecode compiler produced an out-of-range branch " ~
                     "target ", *target, " for `", _function.toString, "`",
                 ));
 
-            *target = cast(size_t) &_instructions[*target];
+            *target = cast(size_t) instructionAt(*target);
         }
+    }
+
+    private bool isCleanupEndBranch(in size_t index, in size_t target) const {
+        foreach (handler; _exceptionHandlers)
+            if (handler._cleanupEnd == target
+                    && index >= handler._handler && index < target)
+                return true;
+
+        return false;
     }
 
     private size_t* branchTargetField(ref Instruction instruction) {
