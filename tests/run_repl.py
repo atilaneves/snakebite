@@ -185,6 +185,28 @@ def test_file_argument_can_import_module_from_import_path(tmp_path: Path) -> Non
     assert result.stderr == ""
 
 
+def test_dub_option_loads_module_from_fetched_project(tmp_path: Path) -> None:
+    file = tmp_path / "loaded.d"
+    file.write_text(
+        "import automem.vector;\n"
+        "int loadedValue() { return 42; }\n",
+        encoding="utf-8",
+    )
+
+    result = run_sb(
+        "--dub",
+        "automem@0.6.11",
+        str(file),
+        "-c",
+        "loadedValue()",
+        timeout_seconds=30,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "42\n"
+    assert result.stderr == ""
+
+
 def test_file_argument_loads_example_fixture() -> None:
     result = run_sb("tests/examples/ct.d")
 
@@ -240,14 +262,18 @@ def test_live_flag_keeps_repl_open_after_file_arguments(tmp_path: Path) -> None:
     assert child.exitstatus == 0
 
 
-def run_sb(*args: str, input: str = "") -> subprocess.CompletedProcess[str]:
+def run_sb(
+    *args: str,
+    input: str = "",
+    timeout_seconds: int = TIMEOUT,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sb_path(), *args],
         input=input,
         capture_output=True,
         check=False,
         text=True,
-        timeout=TIMEOUT,
+        timeout=timeout_seconds,
     )
 
 

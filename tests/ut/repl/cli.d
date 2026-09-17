@@ -78,6 +78,15 @@ unittest {
 }
 
 
+@("dub.capturesProject")
+unittest {
+    const result = parseReplArgs(["sb", "--dub", "arsd-official"]);
+
+    result.status.should == 0;
+    result.options.dubProject.should == "arsd-official";
+}
+
+
 @("live.flagSetsLiveAfterFiles")
 unittest {
     const result = parseReplArgs(["sb", "-l", "loaded.d"]);
