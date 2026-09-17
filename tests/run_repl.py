@@ -42,6 +42,45 @@ def test_repl() -> None:
     assert child.exitstatus == 0
 
 
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode", "ctfe"])
+def test_project_import_without_semicolon(tmp_path: Path, backend: str) -> None:
+    (tmp_path / "dub.sdl").write_text(
+        'name "repl-import-test"\n', encoding="utf-8",
+    )
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "repl_import_test.d").write_text(
+        "module repl_import_test;\n"
+        "T importedValue(T)(T value) { return value; }\n",
+        encoding="utf-8",
+    )
+
+    child = pexpect.spawn(
+        sb_path(),
+        ["--project", str(tmp_path), "-b", backend],
+        timeout=TIMEOUT,
+        encoding="utf-8",
+    )
+    try:
+        child.expect_exact("Snakebite REPL")
+        child.expect_exact("[   0.0 ms] > ")
+
+        child.sendline("import repl_import_test")
+        child.expect(r"\[\s+\d+\.\d ms\] > ")
+        assert "Error:" not in clean(child.before)
+
+        child.sendline("importedValue(42)")
+        child.expect(r"\[\s+\d+\.\d ms\] > ")
+        assert "42\n" in clean(child.before)
+
+        child.sendline(":q")
+        child.expect(pexpect.EOF)
+    finally:
+        child.close(force=True)
+
+    assert child.exitstatus == 0
+
+
 def test_piped_blank_line_is_silent_noop() -> None:
     result = run_sb(input="\n")
 

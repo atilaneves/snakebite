@@ -98,7 +98,11 @@ public struct Repl {
                 return submitExpression(candidate);
         }
 
-        return submitDeclaration(candidate);
+        import snakebite.repl.cell: isImportCell;
+
+        // A newline keeps the terminator outside any trailing line comment.
+        const terminated = candidate ~ "\n;";
+        return submitDeclaration(isImportCell(terminated) ? terminated : candidate);
     }
 
     private SubmitResult submitExpression(in string source) {

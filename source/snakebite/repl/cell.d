@@ -72,6 +72,38 @@ public bool isExpressionCell(in string input) {
     return result;
 }
 
+public bool isImportCell(in string input) {
+    import dmd.astcodegen: ASTCodegen;
+    import dmd.globals: global;
+    import dmd.parse: Parser;
+    import dmd.tokens: TOK;
+    import snakebite.frontend.compiler: resetErrors, withCompilerLock;
+
+    bool result;
+    withCompilerLock(() {
+        resetErrors;
+
+        const source = input ~ '\0';
+        scope parser = new Parser!ASTCodegen(
+            null,
+            source,
+            false,
+            global.errorSink,
+            &global.compileEnv,
+            true,
+        );
+
+        parser.nextToken;
+        const statement = parser.parseStatement(0);
+        result = statement !is null
+            && statement.isImportStatement !is null
+            && parser.token.value == TOK.endOfFile
+            && global.errors == 0;
+    });
+
+    return result;
+}
+
 // Whether `input`, parsed as module-level source, is missing its closing
 // syntax (an unclosed brace, typically) rather than being outright invalid:
 // the parse fails with its last diagnostic sitting exactly at end of input.
