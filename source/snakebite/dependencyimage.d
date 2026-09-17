@@ -32,6 +32,16 @@ public struct DependencyImage {
 // imported source or other file supplied by the caller, so edits invalidate
 // the cache. The compiler installation is assumed immutable at a given
 // path and version. No shell interprets source paths or compiler arguments.
+//
+// `cppSource`, when not empty, is one C++ translation unit compiled by
+// `cxxCompiler` (the system C++ compiler - `c++` by default, or `$CXX`
+// - `defaultCxxCompiler` reads it) into the same shared object as
+// `source`: one build, one cache entry, one loader. This is how a test
+// C++ library reaches the image (issue #336): the D side declares its
+// functions and classes `extern(C++)` and calls them like any other
+// resolved symbol. The C++ compiler's own identity and flags join the
+// cache key, next to the D compiler's, so a different C++ toolchain or
+// flag set never reuses another one's image.
 public DependencyImage prepareImage(
     in string source,
     in string cacheDirectory,
@@ -42,6 +52,9 @@ public DependencyImage prepareImage(
     in string[] compilerArguments = null,
     in string[] linkerFiles = null,
     in string[] linkerArguments = null,
+    in string cppSource = null,
+    in string cxxCompiler = defaultCxxCompiler,
+    in string[] cxxCompilerArguments = null,
 ) {
     import std.conv: text;
     import std.digest.sha: sha256Of;
@@ -66,7 +79,7 @@ public DependencyImage prepareImage(
         ~ importPaths.map!(path => "-I" ~ path).array
         ~ stringImportPaths.map!(path => "-J" ~ path).array;
     const executable = compilerPath(compiler);
-    const identityOutput = compilerIdentity(executable);
+    const identityOutput = compilerIdentity([executable]);
     import std.algorithm: startsWith;
     version (DigitalMars)
         require(identityOutput.startsWith("DMD"), "Image compiler must be DMD");
@@ -86,6 +99,12 @@ public DependencyImage prepareImage(
     } else {
         static assert(false, "Dependency images require DMD or LDC");
     }
+    // Fixed C++ compile flags: same for every build, so this is not a
+    // caller parameter the way `cxxCompilerArguments` is - but it still
+    // joins the fingerprint (issue #336 review, finding 6), so changing
+    // one of these constants later cannot reuse a stale image built with
+    // the old flags.
+    const cxxCompileFlags = ["-c", "-fPIC", "-O2", "-std=c++17"];
     // A linker response file stops DMD from moving archives
     // outside the whole-archive pair. Guest calls do not create undefined
     // symbols in image.o, so ordinary archive extraction loses their code.
@@ -111,6 +130,35 @@ public DependencyImage prepareImage(
     foreach (input; inputs ~ linkerFiles)
         fingerprint ~= text("\n", input.absolutePath.length, ":",
             input.absolutePath, ":", read(input).sha256Of.toHexString);
+
+    // The C++ compiler is only ever asked for when a caller actually
+    // wants C++ code in the image - a build with no `cppSource` probes
+    // no C++ toolchain and its fingerprint is byte-for-byte what it was
+    // before this parameter existed.
+    const hasCppSource = cppSource.length != 0;
+    string[] cxxCommand;
+    string cxxExecutable;
+    string cxxRuntimeLibrary;
+    if (hasCppSource) {
+        cxxCommand = resolveCxxCommand(cxxCompiler);
+        cxxExecutable = cxxCommand[0];
+        const cxxIdentity = compilerIdentity(cxxCommand);
+        // The C++ runtime library this pulls in is what gives the image
+        // `operator new`/`delete`, RTTI and the exception personality
+        // routine a thrown C++ exception (issue #336 step 5) needs. Which
+        // one a given `$CXX` links is not decided by the compiler's name:
+        // on Linux, clang defaults to `libstdc++` unless it was itself
+        // built with `CLANG_DEFAULT_CXX_STDLIB=libc++`, so guessing from
+        // "clang" in `--version` breaks a plain `CXX=clang++` on such a
+        // system. Asking the driver instead - see `probeCxxRuntimeLibrary`
+        // - is right for any compiler and configuration.
+        cxxRuntimeLibrary = probeCxxRuntimeLibrary(cxxCommand);
+        fingerprint ~= text("\ncxx:", cxxCommand, "\n",
+            read(cxxExecutable).sha256Of.toHexString, "\n", cxxIdentity,
+            "\n", cxxCompileFlags, "\n", cxxCompilerArguments,
+            "\n", cxxRuntimeLibrary, "\n", cppSource.length, ":", cppSource);
+    }
+
     const directory = cacheDirectory.absolutePath;
     directory.mkdirRecurse;
     const destination = directory.buildPath(fingerprint.sha256Of.toHexString ~ ".so");
@@ -125,6 +173,23 @@ public DependencyImage prepareImage(
             __VERSION__, ", \"Image compiler must match the host compiler version\");\n"));
         runCompiler("compilation", [executable] ~ compileFlags ~ importFlags
             ~ [sourcePath, "-of=" ~ objectPath]);
+
+        string[] objectPaths = [objectPath];
+        string[] extraLinkFlags;
+        if (hasCppSource) {
+            const cppSourcePath = staging.buildPath("image.cpp");
+            const cppObjectPath = staging.buildPath("image_cpp.o");
+            cppSourcePath.write(cppSource);
+            runCompiler("C++ compilation", cxxCommand ~ cxxCompileFlags
+                ~ cxxCompilerArguments ~ [cppSourcePath, "-o", cppObjectPath]);
+            objectPaths ~= cppObjectPath;
+            // A library flag must trail every object file that needs
+            // symbols from it, or a traditional linker's one-pass symbol
+            // search misses them - so this joins the response file's own
+            // dependency archives, not `linkFlags`, which comes first.
+            extraLinkFlags ~= "-L-l" ~ cxxRuntimeLibrary;
+        }
+
         import std.array: join;
         import std.string: replace;
         const responsePath = staging.buildPath("linker.rsp");
@@ -133,7 +198,7 @@ public DependencyImage prepareImage(
             .join("\n"));
         runCompiler("linking", [executable] ~ linkFlags ~ linkerArguments
             ~ ["-Xcc=-Wl,@linker.rsp"]
-            ~ [objectPath, "-of=" ~ imagePath], staging);
+            ~ objectPaths ~ extraLinkFlags ~ ["-of=" ~ imagePath], staging);
         // Readers must never observe a partially linked image. Concurrent
         // builders publish equivalent complete files with atomic rename.
         rename(imagePath, destination);
@@ -172,6 +237,15 @@ else version (LDC)
     public enum defaultCompiler = "ldc2";
 
 
+// The system C++ compiler: `$CXX` when set, `c++` otherwise - the same
+// rule a Makefile uses.
+public string defaultCxxCompiler() {
+    import std.process: environment;
+
+    return environment.get("CXX", "c++");
+}
+
+
 private void runCompiler(
     in string phase, in string[] command, in string directory = null,
 ) {
@@ -190,28 +264,104 @@ private void runCompiler(
 
 // The compiler's identity does not change while a process runs (the
 // installation at a given path is assumed immutable, see the doc comment
-// on prepareImage above), so probe it once per executable, not once per
-// image build.
+// on prepareImage above), so probe it once per command, not once per
+// image build. `command` is the whole invocation - a wrapper such as
+// `ccache` ahead of the real compiler counts, since it can change what
+// actually runs - joined to one string as the cache key.
 private __gshared string[string] _compilerIdentityCache;
+private __gshared string[string] _cxxRuntimeLibraryCache;
 private __gshared Object _compilerIdentityMutex = new Object();
 
-private string compilerIdentity(in string executable) {
+private string compilerIdentity(in string[] command) {
+    import std.conv: text;
     import std.process: execute;
 
+    const key = command.text;
     synchronized (_compilerIdentityMutex) {
-        if (auto found = executable in _compilerIdentityCache)
+        if (auto found = key in _compilerIdentityCache)
             return *found;
     }
-    const identity = execute([executable, "--version"]);
+    const identity = execute(command ~ ["--version"]);
     require(identity.status == 0, "Cannot identify image compiler: " ~ identity.output);
     synchronized (_compilerIdentityMutex) {
-        _compilerIdentityCache[executable] = identity.output;
+        _compilerIdentityCache[key] = identity.output;
     }
     return identity.output;
 }
 
 
-private string compilerPath(in string compiler) {
+// Which runtime library `cxxCommand` links a C++ shared object against -
+// `stdc++` or `c++` - read from the driver itself instead of guessed from
+// the compiler's name (issue #336 review, finding 1). `-###` asks the
+// driver to print, not run, the subprocess commands it would use to link
+// a trivial C++ shared library: the same commands, whichever runtime it
+// defaults to, for gcc, for clang built either way
+// (`CLANG_DEFAULT_CXX_STDLIB`), and for any wrapper ahead of either. One
+// of the printed, quoted linker arguments is always `"-lstdc++"` or
+// `"-lc++"` (verified on this machine: gcc 16 and a clang 22 built to
+// clang's own upstream default both print `"-lstdc++"`, matching finding
+// 1's report that Linux clang defaults to libstdc++ unless reconfigured).
+private string probeCxxRuntimeLibrary(in string[] cxxCommand) {
+    import std.algorithm: canFind;
+    import std.conv: text;
+    import std.file: exists, remove, tempDir, write;
+    import std.path: buildPath;
+    import std.process: execute;
+    import std.uuid: randomUUID;
+
+    const key = cxxCommand.text;
+    synchronized (_compilerIdentityMutex) {
+        if (auto found = key in _cxxRuntimeLibraryCache)
+            return *found;
+    }
+
+    const probeSource = buildPath(
+        tempDir(), text("snakebite-cxx-probe-", randomUUID, ".cpp"));
+    probeSource.write("int snakebite_cxx_runtime_probe() { return 0; }\n");
+    scope(exit) if (probeSource.exists) probeSource.remove();
+    // `-###` never runs the commands it prints, so this path is never
+    // written - naming it is only what tells the driver what a real
+    // link's output path would be.
+    const probeOutput = buildPath(
+        tempDir(), text("snakebite-cxx-probe-", randomUUID, ".so"));
+
+    const probe = execute(cxxCommand ~ ["-###", "-shared", "-fPIC",
+        probeSource, "-o", probeOutput]);
+    string library;
+    if (probe.output.canFind(`"-lc++"`))
+        library = "c++";
+    else if (probe.output.canFind(`"-lstdc++"`))
+        library = "stdc++";
+    else
+        require(false, text("Cannot tell which C++ runtime library `",
+            cxxCommand, "` links: ", probe.output));
+
+    synchronized (_compilerIdentityMutex) {
+        _cxxRuntimeLibraryCache[key] = library;
+    }
+    return library;
+}
+
+
+// `compiler` may be a bare executable, or, like a Makefile's `$CXX`, a
+// command line - a wrapper such as `ccache` ahead of the real compiler,
+// space-separated (issue #336 review, finding 7). Only the first word is
+// looked up on `PATH`; the rest travel as leading arguments ahead of
+// every other argument this module ever passes.
+private string[] resolveCxxCommand(in string compiler) {
+    import std.algorithm: filter;
+    import std.array: array;
+    import std.string: split, strip;
+
+    const words = compiler.strip.split.filter!(w => w.length != 0).array;
+    require(words.length != 0, "C++ compiler must not be empty");
+    return [compilerPath(words[0], "C++ compiler")] ~ words[1 .. $];
+}
+
+
+private string compilerPath(
+    in string compiler, in string label = "Image compiler",
+) {
     import std.file: exists;
     import std.path: absolutePath, buildPath;
     import std.process: environment;
@@ -219,7 +369,7 @@ private string compilerPath(in string compiler) {
     import std.algorithm: canFind;
 
     if (compiler.canFind('/')) {
-        require(compiler.exists, "Image compiler does not exist: " ~ compiler);
+        require(compiler.exists, label ~ " does not exist: " ~ compiler);
         return compiler.absolutePath;
     }
     foreach (directory; environment.get("PATH", "").split(":")) {
@@ -227,7 +377,7 @@ private string compilerPath(in string compiler) {
         if (candidate.exists)
             return candidate.absolutePath;
     }
-    require(false, "Image compiler not found on PATH: " ~ compiler);
+    require(false, label ~ " not found on PATH: " ~ compiler);
     assert(0);
 }
 

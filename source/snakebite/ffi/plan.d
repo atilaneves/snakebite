@@ -1483,7 +1483,7 @@ private CallPlan _shapeOf(
         plan._hiddenReturnPointer =
             !returnsRef && needsHiddenReturnPointer(type.nextOf);
         plan._contextPrecedesHiddenReturnPointer =
-            contextPrecedesHiddenReturnPointer;
+            contextPrecedesHiddenReturnPointer(linkage);
 
         // An `extern(D)` untyped variadic callee never reverses its
         // argument registers, even when `reversedDParameters` reverses
@@ -1581,7 +1581,7 @@ private CallPlan _shapeOf(
                         2,
                         false,
                     )
-                : ArgumentPlan.ofParameter(type.parameterList[i].type));
+                : ArgumentPlan.of(type.parameterList[i].type));
         }
 
         // A variadic call site's own extra arguments classify exactly
@@ -1604,7 +1604,7 @@ private CallPlan _shapeOf(
             if (isFunctionPointer || isDelegate)
                 plan._callbackArguments ~= CallPlan.CallbackArgument(
                     argumentIndex, false, isDelegate);
-            addArgument(ArgumentPlan.ofParameter(extraType));
+            addArgument(ArgumentPlan.of(extraType));
         }
 
         plan._parameterCount = argumentCount;

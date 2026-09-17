@@ -93,17 +93,48 @@ package struct FrameLayout {
         FrameLayout layout;
 
         if (hasHiddenThis(function_)) {
-            const isRefThis = (function_.vthis.storage_class & STC.ref_) != 0;
+            // `function_.vthis` is `dmd.funcsem.declareThis`'s own answer,
+            // but that pass only runs while walking a body (`semantic3.d`
+            // gates the whole block on `fbody`), so a bodyless declaration
+            // - an `extern(C++)` method or constructor bound to a host
+            // library, with nothing for `functionSemantic3` to walk - never
+            // gets one, whether or not it takes a hidden `this`
+            // (`hasHiddenThis`'s own doc). Its facts are exactly what
+            // `declareThis` would have derived: a struct `this` travels by
+            // reference, a class one by its own already-pointer-shaped
+            // handle type; nothing here calls a bodyless declaration
+            // nested, so `isThis()` is the only case left. A fabricated
+            // `ThisDeclaration` stands in for the missing `vthis`: no body
+            // exists to read it back through a `VarExp`, the one other
+            // reason `hiddenThis.variable`'s own doc gives it meaning, so
+            // it only ever has to be a non-null marker here - the same
+            // one every other reader of `hiddenThis.variable` already
+            // treats as "this layout reserved a slot for `this`".
+            imported!"dmd.declaration".VarDeclaration context;
+            bool isRefThis;
+            if (function_.vthis !is null) {
+                isRefThis = (function_.vthis.storage_class & STC.ref_) != 0;
+                context = function_.vthis;
+            } else {
+                import dmd.declaration: ThisDeclaration;
+
+                auto aggregate = function_.isThis();
+                assert(aggregate !is null,
+                    "FrameLayout.of: hasHiddenThis is true for a bodyless " ~
+                        "function with no `this` to derive its facts from");
+                isRefThis = aggregate.isStructDeclaration !is null;
+                context = new ThisDeclaration(
+                    function_.loc, aggregate.handleType());
+            }
+
             auto slot = isRefThis
                 ? layout.reserveSlot(TypeFacts.pointer)
-                : layout.reserveSlot(function_.vthis.type);
+                : layout.reserveSlot(context.type);
 
             layout.hiddenThis = HiddenThis(
-                Parameter(slot.offset, slot.facts, isRefThis),
-                function_.vthis,
+                Parameter(slot.offset, slot.facts, isRefThis), context,
             );
-            layout._slotOf[function_.vthis] =
-                VariableSlot(slot.offset, isRefThis);
+            layout._slotOf[context] = VariableSlot(slot.offset, isRefThis);
         }
 
         // The parameter *types* are part of the function's own type, and

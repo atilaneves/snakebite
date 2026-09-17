@@ -39,14 +39,26 @@ public enum reversedDParameters = () {
 }();
 
 // Whether a method that returns a large aggregate receives its context
-// before its hidden return pointer. dmd puts `this` first; ldc follows the
-// System V order and puts the hidden return pointer first.
-public enum contextPrecedesHiddenReturnPointer = () {
+// before its hidden return pointer. dmd puts `this` first for `extern(D)`;
+// ldc follows the System V order and puts the hidden return pointer first,
+// for every linkage. On dmd, a non-`extern(D)` method - `extern(C++)`
+// chief among them - follows the System V/Itanium order instead: the
+// glue layer (`e2ir.d`'s `callfunc`) only folds the hidden return pointer
+// in ahead of `this` when `tf.linkage == LINK.d`; for every other linkage
+// on a POSIX target it is appended after `this` instead, which its own
+// parameter-list nesting makes the *first* argument register, ahead of
+// `this` (verified against dmd's own `callfunc`, the comment "ehidden
+// goes last on Linux/OSX C++" marking exactly this branch).
+public bool contextPrecedesHiddenReturnPointer(
+    in imported!"dmd.astenums".LINK linkage,
+) {
+    import dmd.astenums: LINK;
+
     version (DigitalMars)
-        return true;
+        return linkage == LINK.d || linkage == LINK.default_;
     else
         return false;
-}();
+}
 
 // Whether an `extern(D)` untyped variadic call site's hidden `_arguments`
 // argument (issue #334 step 6) travels as a two-register `TypeInfo[]`
@@ -138,24 +150,14 @@ public struct ArgumentPlan {
     // message than an unbounded allocation would.
     private enum size_t maxMemoryBytes = 64 * size_t.sizeof;
 
-    public static ArgumentPlan ofParameter(Type type) {
-        version (LDC) {
-            import dmd.dsymbolsem: isPOD;
-            import dmd.typesem: baseElemOf;
-
-            auto structType = type.baseElemOf.isTypeStruct;
-            if (structType !is null && !structType.sym.isPOD) {
-                // LDC passes non-POD values through an invisible reference.
-                auto plan = ArgumentPlan(
-                    [Register(Register.Kind.pointer, 8), Register.init], 1,
-                );
-                plan.indirect = true;
-                return plan;
-            }
-        }
-        return of(type);
-    }
-
+    // `aggregatePlan` itself already gives a non-trivially-copyable type
+    // (`isNonTriviallyCopyable`'s own doc) the indirect, one-pointer shape
+    // this used to build only for LDC: the same Itanium rule holds for
+    // any host compiler, since it is a fact about the calling convention,
+    // not about which compiler built the caller. `of` alone now answers
+    // a parameter's own question and a return's alike (issue #336
+    // review, finding 12: a parameter-only `ofParameter` wrapper stayed
+    // behind after that unification with nothing left to add).
     public static ArgumentPlan of(Type type) {
         auto plan = aggregatePlan(type);
         if (plan.memory)
@@ -194,15 +196,41 @@ private void validateMemoryParameter(
         );
 }
 
-// The SysV ABI classifies a MEMORY result as a hidden return pointer. This
-// also catches an unaligned aggregate, which the ABI classifies as MEMORY
-// even when its size is at most two eightbytes. A MEMORY-class return
-// always takes this path, whatever its size or alignment - unlike a
-// MEMORY-class explicit parameter, it never becomes an `ArgumentPlan`
-// `buildMoves` places on the stack, so neither of `ArgumentPlan.of`'s own
-// limits applies to it.
+// The SysV ABI classifies a MEMORY result as a hidden return pointer, and
+// so does a non-trivially-copyable result (`isNonTriviallyCopyable`'s own
+// doc) - the same NRVO a hidden-pointer return already gives any large
+// aggregate, just triggered by non-POD-ness rather than size. This also
+// catches an unaligned POD aggregate, which the ABI classifies as MEMORY
+// even when its size is at most two eightbytes. Either path always takes
+// this route, whatever its size or alignment - unlike a MEMORY-class
+// explicit parameter, it never becomes an `ArgumentPlan` `buildMoves`
+// places on the stack, so neither of `ArgumentPlan.of`'s own limits
+// applies to it.
 public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type type) {
-    return aggregatePlan(type).memory;
+    const plan = aggregatePlan(type);
+    return plan.memory || plan.indirect;
+}
+
+// Whether `type` is a non-trivially-copyable struct, possibly through a
+// static array - one where `dmd.dsymbolsem.isPOD` answers `false` for the
+// element type: a user-declared copy constructor, a destructor, or a
+// postblit, on the type itself or on any field, recursively. The Itanium
+// ABI (and dmd's own `target.isReturnOnStack`/`argtypes_sysv_x64.
+// toArgTypes_sysv_x64`, which this mirrors) passes such a value by
+// indirect (hidden) reference instead of classifying it by field layout
+// at all, whatever its own size: one pointer-sized register or stack
+// word, exactly the shape a `ref` parameter already has, carrying the
+// address of a temporary the frontend's own semantic pass already builds
+// - the same copy-constructor call it inserts for passing such a struct
+// to *any* function, `extern(D)` included, which is why this is not
+// gated to one host compiler the way `ArgumentPlan.ofParameter` used to
+// gate it to LDC alone.
+private bool isNonTriviallyCopyable(imported!"dmd.mtype".Type type) {
+    import dmd.dsymbolsem: isPOD;
+    import dmd.typesem: baseElemOf;
+
+    auto aggregate = type.baseElemOf.isTypeStruct;
+    return aggregate !is null && !aggregate.sym.isPOD();
 }
 
 private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
@@ -214,6 +242,13 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
     ArgumentPlan plan;
     if (type.ty == Tvoid)
         return plan;
+
+    if (isNonTriviallyCopyable(type)) {
+        plan.registers[0] = Register(Register.Kind.pointer, 8);
+        plan.count = 1;
+        plan.indirect = true;
+        return plan;
+    }
 
     if (type.ty == Tpointer || type.ty == Tclass || type.ty == Taarray) {
         plan.registers[0] = Register(Register.Kind.pointer, 8);
@@ -358,6 +393,11 @@ private void classify(
     }
 
     if (auto aggregate = type.isTypeStruct) {
+        // A nested non-POD field already made the whole aggregate
+        // non-POD - `dmd.dsymbolsem.isPOD` checks every field itself -
+        // and `aggregatePlan` catches that case before it ever reaches
+        // here (see its own doc). Every field classified here is
+        // therefore already known POD, and classifies by layout as usual.
         foreach (field; aggregate.sym.fields) {
             if (field.type is null)
                 continue;

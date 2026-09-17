@@ -924,12 +924,14 @@ unittest {
             // A body, never walked - `PlanCache.of` builds a plan from
             // this declaration's dmd facts alone (its parameter/return
             // types and its `vthis`) and resolves the call by mangled
-            // symbol name; it never inspects `fbody`. dmd's own
-            // semantic3 pass only populates `vthis` for a function that
-            // has a body (or a `requires`/`ensure` contract) - see
-            // `hasHiddenThis`'s own doc - so a body-less prototype here,
-            // unlike a free function such as `abs`, would never read as
-            // having a hidden `this` at all.
+            // symbol name; it never inspects `fbody`. The body stays for
+            // a different reason: with no `extern` linkage to a host
+            // symbol, it is what gives this function code to emit and a
+            // mangled symbol `PlanCache.of`'s own resolver can find -
+            // `hasHiddenThis`'s `isThis()`/`isNested()` fallback
+            // (`snakebite.frontend.dmd.delegates`) already reads a
+            // body-less prototype as having a hidden `this` correctly,
+            // the same as one with a body.
             pragma(mangle, "snakebite_ut_context_hidden_pointer")
             extern(D) ThreeWords getThreeWords() { assert(0); }
         }
@@ -1536,8 +1538,7 @@ unittest {
 
             // A body, never walked - see
             // `called.contextPrecedesHiddenReturnPointer`'s own comment
-            // on why a body-less prototype would not have a hidden
-            // `this` at all.
+            // on why the body stays anyway.
             pragma(mangle, "snakebite_ut_context_memory_param")
             extern(D) ThreeWords addOffset(ThreeWords value) { assert(0); }
         }

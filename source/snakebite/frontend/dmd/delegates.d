@@ -64,6 +64,21 @@ public bool functionNeedsClosure(FuncDeclaration function_) {
 // checks `semanticRun` itself. `FrameLayout.of`, the FFI call plan, and a
 // call site's own argument count all ask this one function, so the three
 // cannot disagree about whether a given callee takes a hidden `this`.
+//
+// `declareThis`, the one place dmd itself ever assigns `vthis`, only runs
+// while walking a body (`semantic3.d` gates the whole block on `fbody`,
+// or an in/out contract) - `Exception.this` has one, even though neither
+// backend walks it, because dmd's own semantic still does. A declaration
+// with no body anywhere - an `extern(C++)` method or constructor bound to
+// a host library, with nothing for `functionSemantic3` to walk - never
+// runs `declareThis` at all, so `vthis` stays null whether or not the
+// declaration takes a hidden `this`. `isThis()`/`isNested()` answer that
+// same question directly, from the declaration alone, with no body
+// required, and agree with `vthis` on every case that does have a body:
+// `declareThis` sets `vthis` from exactly those two facts (deliberately
+// leaving it null when both are false), and its own dead-context lambda
+// case, below, only ever narrows a non-null `vthis` to unused, never
+// widens a null one.
 public bool hasHiddenThis(FuncDeclaration function_) {
     import dmd.funcsem: functionSemantic3;
     import dmd.tokens: TOK;
@@ -71,7 +86,7 @@ public bool hasHiddenThis(FuncDeclaration function_) {
     functionSemantic3(function_);
 
     if (function_.vthis is null)
-        return false;
+        return function_.isThis() !is null || function_.isNested();
 
     // dmd only clears a `FuncLiteralDeclaration`'s `vthis` when the
     // literal is coerced to a target pointer type at the point it is

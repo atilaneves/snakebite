@@ -4369,7 +4369,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         import snakebite.nativelayout: storeIntegral;
 
-        if (constructor.vthis is null)
+        // `layout.hiddenThis.variable`, not `constructor.vthis`: a
+        // bodyless constructor - `extern(C++)`, bound to a host library -
+        // never gets a real `vthis` (`hasHiddenThis`'s own doc), and
+        // `layoutOf` already stands a fabricated one in for it whenever
+        // it did reserve a `this` slot (`FrameLayout.of`'s own doc).
+        if (layout.hiddenThis.variable is null)
             throw new SnakebiteException(
                 text("interpreter cannot call constructor `",
                     constructor.toString, "`: it has no `this`"),
