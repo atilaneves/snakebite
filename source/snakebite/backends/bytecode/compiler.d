@@ -2743,11 +2743,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `AssignExp` reaching here is already safe to treat as a raw byte
     // copy.
     //
-    // When the right side is not itself an array, this is instead
-    // `p[a .. b] = v;`'s scalar-fill shape (dmd's own `blockAssign`,
-    // e.g. `core/internal/newaa.d`'s `(cast(ubyte*)&entry.value)[0 ..
-    // V.sizeof] = 0` zeroing a newly allocated AA entry's value): `v` is
-    // evaluated once, then broadcast into every element through
+    // DMD's `blockAssign` marks `p[a .. b] = v;` as a scalar fill,
+    // even when the element is itself an array. The value `v` is
+    // evaluated once, then copied into every element through
     // `opSliceFill`, the run-time counterpart to `compileSliceAssign`'s
     // own compile-time-unrolled scalar fill for a static array.
     private void compileDynamicSliceAssign(
@@ -2755,6 +2753,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t resolvedTarget = size_t.max,
     ) {
         import dmd.astenums: Tarray, Tpointer, Tvoid;
+        import dmd.expression: MemorySet;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
         if (target.e1.type.ty != Tarray && target.e1.type.ty != Tpointer)
@@ -2775,7 +2774,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (resolvedTarget == size_t.max)
             evalInto(target, destSliceOffset, arrayFacts.size);
 
-        if (expression.e2.type.ty != Tarray) {
+        if (expression.memset == MemorySet.blockAssign
+                || expression.e2.type.ty != Tarray) {
             if (elementType.ty == Tvoid)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
