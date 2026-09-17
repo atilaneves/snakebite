@@ -13,6 +13,26 @@ import snakebite.frontend.dmd.functions: findFunction;
 import std.string: endsWith;
 
 
+static foreach (backend; Matrix!()) {
+    @("abstractBaseWithBodylessMethod." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            abstract class Base {
+                int value();
+            }
+            class Derived: Base {
+                override int value() { return 17; }
+            }
+            void main() {
+                Base value = new Derived;
+                assert(value.value() == 17);
+            }
+        });
+    }
+}
+
+
 public final class HostDispatchObject: Object {
     public override size_t toHash() @trusted nothrow {
         return 42;
