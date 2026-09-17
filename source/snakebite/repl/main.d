@@ -7,6 +7,7 @@ private:
 public int main(string[] args) {
     import snakebite.frontend.compiler: initialize, Snippets;
     import snakebite.dependencyimage: DependencyImage;
+    import snakebite.dub: fetchProject;
     import snakebite.project: loadProject, prepareDependencies, sourceSet;
     import snakebite.repl: Repl;
     import snakebite.repl.cli: parseReplArgs;
@@ -30,12 +31,18 @@ public int main(string[] args) {
         string[] importPaths = parsed.options.importPaths.dup;
         string[] stringImportPaths;
         const(DependencyImage)* dependencyImage;
-        if (parsed.options.projectDirectory.length != 0) {
+        string projectDirectory = parsed.options.projectDirectory;
+        if (parsed.options.dubProject.length != 0) {
+            if (projectDirectory.length != 0)
+                throw new Exception("--dub and --project cannot be used together");
+            projectDirectory = fetchProject(parsed.options.dubProject);
+        }
+        if (projectDirectory.length != 0) {
             auto projectSources = sourceSet(
-                parsed.options.projectDirectory, [], [],
+                projectDirectory, [], [],
             );
             auto project = loadProject(
-                parsed.options.projectDirectory, projectSources,
+                projectDirectory, projectSources,
             );
             prepareDependencies(project);
             importPaths = project.sources.importPaths ~ importPaths;
