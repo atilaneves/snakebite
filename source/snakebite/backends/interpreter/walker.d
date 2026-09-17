@@ -2302,7 +2302,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // `T value = void` requests storage without initialization. The
         // frame slot already exists, so executing this declaration performs
         // no write. Code must assign any bytes it reads, as in compiled D.
-        if (variable._init.isVoidInitializer !is null)
+        if (variable._init is null || variable._init.isVoidInitializer !is null)
             return;
 
         auto expInitializer = variable._init.isExpInitializer;

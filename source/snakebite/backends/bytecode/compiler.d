@@ -2068,15 +2068,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        // dmd always installs an `ExpInitializer` holding the type's own
-        // default value for a function local with no initialiser written -
-        // `int ret;` and `int ret = 0;` reach here the same way. Zero is
-        // also the wrong default for some of the integral types this
-        // compiler accepts (`char.init`/`wchar.init` are `0xFF`/`0xFFFF`,
-        // not zero), so there is no "blit to zero" case of its own to
-        // handle here, only this invariant to assert.
-        assert(variable._init !is null,
-            "a local variable declaration with no initializer at all");
+        // Zero-length static arrays can have no initializer at all.
+        if (variable._init is null)
+            return;
 
         if (variable._init.isVoidInitializer !is null)
             return;

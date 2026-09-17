@@ -9,6 +9,37 @@ module ut.backends.run.staticarrays;
 import ut.backends;
 
 static foreach (backend; Matrix!()) {
+    @("staticArray.emptyVariantArrayClosure." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.variant: Variant;
+            size_t count(Variant[] values) { return values.length; }
+            void main() {
+                Variant[0] values;
+                size_t nested() { return count(values[]); }
+                assert(nested() == 0);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArray.emptyStructArraySlice." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Element { int value = 17; }
+            size_t count(Element[] values) { return values.length; }
+            void main() {
+                Element[0] values;
+                assert(count(values[]) == 0);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
     @("staticArray.twoHundredElementInitialValues." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

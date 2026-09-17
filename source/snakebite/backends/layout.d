@@ -254,8 +254,11 @@ package struct FrameLayout {
     // pointer's regardless of what it points to, so nothing about
     // `parameter.type` is involved in sizing it.
     private Slot reserveSlot(in TypeFacts facts) {
+        import std.algorithm: max;
+
         const offset = alignUp(this.size, facts.alignment);
-        this.size = offset + facts.size;
+        // A captured zero-size local still needs an address in a live frame.
+        this.size = offset + max(size_t(1), facts.size);
         if (facts.alignment > this.alignment)
             this.alignment = facts.alignment;
 
@@ -625,6 +628,8 @@ extern(C++) private final class LocalsCollector:
         _layout._slotOf[variable] =
             FrameLayout.VariableSlot(slot.offset, isRef);
 
+        if (variable._init is null)
+            return;
         if (auto initializer = variable._init.isExpInitializer) {
             auto value = initializer.exp;
             if (auto construct = value.isConstructExp)
