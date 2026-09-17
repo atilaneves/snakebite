@@ -61,10 +61,23 @@ static foreach (backend; Matrix!(
                 invariant { assert(true); }
             }
             class Resource: Base {
+                bool delegate(out int) fetch;
+                this(bool delegate(out int) fetch) {
+                    this.fetch = fetch;
+                }
                 ~this() {}
+                int read() {
+                    int result;
+                    fetch(result);
+                    return result;
+                }
             }
             void main() {
-                auto resource = new Resource;
+                auto resource = new Resource((out int value) {
+                    value = 42;
+                    return true;
+                });
+                assert(resource.read() == 42);
                 destroy(resource);
             }
         });
