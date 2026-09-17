@@ -23,7 +23,7 @@ public imported!"snakebite.dependencyimage".DependencyImage prepareTestStartup(
 
 private enum registrySource = q{
     module snakebite_test_registry;
-    private __gshared void* slot;
+    private __gshared void* _slot;
     private struct CompilerDSOData {
         size_t version_;
         void** slot;
@@ -31,11 +31,21 @@ private enum registrySource = q{
         const(void*)* end;
     }
     private alias Registry = extern(C) void function(void*);
+    private __gshared Registry _unregister;
     export extern(C) void snakebite_register_tests(
         Registry registry, const(void*)* modules, size_t length,
     ) {
-        auto data = CompilerDSOData(1, &slot, modules, modules + length);
+        auto data = CompilerDSOData(1, &_slot, modules, modules + length);
         registry(&data);
+        _unregister = registry;
+    }
+    // The pinned image outlives guest workers. Its ELF destructor is the
+    // same point at which compiler-generated registrations are removed.
+    pragma(crt_destructor) extern(C) void unregisterTests() {
+        if (_slot !is null) {
+            auto data = CompilerDSOData(1, &_slot, null, null);
+            _unregister(&data);
+        }
     }
 };
 

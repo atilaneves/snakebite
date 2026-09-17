@@ -43,6 +43,7 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
     alias visit = SemanticTimeTransitiveVisitor.visit;
 
     import dmd.func: FuncDeclaration;
+    import dmd.dmodule: Module;
     import dmd.expression: CallExp, VarExp, DelegateExp, FuncExp;
     import dmd.dtemplate: TemplateDeclaration, TemplateInstance;
     import dmd.attrib: AttribDeclaration, ConditionalDeclaration;
@@ -56,6 +57,7 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
     private FuncDeclaration[][FuncDeclaration] _callees;
     private bool[FuncDeclaration] _needsRoot;
     private bool[string] _imports;
+    private bool[Module] _modules;
     private struct Reference {
         string overloads;
         string arguments;
@@ -66,6 +68,16 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
 
     this(imported!"snakebite.backends.backend".Program program) {
         _program = program;
+        foreach (module_; program.rootModules)
+            collectModules(module_);
+    }
+
+    private extern(D) void collectModules(Module module_) {
+        if (module_ in _modules)
+            return;
+        _modules[module_] = true;
+        foreach (dependency; module_.aimports)
+            collectModules(dependency);
     }
 
     // Taking addresses emits the original D symbols. There is no forwarding
@@ -163,8 +175,15 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
                     for (auto type = getType(argument); type !is null; type = type.nextOf) {
                         if (auto symbol = type.toDsymbol(null)) {
                             auto module_ = symbol.getModule; // DMD symbol queries are mutable.
-                            if (module_ !is null && !_program.isRootOwned(module_))
-                                _imports[module_.toPrettyChars.fromStringz.idup] = true;
+                            if (module_ !is null) {
+                                // DMD can home another program's instances on
+                                // this root. Their types are not dependencies
+                                // of the program being compiled into an image.
+                                if (_program.isRootOwned(module_) || module_ !in _modules)
+                                    _needsRoot[function_] = true;
+                                else
+                                    _imports[module_.toPrettyChars.fromStringz.idup] = true;
+                            }
                         }
                     }
                 }

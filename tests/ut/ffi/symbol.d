@@ -73,6 +73,18 @@ static foreach (backend; Matrix!()) {
                 const count = cast(Count)
                     project.program.dependencyImage.resolve("runner_calls");
                 count().should == iteration;
+                if (iteration == 1) {
+                    // DMD can home these template instances on a previous
+                    // project's root. Preparing it again must not import
+                    // this separate, in-memory module into its native image.
+                    parseSnippet(q{
+                        import std.range.interfaces: inputRangeObject;
+                        struct UnrelatedRangeItem { int value; }
+                        Object makeRange() {
+                            return inputRangeObject([UnrelatedRangeItem(1)]);
+                        }
+                    });
+                }
             }
         }
     }
