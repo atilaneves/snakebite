@@ -564,7 +564,8 @@ private void storeValue(
     NativeData* nativeData = null,
 ) {
     import core.stdc.string: memcpy, memset;
-    import dmd.astenums: Tarray, Tfloat32, Tfloat64, Tfloat80, Tsarray;
+    import dmd.astenums:
+        Tarray, Tfloat32, Tfloat64, Tfloat80, Tpointer, Tsarray;
     import dmd.expressionsem: toInteger, toReal;
     import dmd.typesem: mutableOf, nextOf, size, toBasetype;
     import std.conv: text;
@@ -576,6 +577,13 @@ private void storeValue(
 
     if (facts.isIntegral) {
         storeIntegral(place, value.toInteger, facts.size);
+        return;
+    }
+
+    // DMD represents a null pointer used in an identity expression as an
+    // integer literal. It is still a pointer value in the native layout.
+    if (type.ty == Tpointer && value.isIntegerExp && value.toInteger == 0) {
+        memset(place, 0, facts.size);
         return;
     }
 
