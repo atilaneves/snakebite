@@ -42,6 +42,11 @@ public PreparationReport prepareProject(
     import snakebite.frontend.compiler: Snippets, initialize;
     import snakebite.project: loadProject, sourceSet, prepareDependencies;
     import std.datetime.stopwatch: AutoStart, StopWatch;
+    import snakebite.teststartup: prepareTestStartup;
+    import snakebite.dependencyimage: DependencyImage;
+    import std.algorithm.iteration: map;
+    import std.array: array;
+    import std.string: fromStringz;
 
     // Two costs a user pays before any backend runs, timed apart: finding
     // the sources is not frontend work (for a dub project it is a `dub
@@ -58,6 +63,13 @@ public PreparationReport prepareProject(
     stopWatch.reset;
     if (nativeDependencies)
         prepareDependencies(project);
+    if (project.program.dependencyImage !is null)
+        project.program.testHooks = project.program.dependencyImage.testHooks;
+    auto startupImage = new DependencyImage;
+    *startupImage = prepareTestStartup(project.directory,
+        project.program.rootModules.map!(module_ =>
+            module_.toPrettyChars.fromStringz.idup).array);
+    project.program.testStartupImage = startupImage;
     return PreparationReport(project, discovery, frontendDuration, stopWatch.peek);
 }
 
@@ -69,11 +81,28 @@ public ExecutionReport executeBackend(
 ) {
     import snakebite.backends: makeBackend;
     import snakebite.backends.backend: run;
+    import snakebite.teststartup: runTestsAndMain;
     import std.datetime.stopwatch: AutoStart, StopWatch;
+
+    import std.stdio: stdin, stdout, stderr;
+
+    // Guest runners can replace thread-local streams. Host reports must
+    // use the host's streams after execution, including exceptional exits.
+    auto savedInput = stdin; // File references must remain mutable.
+    auto savedOutput = stdout;
+    auto savedError = stderr;
+    scope(exit) {
+        stdin = savedInput;
+        stdout = savedOutput;
+        stderr = savedError;
+    }
 
     auto stopWatch = StopWatch(AutoStart.yes);
     scope backend = makeBackend(name, program);
-    const status = run(backend, program, hostArguments);
+    // Snippet callers construct Programs without project startup metadata.
+    const status = program.testStartupImage is null
+        ? run(backend, program, hostArguments)
+        : runTestsAndMain(backend, program, hostArguments);
     return ExecutionReport(
         status,
         stopWatch.peek,

@@ -159,6 +159,9 @@ private void appendUnittests(
 
         if (auto aggregate = member.isAggregateDeclaration)
             appendUnittests(aggregate.members, unittests);
+
+        if (auto instance = member.isTemplateInstance)
+            appendUnittests(instance.members, unittests);
     }
 }
 

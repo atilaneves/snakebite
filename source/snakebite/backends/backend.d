@@ -4,6 +4,9 @@ module snakebite.backends.backend;
 private:
 
 
+public alias TestHooks = imported!"snakebite.dependencyimage".TestHooks;
+
+
 // The root modules of the guest program, parsed and semantically analysed by
 // the frontend, and its entry point. A dub project is not special: a
 // dub-aware driver asks dub for import paths and flags and builds one of
@@ -23,6 +26,8 @@ public struct Program {
     string name;
     // Prepared for this project's execution before any guest code runs.
     const(DependencyImage)* dependencyImage;
+    const(DependencyImage)* testStartupImage;
+    TestHooks testHooks;
 
     // The entry point is found the way a compiled build finds it: the first
     // root module declaring a module-level `main`.
@@ -165,7 +170,7 @@ public int run(
 
 // A constructor that cannot run is a failed program startup. Report it
 // loudly so the caller cannot mistake a partial run for success.
-private int runModuleConstructors(
+package(snakebite) int runModuleConstructors(
     Backend backend,
     imported!"dmd.func".FuncDeclaration[] constructors,
 ) {
@@ -200,7 +205,7 @@ private int runModuleConstructors(
 
 // The program's own `main`. `void main` maps to exit status 0, and no `main`
 // at all is not an error: the status is 0.
-private int runMain(
+package(snakebite) int runMain(
     Backend backend,
     Program program,
     in string[] hostArguments,
