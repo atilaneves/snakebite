@@ -3559,9 +3559,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        case zero:
-            _nativeData.write(_type, _facts, expression.e1, _place);
+        case zero: {
+            import core.stdc.string: memset;
+
+            if (expression.e1.isNullExp is null)
+                runForEffect(expression.e1);
+            memset(_place, 0, _facts.size);
             return;
+        }
 
         // An explicit pointer-to-integral cast preserves the native
         // address bits.

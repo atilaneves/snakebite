@@ -4955,7 +4955,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         case zero:
-            return evalInto(expression.e1, destOffset, width);
+            if (expression.e1.isNullExp is null)
+                compileEffect(expression.e1);
+            emit(&opZero, destOffset, 0, width);
+            return;
 
         case floatWidth: {
             const sourceOffset = plan.sourceFacts.size > plan.destFacts.size
