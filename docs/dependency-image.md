@@ -27,7 +27,8 @@ linker files, linker flags, and system libraries are also supplied to the link.
 The root package is not linked into the image.
 
 Snakebite records hashes of dependency sources, recipes, build settings, and
-archives in `.snakebite/dub-dependencies`. An unchanged dependency set
+archives in the project's hashed state partition under `.snakebite` in the
+current working directory. An unchanged dependency set
 skips `dub build`. A change to root source contents alone also skips that build.
 A missing archive, changed dependency, or changed build setting makes dub check
 and build the project again. The first run also makes this check to establish
@@ -85,8 +86,11 @@ loader.
 
 ## Cache and errors
 
-Project images are cached in `.snakebite/images` under the project directory.
-Project preparation supplies imported source files as cache inputs.
+Project images are cached in the current working directory under
+`.snakebite/<project-path-hash>/images`. Startup images and DUB dependency
+state use the same project partition. The project path hash is the SHA-256
+hash of the normalized absolute project path. Project preparation supplies
+imported source files as cache inputs.
 
 The cache key includes build flags, import paths, generated source, frontend
 version, compiler path, compiler executable content, compiler version output,
@@ -95,10 +99,11 @@ Callers must list any extra source or configuration files used by the generated
 source. The compiler's
 runtime headers and libraries are assumed unchanged within an installation.
 
-Project preparation first checks `.snakebite/images/project.json`. This records
-the image path, build settings, and file metadata for the compiler, dependency
-inputs, archives, and root sources. If they are unchanged, preparation loads the
-existing image directly. It does not discover templates, probe the compiler, or
+Project preparation first checks the partition's
+`images/project.json`. This records the image path, build settings, and file
+metadata for the compiler, dependency inputs, archives, and root sources. If
+they are unchanged, preparation loads the existing image directly. It does not
+discover templates, probe the compiler, or
 read and hash input contents. File identity, size, modification time, and change
 time detect replaced files and same-size edits with restored modification times.
 

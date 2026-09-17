@@ -41,7 +41,8 @@ public PreparationReport prepareProject(
     in string[] versions = null,
 ) {
     import snakebite.frontend.compiler: Snippets, initialize;
-    import snakebite.project: loadProject, sourceSet, prepareDependencies;
+    import snakebite.project:
+        loadProject, projectStateDirectory, sourceSet, prepareDependencies;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import snakebite.teststartup: prepareTestStartup;
     import snakebite.dependencyimage: DependencyImage;
@@ -60,6 +61,7 @@ public PreparationReport prepareProject(
     stopWatch.reset;
     initialize(Snippets.no);
     auto project = loadProject(directory, sources);
+    const stateDirectory = projectStateDirectory(project.directory);
     const frontendDuration = stopWatch.peek;
     stopWatch.reset;
     if (nativeDependencies)
@@ -67,7 +69,7 @@ public PreparationReport prepareProject(
     if (project.program.dependencyImage !is null)
         project.program.testHooks = project.program.dependencyImage.testHooks;
     auto startupImage = new DependencyImage;
-    *startupImage = prepareTestStartup(project.directory,
+    *startupImage = prepareTestStartup(stateDirectory,
         project.program.rootModules.map!(module_ =>
             module_.toPrettyChars.fromStringz.idup).array);
     project.program.testStartupImage = startupImage;

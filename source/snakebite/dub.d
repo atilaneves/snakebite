@@ -184,7 +184,8 @@ public string[] parseDescribeList(in string output) @safe pure {
 // Let dub decide which targets are stale, including the full dependency
 // chain of static-library roots. PIC is required by the shared image.
 public void buildDubDependencies(
-    in string directory, in DubDescription description, in string[] linkerFiles,
+    in string directory, in string stateDirectory,
+    in DubDescription description, in string[] linkerFiles,
 ) {
     import snakebite.dependencyimage: defaultCompiler;
     import snakebite.exception: SnakebiteException;
@@ -193,7 +194,7 @@ public void buildDubDependencies(
     import std.file: exists, mkdirRecurse, readText, write;
     import std.path: buildPath;
 
-    const statePath = buildPath(directory, ".snakebite", "dub-dependencies");
+    const statePath = buildPath(stateDirectory, "dub-dependencies");
     const fingerprint = dependencyFingerprint(directory, description);
     const before = fileFingerprint(linkerFiles);
     import std.algorithm: all;
@@ -214,7 +215,7 @@ public void buildDubDependencies(
         throw new SnakebiteException("Dub dependency build failed:\n" ~ result.output);
     if (!linkerFiles.all!exists)
         throw new SnakebiteException("Dub build did not produce all dependency libraries");
-    buildPath(directory, ".snakebite").mkdirRecurse;
+    stateDirectory.mkdirRecurse;
     statePath.write(fingerprint ~ fileFingerprint(linkerFiles));
 }
 

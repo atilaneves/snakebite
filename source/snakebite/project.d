@@ -95,6 +95,18 @@ public bool isDubProject(in string directory) {
 }
 
 
+public string projectStateDirectory(in string projectDirectory) {
+    import std.digest.sha: sha256Of;
+    import std.digest: toHexString;
+    import std.file: getcwd;
+    import std.path: absolutePath, buildNormalizedPath, buildPath;
+
+    const absolute = projectDirectory.absolutePath.buildNormalizedPath;
+    return buildPath(getcwd, ".snakebite",
+        absolute.sha256Of.toHexString.idup);
+}
+
+
 private SourceSet bareSourceSet(
     in string directory,
     in string[] importPaths,
@@ -224,7 +236,8 @@ public void prepareDependencies(ref Project project) {
     import std.json: JSONValue;
     import std.process: environment;
 
-    const directory = buildPath(project.directory, ".snakebite", "images");
+    const stateDirectory = projectStateDirectory(project.directory);
+    const directory = buildPath(stateDirectory, "images");
     const settings = text(project.sources.flags, project.sources.importPaths,
         project.sources.stringImportPaths, project.sources.linkerFlags,
         project.sources.linkerFiles, JSONValue(project.sources.sourceOverrides),
@@ -248,8 +261,8 @@ public void prepareDependencies(ref Project project) {
     if (project.sources.linkerFiles.length && isDubProject(project.directory)) {
         import snakebite.dub: buildDubDependencies;
 
-        buildDubDependencies(project.directory, project.sources.dubDescription,
-            project.sources.linkerFiles);
+        buildDubDependencies(project.directory, stateDirectory,
+            project.sources.dubDescription, project.sources.linkerFiles);
     }
     generateSource;
     if (!source.length && !project.sources.linkerFiles.length)

@@ -8,7 +8,7 @@ private:
 // address to find the image's segments. BetterC prevents the compiler from
 // registering a second, unrelated ModuleInfo for this small adapter.
 public imported!"snakebite.dependencyimage".DependencyImage prepareTestStartup(
-    in string directory,
+    in string stateDirectory,
     in string[] moduleNames,
 ) {
     import snakebite.dependencyimage: prepareImage, defaultCompiler;
@@ -16,7 +16,7 @@ public imported!"snakebite.dependencyimage".DependencyImage prepareTestStartup(
     import std.array: join;
 
     const source = registrySource ~ "\n// Modules: " ~ moduleNames.join(", ") ~ "\n";
-    return prepareImage(source, directory.buildPath(".snakebite", "startup"),
+    return prepareImage(source, stateDirectory.buildPath("startup"),
         defaultCompiler, null, null, null, ["-betterC"], null, ["-betterC"]);
 }
 
