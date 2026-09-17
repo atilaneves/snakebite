@@ -209,6 +209,11 @@ private void runThreadEndHooks() nothrow {
 }
 
 static ~this() {
+    // druntime collects garbage after the main thread's module destructors.
+    // Guest finalizers still need its state then. Keep that state rooted
+    // until process exit; worker threads release theirs when they end.
+    if (Thread.getThis !is null && Thread.getThis.isMainThread)
+        return;
     runThreadEndHooks;
 }
 

@@ -13,6 +13,55 @@ import snakebite.frontend.dmd.functions: findFunction;
 import std.string: endsWith;
 
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot access class destructors through TypeInfo"),
+    Omit!(Interpreter, Because.diverges,
+        "The interpreter allocates while executing a GC finalizer"),
+)) {
+    @("firstDestructorCallFromGc." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: GC;
+            class Resource {
+                int* count;
+                this(int* count) { this.count = count; }
+                ~this() { ++*count; }
+            }
+            void main() {
+                int count;
+                auto resource = new Resource(&count);
+                const address = cast(const void*) typeid(Resource).destructor;
+                GC.runFinalizers(address[0 .. 1]);
+                assert(count == 1);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("abstractBaseWithBodylessMethod." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            abstract class Base {
+                int value();
+            }
+            class Derived: Base {
+                override int value() { return 17; }
+            }
+            void main() {
+                Base value = new Derived;
+                assert(value.value() == 17);
+            }
+        });
+    }
+}
+
+
 public final class HostDispatchObject: Object {
     public override size_t toHash() @trusted nothrow {
         return 42;

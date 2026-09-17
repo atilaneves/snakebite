@@ -135,6 +135,15 @@ public TypeInfo_Class classRuntimeInfo(
             info.destructor = hooks.methodAddress(declaration.dtor, 0);
         foreach (i; 1 .. declaration.vtbl.length) {
             auto method = declaration.vtbl[i].isFuncDeclaration;
+            import dmd.dsymbolsem: isAbstract;
+
+            // DMD leaves bodyless slots empty in an abstract class,
+            // even when the method itself has no abstract attribute.
+            if (method !is null && method.fbody is null
+                    && declaration.isAbstract) {
+                info.vtbl[i] = null;
+                continue;
+            }
             if (method !is null)
                 info.vtbl[i] = hooks.methodAddress(method, 0);
         }

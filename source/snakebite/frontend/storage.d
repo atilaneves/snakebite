@@ -38,6 +38,18 @@ public struct StorageResolver(Result, Adapter) {
         if (auto ptrExp = expression.isPtrExp)
             return _adapter.storagePointer(ptrExp);
 
+        if (auto context = expression.isDelegatePtrExp) {
+            import snakebite.nativelayout: delegateContextOffset;
+            return _adapter.storageDelegateWord(
+                resolve(context.e1), delegateContextOffset);
+        }
+
+        if (auto functionPointer = expression.isDelegateFuncptrExp) {
+            import snakebite.nativelayout: delegateFunctionOffset;
+            return _adapter.storageDelegateWord(
+                resolve(functionPointer.e1), delegateFunctionOffset);
+        }
+
         if (auto cond = expression.isCondExp) {
             return _adapter.storageConditional(
                 cond,

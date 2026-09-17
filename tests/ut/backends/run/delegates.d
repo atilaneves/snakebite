@@ -9,6 +9,88 @@ module ut.backends.run.delegates;
 import ut.backends;
 
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot access delegate function pointers"),
+)) {
+    @("assignDelegateFieldsBeforeNestedCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Counter {
+                int value;
+                int read() { return value; }
+            }
+            int invoke(Counter* counter) {
+                int delegate() callback;
+                callback.funcptr = &Counter.read;
+                callback.ptr = counter;
+                int helper() { return callback(); }
+                return helper();
+            }
+            void main() {
+                Counter counter = Counter(42);
+                assert(invoke(&counter) == 42);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read callable TypeInfo fields"),
+)) {
+    @("callableTypeInfo." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Result { int value; }
+            Result operation(int value) { return Result(value); }
+            alias Callback = Result delegate(int);
+            void main() {
+                auto functionInfo = cast(TypeInfo_Function) typeid(typeof(operation));
+                assert(functionInfo !is null);
+                assert(functionInfo.next is typeid(Result));
+                assert(functionInfo.deco == typeof(operation).mangleof);
+                assert(functionInfo.tsize == 0);
+                auto pointerInfo = cast(TypeInfo_Pointer) typeid(typeof(&operation));
+                assert(pointerInfo.m_next is functionInfo);
+                auto delegateInfo = cast(TypeInfo_Delegate) typeid(Callback);
+                assert(delegateInfo !is null);
+                assert(delegateInfo.next is typeid(Result));
+                assert(delegateInfo.deco == Callback.mangleof);
+                assert(delegateInfo.tsize == Callback.sizeof);
+                assert(typeid(Callback) is delegateInfo);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("pointerToVariadicDelegateCaller." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdarg;
+            struct Counter {
+                int value;
+                extern(C) void add(int amount, ...) { value += amount; }
+            }
+            void invoke(Counter* counter) {
+                auto add = &counter.add;
+                add(17);
+            }
+            void main() {
+                auto invokePointer = &invoke;
+                assert(invokePointer !is null);
+            }
+        });
+    }
+}
+
+
 // A function literal that reads no enclosing local needs no context, so
 // binding it to a delegate variable makes a (null, function) pair. Each
 // call binds the parameter afresh, so repeated calls see their own

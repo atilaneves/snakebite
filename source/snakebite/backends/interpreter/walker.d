@@ -271,6 +271,8 @@ private struct Shared {
         import dmd.dsymbolsem: isAbstract;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
+        // getOverloads can leave an alias in a function-pointer constant.
+        method = method.toAliasFunc;
         if (method.isAbstract)
             return null;
 
@@ -2300,7 +2302,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // `T value = void` requests storage without initialization. The
         // frame slot already exists, so executing this declaration performs
         // no write. Code must assign any bytes it reads, as in compiled D.
-        if (variable._init.isVoidInitializer !is null)
+        if (variable._init is null || variable._init.isVoidInitializer !is null)
             return;
 
         auto expInitializer = variable._init.isExpInitializer;
@@ -2616,6 +2618,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         public void* storageValueCall(CallExp expression) {
             return evaluator.valueCallAddress(expression);
+        }
+
+        public void* storageDelegateWord(void* base, in size_t offset) {
+            return cast(ubyte*) base + offset;
         }
 
         public void* storageArrayLength(
