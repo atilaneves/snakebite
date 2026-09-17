@@ -119,15 +119,18 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
             import std.algorithm: canFind;
             if (reference.functions.canFind!(function_ => function_ in _needsRoot))
                 continue;
-            result ~= text("static if (__traits(compiles, { auto pointer = &", key, "; })) {\n",
-                "    export __gshared auto retained", i, " = &", key, ";\n",
-                "} else static if (__traits(compiles, ", reference.overloads, ")) {\n",
-                "static foreach (index, overload; ", reference.overloads, ") {\n",
+            // Diagnostic type spellings are not always valid D expressions.
+            // Parse each candidate inside the guarded mixin so an inaccessible
+            // instance can keep its normal guest fallback.
+            result ~= text("static if (__traits(compiles, { auto pointer = mixin(q{&", key, "}); })) {\n",
+                "    export __gshared auto retained", i, " = mixin(q{&", key, "});\n",
+                "} else static if (__traits(compiles, mixin(q{", reference.overloads, "}))) {\n",
+                "static foreach (index, overload; mixin(q{", reference.overloads, "})) {\n",
                 "    static if (", reference.selected, ") {\n",
-                "    static if (__traits(compiles, { auto pointer = cast(typeof(&overload", reference.arguments, ")) &", key, "; }))\n",
+                "    static if (__traits(compiles, { auto pointer = mixin(q{cast(typeof(&overload", reference.arguments, ")) &", key, "}); }))\n",
                 "        mixin(\"export __gshared auto retained", i,
                 "_\" ~ index.stringof ~ q{ = cast(typeof(&overload", reference.arguments, ")) &", key, ";});\n",
-                "    else static if (__traits(compiles, { auto pointer = &overload", reference.arguments, "; }))\n",
+                "    else static if (__traits(compiles, { auto pointer = mixin(q{&overload", reference.arguments, "}); }))\n",
                 "        mixin(\"export __gshared auto retained", i,
                 "_\" ~ index.stringof ~ q{ = &overload", reference.arguments, ";});\n}\n}\n}\n");
         }

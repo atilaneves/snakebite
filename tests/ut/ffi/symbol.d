@@ -578,6 +578,35 @@ static foreach (backend; Matrix!()) {
 }
 
 
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot read the delegate funcptr used by toDelegate"))) {
+    @("image.functionLinkageTemplateArgument." ~ backend.stringof)
+    @Serial
+    unittest {
+        enum code = q{
+            import std.functional: toDelegate;
+            extern(C) int increment(int value) { return value + 1; }
+            int answer() {
+                return toDelegate(&increment)(16);
+            }
+        };
+        static if (is(backend == Native)) {
+            mixin(code);
+            answer.should == 17;
+        } else {
+            auto module_ = parseSnippet(code);
+            auto program = Program([module_]);
+            auto image = prepareImage(imageSource(program), sharedImageCache);
+            program.dependencyImage = &image;
+            scope instance = new backend(program);
+            int result;
+            instance.call(findFunction(module_, "answer"), &result, []);
+            result.should == 17;
+        }
+    }
+}
+
+
 @("image.templateArgumentImports")
 @Serial
 unittest {
