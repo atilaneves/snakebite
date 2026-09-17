@@ -339,6 +339,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
+        // getOverloads can leave an alias in a function-pointer constant.
+        method = method.toAliasFunc;
         if (method.isAbstract)
             return null;
         // Untyped variadic calls require the argument types at each call

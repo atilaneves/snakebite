@@ -271,6 +271,8 @@ private struct Shared {
         import dmd.dsymbolsem: isAbstract;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
+        // getOverloads can leave an alias in a function-pointer constant.
+        method = method.toAliasFunc;
         if (method.isAbstract)
             return null;
 

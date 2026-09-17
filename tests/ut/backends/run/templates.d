@@ -9,6 +9,33 @@ module ut.backends.run.templates;
 import ut.backends;
 
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE treats a pointer to a getOverloads alias as a bodyless function"),
+)) {
+    @("getOverloadsAliasCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Functions {
+                static int add(int a, int b) { return a + b + 1; }
+                static double add(double a, double b) { return a + b + 2; }
+            }
+            void main() {
+                alias first = __traits(getOverloads, Functions, "add")[0];
+                alias second = __traits(getOverloads, Functions, "add")[1];
+                assert(first(1, 2) == 4);
+                assert(second(1, 2) == 5);
+                static immutable firstPointer = &first;
+                static immutable secondPointer = &second;
+                assert(firstPointer(1, 2) == 4);
+                assert(secondPointer(1, 2) == 5);
+            }
+        });
+    }
+}
+
+
 // `__traits(allMembers)` with a recursive template walks a struct's fields
 // in declaration order, choosing a branch per field type.
 static foreach (backend; Matrix!()) {
