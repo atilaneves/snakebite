@@ -246,6 +246,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     package void registerGuestWord(
         FuncDeclaration function_, const(Function)* compiled,
     ) {
+        // A callback can first run during GC finalization, when allocating
+        // its argument layout is forbidden.
+        hostLayoutOf(function_);
         _plans.registerGuestFunction(compiled, function_);
     }
 
