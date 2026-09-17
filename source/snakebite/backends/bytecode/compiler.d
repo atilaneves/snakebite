@@ -176,6 +176,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         void* returnPlace,
         scope const(void*)[] args,
     ) {
+        initializeThread;
         const layout = hostLayoutOf(function_);
         layout.checkHostArgumentCount(args.length, function_, "bytecode");
 

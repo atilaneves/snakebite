@@ -7,6 +7,64 @@ module ut.backends.run.declarations;
 
 
 import ut.backends;
+import snakebite.backends.backend: Program, run;
+import snakebite.dependencyimage: defaultCompiler;
+import snakebite.frontend.compiler: parseSnippet;
+import std.process: execute;
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run thread-local module initialization"),
+)) {
+    @("threadModuleConstructorBeforeCallback." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum code = q{
+            module thread_constructors;
+            import core.thread: Thread;
+
+            int value;
+            int calls;
+            static this() {
+                value = 42;
+                ++calls;
+            }
+
+            void worker() {
+                assert(value == 42);
+                assert(calls == 1);
+                value = 99;
+            }
+
+            void main() {
+                assert(value == 42);
+                assert(calls == 1);
+                value = 7;
+                foreach (i; 0 .. 2) {
+                    auto thread = new Thread(&worker);
+                    thread.start;
+                    thread.join;
+                }
+                assert(value == 7);
+                assert(calls == 1);
+            }
+        };
+        static if (is(backend == Native)) {
+            const sandbox = Sandbox();
+            sandbox.writeFile("thread_constructors.d", code);
+            const executable = sandbox.inSandboxPath("test");
+            const result = execute([defaultCompiler,
+                sandbox.inSandboxPath("thread_constructors.d"),
+                "-of=" ~ executable]);
+            result.status.shouldEqual(0, result.output);
+            execute([executable]).status.should == 0;
+        } else {
+            auto program = Program([parseSnippet(code)]);
+            run(new backend(program), program).should == 0;
+        }
+    }
+}
 
 
 static foreach (backend; Matrix!()) {

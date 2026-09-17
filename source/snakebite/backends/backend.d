@@ -89,14 +89,37 @@ public struct CompilationStatistics {
 public abstract class Backend {
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
+    import snakebite.hostthreads: PerThread;
 
     // The program this backend runs. Whether a callee is interpreted or
     // called natively is the program's one decision (`isInterpreted`),
     // so every backend is constructed knowing which program it runs.
     protected const Program _program;
+    private PerThread!(bool*) _threadInitialized;
+    private FuncDeclaration[] _threadConstructors;
 
     protected this(const Program program) {
         _program = program;
+        _threadInitialized = PerThread!(bool*)(() => new bool);
+        foreach (constructor; program.moduleConstructors)
+            if (constructor.isStaticCtorDeclaration !is null)
+                // DMD declarations retain mutable semantic caches.
+                _threadConstructors ~= cast(FuncDeclaration) constructor;
+    }
+
+    protected void initializeThread() {
+        if (_threadConstructors.length == 0)
+            return;
+        auto initialized = _threadInitialized.current;
+        if (*initialized)
+            return;
+
+        // Publish before calling guest code: constructors can call back
+        // into this backend on the same thread.
+        *initialized = true;
+        scope(failure) *initialized = false;
+        foreach (constructor; _threadConstructors)
+            call(constructor, null, []);
     }
 
     // Read-only cumulative statistics. Backends without a compilation phase
@@ -157,6 +180,7 @@ public int run(
     Program program,
     in string[] hostArguments = null,
 ) {
+    *backend._threadInitialized.current = true;
     if (runModuleConstructors(backend, program.moduleConstructors))
         return 1;
 

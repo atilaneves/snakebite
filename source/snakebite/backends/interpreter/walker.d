@@ -46,6 +46,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     // The evaluator of the calling thread: made on its first entry, and
     // kept until it ends.
     private Evaluator evaluator() {
+        initializeThread;
         return _evaluators.current;
     }
 
