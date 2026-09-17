@@ -15,8 +15,12 @@ static foreach (backend; Matrix!(
     @("classDestructorAtShutdown." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        const sandbox = Sandbox();
-        sandbox.writeFile("probe.d", q{
+        const directory = buildPath(tempDir,
+            "snakebite-cli-destructor-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
             import core.stdc.stdio: puts;
             class Resource {
                 ~this() { puts("resource finalized"); }
@@ -25,7 +29,9 @@ static foreach (backend; Matrix!(
             void main() { allocate(); }
         });
         static if (is(backend == Native))
-            const result = execute(["dmd", "-run", sandbox.inSandboxPath("probe.d")]);
+            // DMD writes object files in its working directory, even with -run.
+            const result = execute(["dmd", "-run", source],
+                null, Config.none, size_t.max, directory);
         else {
             static if (is(backend == Interpreter))
                 enum name = "interpreter";
@@ -35,7 +41,7 @@ static foreach (backend; Matrix!(
                 enum name = "ctfe";
             const result = execute([
                 buildPath(getcwd, "bin", "sb"), "-b", name,
-                sandbox.inSandboxPath(""),
+                directory,
             ]);
         }
         if (result.status != 0)
@@ -60,7 +66,8 @@ static foreach (backend; Matrix!()) {
         });
         static if (is(backend == Native)) {
             const versions = ["-version=AutomemAsan", "-version=Extra"];
-            const result = execute(["dmd"] ~ versions ~ ["-run", source]);
+            const result = execute(["dmd"] ~ versions ~ ["-run", source],
+                null, Config.none, size_t.max, directory);
         } else {
             const versions = ["--version=AutomemAsan", "--version=Extra"];
             static if (is(backend == Interpreter))
@@ -163,7 +170,8 @@ static foreach (backend; Matrix!(
             "-d", "--help", "-b", "ctfe", "test name", "--", "",
         ];
         static if (is(backend == Native))
-            const result = execute(["dmd", "-run", source] ~ arguments);
+            const result = execute(["dmd", "-run", source] ~ arguments,
+                null, Config.none, size_t.max, directory);
         else {
             static if (is(backend == Interpreter))
                 enum name = "interpreter";
@@ -176,6 +184,7 @@ static foreach (backend; Matrix!(
             ] ~ arguments);
         }
         if (result.status != 42)
-            fail(result.output, __FILE__, __LINE__);
+            fail(text("Expected exit status 42, got ", result.status,
+                ": ", result.output), __FILE__, __LINE__);
     }
 }
