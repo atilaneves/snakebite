@@ -70,15 +70,13 @@ public struct CallPlan {
     // already resolved to its integer/SSE/stack region - `callAt` never
     // has to ask which region a move belongs to. The hidden return
     // pointer, when this plan has one, is not a move - see
-    // `_returnPointerOffset`. `byteOffset` is `ushort`, not `ubyte`: a
-    // MEMORY-class argument's last eightbyte can start up to
-    // `abi.ArgumentPlan.maxMemoryBytes - 8` bytes in (504 at the current
-    // 512-byte limit), past what `ubyte` holds.
+    // `_returnPointerOffset`. Source offsets use `size_t` because
+    // MEMORY-class arguments have no fixed size limit.
     private struct Move {
         private size_t parameterIndex;
         private size_t destinationOffset;
+        private size_t byteOffset;
         private Load load;
-        private ushort byteOffset;
         private ubyte copyBytes;
     }
 
@@ -425,7 +423,7 @@ public struct CallPlan {
         foreach (i; 0 .. _resultCount) {
             const register = _return.registers[i];
             const move = Move(
-                0, 0, loadOf(register), 0, copyBytesOf(register));
+                0, 0, 0, loadOf(register), copyBytesOf(register));
             *cast(size_t*) (frameBytes + _resultMoves[i].sourceOffset) =
                 loadRare(
                     move,
@@ -681,8 +679,8 @@ public struct CallPlan {
                 ? sseBase + (floatingCount++) * size_t.sizeof
                 : integerBase + (integerCount++) * size_t.sizeof;
             _moves[moveCount++] = Move(
-                parameterIndex, destinationOffset, loadOf(register),
-                cast(ushort) byteOffset, copyBytesOf(register),
+                parameterIndex, destinationOffset, byteOffset,
+                loadOf(register), copyBytesOf(register),
             );
         }
 
@@ -694,8 +692,8 @@ public struct CallPlan {
             const destinationOffset =
                 stackBase + (stackCount++) * size_t.sizeof;
             _moves[moveCount++] = Move(
-                parameterIndex, destinationOffset, loadOf(register),
-                cast(ushort) byteOffset, copyBytesOf(register),
+                parameterIndex, destinationOffset, byteOffset,
+                loadOf(register), copyBytesOf(register),
             );
         }
 

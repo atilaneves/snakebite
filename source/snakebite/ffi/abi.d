@@ -137,19 +137,6 @@ public struct ArgumentPlan {
         return (memoryBytes + 7) / 8;
     }
 
-    // The largest MEMORY-class argument this plans for, in bytes: 64
-    // whole eightbytes. A large by-value aggregate does happen in
-    // practice - for example `std.regex`'s `Regex!char`, a struct of a
-    // dozen slices that `std.regex.matchFirst` takes by value, well over
-    // the old 128-byte limit this replaces (issue #334 step 3) - so this
-    // is a generous, independent sanity bound, not a derived one:
-    // `snakebite.ffi.plan.CallPlan`'s own stack capacity is no longer
-    // fixed (it grows on demand past its 16-word fast path - see
-    // `CallPlan.callAt`'s own heap fallback), so there is no plan-side
-    // number for this to track, and refusing here still gives a clearer
-    // message than an unbounded allocation would.
-    private enum size_t maxMemoryBytes = 64 * size_t.sizeof;
-
     // `aggregatePlan` itself already gives a non-trivially-copyable type
     // (`isNonTriviallyCopyable`'s own doc) the indirect, one-pointer shape
     // this used to build only for LDC: the same Itanium rule holds for
@@ -161,18 +148,15 @@ public struct ArgumentPlan {
     public static ArgumentPlan of(Type type) {
         auto plan = aggregatePlan(type);
         if (plan.memory)
-            validateMemoryParameter(type, plan);
+            validateMemoryParameter(type);
         return plan;
     }
 }
 
-// The two ways a MEMORY-class parameter can be unsupported for now - see
-// `ArgumentPlan.maxMemoryBytes` and the stack alignment limit below. Only
-// called for an explicit parameter (`ArgumentPlan.of`); a MEMORY-class
-// *return* still travels through a hidden pointer regardless of these
-// limits (see `needsHiddenReturnPointer`), so this never runs for one.
+// Only explicit MEMORY-class parameters need the stack alignment check.
+// A MEMORY-class return travels through a hidden pointer instead.
 private void validateMemoryParameter(
-    imported!"dmd.mtype".Type type, in ArgumentPlan plan,
+    imported!"dmd.mtype".Type type,
 ) {
     import dmd.typesem: alignsize;
     import std.conv: text;
@@ -186,14 +170,6 @@ private void validateMemoryParameter(
                 "only 16-byte-aligned MEMORY-class arguments are " ~
                 "supported"),
         );
-
-    if (plan.memoryBytes > ArgumentPlan.maxMemoryBytes)
-        throw new Exception(
-            text("ffi cannot pass a value of type `", type.toString,
-                "`: its ", plan.memoryBytes, " bytes exceed the ",
-                ArgumentPlan.maxMemoryBytes,
-                "-byte limit for a MEMORY-class argument"),
-        );
 }
 
 // The SysV ABI classifies a MEMORY result as a hidden return pointer, and
@@ -204,8 +180,8 @@ private void validateMemoryParameter(
 // even when its size is at most two eightbytes. Either path always takes
 // this route, whatever its size or alignment - unlike a MEMORY-class
 // explicit parameter, it never becomes an `ArgumentPlan` `buildMoves`
-// places on the stack, so neither of `ArgumentPlan.of`'s own limits
-// applies to it.
+// places on the stack, so `ArgumentPlan.of`'s alignment limit does not
+// apply to it.
 public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type type) {
     const plan = aggregatePlan(type);
     return plan.memory || plan.indirect;
