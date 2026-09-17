@@ -3,6 +3,8 @@ module snakebite.repl;
 
 private:
 
+private alias DependencyImage =
+    imported!"snakebite.dependencyimage".DependencyImage;
 
 // One REPL session: an accumulated module source, the backend it runs
 // on, and any input still waiting for a closing brace. Declarations from
@@ -22,6 +24,7 @@ private:
 public struct Repl {
     private imported!"snakebite.backends".BackendName _backendName;
     private string[] _importPaths;
+    private const(DependencyImage)* _dependencyImage;
     private string _accumulatedSource;
     private string _pendingInput;
     private uint _cellCount = 1;
@@ -31,13 +34,18 @@ public struct Repl {
     public this(
         imported!"snakebite.backends".BackendName backendName,
         in string[] importPaths = [],
+        in string[] stringImportPaths = [],
+        const(DependencyImage)* dependencyImage = null,
     ) {
-        import dmd.frontend: addImport;
+        import dmd.frontend: addImport, addStringImport;
 
         _backendName = backendName;
         _importPaths = importPaths.dup;
+        _dependencyImage = dependencyImage;
         foreach (importPath; _importPaths)
             addImport(importPath);
+        foreach (stringImportPath; stringImportPaths)
+            addStringImport(stringImportPath);
     }
 
     public bool shouldQuit(in string input) const @safe pure {
@@ -98,12 +106,18 @@ public struct Repl {
         import snakebite.frontend.compiler: parseSnippet;
         import snakebite.frontend.dmd.functions: findFunction;
         import snakebite.repl.cell: replCellLineDirective;
+        import std.string: stripRight;
+
+        const stripped = source.stripRight;
+        const expression = stripped.length != 0 && stripped[$ - 1] == ';'
+            ? stripped[0 .. $ - 1].stripRight
+            : stripped;
 
         const evalName = syntheticEvalFunctionName(_cellCount);
         const cellSource = replCellLineDirective(_cellCount)
             ~ "string " ~ evalName ~ "() {\n"
             ~ "    import std.conv: text;\n"
-            ~ "    return text(" ~ source ~ ");\n"
+            ~ "    return text(" ~ expression ~ ");\n"
             ~ "}\n";
         const fullSource = _accumulatedSource ~ cellSource;
 
@@ -116,9 +130,11 @@ public struct Repl {
         }
 
         auto function_ = findFunction(module_, evalName);
+        auto program = Program(interpretedModules(module_, _importPaths));
+        program.dependencyImage = _dependencyImage;
         auto backend = makeBackend(
             _backendName,
-            Program(interpretedModules(module_, _importPaths)),
+            program,
         );
 
         string display;
@@ -185,10 +201,12 @@ public struct Repl {
             return SubmitResult.init;
         }
 
+        auto program = Program(interpretedModules(module_, _importPaths));
+        program.dependencyImage = _dependencyImage;
         accept(
             fullSource,
             module_,
-            makeBackend(_backendName, Program(interpretedModules(module_, _importPaths))),
+            makeBackend(_backendName, program),
         );
 
         return SubmitResult.init;

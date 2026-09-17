@@ -9,6 +9,7 @@ public struct ReplOptions {
     public bool hasCommand;
     public string command;
     public string[] importPaths;
+    public string projectDirectory;
     public bool showHelp;
     public string[] files;
     public bool liveAfterFiles;
@@ -40,6 +41,8 @@ public ReplCliResult parseReplArgs(string[] args) {
             "I", "Add an import path.", (string _, string val) {
                 result.options.importPaths ~= val;
             },
+            "project", "Use import paths from a DUB project.",
+                &result.options.projectDirectory,
             "b|backend", "Select the backend (default: bytecode).",
                 &backendName,
             "l", "Stay interactive after loading file arguments.",
@@ -74,6 +77,7 @@ private enum helpText =
     "Options:\n" ~
     "  -c <command>          Run one D expression and exit\n" ~
     "  -I <path>             Add an import path\n" ~
+    "  --project <directory> Use import paths from a DUB project\n" ~
     "  -b, --backend <name>  Select the backend (default: bytecode)\n" ~
     "                        valid: "
         ~ imported!"snakebite.backends".validBackendNames ~ "\n" ~

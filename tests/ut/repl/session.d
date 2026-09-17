@@ -20,6 +20,17 @@ unittest {
 }
 
 
+@("submit.evaluatesAnExpressionWithTerminatingSemicolon")
+unittest {
+    auto repl = Repl(ReplBackendName.interpreter);
+
+    const result = repl.submit("1 + 2;");
+
+    result.kind.should == SubmitResult.Kind.value;
+    result.text.should == "3";
+}
+
+
 @("submit.blankLineIsANoopWithNoOutput")
 unittest {
     auto repl = Repl(ReplBackendName.interpreter);
