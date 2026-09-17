@@ -425,11 +425,15 @@ static foreach (backend; Matrix!()) {
             targetName "image-app"
             preBuildCommands "test ! -e reject-build"
             dependency "image-middle" path="../middle"
+            configuration "unittest" {
+                targetType "executable"
+            }
         });
         sandbox.writeFile("app/source/app.d", q{
             module image_app;
             import image_middle;
             unittest { assert(answer() == 42); }
+            int main() { assert(answer() == 42); return 0; }
         });
         sandbox.writeFile("middle/dub.sdl", q{
             name "image-middle"
