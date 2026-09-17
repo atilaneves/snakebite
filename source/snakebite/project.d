@@ -169,6 +169,9 @@ private SourceSet dubSourceSet(in string directory, in string[] versions) {
         foreach (package_; description.value["packages"].array)
             if (package_["active"].boolean) {
                 if (key == "sourceFiles") {
+                    if (package_["name"].str
+                            != description.value["rootPackage"].str)
+                        continue;
                     foreach (file; package_["files"].array)
                         if (file["role"].str == "source")
                             result ~= buildPath(
