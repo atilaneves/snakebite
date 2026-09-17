@@ -146,6 +146,7 @@ private bool hasGuestDelegateArgument(
     scope bool delegate(imported!"dmd.func".FuncDeclaration) isGuest,
 ) {
     import dmd.func: FuncDeclaration;
+    import dmd.astenums: Tdelegate;
 
     if (arguments is null)
         return false;
@@ -154,6 +155,11 @@ private bool hasGuestDelegateArgument(
         auto expression = argument; // Casts do not change the target body.
         while (auto cast_ = expression.isCastExp)
             expression = cast_.e1;
+
+        // Function pointers cross the barrier through callback entries.
+        // Only delegates can require access to a captured guest frame.
+        if (expression.type is null || expression.type.ty != Tdelegate)
+            continue;
 
         FuncDeclaration function_;
         if (auto literal = expression.isFuncExp)

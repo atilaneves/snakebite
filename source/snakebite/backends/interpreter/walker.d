@@ -214,7 +214,7 @@ private struct Shared {
     this(const Program program) {
         this.program = program;
         plans = PlanCache(program.dependencyImage);
-        nativeData = NativeData(&constantSymbolAddress);
+        nativeData = NativeData(&constantSymbolAddress, &classRuntimeInfo);
         runtimeTypes = RuntimeTypes(&this.program.isRootOwned,
             (name) => plans.resolve(name),
             &classRuntimeInfo,

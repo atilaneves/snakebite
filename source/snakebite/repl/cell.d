@@ -39,12 +39,16 @@ public bool isExpressionCell(in string input) {
     import dmd.parse: Parser;
     import dmd.tokens: TOK;
     import snakebite.frontend.compiler: resetErrors, withCompilerLock;
+    import std.string: stripRight;
 
     bool result;
     withCompilerLock(() {
         resetErrors;
 
-        const source = input ~ ";\0";
+        const stripped = input.stripRight;
+        const source = (stripped.length != 0 && stripped[$ - 1] == ';'
+            ? stripped
+            : stripped ~ ";") ~ "\0";
         scope parser = new Parser!ASTCodegen(
             null,
             source,

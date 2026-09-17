@@ -6,6 +6,8 @@ private:
 
 public int main(string[] args) {
     import snakebite.frontend.compiler: initialize, Snippets;
+    import snakebite.dependencyimage: DependencyImage;
+    import snakebite.project: loadProject, prepareDependencies, sourceSet;
     import snakebite.repl: Repl;
     import snakebite.repl.cli: parseReplArgs;
     import std.stdio: stderr, writeln;
@@ -24,29 +26,49 @@ public int main(string[] args) {
         return 0;
     }
 
-    auto repl = Repl(parsed.options.backend, parsed.options.importPaths);
-
-    foreach (file; parsed.options.files) {
-        try
-            repl.loadModuleFile(file);
-        catch (Exception exception) {
-            writeln(errorDiagnostic(exception.msg));
-            return 1;
+    try {
+        string[] importPaths = parsed.options.importPaths.dup;
+        string[] stringImportPaths;
+        const(DependencyImage)* dependencyImage;
+        if (parsed.options.projectDirectory.length != 0) {
+            auto projectSources = sourceSet(
+                parsed.options.projectDirectory, [], [],
+            );
+            auto project = loadProject(
+                parsed.options.projectDirectory, projectSources,
+            );
+            prepareDependencies(project);
+            importPaths = project.sources.importPaths ~ importPaths;
+            stringImportPaths = project.sources.stringImportPaths;
+            dependencyImage = project.program.dependencyImage;
         }
+
+        auto repl = Repl(
+            parsed.options.backend,
+            importPaths,
+            stringImportPaths,
+            dependencyImage,
+        );
+
+        foreach (file; parsed.options.files)
+            repl.loadModuleFile(file);
+
+        if (parsed.options.hasCommand)
+            return runOneShotCommand(repl, parsed.options.command);
+
+        if (parsed.options.files.length != 0 && !parsed.options.liveAfterFiles)
+            return 0;
+
+        if (stdinIsTerminal) {
+            writeln("Snakebite REPL");
+            return runInteractiveRepl(repl);
+        }
+
+        return runPipedRepl(repl);
+    } catch (Exception exception) {
+        writeln(errorDiagnostic(exception.msg));
+        return 1;
     }
-
-    if (parsed.options.hasCommand)
-        return runOneShotCommand(repl, parsed.options.command);
-
-    if (parsed.options.files.length != 0 && !parsed.options.liveAfterFiles)
-        return 0;
-
-    if (stdinIsTerminal) {
-        writeln("Snakebite REPL");
-        return runInteractiveRepl(repl);
-    }
-
-    return runPipedRepl(repl);
 }
 
 

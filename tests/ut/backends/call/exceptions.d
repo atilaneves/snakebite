@@ -10,6 +10,68 @@ import std.meta: AliasSeq;
 
 
 static foreach (backend; Matrix!()) {
+    @("exceptions.staticImmutableException." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                int result() {
+                    static immutable failure = new Exception("locked");
+                    try {
+                        throw failure;
+                    } catch (Exception caught) {
+                        return caught.msg == "locked" ? 42 : 0;
+                    }
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("exceptions.staticImmutableDerivedException." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            class Failure : Exception {
+                int code;
+                Exception[] nested;
+                Failure self;
+                this() pure {
+                    super("outer");
+                    auto inner = new Exception("inner");
+                    nested = [inner, inner];
+                    self = this;
+                    code = 42;
+                }
+            }
+
+            immutable(Failure) failure() {
+                static immutable value = new immutable Failure;
+                return value;
+            }
+
+            int result() {
+                try {
+                    throw failure();
+                } catch (Failure caught) {
+                    assert(caught is failure());
+                    assert(caught.msg == "outer");
+                    assert(caught.nested[0].msg == "inner");
+                    assert(caught.nested[0] is caught.nested[1]);
+                    assert(caught.self is caught);
+                    return caught.code;
+                }
+            }
+        }, "result");
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
     @("assert.passes." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

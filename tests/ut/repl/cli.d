@@ -69,6 +69,15 @@ unittest {
 }
 
 
+@("project.capturesDirectory")
+unittest {
+    const result = parseReplArgs(["sb", "--project", "/tmp/cerealed"]);
+
+    result.status.should == 0;
+    result.options.projectDirectory.should == "/tmp/cerealed";
+}
+
+
 @("live.flagSetsLiveAfterFiles")
 unittest {
     const result = parseReplArgs(["sb", "-l", "loaded.d"]);

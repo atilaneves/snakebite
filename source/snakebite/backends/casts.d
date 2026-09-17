@@ -146,8 +146,8 @@ public CastPlan classify(
             && sourceType.nextOf.mutableOf.equals(destType.nextOf.mutableOf))
         return CastPlan(CastPlan.Kind.sarrayToPointer, sourceFacts, destFacts);
 
-    // Both `arr.ptr` and an explicit pointer cast preserve the array's
-    // data address, even when the destination has a different element type.
+    // Explicit array-to-pointer casts preserve the data address even when
+    // the pointed-to type differs from the array's element type.
     if (sourceFacts.isDynamicArray && destType.ty == Tpointer)
         return CastPlan(CastPlan.Kind.sliceToPointer, sourceFacts, destFacts);
 
