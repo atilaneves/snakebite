@@ -65,8 +65,11 @@ and the guest use the same compiler family (ADR-0007).
 
 **`extern(C++)`**: free functions and static member functions, using
 the Itanium mangling the frontend already produces. Non-virtual member
-functions, with `this` as the first argument. Virtual member
-functions, called through the C++ vtable the frontend models.
+functions, with `this` as the first argument - except when the method
+also returns a MEMORY-class or non-trivially-copyable value, where
+`this` follows the hidden return pointer instead, as issue #336 itself
+found and `abi.contextPrecedesHiddenReturnPointer` encodes. Virtual
+member functions, called through the C++ vtable the frontend models.
 Non-trivially-copyable classes, passed by hidden reference, as the
 Itanium ABI requires. A C++ exception that crosses the barrier
 propagates or terminates the process, exactly as it does for compiled

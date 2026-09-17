@@ -154,13 +154,10 @@ public struct ArgumentPlan {
     // (`isNonTriviallyCopyable`'s own doc) the indirect, one-pointer shape
     // this used to build only for LDC: the same Itanium rule holds for
     // any host compiler, since it is a fact about the calling convention,
-    // not about which compiler built the caller. Kept as its own name so
-    // a parameter call site still reads as asking a parameter's own
-    // question, distinct from a return's.
-    public static ArgumentPlan ofParameter(Type type) {
-        return of(type);
-    }
-
+    // not about which compiler built the caller. `of` alone now answers
+    // a parameter's own question and a return's alike (issue #336
+    // review, finding 12: a parameter-only `ofParameter` wrapper stayed
+    // behind after that unification with nothing left to add).
     public static ArgumentPlan of(Type type) {
         auto plan = aggregatePlan(type);
         if (plan.memory)
