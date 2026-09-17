@@ -53,6 +53,23 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.unconfirmed,
         "CTFE cannot modify druntime test hooks"),
 )) {
+    @("runnerOutputDoesNotHideHostSummary." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        checkStartup!backend("streams", [q{
+            module probe;
+            import core.runtime: Runtime, UnitTestResult;
+            import std.stdio: File, stdout, stderr;
+            shared static this() {
+                Runtime.extendedModuleUnitTester = () {
+                    stdout = File("/dev/null", "w");
+                    stderr = File("/dev/null", "w");
+                    return UnitTestResult(1, 1, false, false);
+                };
+            }
+        }], [], 0, is(backend == Native) ? [] : ["frontend time:", "run time:"], []);
+    }
+
     @("extendedTestRunnerArguments." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

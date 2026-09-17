@@ -22,6 +22,61 @@ import std.process: execute;
 import std.file: exists, readText, remove, setTimes;
 import std.path: buildPath;
 
+static foreach (backend; Matrix!()) {
+    @("image.repeatedProjectTestRunner." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        sandbox.writeFile("app/dub.sdl", q{
+            name "repeat-runner-app"
+            targetType "library"
+            dependency "repeat-runner" path="../runner"
+        });
+        sandbox.writeFile("app/source/app.d", q{
+            module repeat_runner_app;
+            import repeat_runner;
+            unittest { assert(false, "custom runner must replace default tests"); }
+        });
+        sandbox.writeFile("runner/dub.sdl", q{
+            name "repeat-runner"
+            targetType "staticLibrary"
+        });
+        sandbox.writeFile("runner/source/repeat_runner.d", q{
+            module repeat_runner;
+            import core.runtime: Runtime, UnitTestResult;
+            private __gshared int calls;
+            shared static this() {
+                Runtime.extendedModuleUnitTester = () {
+                    ++calls;
+                    return UnitTestResult(1, 1, false, false);
+                };
+            }
+            extern(C) int runner_calls() { return calls; }
+        });
+        const directory = sandbox.inSandboxPath("app");
+        foreach (iteration; 1 .. 3) {
+            static if (is(backend == Native)) {
+                import std.process: Config;
+                execute(["dub", "test", "--compiler=" ~ defaultCompiler],
+                    null, Config.none, size_t.max, directory).status.should == 0;
+            } else {
+                import snakebite.execution: executeBackend;
+                import snakebite.backends: backendIdentity;
+                import snakebite.dependencyimage: TestHooks;
+                auto project = prepareProject(directory).project;
+                // A missing hook would enter this host's default unittest
+                // runner recursively instead of giving a bounded failure.
+                project.program.testHooks.should.not == TestHooks.init;
+                executeBackend(backendIdentity!backend, project.program).status.should == 0;
+                alias Count = extern(C) int function();
+                const count = cast(Count)
+                    project.program.dependencyImage.resolve("runner_calls");
+                count().should == iteration;
+            }
+        }
+    }
+}
+
 private enum atomicSource = q{
     module image;
     import core.atomic: MemoryOrder;

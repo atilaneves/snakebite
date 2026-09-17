@@ -4,21 +4,7 @@ module snakebite.backends.backend;
 private:
 
 
-public struct TestHooks {
-    import core.runtime: Runtime;
-
-    private typeof(Runtime.moduleUnitTester) _legacy;
-    private typeof(Runtime.extendedModuleUnitTester) _extended;
-
-    public static TestHooks current() {
-        return TestHooks(Runtime.moduleUnitTester, Runtime.extendedModuleUnitTester);
-    }
-
-    public void install() const {
-        Runtime.moduleUnitTester = _legacy;
-        Runtime.extendedModuleUnitTester = _extended;
-    }
-}
+public alias TestHooks = imported!"snakebite.dependencyimage".TestHooks;
 
 
 // The root modules of the guest program, parsed and semantically analysed by

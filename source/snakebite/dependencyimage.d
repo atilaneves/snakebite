@@ -4,11 +4,29 @@ module snakebite.dependencyimage;
 private:
 
 
+public struct TestHooks {
+    import core.runtime: Runtime;
+
+    private typeof(Runtime.moduleUnitTester) _legacy;
+    private typeof(Runtime.extendedModuleUnitTester) _extended;
+
+    public static TestHooks current() {
+        return TestHooks(Runtime.moduleUnitTester, Runtime.extendedModuleUnitTester);
+    }
+
+    public void install() const {
+        Runtime.moduleUnitTester = _legacy;
+        Runtime.extendedModuleUnitTester = _extended;
+    }
+}
+
+
 // A project's dependency image stays loaded until the executable exits.
 // This value describes the image; its scope does not limit that lifetime.
 public struct DependencyImage {
     private void* _handle;
     private string _path;
+    public TestHooks testHooks;
 
     public string path() @safe @nogc nothrow pure const return scope {
         return _path;
@@ -149,12 +167,28 @@ private DependencyImage loadImage(in string path) {
     import std.string: fromStringz, toStringz;
     import std.conv: text;
 
+    // Hooks belong to the process, so concurrent image loads must not
+    // capture or restore another image's constructor changes.
+    _imageLoadLock.lock;
+    scope(exit) _imageLoadLock.unlock;
+    const savedHooks = TestHooks.current;
+    scope(exit) savedHooks.install;
+    TestHooks.init.install;
+
     DependencyImage image;
     image._path = path;
     image._handle = Runtime.loadLibrary(path);
     if (image._handle is null)
         require(false, text("Cannot load dependency image ", path,
             ": ", dlerror.fromStringz));
+    // Shared constructors run only on the first load. Retain their hooks
+    // even if later preparation fails, since the loaded image stays pinned.
+    if (auto hooks = image._handle in _imageTestHooks)
+        image.testHooks = *hooks;
+    else {
+        image.testHooks = TestHooks.current;
+        _imageTestHooks[image._handle] = image.testHooks;
+    }
     // druntime releases a thread's library references when that thread exits.
     // Symbols must remain valid for the executable after the loading thread ends.
     const pinned = dlopen(path.toStringz, RTLD_LAZY | RTLD_NODELETE);
@@ -163,6 +197,17 @@ private DependencyImage loadImage(in string path) {
             ": ", dlerror.fromStringz));
     dlclose(cast(void*) pinned);
     return image;
+}
+
+
+private __gshared TestHooks[void*] _imageTestHooks;
+private __gshared imported!"core.sync.mutex".Mutex _imageLoadLock;
+
+
+shared static this() {
+    import core.sync.mutex: Mutex;
+
+    _imageLoadLock = new Mutex;
 }
 
 
