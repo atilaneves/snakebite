@@ -9,6 +9,32 @@ import snakebite.frontend.dmd.functions: findFunction;
 import std.conv: text;
 
 
+public extern(C) typeof(null) snakebite_ut_null_value(typeof(null) value) {
+    assert(value is null);
+    return value;
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call an external function without source"),
+)) {
+    @("ffi.nullValueArgumentAndReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            pragma(mangle, "snakebite_ut_null_value")
+            extern(C) typeof(null) snakebite_ut_null_value(typeof(null));
+
+            void main() {
+                auto value = snakebite_ut_null_value(null);
+                assert(value is null);
+            }
+        });
+    }
+}
+
+
 private extern(C) ubyte[] snakebite_ut_dynamic_array() {
     static ubyte[] values = [17, 31, 47];
     return values;
