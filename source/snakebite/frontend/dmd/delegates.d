@@ -81,29 +81,16 @@ public bool functionNeedsClosure(FuncDeclaration function_) {
 // widens a null one.
 public bool hasHiddenThis(FuncDeclaration function_) {
     import dmd.funcsem: functionSemantic3;
-    import dmd.tokens: TOK;
 
     functionSemantic3(function_);
 
     if (function_.vthis is null)
         return function_.isThis() !is null || function_.isNested();
 
-    // dmd only clears a `FuncLiteralDeclaration`'s `vthis` when the
-    // literal is coerced to a target pointer type at the point it is
-    // written (`expressionsem.d`'s `visit(FuncExp)`); a lambda bound
-    // through `auto`, with no target type to coerce to, keeps a `vthis`
-    // nothing in its body ever reads. Two things must both hold before
-    // that `vthis` counts as dead: `tok` must not have settled on
-    // `TOK.delegate_` - dmd's own lazy-argument lowering builds its
-    // implicit delegate directly with that `tok`, and it does read the
-    // enclosing frame through `vthis` despite never appearing in
-    // `closureVars` the way a written closure's own captures do - and
-    // `closureVars` itself must be empty, proof nothing else is captured
-    // either.
-    auto literal = function_.isFuncLiteralDeclaration;
-    const deadContext = literal !is null && literal.tok != TOK.delegate_
-        && literal.closureVars.length == 0;
-    return !deadContext;
+    // A delegate call always passes its context word, even when the
+    // function does not use it. Keep the slot so a delegate target and its
+    // caller use one native layout.
+    return true;
 }
 
 // The nearest enclosing function `symbol` (a captured variable or a nested
