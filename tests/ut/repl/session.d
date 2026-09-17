@@ -4,9 +4,73 @@ module ut.repl.session;
 import ut;
 import snakebite.backends: BackendName;
 import snakebite.repl: Repl, SubmitResult;
+import std.traits: EnumMembers;
 
 
 alias ReplBackendName = BackendName;
+
+
+static foreach (backend; EnumMembers!ReplBackendName) {
+    @("submit.importWithoutSemicolon." ~ backend.stringof)
+    unittest {
+        foreach (source; [
+            "import std.math",
+            "import std.math\n",
+            "import std.math // absolute value",
+            "import std.math /+ absolute value +/",
+            "import std.math : abs",
+            "import std.math, std.conv",
+        ]) {
+            auto repl = Repl(backend);
+
+            repl.submit(source).kind.should == SubmitResult.Kind.none;
+            repl.submit("abs(-42)").text.should == "42";
+            repl.submit(":q").kind.should == SubmitResult.Kind.quit;
+        }
+    }
+
+    @("submit.qualifiedImportWithoutSemicolon." ~ backend.stringof)
+    unittest {
+        foreach (source; ["static import std.math", "import math = std.math"]) {
+            auto repl = Repl(backend);
+            const expression = source == "static import std.math"
+                ? "std.math.abs(-42)"
+                : "math.abs(-42)";
+
+            repl.submit(source).kind.should == SubmitResult.Kind.none;
+            repl.submit(expression).text.should == "42";
+        }
+    }
+
+    @("submit.canRepeatImportAfterOmittedSemicolon." ~ backend.stringof)
+    unittest {
+        auto repl = Repl(backend);
+
+        repl.submit("import std.math").kind.should == SubmitResult.Kind.none;
+        repl.submit("import std.math;").kind.should == SubmitResult.Kind.none;
+        repl.submit("abs(-42)").text.should == "42";
+    }
+
+    @("submit.recoversFromFailedImportWithoutSemicolon." ~ backend.stringof)
+    unittest {
+        auto repl = Repl(backend);
+
+        const result = repl.submit("import no_such_module_xyz");
+        result.kind.should == SubmitResult.Kind.error;
+        result.text.should == "unable to read module `no_such_module_xyz`";
+        repl.submit("import std.math;").kind.should == SubmitResult.Kind.none;
+        repl.submit("abs(-42)").text.should == "42";
+    }
+
+    @("submit.accumulatesIncompleteImportAcrossLines." ~ backend.stringof)
+    unittest {
+        auto repl = Repl(backend);
+
+        repl.submit("import std.math :").kind.should == SubmitResult.Kind.none;
+        repl.submit("abs").kind.should == SubmitResult.Kind.none;
+        repl.submit("abs(-42)").text.should == "42";
+    }
+}
 
 
 @("submit.evaluatesAnExpression")
