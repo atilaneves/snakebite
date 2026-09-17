@@ -4903,6 +4903,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import std.conv: text;
 
         auto callee = expression.e1;
+        if (auto dot = callee.isDotVarExp)
+            if (auto function_ = dot.var.isFuncDeclaration)
+                return Callee(function_, null, false);
+
         if (auto deref = callee.isPtrExp) {
             auto function_ = cast(FuncDeclaration) asPointer(deref.e1);
             if (function_ is null)

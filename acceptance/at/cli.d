@@ -47,6 +47,45 @@ static foreach (backend; Matrix!(
         if (result.status != 0)
             fail(result.output, __FILE__, __LINE__);
     }
+
+    @("classInvariantAtShutdown." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-invariant-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            class Base {
+                invariant { assert(true); }
+            }
+            class Resource: Base {
+                ~this() {}
+            }
+            void main() {
+                auto resource = new Resource;
+                destroy(resource);
+            }
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter))
+                enum name = "interpreter";
+            else static if (is(backend == Bytecode))
+                enum name = "bytecode";
+            else
+                enum name = "ctfe";
+            const result = execute([
+                buildPath(getcwd, "bin", "sb"), "-b", name,
+                directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
 }
 
 
