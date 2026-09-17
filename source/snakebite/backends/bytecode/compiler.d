@@ -5260,8 +5260,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto callee = expression.f;
         if (callee is null) {
             auto calleeExp = expression.e1.isVarExp;
-            callee = calleeExp is null
-                ? null : calleeExp.var.isFuncDeclaration;
+            if (calleeExp !is null)
+                callee = calleeExp.var.isFuncDeclaration;
+            else if (auto dot = expression.e1.isDotVarExp)
+                callee = dot.var.isFuncDeclaration;
         }
         // `super(args)`/`this(args)` constructor delegation reaches here
         // the same as any other call: dmd's own semantic pass always
