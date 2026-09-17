@@ -3,9 +3,101 @@ module at.cli;
 
 import ut.backends;
 import std.conv: text;
-import std.file: getcwd, mkdir, rmdirRecurse, tempDir, write;
+import std.file: getcwd, mkdir, mkdirRecurse, rmdirRecurse, tempDir, write;
 import std.path: buildPath;
-import std.process: execute, thisProcessID;
+import std.process: Config, execute, thisProcessID;
+
+
+static foreach (backend; Matrix!()) {
+    @("versionOptions." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-version-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "version_probe.d");
+        source.write(q{
+            version (AutomemAsan) {} else static assert(false);
+            version (Extra) {} else static assert(false);
+            int main() { return 42; }
+        });
+        const versions = ["-version=AutomemAsan", "-version=Extra"];
+        static if (is(backend == Native))
+            const result = execute(["dmd"] ~ versions ~ ["-run", source]);
+        else {
+            static if (is(backend == Interpreter))
+                enum name = "interpreter";
+            else static if (is(backend == Bytecode))
+                enum name = "bytecode";
+            else
+                enum name = "ctfe";
+            const result = execute([
+                buildPath(getcwd, "bin", "sb"), "-b", name,
+            ] ~ versions ~ [directory]);
+        }
+        if (result.status != 42)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "Imported function bodies lose version flags during deferred CTFE analysis"),
+)) {
+    @("dubVersionOptions." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-dub-version-" ~ thisProcessID.text ~ backend.stringof);
+        const app = buildPath(directory, "app");
+        const dependency = buildPath(directory, "dependency");
+        buildPath(app, "source").mkdirRecurse;
+        buildPath(dependency, "source").mkdirRecurse;
+        scope(exit) directory.rmdirRecurse;
+        buildPath(app, "dub.sdl").write(q{
+            name "version-app"
+            targetType "library"
+            dependency "version-dependency" path="../dependency"
+        });
+        buildPath(dependency, "dub.sdl").write(q{
+            name "version-dependency"
+            targetType "staticLibrary"
+        });
+        buildPath(app, "source", "app.d").write(q{
+            module app;
+            import dependency;
+            version (AutomemAsan) {} else static assert(false);
+            unittest { assert(answer() == 42); }
+        });
+        buildPath(dependency, "source", "dependency.d").write(q{
+            module dependency;
+            int answer() {
+                version (AutomemAsan) return 42;
+                else return 17;
+            }
+        });
+        static if (is(backend == Native))
+            const result = execute([
+                "dub", "test", "--compiler=dmd", "--d-version=AutomemAsan",
+            ], null, Config.none, size_t.max, app);
+        else {
+            static if (is(backend == Interpreter))
+                enum name = "interpreter";
+            else static if (is(backend == Bytecode))
+                enum name = "bytecode";
+            else
+                enum name = "ctfe";
+            const result = execute([
+                buildPath(getcwd, "bin", "sb"), "-b", name,
+                "-version=AutomemAsan", app,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
 
 
 static foreach (backend; Matrix!(

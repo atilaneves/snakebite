@@ -38,6 +38,7 @@ public PreparationReport prepareProject(
     in string[] importPaths = null,
     in string[] stringImportPaths = null,
     in bool nativeDependencies = true,
+    in string[] versions = null,
 ) {
     import snakebite.frontend.compiler: Snippets, initialize;
     import snakebite.project: loadProject, sourceSet, prepareDependencies;
@@ -48,7 +49,7 @@ public PreparationReport prepareProject(
     // describe` subprocess, which spawns the compiler too) and once counted
     // as frontend time it inflated that number by up to half.
     auto stopWatch = StopWatch(AutoStart.yes);
-    auto sources = sourceSet(directory, importPaths, stringImportPaths);
+    auto sources = sourceSet(directory, importPaths, stringImportPaths, versions);
     const discovery = stopWatch.peek;
 
     stopWatch.reset;

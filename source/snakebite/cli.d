@@ -8,6 +8,7 @@ public struct Options {
     public imported!"snakebite.backends".BackendName backend;
     public string[] importPaths;
     public string[] stringImportPaths;
+    public string[] versions;
     public string projectDirectory;
     public string[] programArguments;
     public bool showHelp;
@@ -23,7 +24,7 @@ public struct CliResult {
 
 public CliResult parseArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
-    import std.algorithm.searching: countUntil;
+    import std.algorithm.searching: countUntil, startsWith;
     import std.getopt: getopt, GetOptException;
 
     CliResult result;
@@ -32,6 +33,10 @@ public CliResult parseArgs(string[] args) {
         result.options.programArguments = args[separator + 1 .. $].dup;
         args = args[0 .. separator];
     }
+    args = args.dup;
+    foreach (ref argument; args[1 .. $])
+        if (argument.startsWith("-version="))
+            argument = "-" ~ argument;
     string backendName = "bytecode";
 
     typeof(getopt(args)) helpInfo;
@@ -44,6 +49,8 @@ public CliResult parseArgs(string[] args) {
                 &result.options.importPaths,
             "J|string-import-path", "Add a string import path.",
                 &result.options.stringImportPaths,
+            "version", "Define a version identifier (repeatable).",
+                &result.options.versions,
         );
     } catch (GetOptException exception) {
         return CliResult(1, exception.msg);
@@ -83,4 +90,5 @@ private enum helpText =
     "  -I, --import-path <path>  Add an import path for a bare directory\n" ~
     "  -J, --string-import-path <path>\n" ~
     "                            Add a string import path for a bare directory\n" ~
+    "  -version=<identifier>     Define a version identifier (repeatable)\n" ~
     "  -h, --help                Show this help\n";
