@@ -3,7 +3,7 @@ module ut.ffi.symbol;
 
 import ut;
 import snakebite.ffi: Resolver;
-import snakebite.dependencyimage: defaultCompiler, prepareImage;
+import snakebite.dependencyimage: DependencyImage, ProjectImageCache, defaultCompiler, prepareImage;
 import std.file: timeLastModified;
 import core.atomic: atomicStore, MemoryOrder;
 import core.internal.atomic: atomicLoad;
@@ -18,6 +18,9 @@ import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.file: dirEntries, SpanMode;
 import std.array: array;
+import std.process: execute;
+import std.file: exists, readText, remove, setTimes;
+import std.path: buildPath;
 
 private enum atomicSource = q{
     module image;
@@ -408,4 +411,129 @@ static foreach (backend; Matrix!()) {
             result.should == 17;
         }
     }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("image.dubTransitiveArchives." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        sandbox.writeFile("app/dub.sdl", q{
+            name "image-app"
+            targetType "library"
+            targetName "image-app"
+            preBuildCommands "test ! -e reject-build"
+            dependency "image-middle" path="../middle"
+        });
+        sandbox.writeFile("app/source/app.d", q{
+            module image_app;
+            import image_middle;
+            unittest { assert(answer() == 42); }
+        });
+        sandbox.writeFile("middle/dub.sdl", q{
+            name "image-middle"
+            targetType "staticLibrary"
+            dependency "image-leaf" path="../leaf archives"
+        });
+        sandbox.writeFile("middle/source/image_middle.d", q{
+            module image_middle;
+            import image_leaf;
+            int answer() { return leaf() + 1; }
+        });
+        sandbox.writeFile("leaf archives/dub.sdl", q{
+            name "image-leaf"
+            targetType "staticLibrary"
+        });
+        sandbox.writeFile("leaf archives/source/image_leaf.d", q{
+            module image_leaf;
+            int leaf() { return 41; }
+        });
+        // A separate archive member has no reference from the guest or the
+        // image source. It must still be present for later symbol lookups.
+        sandbox.writeFile("leaf archives/source/image_unused.d", q{
+            module image_unused;
+            extern(C) int image_unused_answer() { return 73; }
+        });
+        const directory = sandbox.inSandboxPath("app");
+        const archive = sandbox.inSandboxPath("leaf archives/libimage-leaf.a");
+        archive.exists.should == false;
+        auto project = prepareProject(directory).project;
+        archive.exists.should == true;
+        project.program.dependencyImage.should.not == null;
+        alias Answer = extern(C) int function();
+        const unused = cast(Answer)
+            project.program.dependencyImage.resolve("image_unused_answer");
+        unused.should.not == null;
+        unused().should == 73;
+        static if (is(backend == Native)) {
+            const description = project.sources.dubDescription.value;
+            foreach (target; description["targets"].array)
+                if (target["rootPackage"].str == description["rootPackage"].str) {
+                    const settings = target["buildSettings"];
+                    execute([buildPath(settings["targetPath"].str,
+                        settings["targetName"].str)]).status.should == 0;
+                }
+        } else {
+            scope instance = new backend(project.program);
+            run(instance, project.program).should == 0;
+        }
+        const path = project.program.dependencyImage.path;
+        const stamp = timeLastModified(archive);
+        sandbox.writeFile("app/reject-build", "");
+        sandbox.writeFile("app/source/app.d",
+            sandbox.inSandboxPath("app/source/app.d").readText ~ "\n");
+        auto reused = prepareProject(directory).project;
+        reused.program.dependencyImage.path.should == path;
+        timeLastModified(archive).should == stamp;
+        sandbox.inSandboxPath("app/reject-build").remove;
+        sandbox.writeFile("leaf archives/source/image_unused.d", q{
+            module image_unused;
+            extern(C) int image_unused_answer() { return 179; }
+        });
+        auto changed = prepareProject(directory).project;
+        const changedPath = changed.program.dependencyImage.path;
+        changedPath.should.not == path;
+        const changedAnswer = cast(Answer)
+            changed.program.dependencyImage.resolve("image_unused_answer");
+        changedAnswer.should.not == null;
+        changedAnswer().should == 179;
+        archive.remove;
+        auto rebuilt = prepareProject(directory).project;
+        archive.exists.should == true;
+        rebuilt.program.dependencyImage.path.should == changedPath;
+    }
+}
+
+
+@("image.projectCacheSkipsPreparation")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("root.d", "root");
+    sandbox.writeFile("dependency.d", "before");
+    const root = sandbox.inSandboxPath("root.d");
+    const dependency = sandbox.inSandboxPath("dependency.d");
+    const directory = sandbox.sandboxPath;
+    auto image = prepareImage(atomicSource, directory);
+    auto cache = ProjectImageCache(directory, "settings", [root]);
+    cache.save(image.path, atomicSource, [dependency]);
+    auto next = ProjectImageCache(directory, "settings", [root]);
+    DependencyImage hit;
+    string unexpectedSource() {
+        throw new Exception("An unchanged image must skip source generation");
+    }
+    next.restore(hit, &unexpectedSource).should == true;
+    hit.path.should == image.path;
+
+    sandbox.writeFile("root.d", "changed root");
+    next.restore(hit, () => atomicSource).should == true;
+    auto changedSettings = ProjectImageCache(directory, "other settings", [root]);
+    changedSettings.restore(hit, () => atomicSource).should == false;
+
+    // A preserved mtime and size must not hide a changed dependency.
+    const stamp = timeLastModified(dependency);
+    sandbox.writeFile("dependency.d", "after!");
+    setTimes(dependency, stamp, stamp);
+    next.restore(hit, () => atomicSource).should == false;
 }

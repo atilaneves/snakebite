@@ -36,29 +36,44 @@ public string[][] dubDescribe(
 ) {
     import std.array: join;
 
-    const describe = ["dub", "describe"];
-    const dataArgs = ["--data=" ~ dataKinds.join(","), "--data-list"];
+    return parseDescribeLists(describe(pkgDir,
+        ["--data=" ~ dataKinds.join(","), "--data-list"], config).output,
+        dataKinds.length);
+}
 
+
+public struct DubDescription {
+    public imported!"std.json".JSONValue value;
+    public string[] buildArguments;
+}
+
+
+public DubDescription dubDescribeProject(in string directory) {
+    import std.json: parseJSON;
+    import snakebite.dependencyimage: defaultCompiler;
+
+    const result = describe(directory, ["--compiler=" ~ defaultCompiler], DubConfig.test);
+    return DubDescription(parseJSON(result.output), result.buildArguments.dup);
+}
+
+
+private auto describe(
+    in string directory, in string[] arguments, in DubConfig config,
+) {
+    import std.typecons: tuple;
+
+    const command = ["dub", "describe"];
     if (config == DubConfig.test) {
-        // `--build=unittest` too: without it, describe reports the default
-        // build type's flags, not the unittest build type's - missing
-        // `-unittest` itself among others, since dub adds those per build
-        // type, not per config.
-        auto withUnittest = describeCapturingStdout(  // auto: need status and output
-            describe ~ ["--config=unittest", "--build=unittest"] ~ dataArgs, pkgDir,
-        );
-        if (withUnittest.status == 0)
-            return parseDescribeLists(withUnittest.output, dataKinds.length);
+        const testArguments = ["--config=unittest", "--build=unittest"];
+        const result = describeCapturingStdout(
+            command ~ testArguments ~ arguments, directory);
+        if (result.status == 0)
+            return tuple!("output", "buildArguments")(result.output, testArguments.dup);
     }
-
-    const fallback = describeCapturingStdout(describe ~ dataArgs, pkgDir);
-    if (fallback.status != 0)
-        throw new Exception(
-            "dub describe " ~ dataKinds.join(",") ~ " failed in " ~ pkgDir
-            ~ ": " ~ fallback.output,
-        );
-
-    return parseDescribeLists(fallback.output, dataKinds.length);
+    const result = describeCapturingStdout(command ~ arguments, directory);
+    if (result.status != 0)
+        throw new Exception("dub describe failed in " ~ directory ~ ": " ~ result.output);
+    return tuple!("output", "buildArguments")(result.output, ["--build=debug"]);
 }
 
 // Run a `dub describe` command in pkgDir, capturing its stdout and discarding
@@ -131,3 +146,98 @@ public string[] parseDescribeList(in string output) @safe pure {
         .array;
 }
 
+// Let dub decide which targets are stale, including the full dependency
+// chain of static-library roots. PIC is required by the shared image.
+public void buildDubDependencies(
+    in string directory, in DubDescription description, in string[] linkerFiles,
+) {
+    import snakebite.dependencyimage: defaultCompiler;
+    import snakebite.exception: SnakebiteException;
+    import std.process: Config, environment, execute;
+
+    import std.file: exists, mkdirRecurse, readText, write;
+    import std.path: buildPath;
+
+    const statePath = buildPath(directory, ".snakebite", "dub-dependencies");
+    const fingerprint = dependencyFingerprint(directory, description);
+    const before = fileFingerprint(linkerFiles);
+    import std.algorithm: all;
+    if (linkerFiles.all!exists && statePath.exists
+            && statePath.readText == fingerprint ~ before)
+        return;
+
+    auto variables = environment.toAA; // Add PIC without changing the process environment.
+    version (DigitalMars)
+        enum pic = "-fPIC";
+    else version (LDC)
+        enum pic = "-relocation-model=pic";
+    variables["DFLAGS"] = environment.get("DFLAGS", "") ~ " " ~ pic;
+    const result = execute(["dub", "build", "--deep", "--compiler=" ~ defaultCompiler]
+        ~ description.buildArguments, variables, Config.none,
+        size_t.max, directory);
+    if (result.status != 0)
+        throw new SnakebiteException("Dub dependency build failed:\n" ~ result.output);
+    if (!linkerFiles.all!exists)
+        throw new SnakebiteException("Dub build did not produce all dependency libraries");
+    buildPath(directory, ".snakebite").mkdirRecurse;
+    statePath.write(fingerprint ~ fileFingerprint(linkerFiles));
+}
+
+
+// The full description provides dependency sources that the root's flat
+// import-files list does not contain. Root source contents are excluded:
+// editing a guest module must not cause another native build.
+private string dependencyFingerprint(in string directory, in DubDescription description) {
+    import std.conv: text;
+    import std.digest.sha: sha256Of;
+    import std.digest: toHexString;
+    import std.path: buildPath;
+    import std.process: environment;
+    import snakebite.dependencyimage: defaultCompiler;
+
+    return text("snakebite-dub-v1", defaultCompiler, __VERSION__,
+        environment.get("DFLAGS", ""), environment.get("LFLAGS", ""),
+        description.value.toString,
+        fileFingerprint(dubInputs(directory, description))).sha256Of.toHexString.idup;
+}
+
+
+public string[] dubInputs(in string directory, in DubDescription description) {
+    import std.path: buildPath;
+
+    const value = description.value;
+    string[] files = [buildPath(directory, "dub.selections.json")];
+    foreach (package_; value["packages"].array) {
+        if (!package_["active"].boolean)
+            continue;
+        const path = package_["path"].str;
+        files ~= [buildPath(path, "dub.json"), buildPath(path, "dub.sdl"),
+            buildPath(path, "dub.selections.json")];
+        if (package_["name"].str == value["rootPackage"].str)
+            continue;
+        foreach (file; package_["files"].array) {
+            const role = file["role"].str;
+            if (role == "source" || role == "import" || role == "import_"
+                    || role == "stringImport")
+                files ~= buildPath(path, file["path"].str);
+        }
+    }
+    foreach (target; value["targets"].array)
+        foreach (file; target["buildSettings"]["extraDependencyFiles"].array)
+            files ~= file.str;
+    return files;
+}
+
+
+private string fileFingerprint(in string[] files) {
+    import std.digest.sha: sha256Of;
+    import std.digest: toHexString;
+    import std.file: exists, isFile, read;
+    import std.conv: text;
+
+    string result;
+    foreach (file; files)
+        result ~= text(file.length, ":", file, ":",
+            file.exists && file.isFile ? read(file).sha256Of.toHexString.idup : "missing");
+    return result.sha256Of.toHexString.idup;
+}

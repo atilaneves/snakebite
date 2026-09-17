@@ -16,13 +16,28 @@ the calling convention. Overloaded templates are instantiated separately with
 
 Root-defined templates stay in the guest. Instances that require private names,
 guest-local types, or a captured context cannot be compiled in the image and
-keep the normal backend fallback. Discovery does not yet build or link dub
-dependency archives.
+keep the normal backend fallback.
 
-The project owns the image through a reference-counted handle. Project copies
-retain it; `Program` and `Resolver` borrow it. Keep the project alive until its
-backends, callbacks, and returned objects have been destroyed. The benchmark
-reports image preparation time separately from frontend and execution time.
+For dub projects, the same `dub describe` call supplies root sources and the
+full dependency description. Snakebite uses the host compiler with `dub build
+--deep` to build missing or changed dependencies with position-independent
+code. The image includes every member of every static archive in the transitive
+link dependency chain, including members that no template reference uses. Dub
+linker files, linker flags, and system libraries are also supplied to the link.
+The root package is not linked into the image.
+
+Snakebite records hashes of dependency sources, recipes, build settings, and
+archives in `.snakebite/dub-dependencies`. An unchanged dependency set
+skips `dub build`. A change to root source contents alone also skips that build.
+A missing archive, changed dependency, or changed build setting makes dub check
+and build the project again. The first run also makes this check to establish
+archives for the host compiler and shared image. Dub build hooks run when dub
+builds the project; they do not run on a dependency cache hit.
+
+The image remains mapped until the executable exits, including after the
+loading thread exits. `Project`, `Program`, and `Resolver` hold descriptions of
+that image. The benchmark reports image preparation time separately from
+frontend and execution time.
 
 ## Direct use
 
@@ -41,7 +56,7 @@ auto image = prepareImage(q{
 auto program = Program(rootModules);
 program.dependencyImage = &image;
 scope backend = new Bytecode(program);
-// Run the program while image is alive.
+// Run the program with the prepared image.
 ```
 
 Guest code imports and calls `core.internal.atomic.atomicLoad` directly. The
@@ -52,9 +67,9 @@ Prepare the image before constructing any backend. Each backend searches the
 image handle first, then the process symbols. Symbol misses and call plans stay
 cached. There is no compile step on symbol lookup.
 
-`DependencyImage` cannot be copied. It owns a loader reference and releases that
-reference when its scope ends. Direct callers must keep it alive for all uses of
-the code and data it contains.
+`DependencyImage` is a copyable description. Its scope does not control the
+image lifetime. The native loader retains the image with `RTLD_NODELETE`, while
+druntime still performs D module initialization and thread cleanup.
 
 ## Compiler and runtime
 
@@ -75,15 +90,26 @@ Project preparation supplies imported source files as cache inputs.
 
 The cache key includes build flags, import paths, generated source, frontend
 version, compiler path, compiler executable content, compiler version output,
-and the paths and contents of explicit `inputs`. Callers must list any extra
-source or configuration files used by the generated source. The compiler's
+linker arguments, and the paths and contents of `inputs` and `linkerFiles`.
+Callers must list any extra source or configuration files used by the generated
+source. The compiler's
 runtime headers and libraries are assumed unchanged within an installation.
 
-A cache hit skips compilation and linking. It still identifies the compiler,
-hashes the inputs, and loads the image. Builds use unique temporary directories
-and publish completed libraries with an atomic rename. A failed build does not
-publish an image. Concurrent builders can duplicate work but cannot expose a
-partially linked library.
+Project preparation first checks `.snakebite/images/project.json`. This records
+the image path, build settings, and file metadata for the compiler, dependency
+inputs, archives, and root sources. If they are unchanged, preparation loads the
+existing image directly. It does not discover templates, probe the compiler, or
+read and hash input contents. File identity, size, modification time, and change
+time detect replaced files and same-size edits with restored modification times.
+
+If only root source metadata changed, preparation checks whether the generated
+template references changed. If they did not, it reuses the image and updates
+the root metadata. Otherwise, it uses the content-based image cache described
+above. Direct calls to `prepareImage` also use that content-based cache.
+
+Builds use unique temporary directories and publish completed libraries with an
+atomic rename. A failed build does not publish an image. Concurrent builders can
+duplicate work but cannot expose a partially linked library.
 
 Compiler errors name the failed phase. Their exception cause retains the command
 and compiler output. Loader errors include the library path. The cache directory
@@ -97,4 +123,6 @@ backends, cache reuse, source and input changes, compiler and linker failure,
 compiler family checks, and D module construction. The atomic tests call
 druntime's real `atomicLoad!int` and `atomicFetchAdd!int`. They also check
 automatic project preparation, image lifetime, and cache reuse. CTFE cannot
-execute loaded native code.
+execute loaded native code. The dub fixture checks the full backend matrix,
+transitive archive members, paths with spaces, missing archives, changed
+dependency sources, and reuse after a root source edit.
