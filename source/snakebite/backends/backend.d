@@ -102,7 +102,8 @@ public abstract class Backend {
         _program = program;
         _threadInitialized = PerThread!(bool*)(() => new bool);
         foreach (constructor; program.moduleConstructors)
-            if (constructor.isStaticCtorDeclaration !is null)
+            if (constructor.isStaticCtorDeclaration !is null
+                && constructor.isSharedStaticCtorDeclaration is null)
                 // DMD declarations retain mutable semantic caches.
                 _threadConstructors ~= cast(FuncDeclaration) constructor;
     }

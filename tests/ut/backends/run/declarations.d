@@ -13,41 +13,60 @@ import snakebite.frontend.compiler: parseSnippet;
 import std.process: execute;
 
 
+static foreach (withTls; [false, true])
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run thread-local module initialization"),
 )) {
-    @("threadModuleConstructorBeforeCallback." ~ backend.stringof)
+    @("threadModuleConstructorBeforeCallback." ~ backend.stringof
+        ~ (withTls ? ".withTls" : ".sharedOnly"))
     @Tags(backend.stringof)
     unittest {
-        enum code = q{
-            module thread_constructors;
+        enum code = "module thread_constructors"
+            ~ (withTls ? "_tls;" : "_shared;")
+            ~ "enum withTls = " ~ (withTls ? "true;" : "false;") ~ q{
             import core.thread: Thread;
 
-            int value;
-            int calls;
-            static this() {
-                value = 42;
-                ++calls;
+            __gshared int sharedCalls;
+            shared static this() {
+                ++sharedCalls;
+            }
+
+            static if (withTls) {
+                int value;
+                int calls;
+                static this() {
+                    value = 42;
+                    ++calls;
+                }
             }
 
             void worker() {
-                assert(value == 42);
-                assert(calls == 1);
-                value = 99;
+                assert(sharedCalls == 1);
+                static if (withTls) {
+                    assert(value == 42);
+                    assert(calls == 1);
+                    value = 99;
+                }
             }
 
             void main() {
-                assert(value == 42);
-                assert(calls == 1);
-                value = 7;
+                assert(sharedCalls == 1);
+                static if (withTls) {
+                    assert(value == 42);
+                    assert(calls == 1);
+                    value = 7;
+                }
                 foreach (i; 0 .. 2) {
                     auto thread = new Thread(&worker);
                     thread.start;
                     thread.join;
                 }
-                assert(value == 7);
-                assert(calls == 1);
+                assert(sharedCalls == 1);
+                static if (withTls) {
+                    assert(value == 7);
+                    assert(calls == 1);
+                }
             }
         };
         static if (is(backend == Native)) {
