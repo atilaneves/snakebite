@@ -4,6 +4,52 @@ module ut.backends.call.cast_;
 import ut.backends;
 
 
+// Dropping function attributes must preserve both the callable and its
+// context, including when the conversion supplies a constructor argument.
+static foreach (backend; Matrix!()) {
+    @("cast.delegate.weakenAttributes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            alias Strong = void delegate(in string[], in string[])
+                pure nothrow @nogc @safe;
+            alias Weak = void delegate(in string[], in string[]);
+
+            struct Counter {
+                int value;
+
+                void add(in string[] left, in string[] right)
+                    pure nothrow @nogc @safe {
+                    value += cast(int) (left.length * 10 + right.length);
+                }
+            }
+
+            struct Handler {
+                Weak callback;
+                this(Weak callback) {
+                    this.callback = callback;
+                }
+            }
+
+            int result() {
+                Counter counter;
+                Strong source = &counter.add;
+                auto handler = Handler(source);
+                handler.callback(["a", "b"], ["c"]);
+                auto converted = cast(Weak) source;
+                converted(["d", "e"], ["f"]);
+
+                Strong missing;
+                Weak empty = missing;
+                if (empty !is null)
+                    return -1;
+                return counter.value;
+            }
+        }, "result");
+    }
+}
+
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.diverges,
         "CTFE does not preserve storage aliasing through this void[] cast"),
