@@ -386,6 +386,8 @@ public struct Vm {
             function_.frameSize,
             function_.frameAlignment,
         );
+        if (function_.contextOffset != size_t.max)
+            *cast(size_t*) (frame.base + function_.contextOffset) = 0;
         foreach (argument; arguments)
             memcpy(frame.base + argument.offset, argument.source,
                 argument.width);

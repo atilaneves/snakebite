@@ -572,12 +572,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         scope const(void*)[] declaredArguments = args;
         if (layout.hiddenThis.variable !is null) {
-            storeIntegral(
-                frame.base + layout.hiddenThis.parameter.offset,
-                loadIntegral(args[0], size_t.sizeof, false),
-                size_t.sizeof,
-            );
-            declaredArguments = args[1 .. $];
+            if (args.length) {
+                storeIntegral(
+                    frame.base + layout.hiddenThis.parameter.offset,
+                    loadIntegral(args[0], size_t.sizeof, false),
+                    size_t.sizeof,
+                );
+                declaredArguments = args[1 .. $];
+            } else
+                storeIntegral(
+                    frame.base + layout.hiddenThis.parameter.offset,
+                    0, size_t.sizeof,
+                );
         }
 
         try
