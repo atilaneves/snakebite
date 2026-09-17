@@ -553,6 +553,31 @@ static foreach (backend; Matrix!()) {
 }
 
 
+static foreach (backend; Matrix!()) {
+    @("image.constructorLocalTypes." ~ backend.stringof)
+    @Serial
+    unittest {
+        enum code = q{
+            import std.bigint: BigInt;
+            int answer() { return BigInt("123").toInt; }
+        };
+        static if (is(backend == Native)) {
+            mixin(code);
+            answer.should == 123;
+        } else {
+            auto module_ = parseSnippet(code);
+            auto program = Program([module_]);
+            auto image = prepareImage(imageSource(program), sharedImageCache);
+            program.dependencyImage = &image;
+            scope instance = new backend(program);
+            int result;
+            instance.call(findFunction(module_, "answer"), &result, []);
+            result.should == 123;
+        }
+    }
+}
+
+
 @("image.templateArgumentImports")
 @Serial
 unittest {

@@ -165,7 +165,8 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
         if (auto instance = function_.parent.isTemplateInstance) {
             if (instance.tempdecl !is null
                     && !_program.isRootOwned(instance.tempdecl)
-                    && !function_.needThis && !function_.isNested) {
+                    && !function_.needThis && !function_.isNested
+                    && !hasFunctionLocalType(instance)) {
                 const name = instance.tempdecl.getModule.toPrettyChars.fromStringz.idup;
                 _imports[name] = true;
                 import dmd.dtemplate: getType;
@@ -242,6 +243,23 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
     override void visit(FuncExp expression) {
         expression.fd.accept(this);
     }
+}
+
+
+// Function-local types cannot be named from an independent module. Their
+// enclosing dependency body can still instantiate them when it is compiled.
+private bool hasFunctionLocalType(imported!"dmd.dtemplate".TemplateInstance instance) {
+    import dmd.dtemplate: getType;
+    import dmd.typesem: nextOf, toDsymbol;
+
+    foreach (argument; *instance.tiargs) {
+        for (auto type = getType(argument); type !is null; type = type.nextOf) {
+            for (auto symbol = type.toDsymbol(null); symbol !is null; symbol = symbol.parent)
+                if (symbol.isFuncDeclaration)
+                    return true;
+        }
+    }
+    return false;
 }
 
 
