@@ -1883,6 +1883,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
+        if (auto with_ = body_.isWithStatement()) {
+            if (with_.wthis is null) {
+                // A name-lookup scope must not hide later case labels
+                // after an earlier case returns or breaks.
+                compileSwitchBody(with_._body);
+                return;
+            }
+        }
+
         if (auto compound = body_.isCompoundStatement()) {
             foreach (child; *compound.statements) {
                 _finished = false;

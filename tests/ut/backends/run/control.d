@@ -8,6 +8,35 @@ module ut.backends.run.control;
 
 import ut.backends;
 
+static foreach (backend; Matrix!()) {
+    @("stringSwitchInsideForeach." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.traits: PSC = ParameterStorageClass;
+            auto flags(in string[] names) @safe pure nothrow {
+                auto result = PSC.none;
+                foreach (name; names) {
+                    final switch (name) with(PSC) {
+                    case "in": result |= in_; break;
+                    case "out": result |= out_; break;
+                    case "ref": result |= ref_; break;
+                    case "lazy": result |= lazy_; break;
+                    case "scope": result |= scope_; break;
+                    case "return": result |= return_; break;
+                    }
+                }
+                return result;
+            }
+            void main() {
+                assert(flags(["return", "scope"]) == (PSC.return_ | PSC.scope_));
+                assert(flags(["in", "out", "ref", "lazy"]) ==
+                    (PSC.in_ | PSC.out_ | PSC.ref_ | PSC.lazy_));
+            }
+        });
+    }
+}
+
 
 // A discarded __ctfe conditional can assign a nested field of `this`, with a
 // call in its alternate branch. This is the shape used by std.sumtype.
