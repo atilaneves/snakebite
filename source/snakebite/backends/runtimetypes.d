@@ -95,8 +95,10 @@ public struct RuntimeTypes {
     private TypeInfo build(Type type) {
         import dmd.astenums;
         import dmd.typesem: mutableOf, nextOf, unSharedOf;
+        import dmd.root.string: toDString;
         import object: TypeInfo_Array, TypeInfo_AssociativeArray,
-            TypeInfo_Const, TypeInfo_Enum, TypeInfo_Inout,
+            TypeInfo_Const, TypeInfo_Delegate, TypeInfo_Enum,
+            TypeInfo_Function, TypeInfo_Inout,
             TypeInfo_Invariant, TypeInfo_Pointer, TypeInfo_Shared,
             TypeInfo_StaticArray, TypeInfo_Tuple, TypeInfo_Vector;
 
@@ -130,6 +132,24 @@ public struct RuntimeTypes {
             info = structInfo(structType.sym);
         else if (auto enumType = type.isTypeEnum)
             info = enumInfo(enumType.sym);
+        else if (auto functionType = type.isTypeFunction) {
+            auto result = get(functionType.next);
+            if (result is null)
+                return null;
+            auto functionInfo = new TypeInfo_Function;
+            functionInfo.next = result;
+            functionInfo.deco = type.deco.toDString.idup;
+            info = functionInfo;
+        }
+        else if (auto delegateType = type.isTypeDelegate) {
+            auto result = get(delegateType.next.nextOf);
+            if (result is null)
+                return null;
+            auto delegateInfo = new TypeInfo_Delegate;
+            delegateInfo.next = result;
+            delegateInfo.deco = type.deco.toDString.idup;
+            info = delegateInfo;
+        }
         else if (auto pointer = type.isTypePointer) {
             auto next = get(pointer.next);
             if (next is null)

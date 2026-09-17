@@ -9,6 +9,37 @@ module ut.backends.run.delegates;
 import ut.backends;
 
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read callable TypeInfo fields"),
+)) {
+    @("callableTypeInfo." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Result { int value; }
+            Result operation(int value) { return Result(value); }
+            alias Callback = Result delegate(int);
+            void main() {
+                auto functionInfo = cast(TypeInfo_Function) typeid(typeof(operation));
+                assert(functionInfo !is null);
+                assert(functionInfo.next is typeid(Result));
+                assert(functionInfo.deco == typeof(operation).mangleof);
+                assert(functionInfo.tsize == 0);
+                auto pointerInfo = cast(TypeInfo_Pointer) typeid(typeof(&operation));
+                assert(pointerInfo.m_next is functionInfo);
+                auto delegateInfo = cast(TypeInfo_Delegate) typeid(Callback);
+                assert(delegateInfo !is null);
+                assert(delegateInfo.next is typeid(Result));
+                assert(delegateInfo.deco == Callback.mangleof);
+                assert(delegateInfo.tsize == Callback.sizeof);
+                assert(typeid(Callback) is delegateInfo);
+            }
+        });
+    }
+}
+
+
 static foreach (backend; Matrix!()) {
     @("pointerToVariadicDelegateCaller." ~ backend.stringof)
     @Tags(backend.stringof)
