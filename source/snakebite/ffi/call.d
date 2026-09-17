@@ -206,7 +206,13 @@ public struct CallAdapter {
         auto type = function_.type.isTypeFunction;
         assert(type !is null);
 
-        return ofType(type, function_.isCtorDeclaration !is null);
+        const isConstructor = function_.isCtorDeclaration !is null;
+        auto adapter = ofType(type, isConstructor);
+        // The constructor ABI returns its receiver by reference. Copy its
+        // aggregate, not dmd's placeholder-sized `void` return type.
+        if (isConstructor && adapter._referenceResult)
+            adapter._resultSize = TypeFacts.of(function_.isThis.type).size;
+        return adapter;
     }
 
     // As `of`, from a bare `TypeFunction` rather than a declaration - the
