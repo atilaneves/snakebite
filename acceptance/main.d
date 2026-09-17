@@ -7,6 +7,6 @@ int main(string[] args) {
     return args.runTests!(
         "at.ffi.cost", "at.ffi.dvariadic", "at.bench.timing",
         "at.runtime.arraycopy", "at.ffi.aggregates", "at.runtime.messaging",
-        "ut.ffi.symbol",
+        "ut.ffi.symbol", "at.cli",
     );
 }

@@ -7,6 +7,42 @@ import std.algorithm.searching: startsWith;
 import ut;
 
 
+@("programArgumentsAfterSeparator")
+unittest {
+    const result = parseArgs([
+        "sb", "-b", "bytecode", "project", "--", "-d", "--help",
+        "-b", "ctfe", "test name", "--", "",
+    ]);
+
+    result.status.should == 0;
+    result.options.showHelp.should == false;
+    result.options.backend.should == BackendName.bytecode;
+    result.options.projectDirectory.should == "project";
+    result.options.programArguments.should == [
+        "-d", "--help", "-b", "ctfe", "test name", "--", "",
+    ];
+}
+
+
+@("emptyProgramArgumentsAfterSeparator")
+unittest {
+    const result = parseArgs(["sb", "project", "--"]);
+
+    result.status.should == 0;
+    result.options.projectDirectory.should == "project";
+    result.options.programArguments.length.should == 0;
+}
+
+
+@("separatorDoesNotSupplyProjectDirectory")
+unittest {
+    const result = parseArgs(["sb", "--", "project", "-d"]);
+
+    result.status.should == 1;
+    result.diagnostic.startsWith("expected one project directory").should == true;
+}
+
+
 unittest {
     const result = parseArgs(["sb", "examples/rt-simple"]);
 

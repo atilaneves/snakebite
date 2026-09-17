@@ -9,6 +9,7 @@ public struct Options {
     public string[] importPaths;
     public string[] stringImportPaths;
     public string projectDirectory;
+    public string[] programArguments;
     public bool showHelp;
 }
 
@@ -22,9 +23,15 @@ public struct CliResult {
 
 public CliResult parseArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
+    import std.algorithm.searching: countUntil;
     import std.getopt: getopt, GetOptException;
 
     CliResult result;
+    const separator = args.countUntil("--");
+    if (separator >= 0) {
+        result.options.programArguments = args[separator + 1 .. $].dup;
+        args = args[0 .. separator];
+    }
     string backendName = "interpreter";
 
     typeof(getopt(args)) helpInfo;
@@ -64,9 +71,10 @@ public CliResult parseArgs(string[] args) {
 
 
 private enum helpText =
-    "Usage: sb [options] <directory>\n" ~
+    "Usage: sb [options] <directory> [-- program arguments...]\n" ~
     "\n" ~
     "Run the D unit tests in a project directory.\n" ~
+    "Pass arguments after -- to the program (for example: -- -d).\n" ~
     "\n" ~
     "Options:\n" ~
     "  -b, --backend <name>      Select the backend (default: interpreter)\n" ~
