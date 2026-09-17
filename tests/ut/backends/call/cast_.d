@@ -4,6 +4,36 @@ module ut.backends.call.cast_;
 import ut.backends;
 
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE does not preserve storage aliasing through this void[] cast"),
+)) {
+    @("cast.voidSliceToSharedStructPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                struct Impl { int count; }
+
+                shared(Impl)* allocateImpl(void[] bytes) {
+                    return cast(shared(Impl)*) bytes;
+                }
+
+                int result() {
+                    Impl[1] storage;
+                    void[] bytes = cast(void[]) storage[];
+                    auto pointer = allocateImpl(bytes);
+                    pointer.count = 42;
+                    return storage[0].count;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+
 static foreach (backend; Matrix!()) {
     @("cast.staticArrayToSliceAliasesStorage." ~ backend.stringof)
     @Tags(backend.stringof)
