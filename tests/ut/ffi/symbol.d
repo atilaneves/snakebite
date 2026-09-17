@@ -8,6 +8,7 @@ import std.file: timeLastModified;
 import core.atomic: atomicStore, MemoryOrder;
 import core.internal.atomic: atomicLoad;
 import core.thread: Thread;
+import core.lifetime: _d_newclassT;
 import snakebite.exception: SnakebiteException;
 import ut.backends;
 import snakebite.backends.backend: Program, run;
@@ -130,12 +131,12 @@ unittest {
                 static assert(false, "image compile diagnostic");
             }, directory);
         } catch (SnakebiteException error) {
-            (error.next !is null).should == true;
-            "image compile diagnostic".shouldBeIn(error.next.msg);
+            "Dependency image compilation failed".shouldBeIn(error.msg);
+            "Command: ".shouldBeIn(error.msg);
+            "image compile diagnostic".shouldBeIn(error.msg);
             throw error;
         }
-    })().shouldThrowWithMessage!SnakebiteException(
-        "Dependency image compilation failed");
+    })().shouldThrow!SnakebiteException;
     dirEntries(directory, SpanMode.shallow).array.length.should == 0;
 }
 
@@ -151,12 +152,12 @@ unittest {
                 export extern(C) int answer() { return image_missing_dependency(); }
             }, directory);
         } catch (SnakebiteException error) {
-            (error.next !is null).should == true;
-            "image_missing_dependency".shouldBeIn(error.next.msg);
+            "Dependency image linking failed".shouldBeIn(error.msg);
+            "Command: ".shouldBeIn(error.msg);
+            "image_missing_dependency".shouldBeIn(error.msg);
             throw error;
         }
-    })().shouldThrowWithMessage!SnakebiteException(
-        "Dependency image linking failed");
+    })().shouldThrow!SnakebiteException;
     dirEntries(directory, SpanMode.shallow).array.length.should == 0;
 }
 
@@ -192,6 +193,81 @@ unittest {
         defaultCompiler, [input]);
     first.path.should.not == second.path;
 }
+
+static foreach (backend; Matrix!()) {
+    @("image.overloadedTemplate." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        enum moduleName = "image_overloads_" ~ backend.stringof;
+        sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+            "module " ~ moduleName ~ ";\n" ~ q{
+                template answer(T) {
+                    T answer() { return 17; }
+                    T answer(T value) { return value + 1; }
+                }
+                int invoke(string moduleName)() {
+                    mixin("import " ~ moduleName ~ ";");
+                    return mixin(moduleName ~ ".rootAnswer()");
+                }
+            });
+        sandbox.writeFile("app/root_" ~ moduleName ~ ".d", "module root_" ~ moduleName ~ ";\nimport "
+            ~ moduleName ~ ";\n" ~ q{
+                int rootAnswer() { return 31; }
+                int main() {
+                    assert(answer!int() == 17);
+                    assert(answer!int(23) == 24);
+                    assert(invoke!(__MODULE__)() == 31);
+                    return 0;
+                }
+            });
+        const directory = sandbox.inSandboxPath("app");
+        const imports = [sandbox.inSandboxPath("deps")];
+        static if (is(backend == Native)) {
+            const executable = sandbox.inSandboxPath("test");
+            const result = execute([defaultCompiler, "-I" ~ imports[0],
+                sandbox.inSandboxPath("app/root_" ~ moduleName ~ ".d"), "-of=" ~ executable]);
+            result.status.shouldEqual(0, result.output);
+            execute([executable]).status.should == 0;
+        } else {
+            auto project = prepareProject(directory, imports).project;
+            scope instance = new backend(project.program);
+            run(instance, project.program).should == 0;
+        }
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("image.templateAliasOverloads." ~ backend.stringof)
+    @Serial
+    unittest {
+        // Rebindable!T can alias T itself. Only the selected overload may
+        // be emitted when two template declarations then share a signature.
+        enum code = q{
+            import std.typecons: rebindable;
+            int answer() {
+                int[] values = [17];
+                return rebindable(values)[0];
+            }
+        };
+        static if (is(backend == Native)) {
+            mixin(code);
+            answer.should == 17;
+        } else {
+            auto module_ = parseSnippet(code);
+            auto program = Program([module_]);
+            auto image = prepareImage(imageSource(program), sharedImageCache,
+                defaultCompiler, null, null, null, ["-w"]);
+            program.dependencyImage = &image;
+            scope instance = new backend(program);
+            int result;
+            instance.call(findFunction(module_, "answer"), &result, []);
+            result.should == 17;
+        }
+    }
+}
+
 
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     "CTFE cannot call a function in a loaded native image"))) {
@@ -369,6 +445,22 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             run(second, changed.program).should == 9;
         }
     }
+}
+
+
+@("image.templateArgumentImports")
+@Serial
+unittest {
+    // Program requires a mutable AST.
+    auto module_ = parseSnippet(q{
+        import core.lifetime: _d_newclassT;
+        import core.thread.osthread: Thread;
+        Thread allocate() { return _d_newclassT!Thread(); }
+    });
+    const source = imageSource(Program([module_]));
+    auto image = prepareImage(source, sharedImageCache,
+        defaultCompiler, null, null, null, ["-de"]);
+    image.resolve(_d_newclassT!Thread.mangleof).should.not == null;
 }
 
 

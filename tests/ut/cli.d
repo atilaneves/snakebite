@@ -48,7 +48,7 @@ unittest {
 
     result.status.should == 0;
     result.options.projectDirectory.should == "examples/rt-simple";
-    result.options.backend.should == BackendName.interpreter;
+    result.options.backend.should == BackendName.bytecode;
 }
 
 

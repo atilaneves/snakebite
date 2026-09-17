@@ -182,10 +182,8 @@ private void runCompiler(
     if (result.status != 0) {
         import snakebite.exception: SnakebiteException;
 
-        auto error = new SnakebiteException(
-            text("Dependency image ", phase, " failed"));
-        error.next = new Exception(text("Command: ", command, "\n", result.output));
-        throw error;
+        throw new SnakebiteException(text("Dependency image ", phase,
+            " failed\nCommand: ", command, "\n", result.output));
     }
 }
 
