@@ -8,6 +8,42 @@ import std.path: buildPath;
 import std.process: Config, execute, thisProcessID;
 
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run class finalizers"),
+)) {
+    @("classDestructorAtShutdown." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        sandbox.writeFile("probe.d", q{
+            import core.stdc.stdio: puts;
+            class Resource {
+                ~this() { puts("resource finalized"); }
+            }
+            void allocate() { auto resource = new Resource; }
+            void main() { allocate(); }
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-run", sandbox.inSandboxPath("probe.d")]);
+        else {
+            static if (is(backend == Interpreter))
+                enum name = "interpreter";
+            else static if (is(backend == Bytecode))
+                enum name = "bytecode";
+            else
+                enum name = "ctfe";
+            const result = execute([
+                buildPath(getcwd, "bin", "sb"), "-b", name,
+                sandbox.inSandboxPath(""),
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+
 static foreach (backend; Matrix!()) {
     @("versionOptions." ~ backend.stringof)
     @Tags(backend.stringof)
