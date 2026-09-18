@@ -4,16 +4,14 @@ module snakebite.backends.calls;
 private:
 
 
-// A call's target rules and cached declaration preference belong together.
-// Argument-dependent guest requirements must run before symbol resolution:
-// a host body cannot read a captured guest frame.
+// Delegate values use native callback entries, so captured guest contexts
+// do not change whether the receiving function executes as guest or host.
 public struct CallSelection {
     // Holds a `SharedTable` (finding 2.4): a copy would share its
     // storage with the original until one side grows.
     @disable this(this);
 
     import dmd.func: FuncDeclaration;
-    import dmd.arraytypes: Expressions;
 
     import snakebite.sharedtable: SharedTable;
 
@@ -38,16 +36,14 @@ public struct CallSelection {
 
     public bool usesGuestBody(
         FuncDeclaration function_,
-        Expressions* arguments,
         scope bool delegate(FuncDeclaration) isGuest,
         lazy bool hasNativeSymbol,
-        in string backend,
     ) {
         if (function_.fbody is null)
             return false;
 
         if (auto cached = function_ in _decisions)
-            return decide(*cached, arguments, isGuest);
+            return decide(*cached);
 
         import snakebite.frontend.compiler: withCompilerLock;
 
@@ -60,7 +56,7 @@ public struct CallSelection {
             decision = buildDecision(function_, hasNativeSymbol, isGuest);
             _decisions.insert(function_, decision);
         });
-        return decide(decision, arguments, isGuest);
+        return decide(decision);
     }
 
     // Called under the compiler lock only: every dmd query a function's
@@ -92,15 +88,9 @@ public struct CallSelection {
         return Decision(false, false, prefers);
     }
 
-    private static bool decide(
-        in Decision decision,
-        Expressions* arguments,
-        scope bool delegate(FuncDeclaration) isGuest,
-    ) {
+    private static bool decide(in Decision decision) {
         if (decision.variadicRejects)
             return false;
-        if (hasGuestDelegateArgument(arguments, isGuest))
-            return true;
         return decision.hasOuter || decision.prefers;
     }
 }
@@ -139,36 +129,4 @@ public bool arityMismatches(
     return allowExtra
         ? count < parameterList.length
         : count != parameterList.length;
-}
-
-private bool hasGuestDelegateArgument(
-    imported!"dmd.arraytypes".Expressions* arguments,
-    scope bool delegate(imported!"dmd.func".FuncDeclaration) isGuest,
-) {
-    import dmd.func: FuncDeclaration;
-    import dmd.astenums: Tdelegate;
-
-    if (arguments is null)
-        return false;
-
-    foreach (argument; *arguments) {
-        auto expression = argument; // Casts do not change the target body.
-        while (auto cast_ = expression.isCastExp)
-            expression = cast_.e1;
-
-        // Function pointers cross the barrier through callback entries.
-        // Only delegates can require access to a captured guest frame.
-        if (expression.type is null || expression.type.ty != Tdelegate)
-            continue;
-
-        FuncDeclaration function_;
-        if (auto literal = expression.isFuncExp)
-            function_ = literal.fd;
-        else if (auto delegate_ = expression.isDelegateExp)
-            function_ = delegate_.func;
-
-        if (function_ !is null && isGuest(function_))
-            return true;
-    }
-    return false;
 }
