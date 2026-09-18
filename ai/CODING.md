@@ -1,6 +1,6 @@
-## Code Style
+# Code Style
 
-### General
+## General
 
 * One True Brace Style. For functions with many attributes, `{` on its
   own line is acceptable.
@@ -25,7 +25,7 @@
   conventions like `Foo` and `FooEnum`, instead place enums inside the
   corresponding class/struct so that one uses `Foo.Enum` instead.
 
-### Production code (in `source`)
+## Production code (in `source`)
 
 - Use `imported!"module"` for parameter and return types at
   module-scope.  Do not use `imported!"module"` in non-module scopes
@@ -34,14 +34,14 @@
   explicitly with `public`/`private`.
 - Do not use exceptions for control flow.
 
-### Test modules (in `tests`)
+## Test modules (in `tests`)
 
 - Use module-scope imports to avoid repeating the same import in every
   test block. Unit test modules should not use `imported`.
 - Use package modules liberally to avoid imports in test modules - see
   `import ut;` for a good example.
 
-## Code organisation
+# Code organisation
 
 * Backends must not import each other: nothing in one backend's package
   may import another backend's package, and vice versa. Within a single
@@ -51,12 +51,12 @@
   modules. The bytecode VM and all project modules that it imports must
   compile without DMD frontend import paths.
 
-## Runtime semantics
+# Runtime semantics
 
 druntime is not be emulated or reimplemented. It is either interpreted,
 compiled, or called via FFI.
 
-### DMD lowerings
+# DMD lowerings
 
 All runtime AST visitors, including those for new backends, must inherit
 `LoweringVisitor`. Its final overrides own lowering dispatch. Put backend
@@ -90,3 +90,7 @@ This means there is no need to marshall or unmarshall when doing FFI.
   language semantics. If necessary, you are allowed to refer to dmd
   internal implementation details.
 - Code comments are for *why*.
+
+# Tests
+- Use `shouldThrowWithMessage`, not `shouldThrow`.
+- Use `.should ==`, not `.shouldEqual`.

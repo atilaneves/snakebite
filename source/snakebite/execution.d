@@ -28,8 +28,8 @@ public string discoveryLabel(in PreparationReport report) {
     import snakebite.project: isDubProject;
 
     return isDubProject(report.project.directory)
-        ? "dub overhead"
-        : "source scan";
+        ? "dub ovrhd"
+        : "src scan";
 }
 
 
@@ -106,6 +106,10 @@ public ExecutionReport executeBackend(
     const status = program.testStartupImage is null
         ? run(backend, program, hostArguments)
         : runTestsAndMain(backend, program, hostArguments);
+    // Native objects can hold callback entries for guest destructors. Run
+    // their finalizers while the backend and the frontend declarations that
+    // those entries name are still alive.
+    imported!"core.memory".GC.collect;
     return ExecutionReport(
         status,
         stopWatch.peek,

@@ -343,7 +343,7 @@ private string headerLine(
         "   ", discoveryLabel(preparation), " ",
         milliseconds(preparation.discovery),
         "   frontend ", milliseconds(preparation.duration),
-        "   dependency image ", milliseconds(preparation.imageDuration),
+        "   dep img ", milliseconds(preparation.imageDuration),
         "   ", hostCompiler,
         "   ", options.warmup, "+", options.runs, " runs",
     );
