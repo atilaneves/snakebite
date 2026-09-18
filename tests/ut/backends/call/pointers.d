@@ -2067,3 +2067,30 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the string literal terminator"),
+)) {
+    @("pointers.stringLiteralNativePointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            const(char)* choose(bool longer) {
+                return longer ? "abc" : ".";
+            }
+            void main() {
+                const(char)* narrow = "abc";
+                const(wchar)* wide = "ab";
+                const(dchar)* full = "abc";
+                assert(narrow[0] == 'a' && narrow[2] == 'c');
+                assert(wide[1] == 'b');
+                assert(full[2] == 'c');
+                assert(narrow[3] == 0 && wide[2] == 0 && full[3] == 0);
+                assert(choose(false)[0] == '.');
+                assert(choose(true)[2] == 'c');
+            }
+        });
+    }
+}
