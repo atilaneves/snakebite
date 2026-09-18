@@ -1,6 +1,9 @@
 module snakebite.main;
 
 
+extern(C) __gshared string[] rt_options = ["gcopt=cleanup:none"];
+
+
 private:
 
 
@@ -34,6 +37,7 @@ public int main(string[] args) {
             parsed.options.backend,
             preparation.project.program,
             [preparation.project.program.name] ~ parsed.options.programArguments,
+            false,
         );
         printStatistics(preparation, report);
         return report.status;
@@ -54,16 +58,39 @@ private void printStatistics(
     // Two one-off costs before any backend runs: finding out what to run
     // the frontend on, then the frontend itself.
     writefln(
-        "%-14s %8.1f ms",
+        "%-20s %8.1f ms",
         discoveryLabel(preparation) ~ ":",
         milliseconds(preparation.discovery),
     );
-    writefln("frontend time: %8.1f ms", milliseconds(preparation.duration));
-    writefln("image time:    %8.1f ms", milliseconds(preparation.imageDuration));
-    writefln("run time:      %8.1f ms", milliseconds(report.runTime));
+    writefln(
+        "%-20s %8.1f ms",
+        "frontend time:",
+        milliseconds(preparation.duration),
+    );
+    writefln(
+        "%-20s %8.1f ms",
+        "image time:",
+        milliseconds(preparation.imageDuration),
+    );
+    writefln(
+        "%-20s %8.1f ms",
+        "module constructors:",
+        milliseconds(report.constructorDuration),
+    );
+    writefln(
+        "%-20s %8.1f ms",
+        "test registration:",
+        milliseconds(report.activationDuration),
+    );
+    writefln(
+        "%-20s %8.1f ms",
+        "run time:",
+        milliseconds(report.runTime),
+    );
     if (report.compilation.hasCompiler)
         writefln(
-            "compile time:  %8.1f ms",
+            "%-20s %8.1f ms",
+            "compile time:",
             milliseconds(report.compilation.duration),
         );
 }
