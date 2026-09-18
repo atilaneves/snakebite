@@ -1757,7 +1757,11 @@ static foreach (backend; Matrix!()) {
         0.shouldBeStatusOf!(backend, q{
             int main() {
                 auto increment = (int x) => x + 1;
+                auto difference = (int a, int b) => a - b;
+                int delegate(int) bound = (int x) => x + 2;
                 assert(increment(4) == 5);
+                assert(difference(11, 4) == 7);
+                assert(bound(4) == 6);
                 return 0;
             }
         });
