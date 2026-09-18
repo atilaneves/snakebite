@@ -17,11 +17,10 @@ private enum defaultFrameReservation = 1024 * 1024 * 1024;
 // site never marks a position and pops back to it by hand, so it can
 // never forget to, on a throw or any other path out of scope.
 //
-// `mark`/`reserve`/`release` are the exception, for a reservation whose
-// lifetime is not any host function's lexical scope - the interpreter's
-// expression-scoped temporaries outlive every call frame pushed while
-// their expression evaluates. A caller of `reserve` owns the release and
-// must pair its `mark` with a `scope(exit) release(mark)` of its own.
+// `mark`/`reserve`/`release` handle reservations whose lifetimes do not
+// match a host function's lexical scope: interpreter temporaries and
+// bytecode activations. Their owners release each mark in LIFO order on
+// both normal completion and exception unwinding.
 //
 // A pushed frame can hold a guest pointer into GC-owned storage (an array's
 // `ptr` field, for instance) for as long as the frame is live, and nothing

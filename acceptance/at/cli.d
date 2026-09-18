@@ -510,3 +510,58 @@ static foreach (backend; Matrix!(
             fail(result.output, __FILE__, __LINE__);
     }
 }
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "Recursive evaluation exhausts the default Fiber stack"),
+)) {
+    @("fiberDeepRecursion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-fiber-deep-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Fiber;
+            int finished;
+            int descend(int depth) {
+                scope(exit) ++finished;
+                if (depth == 0) {
+                    Fiber.yield();
+                    return 3;
+                }
+                return descend(depth - 1) + depth;
+            }
+            unittest {
+                int result;
+                auto fiber = new Fiber({ result = descend(64); });
+                fiber.call();
+                assert(finished == 0);
+                assert(fiber.state == Fiber.State.HOLD);
+                fiber.call();
+                assert(result == 2083);
+                assert(finished == 65);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
