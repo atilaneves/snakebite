@@ -28,8 +28,8 @@ public string discoveryLabel(in PreparationReport report) {
     import snakebite.project: isDubProject;
 
     return isDubProject(report.project.directory)
-        ? "dub overhead"
-        : "source scan";
+        ? "dub ovrhd"
+        : "src scan";
 }
 
 
