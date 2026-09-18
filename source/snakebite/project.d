@@ -137,6 +137,24 @@ private SourceSet bareSourceSet(
 
 private SourceSet dubSourceSet(in string directory, in string[] versions) {
     import snakebite.dub: dubDescribeProject;
+
+    return dubSourceSet(directory, dubDescribeProject(directory, versions));
+}
+
+
+version(unittest)
+public SourceSet dubSourceSetFromDescription(
+    in string directory,
+    imported!"snakebite.dub".DubDescription description,
+) {
+    return dubSourceSet(directory, description);
+}
+
+
+private SourceSet dubSourceSet(
+    in string directory,
+    imported!"snakebite.dub".DubDescription description,
+) {
     import snakebite.frontend.compiler: FrontendFlags;
     import std.algorithm.iteration: filter, map;
     import std.array: array;
@@ -144,7 +162,6 @@ private SourceSet dubSourceSet(in string directory, in string[] versions) {
     import std.json: JSONType, JSONValue;
     import std.path: buildPath;
 
-    auto description = dubDescribeProject(directory, versions); // Stored in the mutable SourceSet.
     JSONValue settings;
     foreach (target; description.value["targets"].array)
         if (target["rootPackage"].str == description.value["rootPackage"].str)
