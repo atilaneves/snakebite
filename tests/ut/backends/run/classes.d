@@ -886,3 +886,25 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot take the address of an initializer symbol"),
+)) {
+    @("classMethodReadsInstanceInitializer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Node {
+                int value = 42;
+                size_t initializerSize() {
+                    return __traits(initSymbol, Node).length;
+                }
+            }
+            void main() {
+                auto node = new Node;
+                assert(node.initializerSize() == __traits(classInstanceSize, Node));
+            }
+        });
+    }
+}
