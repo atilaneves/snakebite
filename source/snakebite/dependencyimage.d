@@ -447,7 +447,7 @@ public struct ProjectImageCache {
         import std.conv: text;
 
         _path = buildPath(directory, "project.json");
-        _settings = sourceDigest(text("snakebite-project-image-v1", __VERSION__, settings));
+        _settings = sourceDigest(text("snakebite-project-image-v2", __VERSION__, settings));
         _roots = roots.dup;
     }
 
