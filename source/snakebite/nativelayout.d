@@ -236,6 +236,7 @@ public struct NativeData {
     import dmd.aggregate: AggregateDeclaration;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration, VarDeclaration;
+    import dmd.dsymbol: Dsymbol;
     import dmd.expression: ClassReferenceExp, Expression, StructLiteralExp;
     import dmd.location: Loc;
     import dmd.mtype: Type;
@@ -245,6 +246,7 @@ public struct NativeData {
     import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
 
     private SymbolAddress _symbolAddress;
+    private bool delegate(Dsymbol) _isRootOwned;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
     // Read and written only under the compiler lock. Key by the object,
     // not a reference expression, to preserve aliases and cycles.
@@ -272,8 +274,10 @@ public struct NativeData {
     public this(
         SymbolAddress symbolAddress,
         TypeInfo_Class delegate(ClassDeclaration) classInfo,
+        bool delegate(Dsymbol) isRootOwned,
     ) {
         _symbolAddress = symbolAddress;
+        _isRootOwned = isRootOwned;
         _classInfo = classInfo;
         _tls = PerThread!(TlsSlots*)(() => new TlsSlots);
     }
@@ -372,6 +376,10 @@ public struct NativeData {
         return bytes;
     }
 
+    public TlsSlots* tlsSlots() {
+        return _tls.current;
+    }
+
     // `variable`'s storage: this thread's own copy if it is thread-local
     // (finding 1.3 - compiled D gives every thread its own copy of a
     // module-level or `static` local that is not `shared`/`__gshared`),
@@ -401,7 +409,15 @@ public struct NativeData {
                 bytes = *found;
                 return;
             }
-            bytes = buildInitialBytes(variable, facts);
+            // Imported shared storage can be initialized by native startup.
+            // Only missing symbols need a guest-owned initialization image.
+            if (!_isRootOwned(variable)) {
+                auto address = _symbolAddress(variable); // Storage stays writable.
+                if (address !is null)
+                    bytes = address[0 .. facts.size];
+            }
+            if (bytes.ptr is null)
+                bytes = buildInitialBytes(variable, facts);
             _statics.insert(variable, bytes);
         });
         return bytes;
@@ -564,7 +580,8 @@ private void storeValue(
     NativeData* nativeData = null,
 ) {
     import core.stdc.string: memcpy, memset;
-    import dmd.astenums: Tarray, Tfloat32, Tfloat64, Tfloat80, Tsarray;
+    import dmd.astenums:
+        Tarray, Tfloat32, Tfloat64, Tfloat80, Tpointer, Tsarray;
     import dmd.expressionsem: toInteger, toReal;
     import dmd.typesem: mutableOf, nextOf, size, toBasetype;
     import std.conv: text;
@@ -576,6 +593,13 @@ private void storeValue(
 
     if (facts.isIntegral) {
         storeIntegral(place, value.toInteger, facts.size);
+        return;
+    }
+
+    // DMD represents a null pointer used in an identity expression as an
+    // integer literal. It is still a pointer value in the native layout.
+    if (type.ty == Tpointer && value.isIntegerExp && value.toInteger == 0) {
+        memset(place, 0, facts.size);
         return;
     }
 
@@ -638,6 +662,8 @@ private void storeValue(
         if (type.ty == Tsarray) {
             assert(literal.len * elementSize == facts.size);
             memcpy(place, literal.peekData.ptr, facts.size);
+        } else if (type.ty == Tpointer) {
+            *cast(const(void)**) place = literal.peekData.ptr;
         } else {
             assert(type.ty == Tarray);
             storeIntegral(bytes + arrayLengthOffset, literal.len, size_t.sizeof);

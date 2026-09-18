@@ -59,10 +59,7 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
     private bool[string] _imports;
     private bool[Module] _modules;
     private struct Reference {
-        string overloads;
-        string arguments;
         FuncDeclaration[] functions;
-        string selected = "false";
     }
     private Reference[string] _references;
 
@@ -80,14 +77,11 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
             collectModules(dependency);
     }
 
-    // Taking addresses emits the original D symbols. There is no forwarding
-    // function and no ABI remapping. Each overload is instantiated separately
-    // when taking their address directly is ambiguous. Prefer the original
-    // name: recreating unambiguous instances through aliases can make LDC
-    // emit duplicate definitions and reject a warning-as-error build. If
-    // template selection is ambiguous before the cast, use the alias.
-    // Some instances mention guest-local types or private declarations. They
-    // cannot be compiled independently and keep the normal guest fallback.
+    // Address references retain unambiguous instances. Calls in unused anchor
+    // bodies select ambiguous overloads through their argument types. Aliasing
+    // one template overload can change recursive lookup inside its body in LDC.
+    // Both forms emit the original symbols that the backends call through FFI.
+    // Inaccessible instances keep the normal guest fallback.
     private extern(D) string source() {
         if (!_references.length)
             return "";
@@ -124,17 +118,50 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
             // instance can keep its normal guest fallback.
             result ~= text("static if (__traits(compiles, { auto pointer = mixin(q{&", key, "}); })) {\n",
                 "    export __gshared auto retained", i, " = mixin(q{&", key, "});\n",
-                "} else static if (__traits(compiles, mixin(q{", reference.overloads, "}))) {\n",
-                "static foreach (index, overload; mixin(q{", reference.overloads, "})) {\n",
-                "    static if (", reference.selected, ") {\n",
-                "    static if (__traits(compiles, { auto pointer = mixin(q{cast(typeof(&overload", reference.arguments, ")) &", key, "}); }))\n",
-                "        mixin(\"export __gshared auto retained", i,
-                "_\" ~ index.stringof ~ q{ = cast(typeof(&overload", reference.arguments, ")) &", key, ";});\n",
-                "    else static if (__traits(compiles, { auto pointer = mixin(q{&overload", reference.arguments, "}); }))\n",
-                "        mixin(\"export __gshared auto retained", i,
-                "_\" ~ index.stringof ~ q{ = &overload", reference.arguments, ";});\n}\n}\n}\n");
+                "} else {\n");
+            foreach (j, function_; reference.functions) {
+                const anchor = overloadAnchor(function_, key, text("retained", i, "_", j));
+                if (!anchor.length)
+                    continue;
+                result ~= text("static if (__traits(compiles, { mixin(q{", anchor,
+                    "}); })) mixin(q{export ", anchor, "});\n");
+            }
+            result ~= "}\n";
         }
         return result;
+    }
+
+    private extern(D) string overloadAnchor(
+        FuncDeclaration function_, in string key, in string name,
+    ) {
+        import dmd.astenums: STC;
+
+        // Speculative template instances can retain an error type.
+        auto type = function_.type.isTypeFunction; // DMD printers use mutable types.
+        if (type is null)
+            return "";
+        string parameters;
+        string arguments;
+        const count = type.parameterList.length;
+        foreach (i; 0 .. count) {
+            auto parameter = type.parameterList[i]; // DMD printers use mutable types.
+            if (i) {
+                parameters ~= ", ";
+                arguments ~= ", ";
+            }
+            if (parameter.storageClass & STC.ref_)
+                parameters ~= "ref ";
+            else if (parameter.storageClass & STC.out_)
+                parameters ~= "out ";
+            else if (parameter.storageClass & STC.lazy_)
+                parameters ~= "lazy ";
+            const argument = text("argument", i);
+            parameters ~= sourceSpelling(parameter.type.toChars.fromStringz)
+                ~ " " ~ argument;
+            arguments ~= argument;
+        }
+        return text("void ", name, "(", parameters, ") { ",
+            key, "(", arguments, "); }");
     }
 
     override void visit(TemplateDeclaration declaration) {}
@@ -191,35 +218,10 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
                         }
                     }
                 }
-                import std.string: indexOf;
-                const spelling = sourceSpelling(instance.toChars.fromStringz);
-                const arguments = spelling[spelling.indexOf('!') .. $].idup;
-                const scopeName = sourceSpelling(instance.tempdecl.parent.toPrettyChars(true).fromStringz);
-                const reference = text("__traits(getOverloads, ", scopeName,
-                    ", \"", instance.tempdecl.ident.toString, "\", true)");
                 const key = sourceSpelling(instance.toPrettyChars(true).fromStringz);
                 if (key !in _references)
-                    _references[key] = Reference(reference, arguments);
+                    _references[key] = Reference.init;
                 _references[key].functions ~= function_;
-                // Reinstantiating unselected overloads can emit distinct bodies
-                // with the same mangled name after template aliases expand.
-                import dmd.dsymbol: Dsymbol;
-                import dmd.funcsem: overloadApply;
-                Dsymbol first = instance.tempdecl;
-                if (auto declaration = instance.tempdecl.isTemplateDeclaration) {
-                    if (declaration.funcroot !is null)
-                        first = declaration.funcroot;
-                    else if (declaration.overroot !is null)
-                        first = declaration.overroot;
-                }
-                size_t index;
-                overloadApply(first, (symbol) {
-                    if (symbol is instance.tempdecl)
-                        _references[key].selected ~= text(" || index == ", index);
-                    if (symbol.isFuncDeclaration || symbol.isTemplateDeclaration)
-                        ++index;
-                    return 0;
-                });
             }
         }
         function_.fbody.accept(this);

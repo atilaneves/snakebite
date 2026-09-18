@@ -30,7 +30,9 @@ import core.thread: Thread, ThreadID;
 //
 // `State` is a class or a pointer to a struct. `destroy` is applied to
 // the object it names when the state is released.
-public struct PerThread(State) {
+// Execution state needs a separate entry for each Fiber stack. Native TLS
+// variables use the default so all Fibers on a thread see the same storage.
+public struct PerThread(State, bool fiberLocal = false) {
     // What every thread that holds a state of this `PerThread` shares:
     // the factory that makes a fresh state, and a number that tells this
     // `PerThread` apart from every other one sharing the same `_held`
@@ -45,8 +47,16 @@ public struct PerThread(State) {
         State state;
     }
 
+    private struct Key {
+        size_t owner;
+        static if (fiberLocal) {
+            import core.thread: Fiber;
+            Fiber fiber;
+        }
+    }
+
     private Core* _core;
-    private static Held[size_t] _held;
+    private static Held[Key] _held;
     private static bool _hooked;
     // The last `(core, state)` pair `current` returned on this thread,
     // checked before the associative-array lookup below. Almost every
@@ -55,7 +65,7 @@ public struct PerThread(State) {
     // instead of a hash and a probe (finding 11). `size_t.max` never
     // matches a real `_core.id` (it starts at 1, see `nextId`), so an
     // empty cache never looks like a hit.
-    private static size_t _cachedId = size_t.max;
+    private static Key _cachedKey = Key(size_t.max);
     private static State _cachedState;
 
     @disable this();
@@ -73,19 +83,25 @@ public struct PerThread(State) {
     // and no call to `attachedThread`, once this thread already holds
     // one (ADR-0006's fast path).
     public State current() {
-        if (_core.id == _cachedId)
+        static if (fiberLocal) {
+            import core.thread: Fiber;
+            // The cache retains a mutable Fiber reference.
+            auto key = Key(_core.id, Fiber.getThis);
+        } else
+            const key = Key(_core.id);
+        if (key == _cachedKey)
             return _cachedState;
 
-        if (auto held = _core.id in _held) {
-            _cachedId = _core.id;
+        if (auto held = key in _held) {
+            _cachedKey = key;
             _cachedState = held.state;
             return held.state;
         }
 
-        return enter;
+        return enter(key);
     }
 
-    private State enter() {
+    private State enter(Key key) {
         attachedThread;
         if (!_hooked) {
             onThreadEnd(&releaseThisThread);
@@ -93,8 +109,8 @@ public struct PerThread(State) {
         }
 
         auto state = _core.create();
-        _held[_core.id] = Held(state);
-        _cachedId = _core.id;
+        _held[key] = Held(state);
+        _cachedKey = key;
         _cachedState = state;
         return state;
     }
@@ -113,7 +129,7 @@ public struct PerThread(State) {
         // Drop the cache along with the table: a state it still points
         // to is about to be destroyed, and a later entry on the same
         // thread must go through `enter` again to notice.
-        _cachedId = size_t.max;
+        _cachedKey = Key(size_t.max);
         _cachedState = State.init;
         // Let a later entry on this same thread register a fresh hook.
         // Without this, a thread that enters guest code again after its

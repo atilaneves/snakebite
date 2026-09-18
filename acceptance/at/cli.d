@@ -47,6 +47,128 @@ static foreach (backend; Matrix!(
         if (result.status != 0)
             fail(result.output, __FILE__, __LINE__);
     }
+
+    @("classInvariantAtShutdown." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-invariant-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            class Base {
+                invariant { assert(true); }
+            }
+            class Resource: Base {
+                bool delegate(out int) fetch;
+                this(bool delegate(out int) fetch) {
+                    this.fetch = fetch;
+                }
+                ~this() {}
+                int read() {
+                    int result;
+                    fetch(result);
+                    return result;
+                }
+            }
+            void main() {
+                auto resource = new Resource((out int value) {
+                    value = 42;
+                    return true;
+                });
+                assert(resource.read() == 42);
+                destroy(resource);
+            }
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter))
+                enum name = "interpreter";
+            else static if (is(backend == Bytecode))
+                enum name = "bytecode";
+            else
+                enum name = "ctfe";
+            const result = execute([
+                buildPath(getcwd, "bin", "sb"), "-b", name,
+                directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+
+    @("nullVoidPointerIdentity." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-null-pointer-" ~ thisProcessID.text
+                ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            void main() {
+                void* pointer;
+                assert(pointer is null);
+            }
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter))
+                enum name = "interpreter";
+            else static if (is(backend == Bytecode))
+                enum name = "bytecode";
+            else
+                enum name = "ctfe";
+            const result = execute([
+                buildPath(getcwd, "bin", "sb"), "-b", name,
+                directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+
+    @("moduleUnittestNestedDelegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-unittest-context-" ~ thisProcessID.text
+                ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            unittest {
+                int value = 42;
+                auto read = () { return value; };
+                assert(read() == 42);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter))
+                enum name = "interpreter";
+            else static if (is(backend == Bytecode))
+                enum name = "bytecode";
+            else
+                enum name = "ctfe";
+            const result = execute([
+                buildPath(getcwd, "bin", "sb"), "-b", name,
+                directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
 }
 
 
@@ -186,5 +308,260 @@ static foreach (backend; Matrix!(
         if (result.status != 42)
             fail(text("Expected exit status 42, got ", result.status,
                 ": ", result.output), __FILE__, __LINE__);
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("staticArrayComparison." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-array-comparison-" ~ thisProcessID.text
+                ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            unittest {
+                ubyte[4] values = [23, 13, 42, 71];
+                assert(values == [23, 13, 42, 71]);
+                assert(values != [23, 13, 42, 72]);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("fiberCapturedDelegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-fiber-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Fiber;
+            unittest {
+                int value;
+                auto fiber = new Fiber({
+                    value = 17;
+                    value += 25;
+                }, 64 * 1024, 0);
+                fiber.call();
+                assert(value == 42);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("fiberYieldingDelegates." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-fiber-yield-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Fiber;
+            int threadCount;
+            int useStack(int value) {
+                int[128] values;
+                values[127] = value;
+                return values[127];
+            }
+            unittest {
+                int first, second;
+                auto a = new Fiber({
+                    int local = 17;
+                    ++threadCount;
+                    first = local;
+                    Fiber.yield();
+                    first = local + 25;
+                });
+                auto b = new Fiber({
+                    int local = 31;
+                    ++threadCount;
+                    second = local;
+                    Fiber.yield();
+                    second = local + 26;
+                });
+                a.call();
+                b.call();
+                assert(first == 17 && second == 31);
+                assert(threadCount == 2);
+                a.call();
+                assert(first == 42);
+                assert(useStack(73) == 73);
+                b.call();
+                assert(second == 57);
+                assert(a.state == Fiber.State.TERM);
+                assert(b.state == Fiber.State.TERM);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("fiberInterfaceRecursion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-fiber-interface-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Fiber;
+            interface Walker { void walk(uint depth); }
+            class RecursiveWalker: Walker {
+                int count;
+                override void walk(uint depth) {
+                    ++count;
+                    if (depth) {
+                        Walker next = this;
+                        next.walk(depth - 1);
+                    } else {
+                        Fiber.yield();
+                    }
+                }
+            }
+            unittest {
+                auto walker = new RecursiveWalker;
+                auto fiber = new Fiber({ walker.walk(6); });
+                fiber.call();
+                assert(walker.count == 7);
+                assert(fiber.state == Fiber.State.HOLD);
+                fiber.call();
+                assert(fiber.state == Fiber.State.TERM);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "Recursive evaluation exhausts the default Fiber stack"),
+)) {
+    @("fiberDeepRecursion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-fiber-deep-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Fiber;
+            int finished;
+            int descend(int depth) {
+                scope(exit) ++finished;
+                if (depth == 0) {
+                    Fiber.yield();
+                    return 3;
+                }
+                return descend(depth - 1) + depth;
+            }
+            unittest {
+                int result;
+                auto fiber = new Fiber({ result = descend(64); });
+                fiber.call();
+                assert(finished == 0);
+                assert(fiber.state == Fiber.State.HOLD);
+                fiber.call();
+                assert(result == 2083);
+                assert(finished == 65);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
     }
 }

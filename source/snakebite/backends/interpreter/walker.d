@@ -20,19 +20,17 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     // are filled once per key, and the plan cache with its callback
     // bridge (ADR-0006).
     private Shared* _shared;
-    // One evaluator per thread: it owns that thread's frame stack and
-    // execution state. Every thread, including the one that constructed
-    // this backend, gets its evaluator through the same lookup, on its
-    // first entry, and keeps it until it ends (ADR-0006, finding 2.1:
-    // compiled D gives the constructing thread no special path either).
-    private PerThread!Evaluator _evaluators;
+    // Each native stack needs independent execution state: a suspended Fiber
+    // must not leave its active frame or expression state in another Fiber.
+    // Entries are owned and released by their host thread (ADR-0006).
+    private PerThread!(Evaluator, true) _evaluators;
 
     public this(const Program program) {
         super(program);
         _shared = new Shared(program);
         _shared.plans.useCallbacks(
             new CallbackBridge(&invokeCallback, cast(void*) this));
-        _evaluators = PerThread!Evaluator(() => new Evaluator(_shared));
+        _evaluators = PerThread!(Evaluator, true)(() => new Evaluator(_shared));
     }
 
     public override void call(
@@ -227,7 +225,8 @@ private struct Shared {
     this(const Program program) {
         this.program = program;
         plans = PlanCache(program.dependencyImage);
-        nativeData = NativeData(&constantSymbolAddress, &classRuntimeInfo);
+        nativeData = NativeData(&constantSymbolAddress, &classRuntimeInfo,
+            &this.program.isRootOwned);
         runtimeTypes = RuntimeTypes(&this.program.isRootOwned,
             (name) => plans.resolve(name),
             &classRuntimeInfo,
@@ -301,9 +300,9 @@ private struct Shared {
         }
 
         const(void)* word;
-        if (callSelection.usesGuestBody(method, null,
+        if (callSelection.usesGuestBody(method,
                 (callee) => program.isInterpreted(callee),
-                plans.hasNativeSymbol(method), "interpreter")) {
+                plans.hasNativeSymbol(method))) {
             plans.registerGuestFunction(cast(void*) method, method);
             word = cast(void*) method;
         }
@@ -585,12 +584,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         scope const(void*)[] declaredArguments = args;
         if (layout.hiddenThis.variable !is null) {
-            storeIntegral(
-                frame.base + layout.hiddenThis.parameter.offset,
-                loadIntegral(args[0], size_t.sizeof, false),
-                size_t.sizeof,
-            );
-            declaredArguments = args[1 .. $];
+            if (args.length) {
+                storeIntegral(
+                    frame.base + layout.hiddenThis.parameter.offset,
+                    loadIntegral(args[0], size_t.sizeof, false),
+                    size_t.sizeof,
+                );
+                declaredArguments = args[1 .. $];
+            } else
+                storeIntegral(
+                    frame.base + layout.hiddenThis.parameter.offset,
+                    0, size_t.sizeof,
+                );
         }
 
         try
@@ -872,9 +877,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // regardless of which module owns it.
         auto body_ = function_.fbody;
         const interprets = _callSelection.usesGuestBody(
-            function_, callSite is null ? null : callSite.arguments,
+            function_,
             (callee) => _program.isInterpreted(callee),
-            hasNativeSymbol(function_), "interpreter",
+            hasNativeSymbol(function_),
         );
         if (!interprets) {
             const plan = callSite is null
@@ -4724,10 +4729,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto callee = expression.f is null
             ? calleeOf(expression)
             : Callee(expression.f, null, false);
-        if (callee.address !is null)
-            return _callIndirect(expression, callee.type,
-                callee.address, callee.context, callee.fromDelegate,
-                returnPlace);
+        if (callee.address !is null) {
+            const target = _plans.guestTarget(callee.address);
+            if (target.word is null)
+                return _callIndirect(expression, callee.type,
+                    callee.address, callee.context, callee.fromDelegate,
+                    returnPlace);
+            callee.function_ = cast(FuncDeclaration) cast(void*) target.word;
+            callee.context = cast(ubyte*) callee.context + target.adjustment;
+        }
         auto function_ = callee.function_;
 
 
@@ -4760,10 +4770,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             // call uses the declaration of the object held by the receiver,
             // not the declaration dmd selected from its static type.
             if (!expression.directcall && receiver.isSuperExp is null
-                    && function_.isVirtualMethod)
-                return _callIndirect(expression, funcType,
-                    _virtualAddress(function_, classReceiver),
-                    classReceiver, true, returnPlace);
+                    && function_.isVirtualMethod) {
+                const address = _virtualAddress(function_, classReceiver);
+                const target = _plans.guestTarget(address);
+                if (target.word is null)
+                    return _callIndirect(expression, funcType,
+                        address, classReceiver, true, returnPlace);
+                function_ = cast(FuncDeclaration) cast(void*) target.word;
+                classReceiver = cast(ubyte*) classReceiver + target.adjustment;
+            }
         }
 
         auto layout = layoutOf(function_);
@@ -4863,7 +4878,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private CallResult _callIndirect(
-        CallExp expression, TypeFunction type, void* address,
+        CallExp expression, TypeFunction type, const(void)* address,
         void* context, bool hasContext, void* returnPlace,
     ) {
         const layout = FrameLayout.ofParameters(type, hasContext);
@@ -4912,6 +4927,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import std.conv: text;
 
         auto callee = expression.e1;
+        if (auto dot = callee.isDotVarExp)
+            if (auto function_ = dot.var.isFuncDeclaration)
+                return Callee(function_, null, false);
+
         if (auto deref = callee.isPtrExp) {
             auto function_ = cast(FuncDeclaration) asPointer(deref.e1);
             if (function_ is null)

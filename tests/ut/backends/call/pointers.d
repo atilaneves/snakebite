@@ -1757,7 +1757,11 @@ static foreach (backend; Matrix!()) {
         0.shouldBeStatusOf!(backend, q{
             int main() {
                 auto increment = (int x) => x + 1;
+                auto difference = (int a, int b) => a - b;
+                int delegate(int) bound = (int x) => x + 2;
                 assert(increment(4) == 5);
+                assert(difference(11, 4) == 7);
+                assert(bound(4) == 6);
                 return 0;
             }
         });
@@ -2059,6 +2063,33 @@ static foreach (backend; Matrix!()) {
                 assert(u == 3);
                 int narrow = cast(int) (low - high);
                 assert(narrow == -3);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the string literal terminator"),
+)) {
+    @("pointers.stringLiteralNativePointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            const(char)* choose(bool longer) {
+                return longer ? "abc" : ".";
+            }
+            void main() {
+                const(char)* narrow = "abc";
+                const(wchar)* wide = "ab";
+                const(dchar)* full = "abc";
+                assert(narrow[0] == 'a' && narrow[2] == 'c');
+                assert(wide[1] == 'b');
+                assert(full[2] == 'c');
+                assert(narrow[3] == 0 && wide[2] == 0 && full[3] == 0);
+                assert(choose(false)[0] == '.');
+                assert(choose(true)[2] == 'c');
             }
         });
     }

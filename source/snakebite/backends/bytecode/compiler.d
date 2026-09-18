@@ -51,14 +51,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.nativelayout: NativeData, nativeSymbolName;
     import snakebite.backends.runtimetypes: RuntimeTypes;
 
-    // One VM per thread: it owns that thread's frame stack (ADR-0006).
-    // Every thread, including the one that constructed this backend,
-    // gets its VM through the same lookup, on its first entry, and
-    // keeps it until it ends (finding 2.1: compiled D gives the
-    // constructing thread no special path either). Everything else in
-    // this class is built under the compiler lock and read without it
-    // after.
-    private PerThread!(Vm*) _vms;
+    // Each native stack needs its own guest frame stack. Fibers can resume
+    // out of nesting order, so they cannot share one LIFO stack.
+    // Entries are owned and released by their host thread (ADR-0006).
+    private PerThread!(Vm*, true) _vms;
     private NativeData _nativeData;
     private PlanCache _plans;
     private CallSelection _callSelection;
@@ -97,11 +93,13 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     public this(const Program program) {
         super(program);
         _plans = PlanCache(program.dependencyImage);
-        _nativeData = NativeData(&constantSymbolAddress, &classRuntimeInfo);
+        _nativeData = NativeData(&constantSymbolAddress, &classRuntimeInfo,
+            &_program.isRootOwned);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
-        _vms = PerThread!(Vm*)(() => new Vm(defaultFrameCapacity));
+        _vms = PerThread!(Vm*, true)(
+            () => new Vm(defaultFrameCapacity, _nativeData.tlsSlots));
         _plans.useCallbacks(
             new CallbackBridge(&invokeCallback, cast(void*) this));
     }
@@ -353,8 +351,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             return cast(void*) compileFunction(method);
 
         const(void)* word;
-        if (_callSelection.usesGuestBody(method, null, &isGuestFunction,
-                hasNativeSymbol(method), "bytecode compiler")) {
+        if (_callSelection.usesGuestBody(method, &isGuestFunction,
+                hasNativeSymbol(method))) {
             word = compileFunction(method);
             registerGuestWord(method, cast(const(Function)*) word);
         }
@@ -5260,8 +5258,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto callee = expression.f;
         if (callee is null) {
             auto calleeExp = expression.e1.isVarExp;
-            callee = calleeExp is null
-                ? null : calleeExp.var.isFuncDeclaration;
+            if (calleeExp !is null)
+                callee = calleeExp.var.isFuncDeclaration;
+            else if (auto dot = expression.e1.isDotVarExp)
+                callee = dot.var.isFuncDeclaration;
         }
         // `super(args)`/`this(args)` constructor delegation reaches here
         // the same as any other call: dmd's own semantic pass always
@@ -5310,8 +5310,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto parent = callee.toParent2();
             auto parentFunction =
                 parent is null ? null : parent.isFuncDeclaration;
-            if (parentFunction is null)
-                throw rejection(_function, expression.loc, "a static chain");
+            if (parentFunction is null) {
+                const context = reserveTemp(pointerFacts);
+                emit(&opConstant, context, addConstant(0), size_t.sizeof);
+                return context;
+            }
             return contextAddressOf(parentFunction);
         }
 
@@ -5393,8 +5396,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto type = typeFunctionOf(callee);
 
         const guest = _bytecode._callSelection.usesGuestBody(
-            callee, arguments, &_bytecode.isGuestFunction,
-            _bytecode.hasNativeSymbol(callee), "bytecode compiler",
+            callee, &_bytecode.isGuestFunction,
+            _bytecode.hasNativeSymbol(callee),
         );
         if (!guest) {
             Arg[] initialArgs;
