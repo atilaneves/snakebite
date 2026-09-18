@@ -81,8 +81,15 @@ public bool functionNeedsClosure(FuncDeclaration function_) {
 // widens a null one.
 public bool hasHiddenThis(FuncDeclaration function_) {
     import dmd.funcsem: functionSemantic3;
+    import dmd.tokens: TOK;
 
     functionSemantic3(function_);
+
+    // Inferred function pointers can retain the provisional context variable
+    // that DMD created before it knew whether the lambda captured anything.
+    if (auto literal = function_.isFuncLiteralDeclaration)
+        if (literal.tok != TOK.delegate_)
+            return false;
 
     if (function_.vthis is null)
         return function_.isThis() !is null || function_.isNested();
