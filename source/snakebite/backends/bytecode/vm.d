@@ -494,11 +494,9 @@ private void dispatch(
 
 
 private void unwindFinally(Throwable throwable, scope void delegate() cleanup) {
-    try {
-        throw throwable;
-    } finally {
-        cleanup();
-    }
+    import snakebite.backends.exceptions: sharedUnwindFinally = unwindFinally;
+
+    sharedUnwindFinally(throwable, cleanup);
 }
 
 

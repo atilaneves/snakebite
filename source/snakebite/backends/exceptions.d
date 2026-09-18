@@ -4,7 +4,19 @@ module snakebite.backends.exceptions;
 private:
 
 
-import object: TypeInfo_Class;
+import object: Throwable, TypeInfo_Class;
+
+
+public void unwindFinally(
+    Throwable throwable,
+    scope void delegate() cleanup,
+) {
+    try {
+        throw throwable;
+    } finally {
+        cleanup();
+    }
+}
 
 
 // Whether a guest `catch` naming `expected` accepts a throwable whose own

@@ -108,6 +108,19 @@ private final class GuestException: Exception {
     public this(Throwable guest) {
         super(guest.msg);
         _guest = guest;
+        if (_guest.refcount)
+            ++_guest.refcount;
+    }
+
+    ~this() {
+        if (_guest !is null)
+            _d_delThrowable(_guest);
+    }
+
+    private Throwable take() {
+        auto guest = _guest;
+        _guest = null;
+        return guest;
     }
 }
 
@@ -474,7 +487,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // state also records when a function is being resumed at that statement,
     // so every enclosing visitor can continue its normal statement sequence.
     private ControlFlowState _controlFlow;
-    private SwitchStatement[] _switchStack;
+    private SwitchStatement _switchStatement;
     // `extern(D)`: only `Visitor`'s `visit` overloads need the C++
     // linkage.
     extern(D) public this(Shared* shared_) {
@@ -594,7 +607,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 });
             });
         catch (GuestException exception)
-            throw exception._guest;
+            throw exception.take;
     }
 
     extern(D) private void bindHostArguments(
@@ -887,7 +900,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _function = function_;
         _pendingLoopLabel = null;
         _controlFlow = ControlFlowState.init;
-        _switchStack = null;
+        _switchStatement = null;
         while (true) {
             body_.accept(this);
             if (!_controlFlow.hasGoto)
@@ -1032,7 +1045,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         private FuncDeclaration _function;
         private Identifier _pendingLoopLabel;
         private ControlFlowState _controlFlow;
-        private SwitchStatement[] _switchStack;
+        private SwitchStatement _switchStatement;
 
         @disable this();
         @disable this(this);
@@ -1048,7 +1061,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _function = evaluator._function;
             _pendingLoopLabel = evaluator._pendingLoopLabel;
             _controlFlow = evaluator._controlFlow;
-            _switchStack = evaluator._switchStack;
+            _switchStatement = evaluator._switchStatement;
         }
 
         ~this() {
@@ -1061,7 +1074,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _evaluator._function = _function;
             _evaluator._pendingLoopLabel = _pendingLoopLabel;
             _evaluator._controlFlow = _controlFlow;
-            _evaluator._switchStack = _switchStack;
+            _evaluator._switchStatement = _switchStatement;
         }
     }
 
@@ -1119,7 +1132,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     if (!matchesThrowable(catch_, exception))
                         continue;
 
-                    bindCatchVariable(catch_, exception._guest);
+                    bindCatchVariable(catch_, exception.take);
                     catch_.handler.accept(this);
                     return;
                 }
@@ -1140,7 +1153,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 if (!matchesThrowable(catch_, exception))
                     continue;
 
-                bindCatchVariable(catch_, exception._guest);
+                bindCatchVariable(catch_, exception.take);
                 catch_.handler.accept(this);
                 return;
             }
@@ -1187,7 +1200,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     statement._body.accept(this);
             }
         } catch (GuestException exception) {
-            pendingException = exception._guest;
+            pendingException = exception.take;
         } finally {
             _controlFlow.withCleanup({
                 runFinallyBody(statement.finalbody, pendingException);
@@ -1205,21 +1218,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         try {
-            try {
-                throw pendingException;
-            } finally {
-                runFinallyBodyRaw(finalbody);
-            }
+            import snakebite.backends.exceptions: unwindFinally;
+
+            unwindFinally(pendingException, {
+                try
+                    runCleanupBody(finalbody);
+                catch (GuestException exception)
+                    throw exception.take;
+            });
         } catch (Throwable exception) {
             throw new GuestException(exception);
-        }
-    }
-
-    private void runFinallyBodyRaw(Statement finalbody) {
-        try {
-            runCleanupBody(finalbody);
-        } catch (GuestException exception) {
-            throw exception._guest;
         }
     }
 
@@ -1484,9 +1492,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (selected is null)
             return;
 
-        _switchStack ~= statement;
+        auto outerSwitch = _switchStatement;
+        _switchStatement = statement;
         scope (exit)
-            _switchStack = _switchStack[0 .. $ - 1];
+            _switchStatement = outerSwitch;
 
         while (true) {
             _controlFlow.seek(cast(void*) selected);
@@ -1538,14 +1547,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 "interpreter cannot execute an unresolved `goto case`",
             );
 
-        if (_switchStack.length == 0)
+        if (_switchStatement is null)
             throw new SnakebiteException(
                 "interpreter cannot execute `goto case` outside a switch",
             );
 
         _controlFlow.transfer(
             cast(void*) statement.cs,
-            cast(void*) _switchStack[$ - 1].tryBody,
+            cast(void*) _switchStatement.tryBody,
         );
     }
 

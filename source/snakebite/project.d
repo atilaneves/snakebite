@@ -137,20 +137,68 @@ private SourceSet bareSourceSet(
 
 private SourceSet dubSourceSet(in string directory, in string[] versions) {
     import snakebite.dub: dubDescribeProject;
+
+    return dubSourceSet(directory, dubDescribeProject(directory, versions));
+}
+
+
+version(unittest)
+public SourceSet dubSourceSetFromDescription(
+    in string directory,
+    imported!"snakebite.dub".DubDescription description,
+) {
+    return dubSourceSet(directory, description);
+}
+
+
+private SourceSet dubSourceSet(
+    in string directory,
+    imported!"snakebite.dub".DubDescription description,
+) {
     import snakebite.frontend.compiler: FrontendFlags;
     import std.algorithm.iteration: filter, map;
     import std.array: array;
     import std.conv: text;
+    import std.json: JSONType, JSONValue;
+    import std.path: buildPath;
 
-    auto description = dubDescribeProject(directory, versions); // Stored in the mutable SourceSet.
-    import std.json: JSONValue;
     JSONValue settings;
     foreach (target; description.value["targets"].array)
         if (target["rootPackage"].str == description.value["rootPackage"].str)
             settings = target["buildSettings"];
 
+    const packageSettings = settings.type == JSONType.object;
+    if (!packageSettings)
+        foreach (package_; description.value["packages"].array)
+            if (package_["name"].str == description.value["rootPackage"].str
+                    && package_["configuration"].str
+                    == description.value["configuration"].str)
+                settings = package_;
+
     string[] values(in string key) {
-        return settings[key].array.map!(value => value.str).array;
+        if (!packageSettings && key == "linkerFiles")
+            return null;
+        if (packageSettings || key != "sourceFiles" && key != "importPaths"
+                && key != "stringImportPaths")
+            return settings[key].array.map!(value => value.str).array;
+
+        string[] result;
+        foreach (package_; description.value["packages"].array)
+            if (package_["active"].boolean) {
+                if (key == "sourceFiles") {
+                    if (package_["name"].str
+                            != description.value["rootPackage"].str)
+                        continue;
+                    foreach (file; package_["files"].array)
+                        if (file["role"].str == "source")
+                            result ~= buildPath(
+                                package_["path"].str, file["path"].str);
+                } else {
+                    result ~= package_[key].array.map!(path => buildPath(
+                        package_["path"].str, path.str)).array;
+                }
+            }
+        return result;
     }
     import std.algorithm: endsWith;
     const isLinkerFile = (string path) => path.endsWith(".a", ".o", ".so");

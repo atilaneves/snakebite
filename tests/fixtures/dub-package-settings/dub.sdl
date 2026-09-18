@@ -1,0 +1,14 @@
+name "dub-package-settings"
+targetType "library"
+
+configuration "library" {
+}
+
+configuration "unittest" {
+    targetType "executable"
+    targetName "ut"
+    mainSourceFile "tests/main.d"
+    sourcePaths "tests"
+    importPaths "tests"
+    dependency "unit-threaded" version="*"
+}
