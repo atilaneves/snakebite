@@ -662,6 +662,8 @@ private void storeValue(
         if (type.ty == Tsarray) {
             assert(literal.len * elementSize == facts.size);
             memcpy(place, literal.peekData.ptr, facts.size);
+        } else if (type.ty == Tpointer) {
+            *cast(const(void)**) place = literal.peekData.ptr;
         } else {
             assert(type.ty == Tarray);
             storeIntegral(bytes + arrayLengthOffset, literal.len, size_t.sizeof);
