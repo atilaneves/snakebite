@@ -376,6 +376,10 @@ public struct NativeData {
         return bytes;
     }
 
+    public TlsSlots* tlsSlots() {
+        return _tls.current;
+    }
+
     // `variable`'s storage: this thread's own copy if it is thread-local
     // (finding 1.3 - compiled D gives every thread its own copy of a
     // module-level or `static` local that is not `shared`/`__gshared`),
