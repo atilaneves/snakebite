@@ -350,8 +350,10 @@ public struct Vm {
     @disable this();
     @disable this(this);
 
-    public this(in size_t frameCapacity) {
-        _frames = FrameStack(frameCapacity);
+    import snakebite.tlsstorage: TlsSlots;
+
+    public this(in size_t frameCapacity, TlsSlots* tls = null) {
+        _frames = FrameStack(frameCapacity, tls);
     }
 
     // One argument the host hands a guest function: the callee frame
