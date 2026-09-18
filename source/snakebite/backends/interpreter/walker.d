@@ -20,12 +20,10 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     // are filled once per key, and the plan cache with its callback
     // bridge (ADR-0006).
     private Shared* _shared;
-    // One evaluator per thread: it owns that thread's frame stack and
-    // execution state. Every thread, including the one that constructed
-    // this backend, gets its evaluator through the same lookup, on its
-    // first entry, and keeps it until it ends (ADR-0006, finding 2.1:
-    // compiled D gives the constructing thread no special path either).
-    private PerThread!Evaluator _evaluators;
+    // Each native stack needs independent execution state: a suspended Fiber
+    // must not leave its active frame or expression state in another Fiber.
+    // Entries are owned and released by their host thread (ADR-0006).
+    private PerThread!(Evaluator, true) _evaluators;
 
     public this(const Program program) {
         super(program);
@@ -36,7 +34,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
                 cast(void*) this,
                 &prepareCallback,
             ));
-        _evaluators = PerThread!Evaluator(() => new Evaluator(_shared));
+        _evaluators = PerThread!(Evaluator, true)(() => new Evaluator(_shared));
     }
 
     public override void call(

@@ -388,3 +388,70 @@ static foreach (backend; Matrix!(
             fail(result.output, __FILE__, __LINE__);
     }
 }
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the native Fiber page size"),
+)) {
+    @("fiberYieldingDelegates." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const directory = buildPath(tempDir,
+            "snakebite-cli-fiber-yield-" ~ thisProcessID.text ~ backend.stringof);
+        directory.mkdir;
+        scope(exit) directory.rmdirRecurse;
+        const source = buildPath(directory, "probe.d");
+        source.write(q{
+            import core.thread: Fiber;
+            int threadCount;
+            int useStack(int value) {
+                int[128] values;
+                values[127] = value;
+                return values[127];
+            }
+            unittest {
+                int first, second;
+                auto a = new Fiber({
+                    int local = 17;
+                    ++threadCount;
+                    first = local;
+                    Fiber.yield();
+                    first = local + 25;
+                });
+                auto b = new Fiber({
+                    int local = 31;
+                    ++threadCount;
+                    second = local;
+                    Fiber.yield();
+                    second = local + 26;
+                });
+                a.call();
+                b.call();
+                assert(first == 17 && second == 31);
+                assert(threadCount == 2);
+                a.call();
+                assert(first == 42);
+                assert(useStack(73) == 73);
+                b.call();
+                assert(second == 57);
+                assert(a.state == Fiber.State.TERM);
+                assert(b.state == Fiber.State.TERM);
+            }
+            void main() {}
+        });
+        static if (is(backend == Native))
+            const result = execute(["dmd", "-unittest", "-run", source],
+                null, Config.none, size_t.max, directory);
+        else {
+            static if (is(backend == Interpreter)) enum name = "interpreter";
+            else static if (is(backend == Bytecode)) enum name = "bytecode";
+            else enum name = "ctfe";
+            const result = execute([
+                "timeout", "10", buildPath(getcwd, "bin", "sb"),
+                "-b", name, directory,
+            ]);
+        }
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}

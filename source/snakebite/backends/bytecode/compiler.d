@@ -51,14 +51,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.nativelayout: NativeData, nativeSymbolName;
     import snakebite.backends.runtimetypes: RuntimeTypes;
 
-    // One VM per thread: it owns that thread's frame stack (ADR-0006).
-    // Every thread, including the one that constructed this backend,
-    // gets its VM through the same lookup, on its first entry, and
-    // keeps it until it ends (finding 2.1: compiled D gives the
-    // constructing thread no special path either). Everything else in
-    // this class is built under the compiler lock and read without it
-    // after.
-    private PerThread!(Vm*) _vms;
+    // Each native stack needs its own guest frame stack. Fibers can resume
+    // out of nesting order, so they cannot share one LIFO stack.
+    // Entries are owned and released by their host thread (ADR-0006).
+    private PerThread!(Vm*, true) _vms;
     private NativeData _nativeData;
     private PlanCache _plans;
     private CallSelection _callSelection;
@@ -102,7 +98,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
-        _vms = PerThread!(Vm*)(() => new Vm(defaultFrameCapacity));
+        _vms = PerThread!(Vm*, true)(
+            () => new Vm(defaultFrameCapacity, _nativeData.tlsSlots));
         _plans.useCallbacks(
             new CallbackBridge(&invokeCallback, cast(void*) this));
     }
