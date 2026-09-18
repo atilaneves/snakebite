@@ -14,6 +14,7 @@ extern(C) void executeCallPlan(
 extern(C) bool executeIndirectCallPlan(
     const(void)* opaquePlan, ref const(void)* address, void* returnPlace,
     scope const(void*)* arguments, size_t argumentCount,
+    out ptrdiff_t contextAdjustment,
 );
 
 import snakebite.callarguments: CallArguments;
@@ -818,16 +819,19 @@ private const(Instruction)* runCall(Decoded)(
     case indirect:
         auto callee =
             *cast(const(void)**) (execution.storage(site.calleeSlotOffset));
+        ptrdiff_t contextAdjustment;
         if (site.nativePlan !is null) {
             auto arguments = CallArguments(site.args.length);
             auto values = arguments.values;
             foreach (i, arg; site.args)
                 values[i] = execution.storage(arg.callerOffset);
             if (executeIndirectCallPlan(site.nativePlan, callee,
-                    execution.destination, values.ptr, values.length))
+                    execution.destination, values.ptr, values.length,
+                    contextAdjustment))
                 return execution.next;
         }
-        return callFunction(execution, site, cast(const(Function)*) callee);
+        return callFunction(execution, site, cast(const(Function)*) callee,
+            contextAdjustment);
     case native:
         auto arguments = CallArguments(site.args.length);
         // const would make the address slots read-only.
@@ -851,6 +855,7 @@ private const(Instruction)* callFunction(Decoded)(
     ref Decoded execution,
     scope const ref CallSite site,
     const(Function)* callee,
+    in ptrdiff_t contextAdjustment = 0,
 ) {
     import core.stdc.string: memcpy;
 
@@ -862,6 +867,11 @@ private const(Instruction)* callFunction(Decoded)(
             execution.storage(arg.callerOffset),
             arg.width,
         );
+
+    if (contextAdjustment != 0) {
+        auto context = cast(ubyte**) (calleeFrame.base + site.args[0].calleeOffset);
+        *context += contextAdjustment;
+    }
 
     initializeClosure(callee, calleeFrame.base, execution.frames);
 
