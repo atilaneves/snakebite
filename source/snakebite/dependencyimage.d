@@ -228,7 +228,7 @@ public DependencyImage prepareImage(
 private DependencyImage loadImage(in string path) {
     import core.runtime: Runtime;
     import core.sys.posix.dlfcn:
-        dlclose, dlerror, dlopen, RTLD_LAZY, RTLD_NODELETE;
+        dlerror, dlopen, RTLD_LAZY, RTLD_NODELETE;
     import std.string: fromStringz, toStringz;
     import std.conv: text;
 
@@ -256,16 +256,22 @@ private DependencyImage loadImage(in string path) {
     }
     // druntime releases a thread's library references when that thread exits.
     // Symbols must remain valid for the executable after the loading thread ends.
-    const pinned = dlopen(path.toStringz, RTLD_LAZY | RTLD_NODELETE);
-    if (pinned is null)
-        require(false, text("Cannot retain dependency image ", path,
-            ": ", dlerror.fromStringz));
-    dlclose(cast(void*) pinned);
+    if (path !in _pinnedImages) {
+        const pinned = dlopen(path.toStringz, RTLD_LAZY | RTLD_NODELETE);
+        if (pinned is null)
+            require(false, text("Cannot retain dependency image ", path,
+                ": ", dlerror.fromStringz));
+        // Keep one loader reference until process exit. Closing it here lets
+        // the loader run DSO teardown after druntime released the loading
+        // thread's reference, so the DSO is no longer in its DSO list.
+        _pinnedImages[path] = cast(void*) pinned;
+    }
     return image;
 }
 
 
 private __gshared TestHooks[void*] _imageTestHooks;
+private __gshared void*[string] _pinnedImages;
 private __gshared imported!"core.sync.mutex".Mutex _imageLoadLock;
 
 
