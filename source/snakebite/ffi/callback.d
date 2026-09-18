@@ -432,6 +432,7 @@ public struct CallbackBridge {
     // same as an unadjusted one.
     private SharedTable!(Adjusted, const(void)*) _adjustedEntries;
     private SharedTable!(const(void)*, const(void)*) _wordOfEntry;
+    private SharedTable!(const(void)*, Adjusted) _adjustedGuestEntries;
     private CallbackHandler _handler;
     private void* _owner;
     private void function(void*, FuncDeclaration) _prepare;
@@ -510,6 +511,21 @@ public struct CallbackBridge {
         return _words.contains(word);
     }
 
+    public struct GuestTarget {
+        const(void)* word;
+        ptrdiff_t adjustment;
+    }
+
+    // Adjusted entries must retain their receiver offset when a backend
+    // resolves them to guest calls. Stripping only the entry loses it.
+    public GuestTarget guestTarget(const(void)* address) const {
+        if (auto adjusted = address in _adjustedGuestEntries)
+            return GuestTarget(adjusted.word, adjusted.offset);
+        if (const word = wordOf(address))
+            return GuestTarget(word, 0);
+        return contains(address) ? GuestTarget(address, 0) : GuestTarget.init;
+    }
+
     // A native ABI thunk owns the receiver adjustment. Callers keep the
     // original interface pointer, including when they store a delegate.
     public const(void)* adjustedEntryOf(
@@ -539,6 +555,8 @@ public struct CallbackBridge {
                 _handler, _owner, word, declaration, plan, adjustment,
                 contains(word) ? null : word,
             ));
+            if (contains(word))
+                _adjustedGuestEntries.insert(reserved, key);
             entry = *_adjustedEntries.insert(key, reserved);
         });
         return entry;

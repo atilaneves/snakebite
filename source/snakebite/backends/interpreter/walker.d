@@ -4748,10 +4748,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto callee = expression.f is null
             ? calleeOf(expression)
             : Callee(expression.f, null, false);
-        if (callee.address !is null)
-            return _callIndirect(expression, callee.type,
-                callee.address, callee.context, callee.fromDelegate,
-                returnPlace);
+        if (callee.address !is null) {
+            const target = _plans.guestTarget(callee.address);
+            if (target.word is null)
+                return _callIndirect(expression, callee.type,
+                    callee.address, callee.context, callee.fromDelegate,
+                    returnPlace);
+            callee.function_ = cast(FuncDeclaration) cast(void*) target.word;
+            callee.context = cast(ubyte*) callee.context + target.adjustment;
+        }
         auto function_ = callee.function_;
 
 
@@ -4784,10 +4789,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             // call uses the declaration of the object held by the receiver,
             // not the declaration dmd selected from its static type.
             if (!expression.directcall && receiver.isSuperExp is null
-                    && function_.isVirtualMethod)
-                return _callIndirect(expression, funcType,
-                    _virtualAddress(function_, classReceiver),
-                    classReceiver, true, returnPlace);
+                    && function_.isVirtualMethod) {
+                const address = _virtualAddress(function_, classReceiver);
+                const target = _plans.guestTarget(address);
+                if (target.word is null)
+                    return _callIndirect(expression, funcType,
+                        address, classReceiver, true, returnPlace);
+                function_ = cast(FuncDeclaration) cast(void*) target.word;
+                classReceiver = cast(ubyte*) classReceiver + target.adjustment;
+            }
         }
 
         auto layout = layoutOf(function_);
@@ -4887,7 +4897,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private CallResult _callIndirect(
-        CallExp expression, TypeFunction type, void* address,
+        CallExp expression, TypeFunction type, const(void)* address,
         void* context, bool hasContext, void* returnPlace,
     ) {
         const layout = FrameLayout.ofParameters(type, hasContext);

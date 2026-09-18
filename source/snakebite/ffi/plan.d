@@ -965,15 +965,16 @@ public extern(C) void executeCallPlan(
 public extern(C) bool executeIndirectCallPlan(
     const(void)* opaquePlan, ref const(void)* address, void* returnPlace,
     scope const(void*)* arguments, size_t argumentCount,
+    out ptrdiff_t contextAdjustment,
 ) {
     const plan = cast(const(CallPlan)*) opaquePlan;
     if (plan._callbacks !is null) {
-        if (const word = plan._callbacks.wordOf(address)) {
-            address = word;
+        const target = plan._callbacks.guestTarget(address);
+        if (target.word !is null) {
+            address = target.word;
+            contextAdjustment = target.adjustment;
             return false;
         }
-        if (plan._callbacks.contains(address))
-            return false;
     }
     plan.callAt(address, returnPlace, arguments[0 .. argumentCount]);
     return true;
@@ -1012,6 +1013,11 @@ public struct PlanCache {
             word = of(declaration)._address;
         return cast(void*) _callbacks.adjustedEntryOf(
             word, declaration, adjustment);
+    }
+
+    public CallbackBridge.GuestTarget guestTarget(const(void)* address) const {
+        return _callbacks is null ? CallbackBridge.GuestTarget.init
+            : _callbacks.guestTarget(address);
     }
 
     public bool isGuestWord(const(void)* word) const {
