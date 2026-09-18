@@ -301,9 +301,9 @@ private struct Shared {
         }
 
         const(void)* word;
-        if (callSelection.usesGuestBody(method, null,
+        if (callSelection.usesGuestBody(method,
                 (callee) => program.isInterpreted(callee),
-                plans.hasNativeSymbol(method), "interpreter")) {
+                plans.hasNativeSymbol(method))) {
             plans.registerGuestFunction(cast(void*) method, method);
             word = cast(void*) method;
         }
@@ -878,9 +878,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // regardless of which module owns it.
         auto body_ = function_.fbody;
         const interprets = _callSelection.usesGuestBody(
-            function_, callSite is null ? null : callSite.arguments,
+            function_,
             (callee) => _program.isInterpreted(callee),
-            hasNativeSymbol(function_), "interpreter",
+            hasNativeSymbol(function_),
         );
         if (!interprets) {
             const plan = callSite is null

@@ -353,8 +353,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             return cast(void*) compileFunction(method);
 
         const(void)* word;
-        if (_callSelection.usesGuestBody(method, null, &isGuestFunction,
-                hasNativeSymbol(method), "bytecode compiler")) {
+        if (_callSelection.usesGuestBody(method, &isGuestFunction,
+                hasNativeSymbol(method))) {
             word = compileFunction(method);
             registerGuestWord(method, cast(const(Function)*) word);
         }
@@ -5398,8 +5398,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto type = typeFunctionOf(callee);
 
         const guest = _bytecode._callSelection.usesGuestBody(
-            callee, arguments, &_bytecode.isGuestFunction,
-            _bytecode.hasNativeSymbol(callee), "bytecode compiler",
+            callee, &_bytecode.isGuestFunction,
+            _bytecode.hasNativeSymbol(callee),
         );
         if (!guest) {
             Arg[] initialArgs;
