@@ -236,6 +236,7 @@ public struct NativeData {
     import dmd.aggregate: AggregateDeclaration;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration, VarDeclaration;
+    import dmd.dsymbol: Dsymbol;
     import dmd.expression: ClassReferenceExp, Expression, StructLiteralExp;
     import dmd.location: Loc;
     import dmd.mtype: Type;
@@ -245,6 +246,7 @@ public struct NativeData {
     import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
 
     private SymbolAddress _symbolAddress;
+    private bool delegate(Dsymbol) _isRootOwned;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
     // Read and written only under the compiler lock. Key by the object,
     // not a reference expression, to preserve aliases and cycles.
@@ -272,8 +274,10 @@ public struct NativeData {
     public this(
         SymbolAddress symbolAddress,
         TypeInfo_Class delegate(ClassDeclaration) classInfo,
+        bool delegate(Dsymbol) isRootOwned,
     ) {
         _symbolAddress = symbolAddress;
+        _isRootOwned = isRootOwned;
         _classInfo = classInfo;
         _tls = PerThread!(TlsSlots*)(() => new TlsSlots);
     }
@@ -401,7 +405,15 @@ public struct NativeData {
                 bytes = *found;
                 return;
             }
-            bytes = buildInitialBytes(variable, facts);
+            // Imported shared storage can be initialized by native startup.
+            // Only missing symbols need a guest-owned initialization image.
+            if (!_isRootOwned(variable)) {
+                auto address = _symbolAddress(variable); // Storage stays writable.
+                if (address !is null)
+                    bytes = address[0 .. facts.size];
+            }
+            if (bytes.ptr is null)
+                bytes = buildInitialBytes(variable, facts);
             _statics.insert(variable, bytes);
         });
         return bytes;
