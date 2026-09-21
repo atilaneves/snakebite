@@ -4,9 +4,12 @@ module ut.ffi.plan;
 import ut;
 import dmd.func: FuncDeclaration;
 import dmd.mtype: Type;
+import dmd.typesem: nextOf;
 import snakebite.ffi: CallAdapter, PlanCache;
+import snakebite.ffi.abi: ArgumentPlan, needsHiddenReturnPointer;
 import snakebite.frontend.compiler: parseSnippet;
-import snakebite.frontend.dmd.functions: findFunction, findStruct;
+import snakebite.frontend.dmd.functions:
+    findFunction, findStruct, typeFunctionOf;
 import std.algorithm.searching: canFind;
 import std.array: replace;
 
@@ -139,6 +142,16 @@ private struct MixedPair {
 
 private extern(C) ThreeWords snakebite_ut_three_words() {
     return ThreeWords(17, 31, 47);
+}
+
+private struct Fieldless {}
+
+// dmd compiles this the same way for any fieldless struct: `mov rax,
+// rdi; mov byte [rdi], 0; ret` - a write through whatever this process's
+// calling convention left in the hidden-pointer register, never checked
+// against the struct's own (nonexistent) fields.
+private extern(C) Fieldless snakebite_ut_fieldless_return() {
+    return Fieldless();
 }
 
 private extern(C) size_t snakebite_ut_memory_param(ThreeWords value) {
@@ -408,6 +421,54 @@ unittest {
     cache.of(function_).call(&result, []);
 
     result.should == ThreeWords(17, 31, 47);
+}
+
+
+// dmd's own rule for a struct with no fields (`argtypes_sysv_x64.d`,
+// `toArgTypes_sysv_x64`: "if (nfields == 0) return memory();") makes it
+// MEMORY-class, the same as an oversized or unaligned aggregate - both
+// host compilers return such a value through a hidden pointer, never in a
+// register (verified with `objdump`: `struct E {} E f() { return E(); }`
+// compiles to `mov rax, rdi; mov byte [rdi], 0; ret` on both dmd and ldc).
+// `abi.classify` walks `aggregate.sym.fields` to build its eightbyte
+// classes; an empty range leaves every class untouched instead of
+// reaching this rule, so a fieldless struct's return used to need no
+// hidden pointer at all - the bug this pins against a regression.
+@("abi.fieldlessStructReturnNeedsHiddenPointer")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct E {}
+        extern(C) E snakebite_ut_fieldless_return();
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_fieldless_return");
+    assert(function_ !is null,
+        "No `snakebite_ut_fieldless_return` in the guest program");
+
+    auto returnType = typeFunctionOf(function_).nextOf;
+    needsHiddenReturnPointer(returnType).should == true;
+}
+
+
+// The same dmd rule applies to a fieldless struct passed by value, not
+// only a returned one - `classify` is the shared walk both
+// `ArgumentPlan.of`'s parameter path and `aggregatePlan`'s return path
+// read.
+@("abi.fieldlessStructParameterIsMemoryClass")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct E {}
+        extern(C) void snakebite_ut_fieldless_param(E value);
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_fieldless_param");
+    assert(function_ !is null,
+        "No `snakebite_ut_fieldless_param` in the guest program");
+
+    auto parameterType = typeFunctionOf(function_).parameterList[0].type;
+    const plan = ArgumentPlan.of(parameterType);
+
+    plan.memory.should == true;
 }
 
 
@@ -863,6 +924,45 @@ unittest {
     cache.of(function_).call(&result, [cast(const void*) &value]);
 
     result.should == 2_057;
+}
+
+
+// A fieldless struct's return still needs a hidden return pointer
+// (`abi.fieldlessStructReturnNeedsHiddenPointer` pins the classification
+// alone) - this pins the actual call: dmd's own codegen for any fieldless
+// struct's return is `mov rax, rdi; mov byte [rdi], 0; ret`, so the call
+// must hand the callee `returnPlace` in the hidden-pointer register for
+// that one byte to land in `result` - a plan that never marks the return
+// hidden never tells `fillFrame` to put `returnPlace` there, so the
+// callee's write goes through whatever the assembly stub's generic frame
+// left in that register/slot instead (a stack address elsewhere in this
+// same process, not `result` - verified with `gdb`: the pre-fix write
+// lands nowhere `result` can be read back from, not a crash), and
+// `result`'s own byte - deliberately set to a sentinel no fieldless
+// struct's own codegen would ever write - stays unchanged. This is the
+// call-seam version of the same bug the guest program in `ut.backends.
+// call.ffi`'s `tuple.fieldlessReturnDoesNotCorruptPrecedingArray` runs
+// end to end: there, the corrupted memory is a real guest array's length
+// word, chosen by whatever call happened to precede the fieldless return
+// in the compiled image, not a sentinel this test controls directly.
+@("called.fieldlessReturnWritesThroughHiddenPointer")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct Fieldless {}
+
+        extern(C) Fieldless snakebite_ut_fieldless_return();
+    });
+    auto getter =
+        findFunction(guestModule, "snakebite_ut_fieldless_return");
+    assert(getter !is null,
+        "No `snakebite_ut_fieldless_return` in the guest program");
+
+    PlanCache cache;
+    Fieldless result;
+    *cast(ubyte*) &result = 0xFF;
+    cache.of(getter).call(&result, []);
+
+    (*cast(ubyte*) &result).should == 0;
 }
 
 

@@ -3010,3 +3010,43 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// `std.typecons.tuple()` with no arguments returns `Tuple!()`, a
+// fieldless struct - the same ABI shape `ut.ffi.plan`'s `abi.
+// fieldlessStructReturnNeedsHiddenPointer` and `called.
+// fieldlessReturnWritesThroughHiddenPointer` already pin at the
+// classifier and the call seam. This is the same bug end to end, through
+// a real guest program: druntime is never reimplemented (the project's
+// own rule), so a backend that cannot interpret `tuple()` itself calls
+// the real, already-compiled phobos `tuple()` through FFI. dmd and ldc
+// both compile a fieldless struct's return as a write through whatever
+// the hidden-pointer register already held (`abi.classify`'s own doc);
+// a classifier that gave `tuple()`'s return no hidden pointer let that
+// byte land wherever the preceding `numbers ~= i` call's own runtime
+// call left that register - the address of `numbers` itself - zeroing
+// the low byte of `numbers.length`. 257 (0x101) is deliberately not a
+// round number: this corruption clears only the low byte, so 257 would
+// read back as 256, while a smaller count could not tell that apart from
+// an ordinary off-by-one bug.
+static foreach (backend; Matrix!()) {
+    @("tuple.fieldlessReturnDoesNotCorruptPrecedingArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(257).shouldBeRetOf!(
+            backend,
+            q{
+                import std.typecons: tuple;
+
+                size_t appendThenTuple() {
+                    int[] numbers;
+                    foreach (i; 0 .. 257)
+                        numbers ~= i;
+                    auto t = tuple();
+                    return numbers.length;
+                }
+            },
+            "appendThenTuple",
+        );
+    }
+}
