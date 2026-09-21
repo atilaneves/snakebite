@@ -4542,7 +4542,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         ubyte* frameBase, const(FrameLayout)* layout,
         in bool allowExtra = false,
     ) {
-        import dmd.astenums: STC;
         import snakebite.backends.calls: arityMismatches;
         import std.conv: text;
 
@@ -4558,15 +4557,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto preparation = CallAdapter.Arguments.of(
             type, arguments,
         );
-        foreach (i, argument; preparation.declared) {
-            auto parameter = layout.parameters[i];
-            auto slot = frameBase + parameter.offset;
+        preparation.eachDeclared((i, value) {
+            auto argument = value.expression; // Frontend expressions remain mutable.
+            const parameter = layout.parameters[i];
+            auto slot = frameBase + parameter.offset; // Evaluation writes the slot.
 
             void* address;
 
             void* argumentAddress() {
                 if (argument.type.ty == Tpointer
-                        && argument.type.nextOf.equals(parameterList[i].type))
+                        && argument.type.nextOf.equals(value.parameterType))
                     return asPointer(argument);
                 address = addressOf(argument);
                 return address;
@@ -4574,28 +4574,25 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
             void evaluateArgument(void* place) {
                 evaluate(
-                    argument,
-                    parameterList[i].storageClass & STC.lazy_
-                        ? argument.type : parameterList[i].type,
-                    parameter.facts,
+                    argument, value.evaluationType, parameter.facts,
                     place,
                 );
             }
 
-            CallAdapter.Argument.of(parameterList[i]).store(
+            value.store(
                 slot,
                 &argumentAddress,
                 &evaluateArgument,
             );
 
-            if (parameterList[i].storageClass & STC.out_)
+            if (value.isOut)
                 initializeDefault(
-                    parameterList[i].type,
-                    factsOf(parameterList[i].type),
+                    value.parameterType,
+                    factsOf(value.parameterType),
                     cast(ubyte*) address,
                     loc,
                 );
-        }
+        });
     }
 
     private void initializeDefault(
