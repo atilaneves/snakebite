@@ -85,10 +85,16 @@ public DubDescription dubDescribeProject(
     import std.array: array;
 
     const versionArguments = versions.map!(v => "--d-version=" ~ v).array;
-    const result = describe(directory,
-        ["--compiler=" ~ defaultCompiler] ~ versionArguments, DubConfig.test);
-    return DubDescription(parseJSON(result.output),
-        (result.buildArguments ~ versionArguments).dup);
+    import snakebite.dubcache: cachedDubDescription;
+    import std.json: JSONValue;
+    const cached = cachedDubDescription(directory, defaultCompiler, versions, {
+        const result = describe(directory,
+            ["--compiler=" ~ defaultCompiler] ~ versionArguments, DubConfig.test);
+        return JSONValue(["value": parseJSON(result.output),
+            "arguments": JSONValue((result.buildArguments ~ versionArguments).dup)]);
+    });
+    return DubDescription(cached["value"],
+        cached["arguments"].array.map!(v => v.str).array);
 }
 
 
