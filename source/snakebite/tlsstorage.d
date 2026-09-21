@@ -27,6 +27,13 @@ public struct TlsDescriptor {
     public const(void)* key;
     public const(void)* templateBytes;
     public size_t size;
+    // Set when the variable's storage is native (a dependency image's
+    // own thread-local, or an `extern` one): the linker name that
+    // `nativeAddress` resolves, on each thread, to that thread's copy in
+    // the image's TLS block. No copy is made from a template then, so
+    // native code and guest code on one thread reach the same bytes.
+    public string nativeName;
+    public void* delegate(in char[] name) nativeAddress;
 }
 
 
@@ -41,10 +48,20 @@ public struct TlsSlots {
         if (auto found = descriptor.key in _slots)
             return *found;
 
-        import core.stdc.string: memcpy;
+        void[] bytes;
+        if (descriptor.nativeName.length) {
+            // Resolved on this thread: a thread-local symbol's address
+            // is the calling thread's own, so another thread's answer
+            // would be that thread's copy.
+            auto address = descriptor.nativeAddress(descriptor.nativeName);
+            assert(address !is null, descriptor.nativeName);
+            bytes = address[0 .. descriptor.size];
+        } else {
+            import core.stdc.string: memcpy;
 
-        auto bytes = new void[descriptor.size];
-        memcpy(bytes.ptr, descriptor.templateBytes, descriptor.size);
+            bytes = new void[descriptor.size];
+            memcpy(bytes.ptr, descriptor.templateBytes, descriptor.size);
+        }
         _slots[descriptor.key] = bytes;
         return bytes;
     }

@@ -1109,6 +1109,10 @@ public struct PlanCache {
         return _resolver.resolve(name);
     }
 
+    public void* resolveThreadLocal(in char[] name) const {
+        return _resolver.resolveThreadLocal(name);
+    }
+
     // Whether `function_` has machine code in this process. Missing symbols
     // are cached too because a synthesized function with a body can validly
     // have no native counterpart.

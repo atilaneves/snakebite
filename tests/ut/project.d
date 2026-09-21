@@ -10,6 +10,7 @@ import std.digest: toHexString;
 import std.file: getcwd;
 import std.path: absolutePath, buildNormalizedPath, buildPath, dirName;
 import ut;
+import ut.backends;
 
 
 @("stateDirectoryIsCwdScopedAndProjectPartitioned")
@@ -72,4 +73,75 @@ unittest {
 
     sources.files.any!(path => path.endsWith("tests/main.d")).should == true;
     sources.importPaths.any!(path => path.endsWith("source/")).should == true;
+}
+
+
+// dub compiles a package from its own directory with paths relative to
+// it, so a root module's `__FILE__` is that relative path, whether or
+// not the file lies under an import path. A project loaded here names
+// its root modules the same way, relative to the project directory,
+// whatever the current working directory is.
+static foreach (backend; Matrix!()) {
+    @("rootModuleFileIsRelativeToProjectDirectory." ~ backend.stringof)
+    @Serial
+    unittest {
+        enum moduleName = "file_name_" ~ backend.stringof;
+        const relativePath = "sub/" ~ moduleName ~ ".d";
+        const sandbox = Sandbox();
+        sandbox.writeFile("app/dub.sdl", dubProjectRecipe("filename",
+            "sourcePaths \"sub\"\nimportPaths \"imports\"\n"));
+        sandbox.writeFile("app/imports/.keep");
+        sandbox.writeFile("app/" ~ relativePath,
+            "module " ~ moduleName ~ ";\n"
+            ~ "int main() { return __FILE__ == \"" ~ relativePath ~ "\" ? 0 : 1; }\n");
+        dubProjectMainShouldSucceed!backend(sandbox.inSandboxPath("app"));
+    }
+}
+
+
+// dub's debug and unittest build types pass the compiler `-debug`, so a
+// `debug` block in a root module is compiled in. A project loaded here
+// gets the same flag from its dub options, and the frontend has to
+// honour the bare flag, not only `-debug=identifier`.
+static foreach (backend; Matrix!()) {
+    @("dubDebugModeCompilesDebugBlocks." ~ backend.stringof)
+    @Serial
+    unittest {
+        enum moduleName = "debug_mode_" ~ backend.stringof;
+        const sandbox = Sandbox();
+        sandbox.writeFile("app/dub.sdl", dubProjectRecipe("debugmode"));
+        sandbox.writeFile("app/source/" ~ moduleName ~ ".d",
+            "module " ~ moduleName ~ ";\n"
+            ~ "int main() { debug { return 0; } return 1; }\n");
+        dubProjectMainShouldSucceed!backend(sandbox.inSandboxPath("app"));
+    }
+}
+
+// A dub recipe whose unittest configuration is an executable: dub's own
+// synthetic unittest configuration would put a generated stub with its
+// own `main` first, and a program takes the first root `main` it finds.
+private string dubProjectRecipe(in string name, in string settings = "") {
+    return "name \"" ~ name ~ "\"\ntargetType \"library\"\n" ~ settings
+        ~ "configuration \"unittest\" {\n    targetType \"executable\"\n}\n";
+}
+
+// The dub project at `directory` has a `main` that returns 0: run through
+// dub itself for the native oracle, or through the backend.
+private void dubProjectMainShouldSucceed(backend)(in string directory) {
+    import snakebite.backends.backend: run;
+    import snakebite.dependencyimage: defaultCompiler;
+    import snakebite.execution: prepareProject;
+    import std.process: Config, execute;
+
+    static if (is(backend == Native)) {
+        const result = execute(
+            ["dub", "run", "-q", "--config=unittest",
+                "--compiler=" ~ defaultCompiler],
+            null, Config.none, size_t.max, directory);
+        result.status.shouldEqual(0, result.output);
+    } else {
+        auto project = prepareProject(directory).project;
+        scope instance = new backend(project.program);
+        run(instance, project.program).should == 0;
+    }
 }

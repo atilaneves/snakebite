@@ -538,6 +538,129 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 }
 
 
+// A global a dependency defines has one storage, the native image's: a
+// native setter and an interpreted reader reach the same variable, for
+// a `__gshared` and for a thread-local one alike. The dependency is a
+// dub package, so its functions have machine code in an archive the
+// image links, as a project's dependencies do.
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE has no native image to share a global with"))) {
+    @("image.dependencyGlobal." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        const directory = dependencyGlobalProject(sandbox,
+            "image_global_" ~ backend.stringof, q{
+            __gshared int counter = 0;
+            void bump() { ++counter; }
+            struct Settings {
+                static string path = "default";
+                static void setPath(string value) { path = value; }
+            }
+        }, q{
+            int main() {
+                if (counter != 0) return 1;
+                bump();
+                if (counter != 1) return 2;
+                if (Settings.path != "default") return 3;
+                Settings.setPath("changed");
+                if (Settings.path != "changed") return 4;
+                return 0;
+            }
+        });
+        runDependencyGlobalProject!backend(directory).should == 0;
+    }
+}
+
+
+// A dependency's thread-local variable is still one copy per thread:
+// the interpreted reader on a new thread sees that thread's own copy,
+// not the one the main thread wrote. The dependency starts the thread,
+// since that is native code either way, and calls back into the guest
+// on it.
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE has no native image to share a global with"))) {
+    @("image.dependencyThreadLocalPerThread." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        const directory = dependencyGlobalProject(sandbox,
+            "image_tls_" ~ backend.stringof, q{
+            import core.thread: Thread;
+            struct Settings {
+                static string path = "default";
+                static void setPath(string value) { path = value; }
+            }
+            string readOnNewThread(string delegate() read) {
+                string seen;
+                auto thread = new Thread({ seen = read(); });
+                thread.start;
+                thread.join;
+                return seen;
+            }
+        }, q{
+            int main() {
+                Settings.setPath("changed");
+                if (Settings.path != "changed") return 1;
+                if (readOnNewThread(() => Settings.path) != "default") return 2;
+                if (Settings.path != "changed") return 3;
+                return 0;
+            }
+        });
+        runDependencyGlobalProject!backend(directory).should == 0;
+    }
+}
+
+// An app package whose root module runs `rootSource`'s `main` against a
+// static-library dependency built from `dependencySource`. The unittest
+// configuration is an executable so the native oracle has one to run.
+// `name` prefixes both module names: dmd keeps every module this
+// process ever parsed, under its name, so two tests cannot share one.
+private string dependencyGlobalProject(
+    in Sandbox sandbox,
+    in string name,
+    in string dependencySource,
+    in string rootSource,
+) {
+    sandbox.writeFile("app/dub.sdl", q{
+        name "global-app"
+        targetType "library"
+        targetName "global-app"
+        dependency "global-dependency" path="../dependency"
+        configuration "unittest" {
+            targetType "executable"
+        }
+    });
+    sandbox.writeFile("app/source/" ~ name ~ "_app.d",
+        "module " ~ name ~ "_app;\nimport " ~ name ~ "_dependency;\n"
+        ~ rootSource);
+    sandbox.writeFile("dependency/dub.sdl", q{
+        name "global-dependency"
+        targetType "staticLibrary"
+    });
+    sandbox.writeFile("dependency/source/" ~ name ~ "_dependency.d",
+        "module " ~ name ~ "_dependency;\n" ~ dependencySource);
+    return sandbox.inSandboxPath("app");
+}
+
+private int runDependencyGlobalProject(backend)(in string directory) {
+    auto project = prepareProject(directory).project;
+    static if (is(backend == Native)) {
+        const description = project.sources.dubDescription.value;
+        foreach (target; description["targets"].array)
+            if (target["rootPackage"].str == description["rootPackage"].str) {
+                const settings = target["buildSettings"];
+                return execute([buildPath(settings["targetPath"].str,
+                    settings["targetName"].str)]).status;
+            }
+        assert(false, "no root target in the dub description");
+    } else {
+        scope instance = new backend(project.program);
+        return run(instance, project.program);
+    }
+}
+
+
 static foreach (backend; Matrix!()) {
     @("image.narrowTemplateArguments." ~ backend.stringof)
     @Serial

@@ -51,12 +51,14 @@ public imported!"dmd.dmodule".Module[] parseRootModules(
     in string[] importPaths,
     in FrontendFlags flags,
     in string[string] sourceOverrides = null,
+    in string rootDirectory = null,
 ) {
     return compiler.parseRootModules(
         filePaths,
         importPaths,
         flags,
         sourceOverrides,
+        rootDirectory,
     );
 }
 
@@ -275,6 +277,7 @@ final class Compiler {
         in string[] importPaths,
         in FrontendFlags flags,
         in string[string] sourceOverrides,
+        in string rootDirectory,
     ) {
         mutex.lock;
         scope(exit) mutex.unlock;
@@ -285,6 +288,7 @@ final class Compiler {
             importPaths,
             flags,
             sourceOverrides,
+            rootDirectory,
         );
     }
 
@@ -293,6 +297,7 @@ final class Compiler {
         in string[] importPaths,
         in FrontendFlags flags,
         in string[string] sourceOverrides,
+        in string rootDirectory,
     ) {
         import dmd.dmodule: Module;
         import dmd.frontend: addImport, dmdParseModule = parseModule;
@@ -320,7 +325,8 @@ final class Compiler {
         // a fresh non-root parse with bodyless unittest placeholders.
         Module[] modules;
         foreach (filePath; filePaths) {
-            if (auto existing = parsedModuleForFile(filePath, importPaths)) {
+            if (auto existing = parsedModuleForFile(
+                    filePath, importPaths, rootDirectory)) {
                 if (!existing.isRoot)
                     throw new Exception(
                         "module " ~ filePath ~ " was parsed as a non-root "
@@ -335,7 +341,7 @@ final class Compiler {
                 ? filePath.readText
                 : *sourceOverride;
             auto result = dmdParseModule(
-                dmdFileName(filePath, importPaths), source,
+                dmdFileName(filePath, importPaths, rootDirectory), source,
             );
             if (result.diagnostics.hasErrors)
                 throw new Exception(diagnosticMessageWithLocations);
@@ -477,26 +483,37 @@ final class Compiler {
     private imported!"dmd.dmodule".Module parsedModuleForFile(
         in string filePath,
         in string[] importPaths,
+        in string rootDirectory,
     ) const {
         import dmd.dmodule: Module;
 
         foreach (module_; Module.amodules)
-            if (moduleSourceMatches(module_, filePath, importPaths))
+            if (moduleSourceMatches(module_, filePath, importPaths, rootDirectory))
                 return module_;
 
         return null;
     }
 
+    // Whether `module_` was parsed from `filePath`. A parsed module keeps
+    // the name `dmdFileName` gave it, relative to the root directory or
+    // to an import path, so a relative name is resolved against each of
+    // those the way it was made.
     private bool moduleSourceMatches(
         imported!"dmd.dmodule".Module module_,
         in string filePath,
         in string[] importPaths,
+        in string rootDirectory,
     ) const {
         import std.path: absolutePath, buildNormalizedPath;
 
         const absPath = filePath.absolutePath.buildNormalizedPath;
         const sourcePath = module_.sourceFileName;
         if (sourcePath.absolutePath.buildNormalizedPath == absPath)
+            return true;
+
+        if (rootDirectory.length
+                && sourcePath.absolutePath(rootDirectory).buildNormalizedPath
+                    == absPath)
             return true;
 
         foreach (importPath; importPaths) {
@@ -510,11 +527,25 @@ final class Compiler {
         return false;
     }
 
-    private string dmdFileName(in string filePath, in string[] importPaths) const {
+    // The name dmd sees for a root file, and so its `__FILE__`. dub compiles
+    // a package from its own directory with paths relative to it, so a file
+    // under `rootDirectory` gets that same relative name.
+    private string dmdFileName(
+        in string filePath,
+        in string[] importPaths,
+        in string rootDirectory,
+    ) const {
         import std.algorithm.searching: startsWith;
         import std.path: absolutePath, buildNormalizedPath, relativePath;
 
         const absPath = filePath.absolutePath.buildNormalizedPath;
+        if (rootDirectory.length) {
+            const relPath = absPath.relativePath(
+                rootDirectory.absolutePath.buildNormalizedPath,
+            );
+            if (!relPath.startsWith(".."))
+                return relPath;
+        }
         foreach (importPath; importPaths) {
             const relPath = absPath.relativePath(
                 importPath.absolutePath.buildNormalizedPath,
@@ -577,6 +608,7 @@ private struct SavedFrontendFlags {
     imported!"dmd.globals".FeatureState dtorFields;
     imported!"dmd.globals".FeatureState systemVariables;
     bool bitfields;
+    bool debugEnabled;
 }
 
 private SavedFrontendFlags saveFrontendFlags() {
@@ -605,6 +637,7 @@ private SavedFrontendFlags saveFrontendFlags() {
         global.params.dtorFields,
         global.params.systemVariables,
         global.params.bitfields,
+        global.params.debugEnabled,
     );
 }
 
@@ -634,6 +667,7 @@ private void restoreFrontendFlags(ref const SavedFrontendFlags saved) {
     global.params.dtorFields = saved.dtorFields;
     global.params.systemVariables = saved.systemVariables;
     global.params.bitfields = saved.bitfields;
+    global.params.debugEnabled = saved.debugEnabled;
 }
 
 private void applyFrontendFlags(in FrontendFlags flags) {
@@ -686,6 +720,8 @@ private void applyFrontendFlags(in FrontendFlags flags) {
             parsedParams.ehnogc = true;
         else if (arg.startsWith("-version="))
             VersionCondition.addGlobalIdent(arg["-version=".length .. $]);
+        else if (arg == "-debug")
+            parsedParams.debugEnabled = true;
         else if (arg.startsWith("-debug="))
             DebugCondition.addGlobalIdent(arg["-debug=".length .. $]);
         else if (arg.length > 2 && arg.startsWith("-J="))
@@ -766,6 +802,7 @@ private void applyParsedFrontendParams(ref const imported!"dmd.globals".Param pa
     global.params.dtorFields = params.dtorFields;
     global.params.systemVariables = params.systemVariables;
     global.params.bitfields = params.bitfields;
+    global.params.debugEnabled = params.debugEnabled;
 }
 
 private string sourceFileName(imported!"dmd.dmodule".Module module_) @trusted {
