@@ -2882,7 +2882,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const operationFacts = promotion is null
             ? targetFacts : TypeFacts.of(promotion.type);
         auto handler = compoundHandler(
-            expression, operationFacts.isUnsigned);
+            expression, operationFacts.isUnsigned,
+            isFloatingType(promotion is null ? target.type : promotion.type),
+        );
         if (handler is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
@@ -3046,11 +3048,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private Instruction.Handler compoundHandler(
-        BinAssignExp expression, in bool unsigned,
+        BinAssignExp expression, in bool unsigned, in bool floating,
     ) {
-        if (expression.isAddAssignExp) return &opAdd;
-        if (expression.isMinAssignExp) return &opSubtract;
-        if (expression.isMulAssignExp) return &opMultiply;
+        if (expression.isAddAssignExp)
+            return floating ? &opFloatAdd : &opAdd;
+        if (expression.isMinAssignExp)
+            return floating ? &opFloatSubtract : &opSubtract;
+        if (expression.isMulAssignExp)
+            return floating ? &opFloatMultiply : &opMultiply;
         if (expression.isAndAssignExp) return &opBitAnd;
         if (expression.isOrAssignExp) return &opBitOr;
         if (expression.isXorAssignExp) return &opBitXor;
@@ -3059,9 +3064,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return unsigned ? &opShiftRightLogical : &opShiftRightArithmetic;
         if (expression.isUshrAssignExp) return &opShiftRightLogical;
         if (expression.isDivAssignExp)
-            return unsigned ? &opDivideUnsigned : &opDivideSigned;
+            return floating
+                ? &opFloatDivide
+                : (unsigned ? &opDivideUnsigned : &opDivideSigned);
         if (expression.isModAssignExp)
-            return unsigned ? &opModuloUnsigned : &opModuloSigned;
+            return floating
+                ? &opFloatModulo
+                : (unsigned ? &opModuloUnsigned : &opModuloSigned);
 
         return null;
     }

@@ -793,6 +793,106 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// Each target is indirect so its evaluation count is observable. The
+// operation result is checked before the next assignment uses the target.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "interpreter rejects floating compound assignment"),
+)) {
+    @("arithmetic.floatingCompoundAssign.float." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.0f.shouldBeRetOf!(
+            backend,
+            q{
+                ref float target(ref float value, ref int calls) {
+                    ++calls;
+                    return value;
+                }
+
+                float result() {
+                    float value = 0.5f;
+                    int targetCalls;
+                    assert((target(value, targetCalls) += 0.5f) == 1.0f);
+                    assert((target(value, targetCalls) -= 0.5f) == 0.5f);
+                    assert((target(value, targetCalls) *= 2.0f) == 1.0f);
+                    assert((target(value, targetCalls) /= 2.0f) == 0.5f);
+                    assert((target(value, targetCalls) %= 0.25f) == 0.0f);
+                    assert(targetCalls == 5);
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "interpreter rejects floating compound assignment"),
+)) {
+    @("arithmetic.floatingCompoundAssign.double." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.0.shouldBeRetOf!(
+            backend,
+            q{
+                ref double target(ref double value, ref int calls) {
+                    ++calls;
+                    return value;
+                }
+
+                double result() {
+                    double value = 0.5;
+                    int targetCalls;
+                    assert((target(value, targetCalls) += 0.5) == 1.0);
+                    assert((target(value, targetCalls) -= 0.5) == 0.5);
+                    assert((target(value, targetCalls) *= 2.0) == 1.0);
+                    assert((target(value, targetCalls) /= 2.0) == 0.5);
+                    float factor = 2.0f;
+                    assert((target(value, targetCalls) *= factor) == 1.0);
+                    assert((target(value, targetCalls) %= 0.25) == 0.0);
+                    assert(targetCalls == 6);
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "interpreter rejects floating compound assignment"),
+)) {
+    @("arithmetic.floatingCompoundAssign.real." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.0L.shouldBeRetOf!(
+            backend,
+            q{
+                ref real target(ref real value, ref int calls) {
+                    ++calls;
+                    return value;
+                }
+
+                real result() {
+                    real value = 0.5L;
+                    int targetCalls;
+                    assert((target(value, targetCalls) += 0.5L) == 1.0L);
+                    assert((target(value, targetCalls) -= 0.5L) == 0.5L);
+                    assert((target(value, targetCalls) *= 2.0L) == 1.0L);
+                    assert((target(value, targetCalls) /= 2.0L) == 0.5L);
+                    assert((target(value, targetCalls) %= 0.25L) == 0.0L);
+                    assert(targetCalls == 5);
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("arithmetic.andAssign." ~ backend.stringof)
     @Tags(backend.stringof)
