@@ -124,9 +124,13 @@ final class Compiler {
         import dmd.errors: diagnostics, fatalErrorHandler;
         import dmd.frontend: addImport, findImportPaths, initDMD;
         import dmd.globals: global;
+        import dmd.target: CPU, addDefaultVersionIdentifiers, target;
         import std.algorithm.iteration: each;
 
         initDMD;
+        target.cpu = CPU.baseline;
+        target.setCPU;
+        addDefaultVersionIdentifiers(global.params, target);
         findImportPaths.each!addImport;
 
         // Prevent DMD from calling exit() when too many cascading errors
