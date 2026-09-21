@@ -111,6 +111,12 @@ public TypeInfo_Class classRuntimeInfo(
     auto info = new TypeInfo_Class;
     info.m_flags = cast(TypeInfo_Class.ClassFlags) 0;
     info.name = cast(string) declaration.toPrettyChars.toDString;
+    // Compiling a method can read this class's initializer recursively.
+    // Reserve its final storage before publishing the incomplete metadata.
+    if (declaration.isInterfaceDeclaration is null) {
+        info.m_init = cast(byte[]) new void[declaration.structsize];
+        info.m_init[] = 0;
+    }
     // Register before resolving methods: their bodies can refer to this
     // same class while its metadata is being built.
     cache[declaration] = info;
@@ -147,9 +153,6 @@ public TypeInfo_Class classRuntimeInfo(
             if (method !is null)
                 info.vtbl[i] = hooks.methodAddress(method, 0);
         }
-        // Initializers contain GC pointers, including inherited vtables.
-        info.m_init = cast(byte[]) new void[declaration.structsize];
-        info.m_init[] = 0;
         if (info.base !is null)
             info.m_init[0 .. info.base.m_init.length] = info.base.m_init[];
         *cast(void**) info.m_init.ptr = info.vtbl.ptr;

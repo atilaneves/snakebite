@@ -17,11 +17,10 @@ private enum defaultFrameReservation = 1024 * 1024 * 1024;
 // site never marks a position and pops back to it by hand, so it can
 // never forget to, on a throw or any other path out of scope.
 //
-// `mark`/`reserve`/`release` are the exception, for a reservation whose
-// lifetime is not any host function's lexical scope - the interpreter's
-// expression-scoped temporaries outlive every call frame pushed while
-// their expression evaluates. A caller of `reserve` owns the release and
-// must pair its `mark` with a `scope(exit) release(mark)` of its own.
+// `mark`/`reserve`/`release` handle reservations whose lifetimes do not
+// match a host function's lexical scope: interpreter temporaries and
+// bytecode activations. Their owners release each mark in LIFO order on
+// both normal completion and exception unwinding.
 //
 // A pushed frame can hold a guest pointer into GC-owned storage (an array's
 // `ptr` field, for instance) for as long as the frame is live, and nothing
@@ -48,20 +47,22 @@ public struct FrameStack {
     // goes out of scope.
     private ubyte*[] _registeredRanges;
     private TemporaryStack _cleanups;
-    // This thread's own copies of the thread-local guest variables the
-    // bytecode VM has touched (finding 1.3): a `FrameStack` already
-    // belongs to exactly one thread (ADR-0006), so `tlsSlotFor` needs no
-    // lock. `opTls*` (`snakebite.backends.bytecode.vm`) bakes a
-    // `TlsDescriptor*` into its instruction operand instead of a
-    // resolved address, and resolves it through this on every access.
-    private TlsSlots _tls;
+    // Fiber frame stacks on one thread share these variable slots. A frame
+    // stack used alone creates its own slots on first access.
+    private TlsSlots* _tls;
 
     @disable this(this);
+
+    public this(size_t capacity, TlsSlots* tls) @system {
+        this(capacity, defaultFrameReservation, tls);
+    }
 
     public this(
         size_t capacity,
         size_t reservation = defaultFrameReservation,
+        TlsSlots* tls = null,
     ) @system {
+        _tls = tls;
         import core.memory: pageSize;
         import core.sys.posix.sys.mman:
             MAP_ANON, MAP_FAILED, MAP_PRIVATE, PROT_NONE, PROT_READ,
@@ -224,6 +225,8 @@ public struct FrameStack {
     // touch of it (finding 1.3). No lock: this `FrameStack`, like the
     // `Vm` that owns it, belongs to exactly one thread.
     public void[] tlsSlotFor(const(TlsDescriptor)* descriptor) {
+        if (_tls is null)
+            _tls = new TlsSlots;
         return _tls.slotFor(descriptor);
     }
 

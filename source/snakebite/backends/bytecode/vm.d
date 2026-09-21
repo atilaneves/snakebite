@@ -14,6 +14,7 @@ extern(C) void executeCallPlan(
 extern(C) bool executeIndirectCallPlan(
     const(void)* opaquePlan, ref const(void)* address, void* returnPlace,
     scope const(void*)* arguments, size_t argumentCount,
+    out ptrdiff_t contextAdjustment,
 );
 
 import snakebite.callarguments: CallArguments;
@@ -93,11 +94,13 @@ public struct CallSite {
     public static CallSite indirect(
         size_t calleeSlotOffset, Arg[] args, size_t returnWidth,
         const(void)* nativePlan = null,
+        bool hasContext = false,
     ) {
         CallSite site;
         site.kind = Kind.indirect;
         site.nativePlan = nativePlan;
         site.calleeSlotOffset = calleeSlotOffset;
+        site.hasContext = hasContext;
         site.args = args;
         site.returnWidth = returnWidth;
         return site;
@@ -109,6 +112,7 @@ public struct CallSite {
     package const(Function)* callee;
     package const(void)* nativePlan;
     package size_t calleeSlotOffset;
+    package bool hasContext;
     package size_t cleanupStartIndex = size_t.max;
     package size_t cleanupEndIndex = size_t.max;
     package const(void)* cleanupStart;
@@ -173,6 +177,7 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
     public const(CallSite)[] callSites;
     public const(AssertSite)[] assertSites;
     public FrameStack* frames;
+    private DispatchState* _dispatch;
 
     private const(Instruction)* _pc;
     private ubyte* _frame;
@@ -180,7 +185,7 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
     public this(
         const(Instruction)* pc, ubyte* frame, void* returnPlace,
         const(long)[] constants, const(CallSite)[] callSites,
-        const(AssertSite)[] assertSites, FrameStack* frames,
+        const(AssertSite)[] assertSites, DispatchState* state,
     ) pure nothrow @nogc {
         _pc = pc;
         _frame = frame;
@@ -188,7 +193,8 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
         this.constants = constants;
         this.callSites = callSites;
         this.assertSites = assertSites;
-        this.frames = frames;
+        this.frames = state.frames;
+        _dispatch = state;
         destination = decode!destinationKind(pc.destination);
         source = decode!sourceKind(pc.source);
     }
@@ -236,11 +242,11 @@ private const(Instruction)* execute(
     scope const long[] constants,
     scope const CallSite[] callSites,
     scope const AssertSite[] assertSites,
-    FrameStack* frames,
+    DispatchState* state,
 ) {
     // const would prevent operations from writing through storage pointers.
     auto execution = Execution!(destinationKind, sourceKind)(
-        pc, frame, returnPlace, constants, callSites, assertSites, frames,
+        pc, frame, returnPlace, constants, callSites, assertSites, state,
     );
     return operation!Parameters(execution);
 }
@@ -254,7 +260,7 @@ public struct Instruction {
         scope const long[] constants,
         scope const CallSite[] callSites,
         scope const AssertSite[] assertSites,
-        FrameStack* frames,
+        DispatchState* state,
     );
 
     package Handler handler;
@@ -339,6 +345,7 @@ public struct Function {
     package size_t closureSize;
     package uint closureAlignment = 1;
     package ClosureSlot[] closureSlots;
+    package size_t[] parameterOffsets;
 }
 
 
@@ -350,8 +357,10 @@ public struct Vm {
     @disable this();
     @disable this(this);
 
-    public this(in size_t frameCapacity) {
-        _frames = FrameStack(frameCapacity);
+    import snakebite.tlsstorage: TlsSlots;
+
+    public this(in size_t frameCapacity, TlsSlots* tls = null) {
+        _frames = FrameStack(frameCapacity, tls);
     }
 
     // One argument the host hands a guest function: the callee frame
@@ -386,6 +395,8 @@ public struct Vm {
             function_.frameSize,
             function_.frameAlignment,
         );
+        if (function_.contextOffset != size_t.max)
+            *cast(size_t*) (frame.base + function_.contextOffset) = 0;
         foreach (argument; arguments)
             memcpy(frame.base + argument.offset, argument.source,
                 argument.width);
@@ -431,7 +442,35 @@ private void initializeClosure(
 }
 
 
-// Runs one guest function without consuming host stack space per opcode.
+// Guest calls reserve activations beside their values. Native stack use
+// therefore depends on barrier crossings, not guest call depth.
+private struct Activation {
+    const(Instruction)* pc;
+    const(Instruction)* start;
+    const(Instruction)* end;
+    const(Instruction)* resume;
+    ubyte* frame;
+    void* returnPlace;
+    const(long)[] constants;
+    const(CallSite)[] callSites;
+    const(AssertSite)[] assertSites;
+    const(ExceptionHandler)[] exceptionHandlers;
+    size_t cleanupMark;
+    FrameStack.Mark frameMark;
+    Activation* parent;
+
+    void cleanup(FrameStack* frames) {
+        cleanupSince(cleanupMark, frame, constants, callSites, assertSites,
+            frames);
+    }
+}
+
+private struct DispatchState {
+    FrameStack* frames;
+    Activation* current;
+    Activation* pending;
+}
+
 private void dispatch(
     const(Instruction)* pc,
     ubyte* frame,
@@ -443,53 +482,91 @@ private void dispatch(
     FrameStack* frames,
     const(Instruction)* end = null,
 ) {
-    const start = pc;
-    const cleanupMark = frames.cleanupMark;
-    scope (exit)
-        cleanupSince(
-            cleanupMark, frame, constants, callSites, assertSites, frames);
+    Activation root;
+    root.pc = root.start = pc;
+    root.end = end;
+    root.frame = frame;
+    root.returnPlace = returnPlace;
+    root.constants = constants;
+    root.callSites = callSites;
+    root.assertSites = assertSites;
+    root.exceptionHandlers = exceptionHandlers;
+    root.cleanupMark = frames.cleanupMark;
+    auto active = &root;
+    auto state = DispatchState(frames);
 
-    while (pc !is null && pc !is end) {
+    while (true) {
         try {
-            while (pc !is null && pc !is end)
-                pc = pc.handler(
-                    pc, frame, returnPlace, constants, callSites,
-                    assertSites, frames);
+            if (active.pc is null || active.pc is active.end) {
+                active.cleanup(frames);
+                if (active.parent is null)
+                    return;
+                active = popActivation(active, frames);
+                active.pc = active.resume;
+                continue;
+            }
+
+            state.current = active;
+            const next = active.pc.handler(
+                active.pc, active.frame, active.returnPlace,
+                active.constants, active.callSites, active.assertSites, &state);
+            if (state.pending !is null) {
+                active = state.pending;
+                state.pending = null;
+            } else
+                active.pc = next;
         } catch (Throwable throwable) {
-            cleanupSince(
-                cleanupMark, frame, constants, callSites, assertSites, frames);
             size_t firstHandler;
             while (true) {
+                try {
+                    unwindFinally(throwable, () { active.cleanup(frames); });
+                } catch (Throwable chained) {
+                    throwable = chained;
+                }
                 const handler = findHandler(
-                    exceptionHandlers[firstHandler .. $], pc,
+                    active.exceptionHandlers[firstHandler .. $], active.pc,
                     throwable.classinfo);
-                if (handler is null || (end !is null
-                        && (handler.handler < start || handler.handler >= end)))
-                    throw throwable;
+                if (handler is null || (active.end !is null
+                        && (handler.handler < active.start
+                            || handler.handler >= active.end))) {
+                    if (active.parent is null)
+                        throw throwable;
+                    active = popActivation(active, frames);
+                    firstHandler = 0;
+                    continue;
+                }
 
                 if (handler.cleanupEnd !is null) {
                     try {
                         unwindFinally(throwable, () {
-                            dispatch(handler.handler, frame, returnPlace,
-                                constants, callSites, assertSites,
-                                exceptionHandlers, frames, handler.cleanupEnd);
+                            dispatch(handler.handler, active.frame,
+                                active.returnPlace, active.constants,
+                                active.callSites, active.assertSites,
+                                active.exceptionHandlers, frames,
+                                handler.cleanupEnd);
                         });
                     } catch (Throwable chained) {
                         throwable = chained;
                     }
-                    // Inner handlers have already had their chance to catch
-                    // this unwind. Continue with the scopes outside finally.
-                    firstHandler = handler - exceptionHandlers.ptr + 1;
+                    firstHandler = handler - active.exceptionHandlers.ptr + 1;
                     continue;
                 }
 
                 if (handler.catchOffset != size_t.max)
-                    *cast(void**)(frame + handler.catchOffset) = cast(void*) throwable;
-                pc = handler.handler;
+                    *cast(void**)(active.frame + handler.catchOffset) =
+                        cast(void*) throwable;
+                active.pc = handler.handler;
                 break;
             }
         }
     }
+}
+
+private Activation* popActivation(Activation* active, FrameStack* frames) {
+    const mark = active.frameMark;
+    auto parent = active.parent;
+    frames.release(mark);
+    return parent;
 }
 
 
@@ -512,12 +589,9 @@ private void cleanupSince(
         auto site = &callSites[siteIndex];
         assert(site.cleanupStart !is null, "temporary cleanup start missing");
         assert(site.cleanupEnd !is null, "temporary cleanup end missing");
-        auto pc = cast(const(Instruction)*) site.cleanupStart;
-        const end = cast(const(Instruction)*) site.cleanupEnd;
-        while (pc !is end) {
-            pc = pc.handler(
-                pc, frame, null, constants, callSites, assertSites, frames);
-        }
+        dispatch(cast(const(Instruction)*) site.cleanupStart,
+            frame, null, constants, callSites, assertSites, null, frames,
+            cast(const(Instruction)*) site.cleanupEnd);
     });
 }
 
@@ -814,16 +888,19 @@ private const(Instruction)* runCall(Decoded)(
     case indirect:
         auto callee =
             *cast(const(void)**) (execution.storage(site.calleeSlotOffset));
+        ptrdiff_t contextAdjustment;
         if (site.nativePlan !is null) {
             auto arguments = CallArguments(site.args.length);
             auto values = arguments.values;
             foreach (i, arg; site.args)
                 values[i] = execution.storage(arg.callerOffset);
             if (executeIndirectCallPlan(site.nativePlan, callee,
-                    execution.destination, values.ptr, values.length))
+                    execution.destination, values.ptr, values.length,
+                    contextAdjustment))
                 return execution.next;
         }
-        return callFunction(execution, site, cast(const(Function)*) callee);
+        return callFunction(execution, site, cast(const(Function)*) callee,
+            contextAdjustment);
     case native:
         auto arguments = CallArguments(site.args.length);
         // const would make the address slots read-only.
@@ -839,40 +916,55 @@ private const(Instruction)* runCall(Decoded)(
 }
 
 
-// `opCall`'s own `guest`/`indirect` arms, once each has found its own
-// `callee`: pushes its frame, copies `site.args` into it, and runs it to
-// its own return instruction through the nested dispatch loop with
-// `execution.destination` as its result slot, or null for a discarded result.
+// The dispatcher starts the callee after this opcode returns. The saved
+// caller pc remains the call site until the callee returns, so exceptions
+// can find the caller's handler while unwinding guest activations.
 private const(Instruction)* callFunction(Decoded)(
     ref Decoded execution,
     scope const ref CallSite site,
     const(Function)* callee,
+    in ptrdiff_t contextAdjustment = 0,
 ) {
     import core.stdc.string: memcpy;
 
-    auto calleeFrame = execution.frames.push(callee.frameSize, callee.frameAlignment);
+    const mark = execution.frames.mark;
+    scope(failure) execution.frames.release(mark);
+    auto activation = cast(Activation*) execution.frames.reserve(
+        Activation.sizeof, Activation.alignof);
+    *activation = Activation.init;
+    activation.frameMark = mark;
+    activation.frame = execution.frames.reserve(
+        callee.frameSize, callee.frameAlignment);
 
-    foreach (arg; site.args)
-        memcpy(
-            calleeFrame.base + arg.calleeOffset,
-            execution.storage(arg.callerOffset),
-            arg.width,
-        );
+    // An inferred function literal can convert to a delegate without
+    // gaining a context parameter. Use its declared parameter layout;
+    // removing a context word can also change argument alignment.
+    if (site.hasContext && callee.contextOffset == size_t.max) {
+        foreach (i, arg; site.args[1 .. $])
+            memcpy(activation.frame + callee.parameterOffsets[i],
+                execution.storage(arg.callerOffset), arg.width);
+    } else {
+        foreach (arg; site.args)
+            memcpy(activation.frame + arg.calleeOffset,
+                execution.storage(arg.callerOffset), arg.width);
+    }
 
-    initializeClosure(callee, calleeFrame.base, execution.frames);
+    if (contextAdjustment != 0) {
+        auto context = cast(ubyte**) (activation.frame + site.args[0].calleeOffset);
+        *context += contextAdjustment;
+    }
+    initializeClosure(callee, activation.frame, execution.frames);
 
-    // The caller frame stays at a fixed address during nested calls.
-    // This pointer must stay mutable so the callee can write the result.
-    auto returnDestination = site.returnWidth == 0
-        ? null
-        : execution.destination;
-
-    auto calleePc = callee.instructions.ptr;
-    dispatch(
-        calleePc, calleeFrame.base, returnDestination, callee.constants,
-        callee.callSites, callee.assertSites, callee.exceptionHandlers, execution.frames,
-    );
-
+    activation.pc = activation.start = callee.instructions.ptr;
+    activation.returnPlace = site.returnWidth == 0 ? null : execution.destination;
+    activation.constants = callee.constants;
+    activation.callSites = callee.callSites;
+    activation.assertSites = callee.assertSites;
+    activation.exceptionHandlers = callee.exceptionHandlers;
+    activation.cleanupMark = execution.frames.cleanupMark;
+    activation.parent = execution._dispatch.current;
+    activation.parent.resume = execution.next;
+    execution._dispatch.pending = activation;
     return execution.next;
 }
 

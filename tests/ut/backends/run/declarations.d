@@ -400,3 +400,20 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a runtime-initialized immutable variable"),
+)) {
+    @("importedRuntimeInitializedImmutable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: pageSize;
+            void main() {
+                assert(pageSize > 0);
+                assert((pageSize & (pageSize - 1)) == 0);
+            }
+        });
+    }
+}
