@@ -7,7 +7,7 @@ import snakebite.project: dubSourceSetFromDescription,
 import std.algorithm.searching: any, endsWith;
 import std.digest.sha: sha256Of;
 import std.digest: toHexString;
-import std.file: getcwd;
+import std.file: getcwd, write;
 import std.path: absolutePath, buildNormalizedPath, buildPath, dirName;
 import ut;
 import ut.backends;
@@ -94,6 +94,24 @@ static foreach (backend; Matrix!()) {
         sandbox.writeFile("app/" ~ relativePath,
             "module " ~ moduleName ~ ";\n"
             ~ "int main() { return __FILE__ == \"" ~ relativePath ~ "\" ? 0 : 1; }\n");
+        dubProjectMainShouldSucceed!backend(sandbox.inSandboxPath("app"));
+    }
+}
+
+
+// An empty source file is a valid module, including when the project
+// directory differs from the process's current directory.
+static foreach (backend; Matrix!()) {
+    @("emptyRootSourceOutsideWorkingDirectory." ~ backend.stringof)
+    @Serial
+    unittest {
+        enum moduleName = "empty_root_" ~ backend.stringof;
+        const sandbox = Sandbox();
+        sandbox.writeFile("app/dub.sdl", dubProjectRecipe("emptyroot"));
+        sandbox.writeFile("app/source/main_" ~ moduleName ~ ".d",
+            "module main_" ~ moduleName ~ ";\n"
+            ~ "int main() { return 0; }\n");
+        write(sandbox.inSandboxPath("app/source/" ~ moduleName ~ ".d"), "");
         dubProjectMainShouldSucceed!backend(sandbox.inSandboxPath("app"));
     }
 }
