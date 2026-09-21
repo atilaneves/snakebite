@@ -106,6 +106,56 @@ static foreach (backend; Matrix!(
 }
 
 
+// Compiled D compiles a call that it never makes, so a branch that does
+// not execute must not reject the program because of the callee's
+// signature either. The extern(C) function returns an aggregate that holds
+// a `real`, which the native call barrier cannot classify. A destructor
+// reaches the function that calls it through another function, behind a
+// branch that does not execute.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot convert a class reference to void** in `destroy`"),
+)) {
+    @("destructorUnexecutedBranchWithUnclassifiableNativeCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide {
+                real value;
+            }
+
+            pragma(mangle, "labs")
+            extern(C) Wide labs(long);
+
+            void nativeBody() {
+                labs(-1);
+            }
+
+            void helper(bool execute) {
+                if (execute)
+                    nativeBody();
+            }
+
+            class Resource {
+                int* count;
+                this(int* count) { this.count = count; }
+                ~this() {
+                    helper(false);
+                    ++*count;
+                }
+            }
+
+            void main() {
+                int count;
+                auto resource = new Resource(&count);
+                destroy(resource);
+                assert(count == 1);
+            }
+        });
+    }
+}
+
+
 // The same shape, but the branch executes. Compiled D would run the
 // assembly. Bytecode cannot execute it, so a call that does execute a
 // rejected callee must fail there, and must not run an empty body left

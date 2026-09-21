@@ -375,7 +375,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // never runs, so only a call that executes may fail on it.
     private void prepareCallbackBodies() {
         import snakebite.backends.bytecode.vm: CallSite;
-        import snakebite.exception: SnakebiteException;
 
         if (_preparingCallbacks || !_callbackRoots.length)
             return;
@@ -398,11 +397,17 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 }
                 // Preparing is speculative: the site may never execute. A
                 // rejected callee leaves no compiled form behind, so the
-                // site rejects it again if it does execute.
+                // site rejects it again if it does execute. The compiler
+                // rejects with a `SnakebiteException`, but a native call
+                // it plans for a callee that the call barrier cannot pass
+                // fails with a plain `Exception`. Both are rejections; only
+                // an `Error` is a fault, and that ends the process. Nothing
+                // that reaches here therefore drops the roots queued
+                // behind this one.
                 const(Function)* prepared;
                 try
                     prepared = site.prepareGuest();
-                catch (SnakebiteException) {
+                catch (Exception) {
                     continue;
                 }
                 prepare(prepared);
