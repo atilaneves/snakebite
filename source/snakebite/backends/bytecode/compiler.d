@@ -1567,6 +1567,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (condition.type.ty == Tpointer || condition.type.ty == Tclass)
             return compilePointerCondition(condition, facts);
 
+        if (isFloatingType(condition.type)) {
+            const offset = reserveTemp(facts);
+            compileValue(condition, offset, facts.size);
+            emit(&opFloatToBool, offset, offset, facts.size);
+            return offset;
+        }
+
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             throw rejection(_function, condition.loc,
                 expressionText(condition));
@@ -1654,7 +1661,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private size_t conditionWidth(Expression condition) {
         const facts = TypeFacts.of(condition.type);
-        return facts.isDynamicArray ? size_t.sizeof : facts.size;
+        return facts.isDynamicArray
+            ? size_t.sizeof
+            : isFloatingType(condition.type) ? bool.sizeof : facts.size;
     }
 
     // `assert(cond)`: evaluated the same way an `if`'s own condition is,

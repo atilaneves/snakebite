@@ -1781,6 +1781,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (facts.isIntegral)
             return asIntegral(expression, facts) != 0;
 
+        const baseType = type.toBasetype;
+        if (baseType.ty == Tfloat32 || baseType.ty == Tfloat64
+                || baseType.ty == Tfloat80)
+            return asFloating(expression) != 0;
+
         // The pointer alone decides. dmd 2.112 and ldc2 1.42 disagree on
         // an array with a length but a null pointer - dmd calls it true,
         // ldc2 false - so that half is not something to assert as a

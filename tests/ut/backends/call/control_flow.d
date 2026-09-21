@@ -7,6 +7,75 @@ import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 
 
+// Floating conditions use D's value semantics: both signed zeros are false,
+// every nonzero value is true, and NaN is true because it is not zero.
+static foreach (backend; Matrix!()) {
+    @("condition.floatingTruth.float." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        12.shouldBeRetOf!(backend, q{
+            int classify(float value) {
+                int result;
+                if (value)
+                    result = 1;
+                return result;
+            }
+
+            int cases() {
+                return classify(0.0f)
+                    + classify(-0.0f) * 2
+                    + classify(1.5f) * 4
+                    + classify(float.nan) * 8;
+            }
+        }, "cases");
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("condition.floatingTruth.double." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        12.shouldBeRetOf!(backend, q{
+            int classify(double value) {
+                int result;
+                if (value)
+                    result = 1;
+                return result;
+            }
+
+            int cases() {
+                return classify(0.0)
+                    + classify(-0.0) * 2
+                    + classify(1.5) * 4
+                    + classify(double.nan) * 8;
+            }
+        }, "cases");
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("condition.floatingTruth.real." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        12.shouldBeRetOf!(backend, q{
+            int classify(real value) {
+                int result;
+                if (value)
+                    result = 1;
+                return result;
+            }
+
+            int cases() {
+                return classify(0.0L)
+                    + classify(-0.0L) * 2
+                    + classify(1.5L) * 4
+                    + classify(real.nan) * 8;
+            }
+        }, "cases");
+    }
+}
+
+
 // DMD emits this shape for cleanup code, including the cleanup in the
 // benchmark's generated `write` function.
 static foreach (backend; Matrix!()) {
