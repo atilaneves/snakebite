@@ -367,11 +367,15 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _plans.callableAddress(word, method, adjustment);
     }
 
-    // A callback can first execute during GC finalization. Compile its
-    // direct callees before exposing it to host execution, while allocation
-    // is allowed. Wait for recursive placeholders to have complete bodies.
+    // A callback can first execute during GC finalization. Compile every
+    // guest function reachable from it before exposing it to host
+    // execution, while allocation is allowed. Wait for recursive
+    // placeholders to have complete bodies. A callee whose body this
+    // compiler rejects stays deferred: compiled D compiles a callee it
+    // never runs, so only a call that executes may fail on it.
     private void prepareCallbackBodies() {
         import snakebite.backends.bytecode.vm: CallSite;
+        import snakebite.exception: SnakebiteException;
 
         if (_preparingCallbacks || !_callbackRoots.length)
             return;
@@ -385,9 +389,23 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             foreach (ref site; function_.callSites) {
                 // Temporary-cleanup entries also occupy this table, but
                 // have neither a callee nor a compilation callback.
-                if (site.kind == CallSite.Kind.guest
-                        && (site.callee !is null || site.prepareGuest !is null))
-                    prepare(site.callee !is null ? site.callee : site.prepareGuest());
+                if (site.kind != CallSite.Kind.guest
+                        || (site.callee is null && site.prepareGuest is null))
+                    continue;
+                if (site.callee !is null) {
+                    prepare(site.callee);
+                    continue;
+                }
+                // Preparing is speculative: the site may never execute. A
+                // rejected callee leaves no compiled form behind, so the
+                // site rejects it again if it does execute.
+                const(Function)* prepared;
+                try
+                    prepared = site.prepareGuest();
+                catch (SnakebiteException) {
+                    continue;
+                }
+                prepare(prepared);
             }
         }
         while (_callbackRoots.length) {
@@ -475,6 +493,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         // compile that reached here.
         auto placeholder = new Function;
         _compiled[function_] = placeholder;
+        // A rejected body must not stay cached as an empty function that a
+        // later call would run.
+        scope(failure) _compiled.remove(function_);
         registerGuestWord(function_, placeholder);
 
         scope compiler = new FunctionCompiler(
