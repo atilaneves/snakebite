@@ -145,3 +145,80 @@ private void dubProjectMainShouldSucceed(backend)(in string directory) {
         run(instance, project.program).should == 0;
     }
 }
+
+
+// druntime's `_d_run_main` pairs the guest's `rt_init` with `rt_term` only
+// when `runModuleUnitTests` returns. A runner hook that lets a throwable
+// escape it - unit-threaded's own does, when it runs its suite - skips
+// that `rt_term`, and the host's own `rt_term` then only decrements the
+// count: no `thread_joinAll`, no module destructors before `exit`, and the
+// loader runs those destructors itself after it has freed the DSO records
+// a guest thread still walks when it ends, which segfaults `bin/sb`. The
+// host must hand the runtime back at the depth it found it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot install a runtime hook"),
+)) {
+    @("runtime.escapingUnittestThrowableKeepsInitDepth." ~ backend.stringof)
+    @Serial
+    unittest {
+        import core.atomic: atomicLoad;
+
+        const sandbox = Sandbox();
+        sandbox.writeFile("app/dub.sdl", q{
+            name "escaping-throwable-app"
+            targetType "library"
+        });
+        sandbox.writeFile("app/source/escaping_throwable_app.d", q{
+            module escaping_throwable_app;
+            import core.runtime: Runtime, UnitTestResult;
+            // The extended hook wins over the legacy one, whatever another
+            // image left installed.
+            shared static this() {
+                Runtime.extendedModuleUnitTester = {
+                    foreach (module_; ModuleInfo)
+                        if (module_ && module_.unitTest
+                                && module_.name == "escaping_throwable_app")
+                            module_.unitTest()();
+                    return UnitTestResult(1, 1, false, false);
+                };
+            }
+            unittest { throw new Exception("escapes the runner"); }
+        });
+        const directory = sandbox.inSandboxPath("app");
+        static if (is(backend == Native)) {
+            import snakebite.dependencyimage: defaultCompiler;
+            import std.process: Config, execute;
+            // `dub test` reports a test program that exited 1 as its own 2.
+            execute(["dub", "test", "--compiler=" ~ defaultCompiler],
+                null, Config.none, size_t.max, directory).status.should == 2;
+        } else {
+            import snakebite.backends: backendIdentity;
+            import snakebite.execution: executeBackend, prepareProject;
+
+            auto program = prepareProject(directory).project.program;
+            const depth = atomicLoad(runtimeInitDepth);
+            executeBackend(backendIdentity!backend, program).status.should == 1;
+            // Another test's guest run on another thread can hold the depth
+            // one higher for a moment; a skipped `rt_term` holds it forever.
+            runtimeInitDepthReturnsTo(depth).should == true;
+        }
+    }
+}
+
+// druntime's own `rt_init`/`rt_term` nesting depth.
+pragma(mangle, "_D2rt6dmain210_initCountOm")
+private extern shared size_t runtimeInitDepth;
+
+private bool runtimeInitDepthReturnsTo(in size_t depth) {
+    import core.atomic: atomicLoad;
+    import core.thread: Thread;
+    import core.time: msecs, MonoTime, seconds;
+
+    const deadline = MonoTime.currTime + 5.seconds;
+    while (atomicLoad(runtimeInitDepth) != depth) {
+        if (MonoTime.currTime > deadline)
+            return false;
+        Thread.sleep(10.msecs);
+    }
+    return true;
+}
