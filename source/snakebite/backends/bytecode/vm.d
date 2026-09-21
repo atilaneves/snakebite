@@ -43,7 +43,8 @@ public struct Arg {
 // This is the whole interface the bytecode compiler and this VM agree on
 // for a call: the compiler picks a `Kind` and builds the site through
 // that kind's own factory below, and `opCall`'s `final switch` reads back
-// only the one field its `Kind` names.
+// only the fields its `Kind` names: `guest` and `native` each read either
+// the prepared value or the delegate that prepares it on first execution.
 public struct CallSite {
     public enum Kind {
         // `callee` names a compiled function, or `prepareGuest` compiles
