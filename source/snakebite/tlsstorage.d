@@ -32,9 +32,8 @@ public struct TlsDescriptor {
 
 // One thread's own copies of the thread-local guest variables it has
 // touched, grown on demand. A `TlsSlots` belongs to exactly one thread -
-// the interpreter's `Evaluator` and the bytecode `Vm` are both already
-// per-thread state (ADR-0006) - so `slotFor` takes no lock: nothing here
-// is ever visible to another thread.
+// Fibers on that thread share it (ADR-0006), so `slotFor` takes no lock:
+// nothing here is ever visible to another thread.
 public struct TlsSlots {
     private void[][const(void)*] _slots;
 

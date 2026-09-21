@@ -27,6 +27,11 @@ the single-threaded flag. Guest code creating its own threads is the
 other half of #40, and is separate work that this seam makes
 possible.
 
+Fibers can suspend and resume guest calls out of nesting order on one
+thread. Each Fiber therefore needs its own execution state within that
+thread's state; its active frames must survive while other Fibers run.
+Guest thread-local variables remain shared by all Fibers on that thread.
+
 ## Considered options
 
 One global lock around every callback entry. Rejected: this

@@ -463,7 +463,7 @@ public struct ProjectImageCache {
         import std.conv: text;
 
         _path = recordPath;
-        _settings = sourceDigest(text("snakebite-project-image-v1", __VERSION__, settings));
+        _settings = sourceDigest(text("snakebite-project-image-v2", __VERSION__, settings));
         _roots = roots.dup;
         _compiler = compilerPath(compiler);
     }

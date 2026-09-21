@@ -187,14 +187,19 @@ public string[] parseDescribeList(in string output) @safe pure {
 }
 
 // Let dub decide which targets are stale, including the full dependency
-// chain of static-library roots. PIC is required by the shared image.
+// chain of static-library roots. The shared image needs position-
+// independent archives, which both host compilers emit by default on the
+// supported platform. The build must not add a PIC flag through `DFLAGS`:
+// dub keys its build-cache artifacts by `DFLAGS` too, so a build with an
+// environment that `dub describe` did not see produces artifacts at paths
+// the description does not name.
 public void buildDubDependencies(
     in string directory, in string stateDirectory,
     in DubDescription description, in string[] linkerFiles,
 ) {
     import snakebite.dependencyimage: defaultCompiler;
     import snakebite.exception: SnakebiteException;
-    import std.process: Config, environment, execute;
+    import std.process: Config, execute;
     import std.algorithm: all;
     import std.file: exists, mkdirRecurse, readText, write;
     import std.path: buildPath;
@@ -206,14 +211,8 @@ public void buildDubDependencies(
             && statePath.readText == fingerprint ~ before)
         return;
 
-    auto variables = environment.toAA; // Add PIC without changing the process environment.
-    version (DigitalMars)
-        enum pic = "-fPIC";
-    else version (LDC)
-        enum pic = "-relocation-model=pic";
-    variables["DFLAGS"] = environment.get("DFLAGS", "") ~ " " ~ pic;
     const result = execute(["dub", "build", "--deep", "--compiler=" ~ defaultCompiler]
-        ~ description.buildArguments, variables, Config.none,
+        ~ description.buildArguments, null, Config.none,
         size_t.max, directory);
     if (result.status != 0)
         throw new SnakebiteException("Dub dependency build failed:\n" ~ result.output);
