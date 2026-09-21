@@ -9,11 +9,13 @@ private:
 // that holds an `asm` block instead of erroring (the shim at
 // `source/dmd/iasm/package.d` does this on purpose, so druntime modules
 // with `asm` still pass semantic analysis). Walk every root module's own
-// declarations once, after semantic analysis finishes, and return one
-// diagnostic line per function that still has an unguarded `asm` block, so
-// the frontend can fail the load with a clear message instead of a backend
-// hitting the block at run time. An empty result means the root modules are
-// clear.
+// declarations once, after semantic analysis finishes, and report one
+// `dmd.errors.error` per function that still has an unguarded `asm`
+// block, so the frontend fails the load with a clear message instead of a
+// backend hitting the block at run time. Reporting through `error` (not a
+// thrown exception of its own) increments `global.errors` the same way
+// every other frontend error does, so the caller's own `global.errors`
+// check formats this failure exactly like any other semantic error.
 // Dependency modules keep `D_InlineAsm_X86_64` defined (docs/adr/0012), so
 // a dependency template such as `core.internal.atomic.atomicFetchAdd`
 // really does compile its `asm` body in and set `hasInlineAsm` on its own
@@ -24,13 +26,12 @@ private:
 // declaration regardless of where the walk reached it from, so only a
 // `FuncDeclaration` whose own module is one of `rootModules` is
 // root-owned and worth a diagnostic.
-public string[] inlineAsmDiagnostics(
+public void reportInlineAsmDiagnostics(
     imported!"dmd.dmodule".Module[] rootModules,
 ) {
     scope collector = new InlineAsmCollector(rootModules);
     foreach (module_; rootModules)
         module_.accept(collector);
-    return collector.lines;
 }
 
 // The D language specification gives `D_InlineAsm_X86_64` one meaning:
@@ -77,6 +78,7 @@ private extern(C++) class InlineAsmCollector
     import dmd.dsymbolsem: include;
     import dmd.dtemplate: TemplateDeclaration, TemplateInstance,
         TemplateMixin;
+    import dmd.errors: error;
     import dmd.expression: FuncExp;
     import dmd.func: CtorDeclaration, DtorDeclaration,
         FuncDeclaration, FuncLiteralDeclaration, InvariantDeclaration,
@@ -86,15 +88,10 @@ private extern(C++) class InlineAsmCollector
 
     private bool[Module] _rootModules;
     private bool[FuncDeclaration] _visited;
-    private string[] _lines;
 
     private extern(D) this(Module[] rootModules) {
         foreach (module_; rootModules)
             _rootModules[module_] = true;
-    }
-
-    private extern(D) string[] lines() {
-        return _lines;
     }
 
     private extern(D) bool isRootOwned(FuncDeclaration function_) {
@@ -194,7 +191,13 @@ private extern(C++) class InlineAsmCollector
             return;
         _visited[function_] = true;
         if (function_.hasInlineAsm && isRootOwned(function_))
-            _lines ~= diagnosticLine(function_);
+            error(
+                function_.loc,
+                "inline assembler is not supported in `%s`: guard it "
+                ~ "with `version (D_InlineAsm_X86_64)`, which snakebite "
+                ~ "does not define",
+                function_.toPrettyChars,
+            );
         if (function_.fbody !is null)
             function_.fbody.accept(this);
     }
@@ -288,23 +291,4 @@ private extern(C++) class InlineAsmVersionGate
         if (condition.ident is Identifier.idPool("D_InlineAsm_X86_64"))
             condition.inc = Include.no;
     }
-}
-
-// One line, in dmd's own `file(line):` shape, naming the function and the
-// remedy: guard the block with the version identifier snakebite parses
-// root modules without (see `disableInlineAsmVersion` above).
-private extern(D) string diagnosticLine(
-    imported!"dmd.func".FuncDeclaration function_,
-) {
-    import std.conv: text;
-    import std.string: fromStringz;
-
-    return text(
-        function_.loc.filename.fromStringz,
-        "(", function_.loc.linnum, "): ",
-        "inline assembler is not supported in `",
-        function_.toPrettyChars.fromStringz,
-        "`: guard it with `version (D_InlineAsm_X86_64)`, which snakebite ",
-        "does not define",
-    );
 }

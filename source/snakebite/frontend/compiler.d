@@ -637,8 +637,7 @@ private void driveSharedSemantic(
     import dmd.semantic3: semantic3;
     import snakebite.frontend.inlineasm:
         disableInlineAsmVersion,
-        inlineAsmDiagnostics;
-    import std.array: join;
+        reportInlineAsmDiagnostics;
 
     foreach (m; modules) disableInlineAsmVersion(m);
 
@@ -654,11 +653,8 @@ private void driveSharedSemantic(
     foreach (m; rootModules) m.semantic3(null);
     runDeferredSemantic3;
 
-    if (global.errors == 0) {
-        const asmDiagnostics = inlineAsmDiagnostics(rootModules);
-        if (asmDiagnostics.length)
-            throw new Exception(asmDiagnostics.join("\n"));
-    }
+    if (global.errors == 0)
+        reportInlineAsmDiagnostics(rootModules);
 }
 
 // A project module reached only through `import`, not one of `modules`
