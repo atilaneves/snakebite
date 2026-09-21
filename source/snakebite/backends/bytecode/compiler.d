@@ -241,45 +241,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _program.isInterpreted(function_);
     }
 
-    private const(void)* delegate() deferredNativePlan(
-        FuncDeclaration callee,
-        imported!"snakebite.ffi.call".CallAdapter.Arguments preparation,
-    ) {
-        import core.atomic: atomicLoad, atomicStore, MemoryOrder;
-        import snakebite.ffi.plan: CallPlan;
-        import snakebite.frontend.compiler: withCompilerLock;
-
-        const(CallPlan)* cached;
-        return () {
-            if (auto plan = atomicLoad!(MemoryOrder.acq)(cached))
-                return cast(const(void)*) plan;
-            withCompilerLock({
-                if (atomicLoad!(MemoryOrder.acq)(cached) is null)
-                    atomicStore!(MemoryOrder.rel)(cached,
-                        preparation.prepare(_plans, callee));
-            });
-            return cast(const(void)*) atomicLoad!(MemoryOrder.acq)(cached);
-        };
-    }
-
-    private const(Function)* delegate() deferredGuestFunction(
-        FuncDeclaration callee,
-    ) {
-        import core.atomic: atomicLoad, atomicStore, MemoryOrder;
-        import snakebite.frontend.compiler: withCompilerLock;
-
-        const(Function)* cached;
-        return () {
-            if (auto compiled = atomicLoad!(MemoryOrder.acq)(cached))
-                return compiled;
-            withCompilerLock({
-                if (atomicLoad!(MemoryOrder.acq)(cached) is null)
-                    atomicStore!(MemoryOrder.rel)(cached, compileFunction(callee));
-            });
-            return atomicLoad!(MemoryOrder.acq)(cached);
-        };
-    }
-
     // Records that `compiled` is the word this backend stores for
     // `function_`'s address - what the plan swaps for a pool entry
     // (ADR-0003) when the word crosses to host code, and what
@@ -5636,11 +5597,44 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, loc, exprText);
 
         const siteIndex = _callSites.length;
+        // The delegate outlives this compiler, so it captures the backend
+        // and not `this`.
+        auto bytecode = _bytecode;
         _callSites ~= CallSite.guest(
-            _bytecode.deferredGuestFunction(callee), args,
+            deferred(() => bytecode.compileFunction(callee)), args,
             returnShape.returnFacts.size,
         );
         emit(&opCall, destOffset, siteIndex, 0);
+    }
+
+    // Runs `compute` at most once, on the first call of the returned
+    // delegate, under the compiler lock: the site that holds it can execute
+    // on any thread's VM, and the lock keeps two threads from both
+    // preparing the same callee. Later calls read the cached result
+    // without the lock. The state lives in a heap struct, not in captured
+    // locals, so that `compute` is seen to escape and its closure is not
+    // placed on the caller's stack.
+    private static T delegate() deferred(T)(T delegate() compute)
+    if (is(T: const(void)*)) {
+        return &(new Deferred!T(compute)).get;
+    }
+
+    private static struct Deferred(T) {
+        private T delegate() _compute;
+        private T _cached;
+
+        private T get() {
+            import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+            import snakebite.frontend.compiler: withCompilerLock;
+
+            if (auto found = atomicLoad!(MemoryOrder.acq)(_cached))
+                return found;
+            withCompilerLock({
+                if (atomicLoad!(MemoryOrder.acq)(_cached) is null)
+                    atomicStore!(MemoryOrder.rel)(_cached, _compute());
+            });
+            return atomicLoad!(MemoryOrder.acq)(_cached);
+        }
     }
 
     // Builds the FFI call plan for a native callee - one druntime already
@@ -5683,9 +5677,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _callSites ~= CallSite.native(
                 cast(const(void)*) plan, args, returnShape.returnFacts.size);
         } else {
+            // The delegate outlives this compiler, so it captures the
+            // backend and not `this`; `PlanCache` is a struct.
+            auto bytecode = _bytecode;
             _callSites ~= CallSite.native(
-                _bytecode.deferredNativePlan(callee, preparation), args,
-                returnShape.returnFacts.size);
+                deferred(() => cast(const(void)*)
+                    preparation.prepare(bytecode._plans, callee)),
+                args, returnShape.returnFacts.size,
+            );
         }
         emit(&opCall,
             nativeResultPlace(destOffset, returnShape.isVoid,
