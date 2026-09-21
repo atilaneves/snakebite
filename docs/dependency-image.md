@@ -99,11 +99,15 @@ state use the same project partition. The project path hash is the SHA-256
 hash of the normalized absolute project path. Project preparation supplies
 imported source files as cache inputs.
 
-The cache key includes build flags, import paths, generated source, frontend
-version, compiler path, compiler executable content, compiler version output,
-linker arguments, and the paths and contents of `inputs` and `linkerFiles`.
-Callers must list any extra source or configuration files used by the generated
-source. The compiler's
+Every image has two cache levels. A stamp record, keyed on the build flags,
+import paths, generated source, frontend version, compiler path, linker
+arguments, and the paths of `inputs` and `linkerFiles`, holds file metadata
+for the compiler, every input, and the image. If all of them are unchanged,
+preparation loads the image directly: it does not run the compiler, read the
+compiler executable, or read an input. Only a stamp miss computes the content
+key, which adds the compiler executable content, the compiler version output,
+and the contents of `inputs` and `linkerFiles`. Callers must list any extra
+source or configuration files used by the generated source. The compiler's
 runtime headers and libraries are assumed unchanged within an installation.
 
 Project preparation first checks the partition's
@@ -116,8 +120,10 @@ time detect replaced files and same-size edits with restored modification times.
 
 If only root source metadata changed, preparation checks whether the generated
 template references changed. If they did not, it reuses the image and updates
-the root metadata. Otherwise, it uses the content-based image cache described
-above. Direct calls to `prepareImage` also use that content-based cache.
+the root metadata. Otherwise, it uses the two-level image cache described
+above. Direct calls to `prepareImage`, including the test startup image, use
+that cache. A cache hit for a CLI run therefore costs a handful of `stat`
+calls and a loader reference, whichever level it hits.
 
 Builds use unique temporary directories and publish completed libraries with an
 atomic rename. A failed build does not publish an image. Concurrent builders can

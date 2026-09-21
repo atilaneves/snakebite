@@ -21,9 +21,10 @@ shared static this() {
     compiler = new Compiler;
 }
 
-shared static ~this() {
-    compiler.shutdown;
-}
+// Callback entries are permanent and can run guest finalizers during
+// druntime's process-exit collection, after module destructors have run.
+// Keep DMD's declarations valid for those callbacks. The process reclaims
+// the frontend state after druntime finishes.
 
 // Whether this process compiles many small snippets (bin/ut, the REPL) or one
 // whole program as a single root set (`dmd -unittest <files>`). The snippet

@@ -20,9 +20,10 @@ import snakebite.frontend.dmd.functions: findFunction;
 import std.file: dirEntries, SpanMode;
 import std.array: array;
 import std.process: execute;
-import std.file: exists, readText, remove, setTimes;
+import std.file: exists, readText, remove, setAttributes, setTimes;
 import std.path: baseName;
 import std.algorithm.iteration: filter;
+import std.conv: octal;
 import std.path: buildPath;
 
 static foreach (backend; Matrix!()) {
@@ -246,6 +247,26 @@ unittest {
         auto image = prepareImage(atomicSource, directory, otherCompiler);
     })().shouldThrowWithMessage!SnakebiteException(message);
     dirEntries(directory, SpanMode.shallow).array.length.should == 0;
+}
+
+// A repeat preparation with an unchanged compiler, source and inputs must
+// not run the compiler at all: neither the version probe nor a build. A
+// wrapper that fails once poisoned proves the second call never reached it.
+@("image.unchangedImageSkipsCompiler")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    const directory = sandbox.sandboxPath;
+    const poison = sandbox.inSandboxPath("poison");
+    const wrapper = sandbox.inSandboxPath("compiler.sh");
+    sandbox.writeFile("compiler.sh", "#!/bin/sh\n[ -e '" ~ poison
+        ~ "' ] && exit 1\nexec " ~ defaultCompiler ~ " \"$@\"\n");
+    setAttributes(wrapper, octal!755);
+    auto image = prepareImage(atomicSource, directory, wrapper);
+    sandbox.writeFile("poison", "");
+    execute([wrapper, "--version"]).status.should.not == 0;
+    auto reused = prepareImage(atomicSource, directory, wrapper);
+    reused.path.should == image.path;
 }
 
 @("image.inputChange")
@@ -789,10 +810,11 @@ unittest {
     const root = sandbox.inSandboxPath("root.d");
     const dependency = sandbox.inSandboxPath("dependency.d");
     const directory = sandbox.sandboxPath;
+    const record = buildPath(directory, "project.json");
     auto image = prepareImage(atomicSource, directory);
-    auto cache = ProjectImageCache(directory, "settings", [root]);
+    auto cache = ProjectImageCache(record, "settings", [root]);
     cache.save(image.path, atomicSource, [dependency]);
-    auto next = ProjectImageCache(directory, "settings", [root]);
+    auto next = ProjectImageCache(record, "settings", [root]);
     DependencyImage hit;
     string unexpectedSource() {
         throw new Exception("An unchanged image must skip source generation");
@@ -802,7 +824,7 @@ unittest {
 
     sandbox.writeFile("root.d", "changed root");
     next.restore(hit, () => atomicSource).should == true;
-    auto changedSettings = ProjectImageCache(directory, "other settings", [root]);
+    auto changedSettings = ProjectImageCache(record, "other settings", [root]);
     changedSettings.restore(hit, () => atomicSource).should == false;
 
     // A preserved mtime and size must not hide a changed dependency.

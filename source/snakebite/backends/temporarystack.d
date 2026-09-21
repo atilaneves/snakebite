@@ -49,7 +49,7 @@ public struct TemporaryStack {
     ) {
         while (_entries.length > mark_) {
             const entry = _entries[$ - 1];
-            _entries.length -= 1;
+            _entries = _entries[0 .. $ - 1];
             if (!entry.armed)
                 continue;
             // A throwing destructor must not strand older completed values.

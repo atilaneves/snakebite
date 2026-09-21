@@ -318,7 +318,8 @@ public void prepareDependencies(ref Project project) {
         project.sources.linkerFiles, JSONValue(project.sources.sourceOverrides),
         project.sources.dubDescription.value, environment.get("DFLAGS", ""),
         environment.get("LFLAGS", ""));
-    auto cache = ProjectImageCache(directory, settings, project.sources.files);
+    auto cache = ProjectImageCache(buildPath(directory, "project.json"),
+        settings, project.sources.files);
     string source;
     bool sourcePrepared;
     string generateSource() {
