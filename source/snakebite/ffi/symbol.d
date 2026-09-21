@@ -36,6 +36,14 @@ public struct Resolver {
         return *_addresses.insert(name.idup, address);
     }
 
+    // This thread's address of a thread-local symbol. Never cached: the
+    // loader answers `dlsym` on a thread-local symbol with the calling
+    // thread's own copy, so one thread's answer is wrong for every other.
+    public void* resolveThreadLocal(in char[] name) const {
+        auto address = _image is null ? null : _image.resolve(name);
+        return address is null ? symbolAddress(name) : address;
+    }
+
     version(unittest)
     public size_t lookups() @safe @nogc nothrow pure const scope {
         return _lookups;

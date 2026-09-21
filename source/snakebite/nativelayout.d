@@ -245,8 +245,9 @@ public struct NativeData {
     import snakebite.sharedtable: SharedTable;
     import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
 
+    private bool delegate(Dsymbol) const _isRootOwned;
     private SymbolAddress _symbolAddress;
-    private bool delegate(Dsymbol) _isRootOwned;
+    private ThreadLocalAddress _threadLocalAddress;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
     // Read and written only under the compiler lock. Key by the object,
     // not a reference expression, to preserve aliases and cycles.
@@ -272,12 +273,14 @@ public struct NativeData {
     private PerThread!(TlsSlots*) _tls;
 
     public this(
+        bool delegate(Dsymbol) const isRootOwned,
         SymbolAddress symbolAddress,
+        ThreadLocalAddress threadLocalAddress,
         TypeInfo_Class delegate(ClassDeclaration) classInfo,
-        bool delegate(Dsymbol) isRootOwned,
     ) {
-        _symbolAddress = symbolAddress;
         _isRootOwned = isRootOwned;
+        _symbolAddress = symbolAddress;
+        _threadLocalAddress = threadLocalAddress;
         _classInfo = classInfo;
         _tls = PerThread!(TlsSlots*)(() => new TlsSlots);
     }
@@ -383,20 +386,23 @@ public struct NativeData {
     // `variable`'s storage: this thread's own copy if it is thread-local
     // (finding 1.3 - compiled D gives every thread its own copy of a
     // module-level or `static` local that is not `shared`/`__gshared`),
-    // otherwise the one copy every thread shares.
+    // otherwise the one copy every thread shares. Native storage when
+    // the variable has it (`hasNativeStorage`); this program's own
+    // otherwise.
     public void[] storageOf(VarDeclaration variable) {
-        import dmd.astenums: STC;
+        import std.string: fromStringz;
 
         const facts = TypeFacts.of(variable.type);
-        if (variable.storage_class & STC.extern_) {
-            // const would also make the referenced storage read-only here.
-            auto address = _symbolAddress(variable);
-            assert(address !is null);
-            return address[0 .. facts.size];
-        }
-
         if (variable.isThreadlocal)
             return _tls.current.slotFor(tlsDescriptorOf(variable));
+
+        if (hasNativeStorage(variable)) {
+            // const would also make the referenced storage read-only here.
+            auto address = _symbolAddress(variable);
+            if (address !is null)
+                return address[0 .. facts.size];
+            assert(!isExtern(variable), variable.toChars.fromStringz);
+        }
 
         if (auto found = variable in _statics)
             return *found;
@@ -409,15 +415,7 @@ public struct NativeData {
                 bytes = *found;
                 return;
             }
-            // Imported shared storage can be initialized by native startup.
-            // Only missing symbols need a guest-owned initialization image.
-            if (!_isRootOwned(variable)) {
-                auto address = _symbolAddress(variable); // Storage stays writable.
-                if (address !is null)
-                    bytes = address[0 .. facts.size];
-            }
-            if (bytes.ptr is null)
-                bytes = buildInitialBytes(variable, facts);
+            bytes = buildInitialBytes(variable, facts);
             _statics.insert(variable, bytes);
         });
         return bytes;
@@ -443,11 +441,41 @@ public struct NativeData {
                 return;
             }
             const facts = TypeFacts.of(variable.type);
+            if (hasNativeStorage(variable)) {
+                const name = nativeSymbolName(variable);
+                // Only to learn that the symbol is there: this thread's
+                // address is not the descriptor's to keep.
+                if (_threadLocalAddress(name) !is null) {
+                    descriptor = _tlsDescriptors.insert(variable, TlsDescriptor(
+                        cast(const(void)*) variable, null, facts.size,
+                        name, _threadLocalAddress));
+                    return;
+                }
+                assert(!isExtern(variable), name);
+            }
             const bytes = buildInitialBytes(variable, facts);
             descriptor = _tlsDescriptors.insert(variable, TlsDescriptor(
                 cast(const(void)*) variable, bytes.ptr, bytes.length));
         });
         return descriptor;
+    }
+
+    // Whether `variable`'s storage is native rather than this program's
+    // own. An `extern` declaration's is by definition. A dependency's is
+    // too: a module dmd only reached through an `import` has its machine
+    // code in the dependency image, and its globals with it, and that
+    // code reads and writes them there. One storage per variable, or a
+    // native setter and an interpreted reader would each see their own.
+    // A dependency variable with no native symbol (a template instance
+    // only guest code made) keeps this program's own storage.
+    private bool hasNativeStorage(VarDeclaration variable) const {
+        return isExtern(variable) || !_isRootOwned(variable);
+    }
+
+    private static bool isExtern(VarDeclaration variable) {
+        import dmd.astenums: STC;
+
+        return (variable.storage_class & STC.extern_) != 0;
     }
 
     // Reserves and fills a variable's own storage bytes: called under
@@ -525,6 +553,8 @@ public struct NativeData {
 
 private alias SymbolAddress =
     void* delegate(imported!"dmd.declaration".Declaration);
+// This thread's address of a thread-local symbol, by linker name.
+private alias ThreadLocalAddress = void* delegate(in char[] name);
 
 public string nativeSymbolName(imported!"dmd.declaration".Declaration symbol) {
     import dmd.common.outbuffer: OutBuffer;
