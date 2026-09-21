@@ -4,6 +4,10 @@ module ut.backends.call.cast_;
 import ut.backends;
 
 
+// A cast between vectors of equal width reinterprets the bits of all lanes.
+// It is not a per-lane conversion. DMD's SIMD intrinsics declare their
+// parameters as `__vector(void[16])`, so code that reaches them casts
+// through that void vector shape and expects the lanes to come back intact.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot reinterpret overlapping union fields"),

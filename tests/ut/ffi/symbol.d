@@ -359,6 +359,9 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// `among` with a lambda predicate instantiates a template whose `.mangleof`
+// names the instance, not the callable. The lookup in the image must key on
+// the exact mangle of the function itself.
 static foreach (backend; Matrix!()) {
     @("image.importedTemplateDelegate." ~ backend.stringof)
     unittest {

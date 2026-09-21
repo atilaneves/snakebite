@@ -7,6 +7,9 @@ import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 
 
+// Compiled D needs a callee to compile, not to run. A call that the program
+// never executes must not reject the program, even when the callee contains
+// inline assembly that a backend cannot execute.
 static foreach (backend; Matrix!()) {
     @("unexecutedAssemblyCallee." ~ backend.stringof)
     @Tags(backend.stringof)
