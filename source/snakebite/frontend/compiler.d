@@ -340,8 +340,11 @@ final class Compiler {
             const source = sourceOverride is null
                 ? filePath.readText
                 : *sourceOverride;
+            // DMD treats null as a request to reopen the filename, which
+            // is relative for __FILE__ and may not exist in the current directory.
             auto result = dmdParseModule(
-                dmdFileName(filePath, importPaths, rootDirectory), source,
+                dmdFileName(filePath, importPaths, rootDirectory),
+                source is null ? "" : source,
             );
             if (result.diagnostics.hasErrors)
                 throw new Exception(diagnosticMessageWithLocations);
