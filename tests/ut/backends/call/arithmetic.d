@@ -795,10 +795,7 @@ static foreach (backend; Matrix!()) {
 
 // Each target is indirect so its evaluation count is observable. The
 // operation result is checked before the next assignment uses the target.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "interpreter rejects floating compound assignment"),
-)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.floatingCompoundAssign.float." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -827,19 +824,21 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "interpreter rejects floating compound assignment"),
-)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.floatingCompoundAssign.double." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        0.0.shouldBeRetOf!(
+        5.0.shouldBeRetOf!(
             backend,
             q{
                 ref double target(ref double value, ref int calls) {
                     ++calls;
                     return value;
+                }
+
+                float rhs(ref double value) {
+                    value = 3.0;
+                    return 2.0f;
                 }
 
                 double result() {
@@ -852,7 +851,8 @@ static foreach (backend; Matrix!(
                     float factor = 2.0f;
                     assert((target(value, targetCalls) *= factor) == 1.0);
                     assert((target(value, targetCalls) %= 0.25) == 0.0);
-                    assert(targetCalls == 6);
+                    assert((target(value, targetCalls) += rhs(value)) == 5.0);
+                    assert(targetCalls == 7);
                     return value;
                 }
             },
@@ -861,10 +861,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "interpreter rejects floating compound assignment"),
-)) {
+static foreach (backend; Matrix!()) {
     @("arithmetic.floatingCompoundAssign.real." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

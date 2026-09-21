@@ -2924,8 +2924,52 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private extern(D) void storeAssignExp(string op)(
         BinAssignExp expression, void* resolvedTarget = null,
     ) {
+        import snakebite.nativevalue: loadFloating, storeFloating;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
         import std.conv: text;
+
+        // D evaluates the target once, then the right side, then reads the
+        // target. A floating RHS can change the target before that read.
+        auto promotion = expression.e1.isCastExp;
+        auto target_ = promotion is null ? expression.e1 : promotion.e1;
+        const operationType = expression.e1.type.toBasetype;
+        static if (op == "+" || op == "-" || op == "*" || op == "/"
+                || op == "%")
+        if (operationType.ty == Tfloat32 || operationType.ty == Tfloat64
+                || operationType.ty == Tfloat80) {
+            auto target = resolvedTarget;
+            if (target is null)
+                try {
+                    target = addressOf(expression.e1);
+                } catch (SnakebiteException) {
+                    throw new SnakebiteException(
+                        text("interpreter cannot assign to `",
+                            expression.e1.toString, "`: ",
+                            expression.toString),
+                    );
+                }
+
+            const targetFacts = factsOf(target_.type);
+            const step = asFloating(expression.e2);
+            const current = loadFloating(target, targetFacts.size);
+            real result;
+            if (operationType.ty == Tfloat32)
+                result = cast(real) mixin(
+                    "cast(float) current " ~ op ~ " cast(float) step");
+            else if (operationType.ty == Tfloat64)
+                result = cast(real) mixin(
+                    "cast(double) current " ~ op ~ " cast(double) step");
+            else
+                result = mixin("current " ~ op ~ " step");
+
+            storeFloating(target, result, targetFacts.size);
+            storeFloating(
+                _place,
+                loadFloating(target, targetFacts.size),
+                _facts.size,
+            );
+            return;
+        }
 
         const targetFacts = factsOf(expression.e1.type);
         if (!targetFacts.isIntegral && expression.e1.type.ty != Tpointer)
@@ -2950,8 +2994,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // A narrow target (`ubyte`, `short`, ...) arrives wrapped in the
         // `CastExp` dmd's `integralPromotions` adds for the operation
         // itself; the field behind it is what is stored to.
-        auto promotion = expression.e1.isCastExp;
-        auto target_ = promotion is null ? expression.e1 : promotion.e1;
         if (auto dot = target_.isDotVarExp) {
             auto field = dot.var.isVarDeclaration;
             if (field !is null && field.isBitFieldDeclaration !is null) {
