@@ -80,15 +80,20 @@ public DubDescription dubDescribeProject(
 ) {
     import std.json: parseJSON;
     import snakebite.dependencyimage: defaultCompiler;
-
     import std.algorithm.iteration: map;
     import std.array: array;
+    import snakebite.dubcache: cachedDubDescription;
+    import std.json: JSONValue;
 
     const versionArguments = versions.map!(v => "--d-version=" ~ v).array;
-    const result = describe(directory,
-        ["--compiler=" ~ defaultCompiler] ~ versionArguments, DubConfig.test);
-    return DubDescription(parseJSON(result.output),
-        (result.buildArguments ~ versionArguments).dup);
+    const cached = cachedDubDescription(directory, defaultCompiler, versions, {
+        const result = describe(directory,
+            ["--compiler=" ~ defaultCompiler] ~ versionArguments, DubConfig.test);
+        return JSONValue(["value": parseJSON(result.output),
+            "arguments": JSONValue((result.buildArguments ~ versionArguments).dup)]);
+    });
+    return DubDescription(cached["value"],
+        cached["arguments"].array.map!(v => v.str).array);
 }
 
 
@@ -195,14 +200,13 @@ public void buildDubDependencies(
     import snakebite.dependencyimage: defaultCompiler;
     import snakebite.exception: SnakebiteException;
     import std.process: Config, execute;
-
+    import std.algorithm: all;
     import std.file: exists, mkdirRecurse, readText, write;
     import std.path: buildPath;
 
     const statePath = buildPath(stateDirectory, "dub-dependencies");
     const fingerprint = dependencyFingerprint(directory, description);
     const before = fileFingerprint(linkerFiles);
-    import std.algorithm: all;
     if (linkerFiles.all!exists && statePath.exists
             && statePath.readText == fingerprint ~ before)
         return;
