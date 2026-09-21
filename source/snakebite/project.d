@@ -321,41 +321,33 @@ public void prepareDependencies(ref Project project) {
         environment.get("LFLAGS", ""));
     auto cache = ProjectImageCache(buildPath(directory, "project.json"),
         settings, project.sources.files);
-    string source;
-    bool sourcePrepared;
-    string generateSource() {
-        if (!sourcePrepared) {
-            source = imageSource(project.program);
-            sourcePrepared = true;
-        }
-        return source;
-    }
     auto image = new DependencyImage;
-    if (cache.restore(*image, &generateSource)) {
+    const prepared = cache.prepare(*image,
+        () => imageSource(project.program),
+        () {
+            if (project.sources.linkerFiles.length
+                    && isDubProject(project.directory)) {
+                import snakebite.dub: buildDubDependencies;
+
+                buildDubDependencies(project.directory, stateDirectory,
+                    project.sources.dubDescription, project.sources.linkerFiles);
+            }
+        },
+        source => prepareImage(source, directory, defaultCompiler,
+            imageInputs(project.program), project.sources.importPaths,
+            project.sources.stringImportPaths,
+            project.sources.flags.compilerArguments,
+            project.sources.linkerFiles, project.sources.linkerFlags),
+        project.sources.linkerFiles.length != 0,
+        () {
+            import snakebite.dub: dubInputs;
+
+            return imageInputs(project.program) ~ project.sources.linkerFiles
+                ~ (isDubProject(project.directory)
+                    ? dubInputs(project.directory,
+                        project.sources.dubDescription) : null);
+        });
+    if (prepared) {
         project.program.dependencyImage = image;
-        return;
     }
-    if (project.sources.linkerFiles.length && isDubProject(project.directory)) {
-        import snakebite.dub: buildDubDependencies;
-
-        buildDubDependencies(project.directory, stateDirectory,
-            project.sources.dubDescription, project.sources.linkerFiles);
-    }
-    generateSource;
-    if (!source.length && !project.sources.linkerFiles.length)
-        return;
-    *image = prepareImage(
-        source.length ? source : "module snakebite_dependency_image;\n",
-        directory, defaultCompiler,
-        imageInputs(project.program), project.sources.importPaths,
-        project.sources.stringImportPaths,
-        project.sources.flags.compilerArguments,
-        project.sources.linkerFiles, project.sources.linkerFlags);
-    import snakebite.dub: dubInputs;
-
-    cache.save(image.path, source,
-        imageInputs(project.program) ~ project.sources.linkerFiles
-        ~ (isDubProject(project.directory)
-            ? dubInputs(project.directory, project.sources.dubDescription) : null));
-    project.program.dependencyImage = image;
 }

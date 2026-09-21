@@ -138,21 +138,64 @@ public struct CallAdapter {
             public TypeFacts fieldFacts;
         }
 
+        public struct Declared {
+            public Expression expression;
+            public Type parameterType;
+            public Type evaluationType;
+            public bool isReference;
+            public bool isOut;
+            public bool isLazy;
+
+            public void store(
+                void* place,
+                scope void* delegate() address,
+                scope void delegate(void*) evaluate,
+            ) const {
+                Argument(isReference).store(place, address, evaluate);
+            }
+        }
+
+        // Guest calls reuse cached frame facts. Keeping type layout out of
+        // this traversal avoids frontend layout work on each interpreter call.
+        public void eachDeclared(
+            scope void delegate(size_t, Declared) emit,
+        ) {
+            foreach (i; 0 .. _type.parameterList.length)
+                emit(i, declaredValue(i));
+        }
+
         public void each(scope void delegate(Value) emit) {
             if (_declaredOffset)
                 emit(hiddenArgument);
-            foreach (i, expression; declared) {
-                import dmd.astenums: STC;
-
-                auto parameter = _type.parameterList[i];
-                const reference = Argument.of(parameter).isReference;
-                const facts = reference ? TypeFacts.pointer
-                    : parameter.storageClass & STC.lazy_
-                        ? TypeFacts.lazyArgument : TypeFacts.of(parameter.type);
-                emit(Value(expression, facts, reference));
+            foreach (i; 0 .. _type.parameterList.length) {
+                auto declared = declaredValue(i); // Frontend types remain mutable.
+                const facts = declared.isReference ? TypeFacts.pointer
+                    : declared.isLazy
+                        ? TypeFacts.lazyArgument
+                        : TypeFacts.of(declared.parameterType);
+                emit(Value(
+                    declared.expression, facts, declared.isReference,
+                ));
             }
             foreach (expression; _expressions[extraOffset .. $])
                 emit(Value(expression, TypeFacts.of(expression.type)));
+        }
+
+        private Declared declaredValue(in size_t i) {
+            import dmd.astenums: STC;
+
+            auto parameter = _type.parameterList[i]; // Frontend types remain mutable.
+            const reference = Argument.of(parameter).isReference;
+            const isOut = (parameter.storageClass & STC.out_) != 0;
+            const isLazy = (parameter.storageClass & STC.lazy_) != 0;
+            auto parameterType = parameter.type; // Frontend types remain mutable.
+            auto evaluationType = isLazy // Frontend types remain mutable.
+                ? _expressions[_declaredOffset + i].type
+                : parameterType;
+            return Declared(
+                _expressions[_declaredOffset + i], parameterType,
+                evaluationType, reference, isOut, isLazy,
+            );
         }
 
         private Value hiddenArgument() {

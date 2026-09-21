@@ -94,3 +94,4 @@ This means there is no need to marshall or unmarshall when doing FFI.
 # Tests
 - Use `shouldThrowWithMessage`, not `shouldThrow`.
 - Use `.should ==`, not `.shouldEqual`.
+- Use `"...".should.be in foo`, not `.canFind("...").should == true`.

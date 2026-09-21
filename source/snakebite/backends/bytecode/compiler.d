@@ -5566,8 +5566,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto calleeLayout = FrameLayout.of(callee);
         auto calleeType = typeFunctionOf(callee);
 
-        const parameterCount = calleeType.parameterList.length;
-        const argumentStart = calleeType.isDstyleVariadic ? 1 : 0;
         if (arityMismatches(calleeType.parameterList, arguments,
                 calleeType.isDstyleVariadic))
             throw rejection(_function, loc, exprText);
@@ -5589,22 +5587,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             );
         }
 
-        foreach (i; 0 .. parameterCount) {
-            auto parameter = calleeLayout.parameters[i];
-
-            if (parameter.isRef) {
-                const argumentOffset = compileAddress((*arguments)[argumentStart + i]);
-                args ~= Arg(argumentOffset, parameter.offset, size_t.sizeof);
-                continue;
-            }
-
-            const argumentOffset = reserveTemp(parameter.facts);
-            evalInto(
-                (*arguments)[argumentStart + i], argumentOffset,
-                parameter.facts.size,
-            );
-            args ~= Arg(argumentOffset, parameter.offset, parameter.facts.size);
-        }
+        auto preparation = CallAdapter.Arguments.of(calleeType, arguments);
+        args ~= compileGuestArguments(preparation, calleeLayout);
 
         if (calleeType.isDstyleVariadic)
             args ~= compileVariadicArguments(arguments, calleeLayout);
@@ -5662,6 +5646,26 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             });
             return atomicLoad!(MemoryOrder.acq)(_cached);
         }
+    }
+
+    private Arg[] compileGuestArguments(
+        CallAdapter.Arguments preparation,
+        in FrameLayout layout,
+    ) {
+        Arg[] args;
+        preparation.eachDeclared((i, value) {
+            const parameter = layout.parameters[i];
+            if (value.isReference) {
+                const argumentOffset = compileAddress(value.expression);
+                args ~= Arg(argumentOffset, parameter.offset, size_t.sizeof);
+                return;
+            }
+
+            const argumentOffset = reserveTemp(parameter.facts);
+            evalInto(value.expression, argumentOffset, parameter.facts.size);
+            args ~= Arg(argumentOffset, parameter.offset, parameter.facts.size);
+        });
+        return args;
     }
 
     // Builds the FFI call plan for a native callee - one druntime already
@@ -5839,8 +5843,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto(deref.e1, calleeOffset, size_t.sizeof);
         }
 
-        const parameterCount = functionType.parameterList.length;
-        const argumentStart = functionType.isDstyleVariadic ? 1 : 0;
         if (arityMismatches(functionType.parameterList, expression.arguments,
                 functionType.isDstyleVariadic))
             throw rejection(_function, expression.loc,
@@ -5867,29 +5869,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 size_t.sizeof,
             );
 
-        foreach (i; 0 .. parameterCount) {
-            auto slot = calleeLayout.parameters[i];
-
-            // `slot.isRef` comes from the same `packParameter` a resolved
-            // callee's own `FrameLayout.of` packs its `ref` parameters
-            // with (see `FrameLayout.ofParameters`), so the address
-            // `compileAddress` computes here lands in the same slot shape
-            // `compileCall`'s guest branch already builds for a direct
-            // call.
-            if (slot.isRef) {
-                const argumentOffset =
-                    compileAddress((*expression.arguments)[argumentStart + i]);
-                args ~= Arg(argumentOffset, slot.offset, size_t.sizeof);
-                continue;
-            }
-
-
-            const argumentOffset = reserveTemp(slot.facts);
-            evalInto(
-                (*expression.arguments)[argumentStart + i], argumentOffset,
-                slot.facts.size);
-            args ~= Arg(argumentOffset, slot.offset, slot.facts.size);
-        }
+        auto preparation = CallAdapter.Arguments.of(
+            functionType, expression.arguments,
+        );
+        args ~= compileGuestArguments(preparation, calleeLayout);
 
         if (functionType.isDstyleVariadic)
             args ~= compileVariadicArguments(expression.arguments, calleeLayout);
