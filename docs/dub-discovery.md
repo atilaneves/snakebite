@@ -28,6 +28,14 @@ need more input tracking before they can be cached safely. A cache read or
 write failure falls back to DUB. A checksum rejects damaged cache files.
 Writes use a temporary file and an atomic rename.
 
+Recipes also bypass caching when their text contains a backslash, a backtick,
+`.dub`, `.git`, or `.snakebite`. These markers can describe escaped or
+shell-like paths, DUB or Git-managed inputs, or Snakebite's own state. The
+input walker does not try to infer all such dependencies: it skips `.dub` and
+`.git` directories, and it must not treat Snakebite's cache state as a normal
+package input. The bypass is therefore conservative. DUB performs discovery
+again instead of risking a cache hit based on an incomplete input snapshot.
+
 To run fresh discovery and replace the cache:
 
 ```sh

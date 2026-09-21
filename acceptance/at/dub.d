@@ -29,12 +29,13 @@ configuration "unittest" {
             const expected = answer == 42 ? 0 : 1;
             static if (is(backend == Native)) {
                 execute(["dub", "build", "--compiler=" ~ defaultCompiler,
-                    "--config=unittest", "--build=unittest"], null,
-                    Config.none, size_t.max, directory).status.should == 0;
+                    "--config=unittest", "--build=unittest",
+                ], null, Config.none, size_t.max, directory).status.should == 0;
                 execute([buildPath(directory, "edited-app")]).status.should == expected;
             } else {
                 const result = execute(["bin/sb".absolutePath, "-b",
-                    backend.stringof.toLower, directory]);
+                    backend.stringof.toLower, directory,
+                ]);
                 result.status.should == expected;
             }
         }

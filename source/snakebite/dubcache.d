@@ -2,14 +2,68 @@ module snakebite.dubcache;
 
 private:
 
+private bool decode(in ubyte[] bytes, out imported!"std.json".JSONValue value) {
+    import std.json: JSONValue, JSONType;
+    import std.digest.sha: sha256Of;
+    if (bytes.length < 32 || bytes[0 .. 32] != bytes[32 .. $].sha256Of[]) return false;
+    size_t offset = 32;
+    bool valid = true;
+    ulong number() {
+        if (bytes.length - offset < 8) { valid = false; return 0; }
+        ulong n;
+        foreach (i; 0 .. 8) n |= cast(ulong)bytes[offset++] << (8 * i);
+        return n;
+    }
+    string stringValue() {
+        const n = number;
+        if (n > bytes.length - offset) { valid = false; return null; }
+        const result = cast(string)bytes[offset .. offset + n];
+        offset += n;
+        return result;
+    }
+    JSONValue item(size_t depth) {
+        if (!valid || offset == bytes.length || depth > 64) { valid = false; return JSONValue(null); }
+        const kind = cast(JSONType)bytes[offset++];
+        switch (kind) with (JSONType) {
+            case null_: return JSONValue(null);
+            case true_: return JSONValue(true);
+            case false_: return JSONValue(false);
+            case integer: return JSONValue(cast(long)number);
+            case uinteger: return JSONValue(number);
+            case float_:
+                const bits = number; return JSONValue(*cast(const(double)*)&bits);
+            case string: return JSONValue(stringValue);
+            case array:
+                const n = number;
+                if (n > bytes.length - offset) { valid = false; return JSONValue(null); }
+                JSONValue[] items;
+                items.length = n;
+                foreach (ref child; items) { child = item(depth + 1); if (!valid) break; }
+                return JSONValue(items);
+            case object:
+                const n = number;
+                if (n > bytes.length - offset) { valid = false; return JSONValue(null); }
+                JSONValue[immutable(char)[]] items;
+                foreach (_; 0 .. n) {
+                    const key = stringValue; items[key] = item(depth + 1);
+                    if (!valid) break;
+                }
+                return JSONValue(items);
+            default: valid = false; return JSONValue(null);
+        }
+    }
+    value = item(0);
+    return valid && offset == bytes.length;
+}
+
 // A cache miss always delegates semantics and generation to DUB.
 public imported!"std.json".JSONValue cachedDubDescription(
     in string directory, in string compiler, in string[] versions,
     scope imported!"std.json".JSONValue delegate() describe,
 ) {
     import std.json: JSONValue, JSONType;
-    import std.file: exists, read, write, mkdirRecurse, rename, FileException;
-    import std.path: buildPath, dirName;
+    import std.file: exists, read, write, mkdirRecurse, rename, remove, FileException;
+    import std.path: baseName, buildPath, dirName;
     import std.process: environment;
     import std.uuid: randomUUID;
     import std.conv: text;
@@ -20,31 +74,37 @@ public imported!"std.json".JSONValue cachedDubDescription(
         return describe();
     const context = contextKey(directory, compiler, versions);
     const cache = buildPath(projectStateDirectory(directory), "dub-description.bin");
+    string[string] inputStamps;
     // Cache failures must not prevent a normal DUB invocation.
     try {
-        if (mode != "refresh" && cache.exists) {
+        if (cache.exists) {
             JSONValue saved;
             if (decode(cast(ubyte[])read(cache), saved)
                     && saved.type == JSONType.object
                     && "context" in saved && saved["context"].type == JSONType.string
-                    && saved["context"].str == context && "result" in saved
-                    && "watches" in saved && validWatches(saved["watches"]))
-                return saved["result"];
+                    && saved["context"].str == context && "watches" in saved
+                    && saved["watches"].type == JSONType.object) {
+                foreach (path, value; saved["watches"].object)
+                    inputStamps[path] = stamp(path);
+                if (mode != "refresh" && "result" in saved
+                        && validWatches(saved["watches"]))
+                    return saved["result"];
+            }
         }
     } catch (FileException) {
         // Another process can remove the cache during a read.
     }
 
-    import std.datetime.systime: Clock;
-    const started = Clock.currTime;
     auto result = describe(); // The cache record stores mutable JSON values.
     try {
         bool cacheable = true;
         auto watched = collectWatches(directory, compiler, result["value"], cacheable); // JSON stores mutable values.
         // Do not publish an input snapshot taken across a concurrent edit.
         foreach (path, value; watched.object) {
-            import std.file: timeLastModified;
-            if (path.exists && timeLastModified(path) > started) cacheable = false;
+            const generated = path.baseName == "dub.selections.json"
+                || path.baseName == "dub_test_root.d";
+            if (!generated && path in inputStamps && stamp(path) != inputStamps[path])
+                cacheable = false;
         }
         if (cacheable && context == contextKey(directory, compiler, versions)) {
             const record = JSONValue([
@@ -53,7 +113,6 @@ public imported!"std.json".JSONValue cachedDubDescription(
             const bytes = encode(record);
             cache.dirName.mkdirRecurse;
             const temporary = text(cache, ".", randomUUID);
-            import std.file: remove;
             scope(exit) if (temporary.exists) remove(temporary);
             write(temporary, bytes);
             rename(temporary, cache);
@@ -90,6 +149,21 @@ private string contextKey(in string directory, in string compiler, in string[] v
     return digest.finish.toHexString.idup;
 }
 
+private bool validWatches(in imported!"std.json".JSONValue watched) {
+    import std.json: JSONType;
+    if (watched.type != JSONType.object) return false;
+    foreach (path, value; watched.object) {
+        if (value.type != JSONType.string || value.str.length < 2) return false;
+        const data = value.str;
+        const end = 2 + cast(ubyte)data[1];
+        if (end > data.length) return false;
+        if (stamp(path) == data[2 .. end]) continue;
+        if (data[0] == 'D' && entries(path) == data[end .. $]) continue;
+        return false;
+    }
+    return true;
+}
+
 private string stamp(in string path) {
     import core.sys.posix.sys.stat: stat_t, stat;
     import core.stdc.errno: errno, ENOENT, ENOTDIR;
@@ -102,7 +176,8 @@ private string stamp(in string path) {
     }
     ulong[7] fields = [value.st_dev, value.st_ino, value.st_mode,
         cast(ulong)value.st_mtim.tv_sec, cast(ulong)value.st_mtim.tv_nsec,
-        cast(ulong)value.st_ctim.tv_sec, cast(ulong)value.st_ctim.tv_nsec];
+        cast(ulong)value.st_ctim.tv_sec, cast(ulong)value.st_ctim.tv_nsec,
+    ];
     return (cast(const(char)[])fields[]).idup;
 }
 
@@ -121,27 +196,12 @@ private string entries(in string path) {
     return text(names).sha256Of.toHexString.idup;
 }
 
-private bool validWatches(in imported!"std.json".JSONValue watched) {
-    import std.json: JSONType;
-    if (watched.type != JSONType.object) return false;
-    foreach (path, value; watched.object) {
-        if (value.type != JSONType.string || value.str.length < 2) return false;
-        const data = value.str;
-        const end = 2 + cast(ubyte)data[1];
-        if (end > data.length) return false;
-        if (stamp(path) == data[2 .. end]) continue;
-        if (data[0] == 'D' && entries(path) == data[end .. $]) continue;
-        return false;
-    }
-    return true;
-}
-
 private imported!"std.json".JSONValue collectWatches(
     in string root, in string compiler,
     in imported!"std.json".JSONValue description, ref bool cacheable,
 ) {
     import std.json: JSONValue;
-    import std.file: exists, isDir, isSymlink, dirEntries, SpanMode, readText, getcwd;
+    import std.file: exists, isDir, isSymlink, dirEntries, SpanMode, readText, getcwd, readLink;
     import std.path: buildPath, baseName, dirName, absolutePath, buildNormalizedPath;
     import std.process: environment;
     import std.string: split;
@@ -177,8 +237,9 @@ private imported!"std.json".JSONValue collectWatches(
                 const recipe = readText(entry.name);
                 // Unresolved external or variable paths cannot be inferred from
                 // the description when their directories do not yet exist.
-                if (recipe.canFind("..") || recipe.canFind("$")
-                        || recipe.canFind("\"/") || recipe.canFind("\"~")
+                if (recipe.canFind("$") || recipe.canFind("\"/")
+                        || recipe.canFind("\"~\"")
+                        || recipe.canFind("\"~/")
                         || recipe.canFind("\\") || recipe.canFind("`")
                         || recipe.canFind(".dub") || recipe.canFind(".git")
                         || recipe.canFind(".snakebite"))
@@ -197,7 +258,7 @@ private imported!"std.json".JSONValue collectWatches(
             const source = buildPath(path, item["path"].str);
             directory(source.dirName);
             // Generated runner contents are an input even when their name stays.
-            if (source.canFind("/.dub/") || source.canFind("/.dub/cache/")) file(source);
+            if (source.canFind("/.dub/")) file(source);
             // DUB reads module declarations when it generates its test runner.
             if (package_["name"].str == description["rootPackage"].str
                     && package_["mainSourceFile"].str.canFind("dub_test_root.d"))
@@ -218,7 +279,8 @@ private imported!"std.json".JSONValue collectWatches(
         settings(buildPath(path, "settings.json"));
     foreach (path; [dubHome, buildPath(root, ".dub"), "/var/lib/dub"])
         foreach (name; ["packages/local-packages.json",
-                "packages/local-overrides.json"])
+                "packages/local-overrides.json",
+            ])
             file(buildPath(path, name));
     foreach (binary; ["dub", compiler]) {
         string resolved;
@@ -228,8 +290,6 @@ private imported!"std.json".JSONValue collectWatches(
             if (candidate.exists) { resolved = candidate; break; }
         }
         if (resolved.length) {
-            import std.path: absolutePath;
-            import std.file: readLink;
             // Compiler installations commonly expose binaries through links.
             while (resolved.isSymlink) {
                 resolved = readLink(resolved).absolutePath(resolved.dirName).buildNormalizedPath;
@@ -239,7 +299,9 @@ private imported!"std.json".JSONValue collectWatches(
                 settings(buildPath(resolved.dirName, "../etc/dub/settings.json").buildNormalizedPath);
             foreach (name; ["dmd.conf", "ldc2.conf"])
                 foreach (path; [root, getcwd, environment.get("HOME", ""), resolved.dirName,
-                        buildPath(resolved.dirName, "../etc"), "/etc"]) {
+                        buildPath(resolved.dirName, "../etc"), "/etc",
+                        buildPath(environment.get("HOME", ""), ".ldc"), "/etc/ldc",
+                    ]) {
                     const config = buildPath(path, name).absolutePath.buildNormalizedPath;
                     file(config);
                     if (config.exists && config.isDir) {
@@ -262,18 +324,18 @@ private ubyte[] encode(in imported!"std.json".JSONValue value) {
     void stringValue(in string text) { number(text.length); output.put(cast(const(ubyte)[])text); }
     void item(in JSONValue v) {
         output.put(cast(ubyte)v.type);
-        final switch (v.type) {
-            case JSONType.null_: case JSONType.true_: case JSONType.false_: break;
-            case JSONType.integer: number(cast(ulong)v.integer); break;
-            case JSONType.uinteger: number(v.uinteger); break;
-            case JSONType.float_:
+        final switch (v.type) with (JSONType) {
+            case null_: case true_: case false_: break;
+            case integer: number(cast(ulong)v.integer); break;
+            case uinteger: number(v.uinteger); break;
+            case float_:
                 const d = v.floating;
                 number(*cast(const(ulong)*)&d);
                 break;
-            case JSONType.string: stringValue(v.str); break;
-            case JSONType.array:
+            case string: stringValue(v.str); break;
+            case array:
                 number(v.array.length); foreach (child; v.array) item(child); break;
-            case JSONType.object:
+            case object:
                 number(v.object.length);
                 foreach (key, child; v.object) { stringValue(key); item(child); }
                 break;
@@ -281,58 +343,4 @@ private ubyte[] encode(in imported!"std.json".JSONValue value) {
     }
     item(value);
     return cast(ubyte[])output.data.sha256Of[] ~ output.data;
-}
-
-private bool decode(in ubyte[] bytes, out imported!"std.json".JSONValue value) {
-    import std.json: JSONValue, JSONType;
-    import std.digest.sha: sha256Of;
-    if (bytes.length < 32 || bytes[0 .. 32] != bytes[32 .. $].sha256Of[]) return false;
-    size_t offset = 32;
-    bool valid = true;
-    ulong number() {
-        if (bytes.length - offset < 8) { valid = false; return 0; }
-        ulong n;
-        foreach (i; 0 .. 8) n |= cast(ulong)bytes[offset++] << (8 * i);
-        return n;
-    }
-    string stringValue() {
-        const n = number();
-        if (n > bytes.length - offset) { valid = false; return null; }
-        const result = cast(string)bytes[offset .. offset + n];
-        offset += n;
-        return result;
-    }
-    JSONValue item(size_t depth) {
-        if (!valid || offset == bytes.length || depth > 64) { valid = false; return JSONValue(null); }
-        const kind = cast(JSONType)bytes[offset++];
-        switch (kind) {
-            case JSONType.null_: return JSONValue(null);
-            case JSONType.true_: return JSONValue(true);
-            case JSONType.false_: return JSONValue(false);
-            case JSONType.integer: return JSONValue(cast(long)number());
-            case JSONType.uinteger: return JSONValue(number());
-            case JSONType.float_:
-                const bits = number(); return JSONValue(*cast(const(double)*)&bits);
-            case JSONType.string: return JSONValue(stringValue());
-            case JSONType.array:
-                const n = number();
-                if (n > bytes.length - offset) { valid = false; return JSONValue(null); }
-                JSONValue[] items;
-                items.length = n;
-                foreach (ref child; items) { child = item(depth + 1); if (!valid) break; }
-                return JSONValue(items);
-            case JSONType.object:
-                const n = number();
-                if (n > bytes.length - offset) { valid = false; return JSONValue(null); }
-                JSONValue[string] items;
-                foreach (_; 0 .. n) {
-                    const key = stringValue(); items[key] = item(depth + 1);
-                    if (!valid) break;
-                }
-                return JSONValue(items);
-            default: valid = false; return JSONValue(null);
-        }
-    }
-    value = item(0);
-    return valid && offset == bytes.length;
 }

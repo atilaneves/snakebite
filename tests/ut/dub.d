@@ -35,56 +35,114 @@ configuration "unittest" {
         return JSONValue(["value": parseJSON(output.output), "arguments": JSONValue(arguments)]);
     }
     void load() { cachedDubDescription(directory, defaultCompiler, null, &describe); }
-    load();
-    load();
+    load;
+    load;
     calls.should == 1;
     write(buildPath(directory, "source/main.d"), "module main; void main() { int x; }\n");
-    load();
+    load;
     calls.should == 1;
     sandbox.writeFile("app/source/replacement.tmp", "module main; void main() {}\n");
     rename(buildPath(directory, "source/replacement.tmp"), buildPath(directory, "source/main.d"));
-    load();
+    load;
     calls.should == 1;
     sandbox.writeFile("app/source/extra.d", "module extra;\n");
-    load();
+    load;
     calls.should == 2;
     sourceSet(directory, null, null).files.any!(f => f.endsWith("extra.d")).should == true;
     remove(buildPath(directory, "source/extra.d"));
-    load();
+    load;
     calls.should == 3;
     write(buildPath(directory, "dub.sdl"), recipe ~ "versions \"Changed\"\n");
-    load();
+    load;
     calls.should == 4;
     sourceSet(directory, null, null).flags.compilerArguments.any!(f => f == "-version=Changed").should == true;
     cachedDubDescription(directory, defaultCompiler, ["Extra"], &describe);
     calls.should == 5;
-    load();
+    load;
     calls.should == 6;
     write(buildPath(projectStateDirectory(directory), "dub-description.bin"), "truncated");
-    load();
+    load;
     calls.should == 7;
-    load();
+    load;
     calls.should == 7;
     sandbox.writeFile("app/source/nested/extra.d", "module nested.extra;\n");
-    load();
+    load;
     calls.should == 8;
     sourceSet(directory, null, null).files.any!(f => f.endsWith("nested/extra.d")).should == true;
 
     const oldMode = environment.get("SNAKEBITE_DUB_CACHE", "on");
     scope(exit) environment["SNAKEBITE_DUB_CACHE"] = oldMode;
     environment["SNAKEBITE_DUB_CACHE"] = "off";
-    load();
+    load;
     calls.should == 9;
     environment["SNAKEBITE_DUB_CACHE"] = "refresh";
-    load();
+    load;
     calls.should == 10;
     environment["SNAKEBITE_DUB_CACHE"] = "on";
-    load();
+    load;
     calls.should == 10;
     sandbox.writeFile("app/dub.settings.json", "{}\n");
-    load();
-    load();
+    load;
+    load;
     calls.should == 12;
+}
+
+@("cache.reusesLibraryDescriptions")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("library/dub.sdl", `name "cached-library"
+targetType "library"
+`);
+    sandbox.writeFile("library/source/library.d", "module library;\n");
+    const directory = sandbox.inSandboxPath("library");
+    size_t calls;
+    JSONValue describe() {
+        ++calls;
+        const output = execute([
+            "dub", "describe", "--compiler=" ~ defaultCompiler,
+        ], null, Config.none, size_t.max, directory);
+        output.status.should == 0;
+        return JSONValue(["value": parseJSON(output.output),
+            "arguments": JSONValue(["--build=debug"])]);
+    }
+    void load() { cachedDubDescription(directory, defaultCompiler, null, &describe); }
+
+    load;
+    load;
+
+    calls.should == 1;
+}
+
+@("cache.reusesDependencyDescriptions")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("dependency/dub.sdl", `name "cached-dependency"
+targetType "library"
+`);
+    sandbox.writeFile("dependency/source/dependency.d", "module dependency;\n");
+    sandbox.writeFile("app/dub.sdl", `name "cached-app-with-dependency"
+dependency "cached-dependency" path="../dependency"
+`);
+    sandbox.writeFile("app/source/app.d", "module app;\n");
+    const directory = sandbox.inSandboxPath("app");
+    size_t calls;
+    JSONValue describe() {
+        ++calls;
+        const output = execute([
+            "dub", "describe", "--compiler=" ~ defaultCompiler,
+        ], null, Config.none, size_t.max, directory);
+        output.status.should == 0;
+        return JSONValue(["value": parseJSON(output.output),
+            "arguments": JSONValue(["--build=debug"])]);
+    }
+    void load() { cachedDubDescription(directory, defaultCompiler, null, &describe); }
+
+    load;
+    load;
+
+    calls.should == 1;
 }
 
 @("cache.generationHooksAreNotSkipped")
