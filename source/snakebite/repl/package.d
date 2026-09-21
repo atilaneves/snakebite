@@ -127,7 +127,7 @@ public struct Repl {
 
         imported!"dmd.dmodule".Module module_;
         try
-            module_ = parseSnippet(fullSource);
+            module_ = parseSnippet(fullSource, _importPaths);
         catch (Exception exception) {
             _pendingInput = null;
             return SubmitResult(SubmitResult.Kind.error, exception.msg.withoutDuplicateLines);
@@ -182,7 +182,7 @@ public struct Repl {
 
         imported!"dmd.dmodule".Module module_;
         try
-            module_ = parseSnippet(fullSource);
+            module_ = parseSnippet(fullSource, _importPaths);
         catch (Exception exception) {
             _pendingInput = null;
             return SubmitResult(SubmitResult.Kind.error, exception.msg.withoutDuplicateLines);

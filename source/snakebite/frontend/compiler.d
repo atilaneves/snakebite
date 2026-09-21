@@ -62,8 +62,16 @@ public imported!"dmd.dmodule".Module[] parseRootModules(
     );
 }
 
-public imported!"dmd.dmodule".Module parseSnippet(in string source) {
-    return compiler.parseSnippet(source);
+// `rootImportPaths` is the REPL's own project import paths
+// (`snakebite.repl.Repl._importPaths`), the same paths
+// `Program.isRootOwned` treats a cell's own imports as root-owned under
+// (see `driveSharedSemantic`). A plain snippet (bin/ut, a REPL session
+// with no project) leaves it empty and behaves exactly as before.
+public imported!"dmd.dmodule".Module parseSnippet(
+    in string source,
+    in string[] rootImportPaths = null,
+) {
+    return compiler.parseSnippet(source, rootImportPaths);
 }
 
 // Parse several whole guest programs, driving the shared semantic phases
@@ -367,12 +375,15 @@ final class Compiler {
         return modules;
     }
 
-    imported!"dmd.dmodule".Module parseSnippet(in string source) {
+    imported!"dmd.dmodule".Module parseSnippet(
+        in string source,
+        in string[] rootImportPaths,
+    ) {
         mutex.lock;
         scope(exit) mutex.unlock;
         requireInitialized;
 
-        return parseSourceLocked(source);
+        return parseSourceLocked(source, rootImportPaths);
     }
 
     imported!"dmd.dmodule".Module[] parseSnippets(in string[] sources) {
@@ -383,15 +394,27 @@ final class Compiler {
         return parseSnippetsLocked(sources);
     }
 
-    private imported!"dmd.dmodule".Module parseSourceLocked(in string source) {
+    private imported!"dmd.dmodule".Module parseSourceLocked(
+        in string source,
+        in string[] rootImportPaths,
+    ) {
         import core.atomic: atomicFetchAdd;
         import dmd.errors: diagnostics;
         import dmd.frontend: dmdParseModule = parseModule;
         import dmd.globals: global;
         import std.conv: text;
 
-        if (auto cached = source in sourceCache)
-            return *cached;
+        // A cached module was gated for whichever `rootImportPaths` its own
+        // parse used; a REPL cell's `rootImportPaths` can differ across
+        // `Repl` sessions in the same process even when the cell's source
+        // text is byte-identical (e.g. two sessions' first cell), so a hit
+        // here would silently reuse the wrong session's gating. Only the
+        // plain-snippet callers (empty `rootImportPaths`) benefit from the
+        // cache; they are unaffected by this.
+        if (rootImportPaths.length == 0) {
+            if (auto cached = source in sourceCache)
+                return *cached;
+        }
 
         resetErrors;
 
@@ -416,20 +439,24 @@ final class Compiler {
         if (moduleResult.diagnostics.hasErrors)
             throw new Exception(diagnosticMessage);
 
-        fullSemantic(moduleResult.module_);
+        fullSemantic(moduleResult.module_, rootImportPaths);
         if (global.errors != 0)
             throw new Exception(diagnosticMessage);
 
         captured.replay;
 
-        sourceCache[source] = moduleResult.module_;
+        if (rootImportPaths.length == 0)
+            sourceCache[source] = moduleResult.module_;
 
         return moduleResult.module_;
     }
 
-    private void fullSemantic(imported!"dmd.dmodule".Module module_) {
+    private void fullSemantic(
+        imported!"dmd.dmodule".Module module_,
+        in string[] rootImportPaths = null,
+    ) {
         module_.importedFrom = module_;
-        driveSharedSemantic([module_]);
+        driveSharedSemantic([module_], rootImportPaths);
     }
 
     // Parse each of `sources` not already in `sourceCache` as its own module,
@@ -573,23 +600,173 @@ final class Compiler {
 // phase order is defined once. Leaves `global.errors` for the caller to
 // check: what counts as fatal differs (root-set parsing reports locations,
 // snippet parsing does not).
-private void driveSharedSemantic(imported!"dmd.dmodule".Module[] modules) {
+//
+// `modules` is the root set for whichever call site is driving semantic
+// (the whole file-backed root set, one REPL snippet, or one batch of
+// snippets), so it is also exactly the "root-owned" set for both the
+// `D_InlineAsm_X86_64` version gate and the inline assembler check (issue
+// #415): every path that loads guest code (`loadProject`, the snippet/REPL
+// path, `bin/ut`) converges here, so this is the one place to gate a
+// root-owned `version (D_InlineAsm_X86_64)` and to fail a root-owned `asm`
+// block for all of them. The gate runs first, before any semantic phase
+// can resolve a `VersionCondition` (docs/adr/0012); the `asm` check only
+// runs when semantic itself is otherwise clean, since a module with
+// unrelated errors may have an incomplete AST that is not safe to walk,
+// and its own errors are reported first regardless.
+//
+// `rootImportPaths` covers the one path where `modules` alone is not the
+// whole root-owned set: a REPL cell's own `Program` (`snakebite.repl`)
+// also root-owns a project module the cell only reaches through `import`,
+// resolved under one of these paths. `discoverRootOwnedImports` finds and
+// gates those before `importAll` below can resolve their own version
+// conditions, and folds them into `rootModules` so every phase, and the
+// `asm` scan, sees them too. Empty for every other caller, which behaves
+// exactly as before.
+private void driveSharedSemantic(
+    imported!"dmd.dmodule".Module[] modules,
+    in string[] rootImportPaths = null,
+) {
     import dmd.dsymbolsem:
         dsymbolSemantic,
         importAll,
         runDeferredSemantic,
         runDeferredSemantic2,
         runDeferredSemantic3;
+    import dmd.globals: global;
     import dmd.semantic2: semantic2;
     import dmd.semantic3: semantic3;
+    import snakebite.frontend.inlineasm:
+        disableInlineAsmVersion,
+        inlineAsmDiagnostics;
+    import std.array: join;
 
-    foreach (m; modules) m.importAll(null);
-    foreach (m; modules) m.dsymbolSemantic(null);
+    foreach (m; modules) disableInlineAsmVersion(m);
+
+    auto rootModules = modules;
+    if (rootImportPaths.length)
+        rootModules ~= discoverRootOwnedImports(modules, rootImportPaths);
+
+    foreach (m; rootModules) m.importAll(null);
+    foreach (m; rootModules) m.dsymbolSemantic(null);
     runDeferredSemantic;
-    foreach (m; modules) m.semantic2(null);
+    foreach (m; rootModules) m.semantic2(null);
     runDeferredSemantic2;
-    foreach (m; modules) m.semantic3(null);
+    foreach (m; rootModules) m.semantic3(null);
     runDeferredSemantic3;
+
+    if (global.errors == 0) {
+        const asmDiagnostics = inlineAsmDiagnostics(rootModules);
+        if (asmDiagnostics.length)
+            throw new Exception(asmDiagnostics.join("\n"));
+    }
+}
+
+// A project module reached only through `import`, not one of `modules`
+// itself, is still root-owned when it resolves under one of
+// `rootImportPaths` - `snakebite.repl.Program.isRootOwned` (via
+// `interpretedModules`) treats it the same way. dmd only discovers and
+// parses such a module lazily, inside `importAll`, and a module-scope
+// `version (...)` block resolves in that very call
+// (`AttribDeclaration.importAll` -> `include`), before any explicit
+// `dsymbolSemantic` runs - too late for `disableInlineAsmVersion` to
+// reach it there. Parse (not semantic) the transitive closure of
+// `modules`' own top-level imports that resolve to a file under
+// `rootImportPaths` first, the same way `parseRootModulesLocked` parses a
+// dub project's own files (`dmd.frontend.parseModule`, deduplicated
+// against `Module.amodules` the same way, so a later `import` resolves to
+// this same, already-parsed module instead of a fresh, ungated one),
+// gating each one immediately.
+// Known gap, the same shape as the string-mixin gap in docs/adr/0012: an
+// import nested inside a `version`/`static if`/`mixin` at module scope is
+// not discovered here, only a plain module-scope `import` declaration;
+// neither is one resolved through a package's `package.d`.
+private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
+    imported!"dmd.dmodule".Module[] modules,
+    in string[] rootImportPaths,
+) {
+    import dmd.dmodule: Module;
+    import dmd.frontend: dmdParseModule = parseModule;
+    import snakebite.frontend.inlineasm: disableInlineAsmVersion;
+    import std.algorithm.iteration: map;
+    import std.array: array;
+    import std.file: exists, readText;
+    import std.path: absolutePath, buildNormalizedPath, buildPath;
+    import std.string: fromStringz;
+
+    bool[Module] known;
+    foreach (m; modules)
+        known[m] = true;
+
+    Module[] discovered;
+
+    void walk(Module module_) {
+        if (module_.members is null)
+            return;
+
+        foreach (member; *module_.members) {
+            auto import_ = member.isImport();
+            if (import_ is null || import_.id is null)
+                continue;
+
+            const segments = import_.packages
+                .map!(id => id.toString.fromStringz.idup)
+                .array
+                ~ import_.id.toString.fromStringz.idup;
+            const relativePath = buildPath(segments) ~ ".d";
+
+            string matchedPath;
+            foreach (rootPath; rootImportPaths) {
+                const candidate =
+                    buildPath(rootPath, relativePath).absolutePath.buildNormalizedPath;
+                if (candidate.exists) {
+                    matchedPath = candidate;
+                    break;
+                }
+            }
+            if (matchedPath is null)
+                continue;
+
+            auto loaded = alreadyParsedModule(matchedPath);
+            if (loaded is null) {
+                auto result = dmdParseModule(matchedPath, matchedPath.readText);
+                if (result.diagnostics.hasErrors)
+                    continue; // the real `importAll` below reports this properly
+                loaded = result.module_;
+            }
+
+            if (loaded in known)
+                continue;
+            known[loaded] = true;
+
+            disableInlineAsmVersion(loaded);
+            discovered ~= loaded;
+            walk(loaded);
+        }
+    }
+
+    foreach (m; modules)
+        walk(m);
+
+    return discovered;
+}
+
+// Whether `wantedPath` (already an absolute, normalised path) was parsed
+// earlier in this process, the same check `Compiler.parsedModuleForFile`
+// makes before re-registering a dub project's own file.
+private imported!"dmd.dmodule".Module alreadyParsedModule(
+    in string wantedPath,
+) {
+    import dmd.dmodule: Module;
+    import std.path: absolutePath, buildNormalizedPath;
+
+    foreach (module_; Module.amodules) {
+        const candidatePath =
+            sourceFileName(module_).absolutePath.buildNormalizedPath;
+        if (candidatePath == wantedPath)
+            return module_;
+    }
+
+    return null;
 }
 
 private struct SavedFrontendFlags {
