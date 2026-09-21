@@ -121,7 +121,7 @@ public DependencyImage prepareImage(
         // -allinst also analyzes unused template members, which can fail
         // under the project's compiler options. Emit referenced bodies instead.
         const compileFlags = ["-c", "-relocation-model=pic", "-O",
-            "--linkonce-templates"];
+            "-linkonce-templates"];
         const linkFlags = ["-shared", "-link-defaultlib-shared",
             "-L--no-undefined"];
     } else {
