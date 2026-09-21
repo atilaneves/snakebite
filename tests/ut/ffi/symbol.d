@@ -21,6 +21,8 @@ import std.file: dirEntries, SpanMode;
 import std.array: array;
 import std.process: execute;
 import std.file: exists, readText, remove, setAttributes, setTimes;
+import std.path: baseName;
+import std.algorithm.iteration: filter;
 import std.conv: octal;
 import std.path: buildPath;
 
@@ -774,10 +776,27 @@ static foreach (backend; Matrix!()) {
             changed.program.dependencyImage.resolve("image_unused_answer");
         changedAnswer.should.not == null;
         changedAnswer().should == 179;
-        archive.remove;
+        // The image links dub's per-compiler build artifact, not the copy
+        // dub leaves in the package directory: a build by another compiler
+        // replaces that copy, and the guest's own compiled output must not
+        // change because of it.
+        const linked = changed.sources.linkerFiles
+            .filter!(file => file.baseName == archive.baseName).array;
+        linked.length.should == 1;
+        linked[0].should.not == archive;
+        sandbox.writeFile("leaf archives/libimage-leaf.a", "not an archive");
+        auto foreign = prepareProject(directory).project;
+        foreign.program.dependencyImage.path.should == changedPath;
+        // A missing artifact is compiled again. The image is keyed on the
+        // archive's bytes, which a fresh archive need not repeat, so what
+        // must hold is that the image still serves the leaf's symbols.
+        linked[0].remove;
         auto rebuilt = prepareProject(directory).project;
-        archive.exists.should == true;
-        rebuilt.program.dependencyImage.path.should == changedPath;
+        linked[0].exists.should == true;
+        const rebuiltAnswer = cast(Answer)
+            rebuilt.program.dependencyImage.resolve("image_unused_answer");
+        rebuiltAnswer.should.not == null;
+        rebuiltAnswer().should == 179;
     }
 }
 

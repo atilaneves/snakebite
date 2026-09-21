@@ -160,7 +160,7 @@ private SourceSet dubSourceSet(
     import std.array: array;
     import std.conv: text;
     import std.json: JSONType, JSONValue;
-    import std.path: buildPath;
+    import std.path: buildNormalizedPath, buildPath;
 
     JSONValue settings;
     foreach (target; description.value["targets"].array)
@@ -203,8 +203,15 @@ private SourceSet dubSourceSet(
     import std.algorithm: endsWith;
     const isLinkerFile = (string path) => path.endsWith(".a", ".o", ".so");
     const files = values("sourceFiles").filter!(path => !isLinkerFile(path)).array;
-    const linkerFiles = values("linkerFiles")
-        ~ values("sourceFiles").filter!(isLinkerFile).array;
+    // dub names each dependency by the copy it leaves in the package's
+    // target path, and whichever compiler built that package last owns the
+    // copy (issue #401). The artifact in dub's build cache is keyed by
+    // compiler and build settings, so that is what the image links.
+    const artifacts = cacheArtifacts(description.value);
+    const linkerFiles = (values("linkerFiles")
+        ~ values("sourceFiles").filter!(isLinkerFile).array)
+        .map!(file => artifacts.get(file.buildNormalizedPath, file))
+        .array;
     const dflags = values("dflags");
     const debugVersions = values("debugVersions");
     const options = values("options");
@@ -238,6 +245,26 @@ private SourceSet dubSourceSet(
         linkerFiles.dup,
         description,
     );
+}
+
+
+// Each target's build-cache artifact, keyed by the path of the copy dub
+// makes of it in the package's target path.
+private string[string] cacheArtifacts(in imported!"std.json".JSONValue description) {
+    import std.path: baseName, buildNormalizedPath;
+
+    string[string] packagePaths;
+    foreach (package_; description["packages"].array)
+        packagePaths[package_["name"].str] = package_["path"].str;
+    string[string] artifacts;
+    foreach (target; description["targets"].array) {
+        const artifact = target["cacheArtifactPath"].str;
+        const copy = buildNormalizedPath(
+            packagePaths[target["rootPackage"].str],
+            target["buildSettings"]["targetPath"].str, artifact.baseName);
+        artifacts[copy] = artifact;
+    }
+    return artifacts;
 }
 
 
