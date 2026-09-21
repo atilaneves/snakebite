@@ -37,6 +37,158 @@ static foreach (backend; Matrix!(
             }
         });
     }
+
+    // A destructor runs from GC finalization, where the GC must not
+    // allocate. Its first call to another function therefore has to reach
+    // code that was already prepared before the finalizer started.
+    @("firstDestructorHelperCallFromGc." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: GC;
+            class Resource {
+                int* count;
+                this(int* count) { this.count = count; }
+                void increment() { ++*count; }
+                ~this() { increment(); }
+            }
+            void main() {
+                int count;
+                auto resource = new Resource(&count);
+                const address = cast(const void*) typeid(Resource).destructor;
+                GC.runFinalizers(address[0 .. 1]);
+                assert(count == 1);
+            }
+        });
+    }
+}
+
+
+// Compiled D compiles a callee that it never runs. A branch that does not
+// execute must not reject the program, even when a destructor reaches it
+// through another function and the branch calls a body that a backend
+// cannot execute (inline assembly).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot convert a class reference to void** in `destroy`"),
+)) {
+    @("destructorUnexecutedBranchWithAssembly." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void assemblyBody() {
+                asm { nop; }
+            }
+
+            void helper(bool execute) {
+                if (execute)
+                    assemblyBody();
+            }
+
+            class Resource {
+                int* count;
+                this(int* count) { this.count = count; }
+                ~this() {
+                    helper(false);
+                    ++*count;
+                }
+            }
+
+            void main() {
+                int count;
+                auto resource = new Resource(&count);
+                destroy(resource);
+                assert(count == 1);
+            }
+        });
+    }
+}
+
+
+// Compiled D compiles a call that it never makes, so a branch that does
+// not execute must not reject the program because of the callee's
+// signature either. The extern(C) function returns an aggregate that holds
+// a `real`, which the native call barrier cannot classify. A destructor
+// reaches the function that calls it through another function, behind a
+// branch that does not execute.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot convert a class reference to void** in `destroy`"),
+)) {
+    @("destructorUnexecutedBranchWithUnclassifiableNativeCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide {
+                real value;
+            }
+
+            pragma(mangle, "labs")
+            extern(C) Wide labs(long);
+
+            void nativeBody() {
+                labs(-1);
+            }
+
+            void helper(bool execute) {
+                if (execute)
+                    nativeBody();
+            }
+
+            class Resource {
+                int* count;
+                this(int* count) { this.count = count; }
+                ~this() {
+                    helper(false);
+                    ++*count;
+                }
+            }
+
+            void main() {
+                int count;
+                auto resource = new Resource(&count);
+                destroy(resource);
+                assert(count == 1);
+            }
+        });
+    }
+}
+
+
+// The same shape, but the branch executes. Compiled D would run the
+// assembly. Bytecode cannot execute it, so a call that does execute a
+// rejected callee must fail there, and must not run an empty body left
+// over from an earlier attempt to compile it.
+@("destructorExecutedBranchWithAssemblyIsRejected.Bytecode")
+@Tags(Bytecode.stringof)
+unittest {
+    1.shouldBeStatusOf!(Bytecode, q{
+        void assemblyBody() {
+            asm { nop; }
+        }
+
+        void helper(bool execute) {
+            if (execute)
+                assemblyBody();
+        }
+
+        class Resource {
+            int* count;
+            this(int* count) { this.count = count; }
+            ~this() {
+                helper(true);
+                ++*count;
+            }
+        }
+
+        void main() {
+            int count;
+            auto resource = new Resource(&count);
+            destroy(resource);
+            assert(count == 1);
+        }
+    });
 }
 
 

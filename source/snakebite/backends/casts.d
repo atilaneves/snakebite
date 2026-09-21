@@ -64,7 +64,7 @@ public CastPlan classify(
     imported!"dmd.mtype".Type sourceType, imported!"dmd.mtype".Type destType,
 ) {
     import dmd.astenums:
-        Tbool, Taarray, Tclass, Tdelegate, Tnull, Tpointer, Tsarray;
+        Tbool, Taarray, Tclass, Tdelegate, Tnull, Tpointer, Tsarray, Tvector;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: mutableOf, nextOf;
     import snakebite.nativelayout: isIntegralSize;
@@ -84,6 +84,12 @@ public CastPlan classify(
     }
 
     if (sourceType.ty == Taarray && destType.ty == Taarray)
+        return CastPlan(CastPlan.Kind.copy, sourceFacts, destFacts);
+
+    // Equal-width vector casts reinterpret the lane bits, including void
+    // vectors used by DMD's SIMD intrinsic declarations.
+    if (sourceType.ty == Tvector && destType.ty == Tvector
+            && sourceFacts.size == destFacts.size)
         return CastPlan(CastPlan.Kind.copy, sourceFacts, destFacts);
 
     // DMD has checked the conversion. Function attributes do not change

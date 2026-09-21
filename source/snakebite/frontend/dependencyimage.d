@@ -91,6 +91,8 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
             return "";
         import std.algorithm: sort;
         import std.array: array;
+        import dmd.mangle: mangleExact;
+        import snakebite.dependencyimage: DependencyImage;
         // A dependency template can import a root module internally, even
         // when its template arguments contain no root-owned declarations.
         // Propagate through cycles before deciding which bodies can be linked.
@@ -112,6 +114,8 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
         string result = "module snakebite_dependency_image;\n";
         foreach (name; _imports.keys.sort)
             result ~= "import " ~ name ~ ";\n";
+        string registry = "export extern(C) void* "
+            ~ DependencyImage.registrySymbol ~ "(const(char)[] name) {\n";
         foreach (i, key; _references.keys.sort.array) {
             auto reference = _references[key]; // Function identities are mutable AST nodes.
             import std.algorithm: canFind;
@@ -123,16 +127,105 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
             result ~= text("static if (__traits(compiles, { auto pointer = mixin(q{&", key, "}); })) {\n",
                 "    export __gshared auto retained", i, " = mixin(q{&", key, "});\n",
                 "} else {\n");
+            registry ~= text("    static if (__traits(compiles, { auto pointer = mixin(q{&", key,
+                "}); })) { static if (!is(typeof(mixin(q{&", key,
+                "})) == delegate)) {\n");
+            // An eponymous template's .mangleof can name its template
+            // instance rather than the function returned by its address.
+            foreach (function_; reference.functions)
+                registry ~= text("if (name == q{",
+                    mangleExact(function_).fromStringz,
+                    "}) return cast(void*) mixin(q{&", key, "});\n");
+            registry ~= "}\n} else {\n";
             foreach (j, function_; reference.functions) {
+                registry ~= overloadRegistry(function_, key);
                 const anchor = overloadAnchor(function_, key, text("retained", i, "_", j));
                 if (!anchor.length)
                     continue;
                 result ~= text("static if (__traits(compiles, { mixin(q{", anchor,
                     "}); })) mixin(q{export ", anchor, "});\n");
             }
+            registry ~= "}\n";
             result ~= "}\n";
         }
+        registry ~= "    return null;\n}\n";
+        result ~= registry;
         return result;
+    }
+
+    private extern(D) string overloadRegistry(
+        FuncDeclaration function_, in string key,
+    ) {
+        import dmd.mangle: mangleExact;
+        import dmd.typesem: pointerTo;
+
+        if (function_.type.isTypeFunction is null)
+            return "";
+        auto pointerType = function_.type.pointerTo; // DMD caches mutable type nodes.
+        const pointer = text(sourceSpelling(pointerType.toChars.fromStringz),
+            " pointer = &", key, ";");
+        const mangled = mangleExact(function_).fromStringz;
+        const result = text("{\nstatic if (__traits(compiles, { mixin(q{", pointer,
+            "}); })) {\nmixin(q{", pointer, "});\n",
+            "if (name == q{", mangled,
+            "}) return cast(void*) pointer;\n} else {\n");
+        const selected = selectedOverload(
+            function_, key, sourceSpelling(pointerType.toChars.fromStringz), mangled,
+        );
+        return result ~ selected ~ "}\n}\n";
+    }
+
+    // Empty when the function does not come from a module-scope template
+    // whose overload can be selected by ordinal.
+    private extern(D) string selectedOverload(
+        FuncDeclaration function_, in string key, in const(char)[] pointerSpelling, in const(char)[] mangled,
+    ) {
+        import dmd.dsymbol: Dsymbol;
+        import dmd.funcsem: overloadApply;
+        import std.algorithm: startsWith;
+
+        auto instance = function_.parent.isTemplateInstance; // AST queries require mutable nodes.
+        auto declaration = instance.tempdecl; // AST queries require mutable nodes.
+        if (declaration.parent.isModule is null)
+            return "";
+        const moduleName = declaration.getModule.toPrettyChars.fromStringz;
+        const identifier = declaration.ident.toChars.fromStringz;
+        const prefix = text(moduleName, ".", identifier);
+        if (!key.startsWith(prefix ~ "!("))
+            return "";
+        auto head = declaration.getModule.symtab.lookup(declaration.ident); // Overload traversal requires mutable nodes.
+        if (head is null)
+            return "";
+        if (auto template_ = head.isTemplateDeclaration) {
+            if (template_.funcroot !is null)
+                head = template_.funcroot;
+        }
+        size_t ordinal;
+        bool found;
+        overloadApply(head, (Dsymbol symbol) {
+            if (symbol is declaration) {
+                found = true;
+                return 1;
+            }
+            if (symbol.isFuncDeclaration !is null || symbol.isTemplateDeclaration !is null)
+                ++ordinal;
+            return 0;
+        });
+        if (!found)
+            return "";
+        const candidate = "overload" ~ key[prefix.length .. $];
+        // Selecting the template declaration first avoids ambiguous source
+        // expressions. Distinct declarations can also share a mangled name,
+        // so use the same traversal order as __traits(getOverloads).
+        const selection = text("alias overload = __traits(getOverloads, ",
+            moduleName, ", \"", identifier, "\", true)[", ordinal, "];\n");
+        const selectedPointer = text("mixin(q{", pointerSpelling,
+            " pointer = &", candidate, ";});\n");
+        return text("static if (__traits(compiles, { ", selection,
+            selectedPointer, "})) {\n", selection, selectedPointer,
+            "if (name == q{", mangled,
+            "}) return cast(void*) pointer;\n",
+            "}\n");
     }
 
     private extern(D) string overloadAnchor(

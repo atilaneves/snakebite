@@ -36,10 +36,12 @@ private imported!"snakebite.nativelayout".TypeFacts pointerFactsOf() {
 }
 
 public final class Bytecode: imported!"snakebite.backends.backend".Backend {
+    import core.time: Duration;
+    import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
     import dmd.root.string: toDString;
-    import snakebite.backends.backend: Program;
+    import snakebite.backends.backend: CompilationStatistics, Program;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.classinfo;
     import snakebite.backends.bytecode.vm: Function, Vm;
@@ -67,6 +69,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // once and never relocates, unlike an associative array's own
     // storage, which can rehash as more entries go in.
     private Function*[FuncDeclaration] _compiled;
+    private const(Function)*[] _callbackRoots;
+    private bool _preparingCallbacks;
     // The prepared FFI plan for druntime's own allocator, built once and
     // reused by every `new T[](n)`/array literal any function compiles -
     // the same `rawPlanOf` a bounds hook already goes through, so this
@@ -81,7 +85,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
     private size_t _compilationDepth;
     private size_t _cacheMisses;
-    private imported!"core.time".Duration _compilationTime;
+    private Duration _compilationTime;
     // The frame layout of every guest function reached through
     // `runHostToGuest`, built once per declaration and shared by the
     // program runner's top-level call and a callback's re-entry.
@@ -115,9 +119,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _plans.resolve(nativeSymbolName(symbol));
     }
 
-    public override imported!"snakebite.backends.backend".CompilationStatistics
-        compilationStatistics() const {
-        return imported!"snakebite.backends.backend".CompilationStatistics(
+    public override CompilationStatistics compilationStatistics() const {
+        return CompilationStatistics(
             true,
             _cacheMisses,
             _compilationTime,
@@ -316,7 +319,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // only how a vtable slot gets its callable value is this backend's
     // own.
     package TypeInfo_Class classRuntimeInfo(
-        imported!"dmd.dclass".ClassDeclaration declaration,
+        ClassDeclaration declaration,
     ) {
         import snakebite.backends.classinfo:
             classRuntimeInfo_ = classRuntimeInfo, Hooks;
@@ -357,17 +360,74 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 hasNativeSymbol(method))) {
             word = compileFunction(method);
             registerGuestWord(method, cast(const(Function)*) word);
+            _callbackRoots ~= cast(const(Function)*) word;
+            if (_compilationDepth == 0)
+                prepareCallbackBodies;
         }
         return _plans.callableAddress(word, method, adjustment);
     }
 
+    // A callback can first execute during GC finalization. Compile every
+    // guest function reachable from it before exposing it to host
+    // execution, while allocation is allowed. Wait for recursive
+    // placeholders to have complete bodies. A callee whose body this
+    // compiler rejects stays deferred: compiled D compiles a callee it
+    // never runs, so only a call that executes may fail on it.
+    private void prepareCallbackBodies() {
+        import snakebite.backends.bytecode.vm: CallSite;
+
+        if (_preparingCallbacks || !_callbackRoots.length)
+            return;
+        _preparingCallbacks = true;
+        scope(exit) _preparingCallbacks = false;
+        bool[const(Function)*] visited;
+        void prepare(const(Function)* function_) {
+            if (function_ in visited)
+                return;
+            visited[function_] = true;
+            foreach (ref site; function_.callSites) {
+                // Temporary-cleanup entries also occupy this table, but
+                // have neither a callee nor a compilation callback.
+                if (site.kind != CallSite.Kind.guest
+                        || (site.callee is null && site.prepareGuest is null))
+                    continue;
+                if (site.callee !is null) {
+                    prepare(site.callee);
+                    continue;
+                }
+                // Preparing is speculative: the site may never execute. A
+                // rejected callee leaves no compiled form behind, so the
+                // site rejects it again if it does execute. The compiler
+                // rejects with a `SnakebiteException`, but a native call
+                // it plans for a callee that the call barrier cannot pass
+                // fails with a plain `Exception`. Both are rejections; only
+                // an `Error` is a fault, and that ends the process. Nothing
+                // that reaches here therefore drops the roots queued
+                // behind this one.
+                const(Function)* prepared;
+                try
+                    prepared = site.prepareGuest();
+                catch (Exception) {
+                    continue;
+                }
+                prepare(prepared);
+            }
+        }
+        while (_callbackRoots.length) {
+            const roots = _callbackRoots;
+            _callbackRoots = null;
+            foreach (root; roots)
+                prepare(root);
+        }
+    }
+
     private void fillFieldInits(
-        imported!"dmd.dclass".ClassDeclaration declaration, ubyte* base,
+        ClassDeclaration declaration, ubyte* base,
     ) {
         _nativeData.fillFields(declaration, base);
     }
-    // `function_`'s compiled form, compiling it - and, transitively,
-    // whatever it calls - on first use. Reused on every later call to the
+    // `function_`'s compiled form, compiling its body on first use.
+    // Reused on every later call to the
     // same function, the way compiled code only ever compiles a function
     // once. Returns a stable pointer (see `_compiled`) so a call site
     // reached while this very function is still being compiled can point
@@ -438,11 +498,16 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         // compile that reached here.
         auto placeholder = new Function;
         _compiled[function_] = placeholder;
+        // A rejected body must not stay cached as an empty function that a
+        // later call would run.
+        scope(failure) _compiled.remove(function_);
         registerGuestWord(function_, placeholder);
 
         scope compiler = new FunctionCompiler(
             this, function_, layout, returnFacts, isVoidReturn, isRefReturn);
         *placeholder = compiler.build(body_);
+        if (outermost)
+            prepareCallbackBodies;
 
         return placeholder;
     }
@@ -458,13 +523,14 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 // ever handed back through `FrameLayout` itself.
 extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.ffi.call: CallAdapter;
+    import dmd.arraytypes: Expressions;
     import dmd.declaration: VarDeclaration;
     import dmd.identifier: Identifier;
     import dmd.init: ExpInitializer;
     import dmd.location: Loc;
     import dmd.expression;
     import dmd.func: FuncDeclaration;
-    import dmd.mtype: Type;
+    import dmd.mtype: Type, TypeFunction;
     import dmd.statement:
         BreakStatement, CaseStatement, CompoundStatement, ContinueStatement,
         DefaultStatement, DoStatement, ExpStatement, ForStatement,
@@ -514,6 +580,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, delegateTargetOf, functionNeedsClosure,
         outerFunctionOf;
+    import snakebite.backends.aggregateinit: InitStep;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
     import snakebite.exception: SnakebiteException;
@@ -547,7 +614,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private struct Temporary {
         size_t base;
         size_t site;
-        imported!"dmd.expression".Expression destructor;
+        Expression destructor;
     }
     private Temporary[] _temporaries;
     private size_t[] _lifetimeMarkers;
@@ -2139,7 +2206,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // declaration of its own to render).
     private void compileVariableInitializer(
         VarDeclaration variable,
-        imported!"dmd.location".Loc loc,
+        Loc loc,
         in string operation,
     ) {
         auto expInitializer = variable._init.isExpInitializer;
@@ -3555,12 +3622,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // here: leaving `vthis` at its `.init` zero instead reads back a null
     // context the first time a method on that instance uses it.
     private void applyStep(
-        imported!"snakebite.backends.aggregateinit".InitStep step,
-        imported!"dmd.location".Loc loc,
+        InitStep step,
+        Loc loc,
         in size_t base,
     ) {
-        import snakebite.backends.aggregateinit: InitStep;
-
         final switch (step.kind) with (InitStep.Kind) {
         case vthis:
             if (step.parentFunction is null)
@@ -4030,7 +4095,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // constructor and a bare `new Reader` (no arguments at all) get
         // a real context rather than `.init`'s zero.
         import snakebite.backends.aggregateinit:
-            AggregateInitPlan, InitStep, planPositionalFields;
+            AggregateInitPlan, planPositionalFields;
 
         auto plan = structType is null
             ? AggregateInitPlan.init
@@ -5446,8 +5511,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // whichever branch below actually needs it.
     private void compileResolvedCall(
         FuncDeclaration callee,
-        imported!"dmd.arraytypes".Expressions* arguments,
-        imported!"dmd.location".Loc loc,
+        Expressions* arguments,
+        Loc loc,
         string exprText,
         bool hasThis,
         size_t delegate() thisOffsetOf,
@@ -5470,8 +5535,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private void compileResolvedCallBody(
         FuncDeclaration callee,
-        imported!"dmd.arraytypes".Expressions* arguments,
-        imported!"dmd.location".Loc loc,
+        Expressions* arguments,
+        Loc loc,
         string exprText,
         bool hasThis,
         size_t receiverOffset,
@@ -5483,9 +5548,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto type = typeFunctionOf(callee);
 
+        const hasNativeSymbol = _bytecode.hasNativeSymbol(callee);
         const guest = _bytecode._callSelection.usesGuestBody(
             callee, &_bytecode.isGuestFunction,
-            _bytecode.hasNativeSymbol(callee),
+            hasNativeSymbol,
         );
         if (!guest) {
             Arg[] initialArgs;
@@ -5494,10 +5560,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             compileNativeCall(
                 callee, type, arguments, loc, exprText, initialArgs,
-                destOffset);
+                destOffset, hasNativeSymbol);
             return;
         }
-        auto calleeFunction = _bytecode.compileFunction(callee);
         auto calleeLayout = FrameLayout.of(callee);
         auto calleeType = typeFunctionOf(callee);
 
@@ -5543,11 +5608,44 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, loc, exprText);
 
         const siteIndex = _callSites.length;
+        // The delegate outlives this compiler, so it captures the backend
+        // and not `this`.
+        auto bytecode = _bytecode;
         _callSites ~= CallSite.guest(
-            calleeFunction, args,
+            deferred(() => bytecode.compileFunction(callee)), args,
             returnShape.returnFacts.size,
         );
         emit(&opCall, destOffset, siteIndex, 0);
+    }
+
+    // Runs `compute` at most once, on the first call of the returned
+    // delegate, under the compiler lock: the site that holds it can execute
+    // on any thread's VM, and the lock keeps two threads from both
+    // preparing the same callee. Later calls read the cached result
+    // without the lock. The state lives in a heap struct, not in captured
+    // locals, so that `compute` is seen to escape and its closure is not
+    // placed on the caller's stack.
+    private static T delegate() deferred(T)(T delegate() compute)
+    if (is(T: const(void)*)) {
+        return &(new Deferred!T(compute)).get;
+    }
+
+    private static struct Deferred(T) {
+        private T delegate() _compute;
+        private T _cached;
+
+        private T get() {
+            import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+            import snakebite.frontend.compiler: withCompilerLock;
+
+            if (auto found = atomicLoad!(MemoryOrder.acq)(_cached))
+                return found;
+            withCompilerLock({
+                if (atomicLoad!(MemoryOrder.acq)(_cached) is null)
+                    atomicStore!(MemoryOrder.rel)(_cached, _compute());
+            });
+            return atomicLoad!(MemoryOrder.acq)(_cached);
+        }
     }
 
     private Arg[] compileGuestArguments(
@@ -5579,12 +5677,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // the callee takes.
     private void compileNativeCall(
         FuncDeclaration callee,
-        imported!"dmd.mtype".TypeFunction type,
-        imported!"dmd.arraytypes".Expressions* arguments,
-        imported!"dmd.location".Loc loc,
+        TypeFunction type,
+        Expressions* arguments,
+        Loc loc,
         string exprText,
         Arg[] initialArgs,
         in size_t destOffset,
+        in bool hasNativeSymbol,
     ) {
         import snakebite.backends.calls: arityMismatches;
         import snakebite.ffi.call: CallAdapter;
@@ -5597,15 +5696,31 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, loc, exprText);
 
         auto preparation = CallAdapter.Arguments.of(type, arguments);
-        const plan = preparation.prepare(_bytecode._plans, callee);
         Arg[] args = initialArgs;
         preparation.each((value) {
             args ~= compileBarrierArgument(value);
         });
-        _callSites ~= CallSite.native(
-            cast(const(void)*) plan, args,
-            returnShape.returnFacts.size,
-        );
+        // An unused branch can refer to a compiler intrinsic with no host
+        // symbol. Resolve it only if execution reaches the call. Known native
+        // targets stay prepared for callbacks that first run during GC. A
+        // target with no symbol has no plan to prepare early: the lookup
+        // misses again, so the call fails whenever it executes.
+        const returnWidth = returnShape.returnFacts.size;
+        if (hasNativeSymbol) {
+            const plan = preparation.prepare(_bytecode._plans, callee);
+            _callSites ~= CallSite.native(
+                cast(const(void)*) plan, args, returnWidth,
+            );
+        } else {
+            // The delegate outlives this compiler, so it captures the
+            // backend and not `this`; `PlanCache` is a struct.
+            auto bytecode = _bytecode;
+            _callSites ~= CallSite.native(
+                deferred(() => cast(const(void)*)
+                    preparation.prepare(bytecode._plans, callee)),
+                args, returnWidth,
+            );
+        }
         emit(&opCall,
             nativeResultPlace(destOffset, returnShape.isVoid,
                 returnShape.returnFacts),
@@ -5625,7 +5740,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private Arg[] compileVariadicArguments(
-        imported!"dmd.arraytypes".Expressions* arguments,
+        Expressions* arguments,
         in FrameLayout layout,
     ) {
         import snakebite.backends.variadic: VariadicLayout;
@@ -5693,7 +5808,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `hasContext` doc).
     private void compileIndirectCall(CallExp expression, in size_t destOffset) {
         import dmd.astenums: STC, Tdelegate;
-        import dmd.mtype: TypeFunction;
         import snakebite.backends.calls: arityMismatches;
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize;
@@ -5801,7 +5915,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         string hookName,
         scope const(Register)[] parameterRegisters,
         Arg[] extraArgs,
-        in imported!"dmd.location".Loc loc,
+        in Loc loc,
     ) {
         auto plan = _bytecode._plans.rawPlanOf(hookName, parameterRegisters);
         if (plan is null)
