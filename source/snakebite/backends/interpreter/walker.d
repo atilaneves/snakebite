@@ -2935,23 +2935,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             expression, target);
     }
 
-    // The target is looked up once, not once to read and again to write:
-    // D evaluates the left side of a compound assignment a single time. The
-    // right side runs before the target is read, since evaluating it can
-    // change what the target holds.
+    // The target is looked up once, not once to read and again to write. DMD
+    // reads a promoted floating target before its right side; same-width and
+    // integral assignments keep the ordinary right-side-first order.
     //
     // `extern(D)`: a string template parameter has no C++ mangling.
     private extern(D) void storeAssignExp(string op)(
         BinAssignExp expression, void* resolvedTarget = null,
     ) {
+        import snakebite.frontend.storage: compoundTarget;
         import snakebite.nativevalue: loadFloating, storeFloating;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
         import std.conv: text;
 
-        // D evaluates the target once, then the right side, then reads the
-        // target. A floating RHS can change the target before that read.
-        auto promotion = expression.e1.isCastExp;
-        auto target_ = promotion is null ? expression.e1 : promotion.e1;
+        auto target_ = compoundTarget(expression);
         const operationType = expression.e1.type.toBasetype;
         static if (op == "+" || op == "-" || op == "*" || op == "/"
                 || op == "%")
@@ -2960,7 +2957,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             auto target = resolvedTarget;
             if (target is null)
                 try {
-                    target = addressOf(expression.e1);
+                    target = addressOf(target_);
                 } catch (SnakebiteException) {
                     throw new SnakebiteException(
                         text("interpreter cannot assign to `",
@@ -2970,8 +2967,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 }
 
             const targetFacts = factsOf(target_.type);
+            const operationFacts = factsOf(expression.e1.type);
+            const mixedPromotion = targetFacts.size != operationFacts.size;
+            real current;
+            if (mixedPromotion)
+                current = loadFloating(target, targetFacts.size);
             const step = asFloating(expression.e2);
-            const current = loadFloating(target, targetFacts.size);
+            if (!mixedPromotion)
+                current = loadFloating(target, targetFacts.size);
             real result;
             if (operationType.ty == Tfloat32)
                 result = cast(real) mixin(

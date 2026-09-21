@@ -7,7 +7,22 @@ import dmd.expression:
     AssignExp, BinAssignExp, CatAssignExp, Expression, IndexExp, MemorySet,
     SymOffExp;
 import dmd.astenums: Tarray, Tpointer, Tsarray;
-import dmd.typesem: isIntegral;
+import dmd.typesem: isIntegral, toBasetype;
+
+// DMD represents the target of a compound assignment at its promoted
+// operation type. The original target type remains on the assignment node;
+// use that pair to remove only this frontend-generated lvalue promotion.
+public imported!"dmd.expression".Expression compoundTarget(
+    imported!"dmd.expression".BinAssignExp expression,
+) {
+    auto target = expression.e1;
+    if (auto promotion = target.isCastExp)
+        if (!promotion.type.toBasetype.equals(expression.type.toBasetype)
+                && promotion.e1.type.toBasetype.equals(
+                    expression.type.toBasetype))
+            return promotion.e1;
+    return target;
+}
 
 // Resolves the storage named by an expression. `Result` is deliberately a
 // backend type: the interpreter returns a native pointer, while the bytecode
@@ -88,12 +103,10 @@ public struct StorageResolver(Result, Adapter) {
             return assignmentResult(cast(AssignExp) construct, construct.e1);
 
         if (auto assignment = expression.isCatAssignExp)
-            return assignmentResult(
-                cast(BinAssignExp) assignment, assignment.e1);
+            return assignmentResult(cast(BinAssignExp) assignment);
 
         if (auto assignment = expression.isBinAssignExp)
-            return assignmentResult(
-                cast(BinAssignExp) assignment, assignment.e1);
+            return assignmentResult(cast(BinAssignExp) assignment);
 
         if (auto assignment = expression.isAssignExp)
             return assignmentResult(cast(AssignExp) assignment, assignment.e1);
@@ -181,13 +194,11 @@ public struct StorageResolver(Result, Adapter) {
         return target;
     }
 
-    private Result assignmentResult(
-        BinAssignExp expression, Expression targetExpression,
-    ) {
+    private Result assignmentResult(BinAssignExp expression) {
         // CatAssignExp is a BinAssignExp in dmd's AST. The typed overload
         // keeps that family dispatch complete without asking `isAssignExp`,
         // whose predicate only accepts the plain `EXP.assign` opcode.
-        auto target = resolve(targetExpression);
+        auto target = resolve(compoundTarget(expression));
         if (auto cat = expression.isCatAssignExp)
             _adapter.storageCatAssignment(cast(CatAssignExp) cat, target);
         else

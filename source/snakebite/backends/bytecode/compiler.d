@@ -2892,13 +2892,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return addressOffset;
     }
 
-    // Resolve the target before evaluating the right operand. Compound
-    // assignment captures its lvalue once, then evaluates and publishes the
-    // right side through that captured location.
+    // Resolve the target before evaluating the right operand. DMD's
+    // promoted floating target is read before that operand; same-width and
+    // integral assignments keep the ordinary right-side-first order.
     private void compileCompoundAssign(
         BinAssignExp expression, in size_t destOffset,
     ) {
-        const target = compileAddress(expression.e1);
+        import snakebite.frontend.storage: compoundTarget;
+
+        const target = compileAddress(compoundTarget(expression));
         compileCompoundAssignAt(expression, target, destOffset);
     }
 
@@ -2906,21 +2908,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         BinAssignExp expression, in size_t targetOffset,
         in size_t destOffset = discardResult,
     ) {
-        auto promotion = expression.e1.isCastExp;
-        auto target = promotion is null ? expression.e1 : promotion.e1;
+        import snakebite.frontend.storage: compoundTarget;
+
+        auto target = compoundTarget(expression);
         const targetFacts = TypeFacts.of(target.type);
-        const operationFacts = promotion is null
-            ? targetFacts : TypeFacts.of(promotion.type);
+        const operationFacts = TypeFacts.of(expression.e1.type);
         auto handler = compoundHandler(
             expression, operationFacts.isUnsigned,
-            isFloatingType(promotion is null ? target.type : promotion.type),
+            isFloatingType(expression.e1.type),
         );
         if (handler is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        const rightOffset = reserveTemp(operationFacts);
-        evalInto(expression.e2, rightOffset, operationFacts.size);
         auto field = target.isDotVarExp;
         auto fieldDeclaration = field is null
             ? null : field.var.isVarDeclaration;
@@ -2929,10 +2929,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || fieldDeclaration.isBitFieldDeclaration is null
                 ? ScalarStorage.Kind.indirect : ScalarStorage.Kind.bitfield,
             targetFacts, targetOffset, fieldDeclaration,
+            isFloatingType(target.type),
         );
-        const valueOffset = readScalar(storage, operationFacts);
+        const mixedFloating = storage.isFloating
+            && operationFacts.size != storage.facts.size;
+        size_t valueOffset;
+        if (mixedFloating)
+            valueOffset = readScalar(storage, operationFacts);
+
+        const rightOffset = reserveTemp(operationFacts);
+        evalInto(expression.e2, rightOffset, operationFacts.size);
+        if (!mixedFloating)
+            valueOffset = readScalar(storage, operationFacts);
         emit(handler, valueOffset, rightOffset, operationFacts.size);
-        writeScalar(storage, valueOffset, operationFacts.size);
+        valueOffset = writeScalar(storage, valueOffset, operationFacts.size);
 
         if (destOffset != discardResult)
             emit(&opCopy, destOffset, valueOffset, storage.facts.size);
@@ -2945,6 +2955,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         TypeFacts facts;
         size_t offset;
         VarDeclaration variable;
+        bool isFloating;
     }
 
     private ScalarStorage scalarStorage(
@@ -3016,11 +3027,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         loadScalar(storage, valueOffset, storage.facts.size);
-        emit(
-            storage.facts.isUnsigned
-                ? &opCastWidenUnsigned : &opCastWidenSigned,
-            valueOffset, storage.facts.size, resultFacts.size,
-        );
+        if (storage.isFloating && !resultFacts.isIntegral)
+            emit(&opFloatWidthCast, valueOffset, valueOffset,
+                resultFacts.size, storage.facts.size);
+        else
+            emit(
+                storage.facts.isUnsigned
+                    ? &opCastWidenUnsigned : &opCastWidenSigned,
+                valueOffset, storage.facts.size, resultFacts.size,
+            );
         return valueOffset;
     }
 
@@ -3046,27 +3061,36 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
-    private void writeScalar(
+    private size_t writeScalar(
         ScalarStorage storage, in size_t valueOffset,
         in size_t valueWidth,
     ) {
+        size_t storedOffset = valueOffset;
+        if (storage.isFloating && valueWidth != storage.facts.size) {
+            storedOffset = reserveTemp(storage.facts);
+            emit(&opFloatWidthCast, storedOffset, valueOffset,
+                storage.facts.size, valueWidth);
+        }
+
         final switch (storage.kind) with (ScalarStorage.Kind) {
         case frame:
-            if (storage.offset != valueOffset)
-                emit(&opCopy, storage.offset, valueOffset, storage.facts.size);
+            if (storage.offset != storedOffset)
+                emit(&opCopy, storage.offset, storedOffset,
+                    storage.facts.size);
             break;
         case staticData:
-            emitStaticStore(storage.variable, valueOffset, storage.facts.size);
+            emitStaticStore(storage.variable, storedOffset, storage.facts.size);
             break;
         case indirect:
-            emit(&opStoreIndirect, storage.offset, valueOffset,
+            emit(&opStoreIndirect, storage.offset, storedOffset,
                 storage.facts.size);
             break;
         case bitfield:
-            emitBitfieldStore(storage.variable, storage.offset, valueOffset,
+            emitBitfieldStore(storage.variable, storage.offset, storedOffset,
                 valueWidth);
             break;
         }
+        return storedOffset;
     }
 
     private void emitStaticLoad(
