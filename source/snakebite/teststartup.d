@@ -105,7 +105,6 @@ public TestStartupReport runTestsAndMain(
     scope(exit) {
         foreach (module_; modules)
             *testEntry(module_) = null;
-        unregisterTestModules(*program.testStartupImage);
     }
 
     _main = (string[] args) => runMain(backend, program, args);
@@ -138,28 +137,26 @@ private ModuleInfo*[] activateModules(
         modules = *existing;
     } else {
         _registeredModules[path] = modules;
-    }
 
-    alias Registry = extern(C) void function(void*);
-    alias Register = extern(C) void function(Registry, const(void*)*, size_t);
-    const register = cast(Register) program.testStartupImage.resolve("snakebite_register_tests");
-    assert(register !is null);
-    if (modules.length)
-        register(&_d_dso_registry, cast(const(void*)*) modules.ptr, modules.length);
+        alias Registry = extern(C) void function(void*);
+        alias Register = extern(C) void function(
+            Registry,
+            const(void*)*,
+            size_t,
+        );
+        const register = cast(Register) program.testStartupImage.resolve(
+            "snakebite_register_tests",
+        );
+        assert(register !is null);
+        if (modules.length)
+            register(
+                &_d_dso_registry,
+                cast(const(void*)*) modules.ptr,
+                modules.length,
+            );
+    }
     return modules;
 }
-
-
-private void unregisterTestModules(
-    in imported!"snakebite.dependencyimage".DependencyImage image,
-) {
-    alias Unregister = extern(C) void function();
-    const unregister = cast(Unregister)
-        image.resolve("snakebite_unregister_tests");
-    assert(unregister !is null);
-    unregister();
-}
-
 
 private int delegate(string[]) _main;
 

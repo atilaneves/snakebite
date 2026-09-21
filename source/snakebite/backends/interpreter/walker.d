@@ -31,7 +31,11 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         super(program);
         _shared = new Shared(program);
         _shared.plans.useCallbacks(
-            new CallbackBridge(&invokeCallback, cast(void*) this));
+            new CallbackBridge(
+                &invokeCallback,
+                cast(void*) this,
+                &prepareCallback,
+            ));
         _evaluators = PerThread!Evaluator(() => new Evaluator(_shared));
     }
 
@@ -58,6 +62,14 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     ) {
         auto interpreter = cast(Interpreter) context;
         interpreter.evaluator.callGuestFromHost(call);
+    }
+
+    private static void prepareCallback(
+        void* context,
+        FuncDeclaration function_,
+    ) {
+        auto interpreter = cast(Interpreter) context;
+        interpreter.evaluator.prepareCallback(function_);
     }
 
     public override string eval(FuncDeclaration function_) {
@@ -985,6 +997,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // untouched (ADR-0004).
     extern(D) final void callGuestFromHost(CallbackCall* call) {
         runHostToGuest(call.declaration, call.returnPlace, call.arguments);
+    }
+
+    extern(D) final void prepareCallback(FuncDeclaration function_) {
+        layoutOf(function_);
+        callShapeOf(function_);
+        functionNeedsClosure(function_);
+        factsOf(function_.type.nextOf);
     }
 
     private void destroyTemporary(Expression expression) {
