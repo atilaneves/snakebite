@@ -124,9 +124,13 @@ final class Compiler {
         import dmd.errors: diagnostics, fatalErrorHandler;
         import dmd.frontend: addImport, findImportPaths, initDMD;
         import dmd.globals: global;
+        import dmd.target: CPU, addDefaultVersionIdentifiers, target;
         import std.algorithm.iteration: each;
 
         initDMD;
+        target.cpu = CPU.baseline;
+        target.setCPU;
+        addDefaultVersionIdentifiers(global.params, target);
         findImportPaths.each!addImport;
 
         // Prevent DMD from calling exit() when too many cascading errors
@@ -340,8 +344,11 @@ final class Compiler {
             const source = sourceOverride is null
                 ? filePath.readText
                 : *sourceOverride;
+            // DMD treats null as a request to reopen the filename, which
+            // is relative for __FILE__ and may not exist in the current directory.
             auto result = dmdParseModule(
-                dmdFileName(filePath, importPaths, rootDirectory), source,
+                dmdFileName(filePath, importPaths, rootDirectory),
+                source is null ? "" : source,
             );
             if (result.diagnostics.hasErrors)
                 throw new Exception(diagnosticMessageWithLocations);

@@ -310,6 +310,37 @@ private extern(C) double snakebite_ut_scale(double value) {
     return value * 2.5;
 }
 
+private real _realArgumentSeen;
+
+private extern(C) real snakebite_ut_real_identity(real value) {
+    return value;
+}
+
+private extern(C) void snakebite_ut_real_argument(real value) {
+    _realArgumentSeen = value;
+}
+
+private extern(C) real snakebite_ut_real_result() {
+    return 1.0L + real.epsilon;
+}
+
+private extern(C) real snakebite_ut_real_after_odd_stack(
+    long a, long b, long c, long d, long e, long f, long prefix, real value,
+) {
+    return value + prefix;
+}
+
+private extern(C) real snakebite_ut_real_mixed(
+    long integer, double floating, real value,
+) {
+    return value + integer + floating;
+}
+
+pragma(mangle, "snakebite_ut_real_d")
+private extern(D) real snakebite_ut_real_d(real value) {
+    return value;
+}
+
 private extern(C) int snakebite_ut_seven(
     int a, int b, int c, int d, int e, int f, int g,
 ) {
@@ -486,6 +517,191 @@ unittest {
     cache.of(function_).call(&result, [cast(const void*) &value]);
 
     result.should == 3.75;
+}
+
+
+@("called.scalarReal.roundTrip")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(C) real snakebite_ut_real_identity(real value);
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_real_identity");
+    assert(function_ !is null,
+        "No `snakebite_ut_real_identity` in the guest program");
+
+    PlanCache cache;
+    real value = 1.0L + real.epsilon;
+    real result;
+    cache.of(function_).call(&result, [cast(const(void)*) &value]);
+
+    result.should == value;
+}
+
+
+@("called.scalarReal.argumentOnly")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(C) void snakebite_ut_real_argument(real value);
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_real_argument");
+    assert(function_ !is null,
+        "No `snakebite_ut_real_argument` in the guest program");
+
+    PlanCache cache;
+    real value = 7.25L;
+    cache.of(function_).call(null, [cast(const(void)*) &value]);
+
+    _realArgumentSeen.should == value;
+}
+
+
+@("called.scalarReal.resultOnly")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(C) real snakebite_ut_real_result();
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_real_result");
+    assert(function_ !is null,
+        "No `snakebite_ut_real_result` in the guest program");
+
+    PlanCache cache;
+    real result;
+    cache.of(function_).call(&result, []);
+
+    result.should == 1.0L + real.epsilon;
+}
+
+
+@("called.scalarReal.afterOddStackWord")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(C) real snakebite_ut_real_after_odd_stack(
+            long a, long b, long c, long d, long e, long f,
+            long prefix, real value,
+        );
+    });
+    auto function_ = findFunction(
+        guestModule, "snakebite_ut_real_after_odd_stack",
+    );
+    assert(function_ !is null,
+        "No `snakebite_ut_real_after_odd_stack` in the guest program");
+
+    PlanCache cache;
+    long[7] prefix = [1, 2, 3, 4, 5, 6, 7];
+    real value = 10.5L;
+    real result;
+    cache.of(function_).call(&result, [
+        cast(const(void)*) &prefix[0], cast(const(void)*) &prefix[1],
+        cast(const(void)*) &prefix[2], cast(const(void)*) &prefix[3],
+        cast(const(void)*) &prefix[4], cast(const(void)*) &prefix[5],
+        cast(const(void)*) &prefix[6], cast(const(void)*) &value,
+    ]);
+
+    result.should == 17.5L;
+}
+
+
+@("called.scalarReal.mixedIntDouble")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(C) real snakebite_ut_real_mixed(
+            long integer, double floating, real value,
+        );
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_real_mixed");
+    assert(function_ !is null,
+        "No `snakebite_ut_real_mixed` in the guest program");
+
+    PlanCache cache;
+    long integer = 3;
+    double floating = 2.5;
+    real value = 4.0L;
+    real result;
+    cache.of(function_).call(&result, [
+        cast(const(void)*) &integer, cast(const(void)*) &floating,
+        cast(const(void)*) &value,
+    ]);
+
+    result.should == 9.5L;
+}
+
+
+@("called.scalarReal.discardedReturnsPopX87")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(C) real snakebite_ut_real_result();
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_real_result");
+    assert(function_ !is null,
+        "No `snakebite_ut_real_result` in the guest program");
+
+    PlanCache cache;
+    auto plan = cache.of(function_);
+    foreach (i; 0 .. 256)
+        plan.call(null, []);
+
+    real result;
+    plan.call(&result, []);
+    result.should == 1.0L + real.epsilon;
+}
+
+
+@("called.scalarReal.modflOutParameter")
+unittest {
+    auto guestModule = parseSnippet(q{
+        extern(C) real modfl(real value, out real integral);
+    });
+    auto function_ = findFunction(guestModule, "modfl");
+    assert(function_ !is null,
+        "No `modfl` in the guest program");
+
+    PlanCache cache;
+    real value = 3.75L;
+    real integral;
+    real* integralSlot = &integral;
+    real result;
+    cache.of(function_).call(&result, [
+        cast(const(void)*) &value, cast(const(void)*) &integralSlot,
+    ]);
+
+    result.should == 0.75L;
+    integral.should == 3.0L;
+}
+
+
+@("called.scalarReal.externD")
+unittest {
+    auto guestModule = parseSnippet(q{
+        pragma(mangle, "snakebite_ut_real_d")
+        extern(D) real snakebite_ut_real_d(real value);
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_real_d");
+    assert(function_ !is null,
+        "No `snakebite_ut_real_d` in the guest program");
+
+    PlanCache cache;
+    real value = 1.0L + real.epsilon;
+    real result;
+    cache.of(function_).call(&result, [cast(const(void)*) &value]);
+
+    result.should == value;
+}
+
+
+@("called.scalarReal.aggregateReturnRejected")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct RealPair { real value; }
+        extern(C) RealPair snakebite_ut_real_pair();
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_real_pair");
+    assert(function_ !is null,
+        "No `snakebite_ut_real_pair` in the guest program");
+
+    PlanCache cache;
+    cache.of(function_).shouldThrowWithMessage(
+        "ffi cannot return an aggregate containing `real`",
+    );
 }
 
 

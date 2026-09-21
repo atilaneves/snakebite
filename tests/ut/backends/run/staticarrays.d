@@ -656,3 +656,94 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// `a[1 .. 3] = b[]` copies a static array's own sub-slice, not its whole
+// slice, from another static array's whole slice: the same element-by-
+// element copy `a[] = b[]` does, just starting partway into `a` and
+// stopping short of its end. `emsi_containers`' `TTree.removeLargest`
+// hits this shape shifting the tail of a node's `values` array down by
+// one slot.
+static foreach (backend; Matrix!(
+)) {
+    @("staticArray.subSliceCopyFromWholeSlice." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[4] a = [1, 2, 3, 4];
+                int[2] b = [9, 8];
+                a[1 .. 3] = b[];
+                assert(a[0] == 1);
+                assert(a[1] == 9);
+                assert(a[2] == 8);
+                assert(a[3] == 4);
+            }
+        });
+    }
+}
+
+// A zero-length sub-slice copies nothing and leaves every element of `a`
+// untouched. `removeLargest` hits exactly this shape when a `TTree`
+// node's capacity is 2: the tail past the removed element is empty.
+static foreach (backend; Matrix!(
+)) {
+    @("staticArray.subSliceCopyZeroLength." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3] a = [1, 2, 3];
+                int[1] b = [9];
+                a[1 .. 1] = b[0 .. 0];
+                assert(a[0] == 1);
+                assert(a[1] == 2);
+                assert(a[2] == 3);
+            }
+        });
+    }
+}
+
+// A sub-slice's bounds need not be compile-time constants: `lwr`/`upr`
+// are ordinary expressions, evaluated at run time the same way reading a
+// bounded slice already does.
+static foreach (backend; Matrix!(
+)) {
+    @("staticArray.subSliceCopyRuntimeBounds." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int lower() { return 1; }
+            int upper() { return 3; }
+
+            void main() {
+                int[4] a = [1, 2, 3, 4];
+                int[2] b = [9, 8];
+                a[lower() .. upper()] = b[];
+                assert(a[0] == 1);
+                assert(a[1] == 9);
+                assert(a[2] == 8);
+                assert(a[3] == 4);
+            }
+        });
+    }
+}
+
+// `a[1 .. $] = v` fills a static array's own sub-slice with one scalar,
+// evaluated once, the same fill `a[] = v` does over the whole array.
+static foreach (backend; Matrix!(
+)) {
+    @("staticArray.subSliceScalarFill." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[4] a = [1, 2, 3, 4];
+                a[1 .. $] = 7;
+                assert(a[0] == 1);
+                assert(a[1] == 7);
+                assert(a[2] == 7);
+                assert(a[3] == 7);
+            }
+        });
+    }
+}

@@ -80,6 +80,14 @@ public struct CallSelection {
         if (outerFunctionOf(function_) !is null)
             return Decision(false, true, false);
 
+        // A function literal in an imported aggregate has a body but no
+        // native symbol of its own. Keep it guest when it is root-owned or
+        // when the linker cannot resolve that symbol.
+        if (function_.isFuncLiteralDeclaration !is null
+                && function_.fbody !is null
+                && (isGuest(function_) || !hasNativeSymbol))
+            return Decision(false, false, true);
+
         // A root-owned body must run as guest even when its linker name
         // is in the host (notably _Dmain). A template can reuse the host
         // instantiation; a missing template symbol leaves its guest body.

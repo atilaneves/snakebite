@@ -1368,6 +1368,25 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// An integer cast to a pointer keeps its native-width bit pattern. These
+// values are compared without dereferencing them, including MAP_FAILED's
+// all-bits-one value.
+static foreach (backend; Matrix!()) {
+    @("pointers.integerLiteral.pointerWidthBits." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                void* failure = cast(void*) -1;
+                void* positive = cast(void*) 123;
+                assert(failure is cast(void*) -1);
+                assert(positive is cast(void*) 123);
+                assert(failure !is positive);
+            }
+        });
+    }
+}
+
 // `p[0 .. n] = q[]` copies element by element the same way any other
 // dynamic slice assignment does, whether the element itself is an integral
 // or, as here, a pointer: a pointer element is exactly as copyable in bulk

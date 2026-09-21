@@ -1567,6 +1567,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (condition.type.ty == Tpointer || condition.type.ty == Tclass)
             return compilePointerCondition(condition, facts);
 
+        if (isFloatingType(condition.type)) {
+            const offset = reserveTemp(facts);
+            compileValue(condition, offset, facts.size);
+            emit(&opFloatToBool, offset, offset, facts.size);
+            return offset;
+        }
+
         if (!facts.isIntegral || !isIntegralSize(facts.size))
             throw rejection(_function, condition.loc,
                 expressionText(condition));
@@ -1654,7 +1661,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private size_t conditionWidth(Expression condition) {
         const facts = TypeFacts.of(condition.type);
-        return facts.isDynamicArray ? size_t.sizeof : facts.size;
+        return facts.isDynamicArray
+            ? size_t.sizeof
+            : isFloatingType(condition.type) ? bool.sizeof : facts.size;
     }
 
     // `assert(cond)`: evaluated the same way an `if`'s own condition is,
@@ -2366,6 +2375,36 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return context;
     }
 
+    // The raw slot for a reference declaration. Unlike addressOfVariable,
+    // this must not load the pointer stored in that slot: referenceInit is
+    // the first write to the slot.
+    private size_t referenceSlotAddress(VarDeclaration variable) {
+        if (isClosureVariable(variable)) {
+            const slot = _closureLayout.slotOf(variable);
+            return closureSlotAddress(slot.offset);
+        }
+
+        auto owner = outerFunctionOf(variable);
+        if (owner is _function)
+            return _layout.offsetOf(variable);
+
+        if (owner is null)
+            throw rejection(_function, variable.loc, "a local variable");
+
+        auto context = contextAddressOf(owner);
+        if (functionNeedsClosure(owner)) {
+            const closure = ClosureLayout.of(owner);
+            if (!closure.hasSlot(variable))
+                throw rejection(_function, variable.loc, "a local variable");
+            return addPointerOffset(context, closure.slotOf(variable).offset);
+        }
+
+        const layout = FrameLayout.of(owner);
+        if (!layout.hasSlot(variable))
+            throw rejection(_function, variable.loc, "a local variable");
+        return addPointerOffset(context, layout.offsetOf(variable));
+    }
+
     private size_t closureSlotAddress(in size_t offset) {
         const closure = reserveTemp(pointerFacts);
         emit(&opCopy, closure, _closureOffset, size_t.sizeof);
@@ -2611,20 +2650,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import dmd.astenums: Tsarray;
 
-        // A dynamic-length target - a dynamic array's own whole slice, or
-        // a pointer sliced to a run-time length - has no compile-time
-        // element count to unroll a loop over, unlike a static array's
-        // own fixed `dim` below.
-        if (target.e1.type.ty != Tsarray)
+        // A bounded slice - whether of a dynamic array, a pointer, or a
+        // static array's own sub-range - has no compile-time-fixed
+        // element count to unroll a loop over the way a static array's
+        // own *whole* slice does below. Evaluating `target` computes its
+        // `{length, pointer}` pair at run time either way: for a static
+        // array's own sub-range, through `visit(SliceExp)`'s own
+        // `compileBoundedSlice`, the same machinery a bare read of that
+        // sub-range already goes through, bounds checks included.
+        if (target.e1.type.ty != Tsarray
+                || target.lwr !is null || target.upr !is null)
             return compileDynamicSliceAssign(
                 expression, target, destOffset, resolvedTarget);
 
         import dmd.astenums: Tarray;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
-
-        if (target.lwr !is null || target.upr !is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
 
         auto sarrayType = target.e1.type.isTypeSArray;
         const elementFacts = TypeFacts.of(sarrayType.next);
@@ -2765,15 +2805,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // evaluated once, then copied into every element through
     // `opSliceFill`, the run-time counterpart to `compileSliceAssign`'s
     // own compile-time-unrolled scalar fill for a static array.
+    //
+    // `target.e1` is a static array here whenever `compileSliceAssign`
+    // routed a bounded sub-slice of it this way instead of unrolling it
+    // as a whole-slice fill or copy; `target.type` (this function's own
+    // `Tarray`/`Tvoid` checks below look at that, not `target.e1.type`)
+    // is the dynamic shape the slice itself has either way.
     private void compileDynamicSliceAssign(
         AssignExp expression, SliceExp target, in size_t destOffset,
         in size_t resolvedTarget = size_t.max,
     ) {
-        import dmd.astenums: Tarray, Tpointer, Tvoid;
+        import dmd.astenums: Tarray, Tpointer, Tsarray, Tvoid;
         import dmd.expression: MemorySet;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
-        if (target.e1.type.ty != Tarray && target.e1.type.ty != Tpointer)
+        if (target.e1.type.ty != Tarray && target.e1.type.ty != Tpointer
+                && target.e1.type.ty != Tsarray)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -2854,13 +2901,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return addressOffset;
     }
 
-    // Resolve the target before evaluating the right operand. Compound
-    // assignment captures its lvalue once, then evaluates and publishes the
-    // right side through that captured location.
+    // Resolve the target before evaluating the right operand. DMD's
+    // promoted floating target is read before that operand; same-width and
+    // integral assignments keep the ordinary right-side-first order.
     private void compileCompoundAssign(
         BinAssignExp expression, in size_t destOffset,
     ) {
-        const target = compileAddress(expression.e1);
+        import snakebite.frontend.storage: compoundTarget;
+
+        const target = compileAddress(compoundTarget(expression));
         compileCompoundAssignAt(expression, target, destOffset);
     }
 
@@ -2868,19 +2917,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         BinAssignExp expression, in size_t targetOffset,
         in size_t destOffset = discardResult,
     ) {
-        auto promotion = expression.e1.isCastExp;
-        auto target = promotion is null ? expression.e1 : promotion.e1;
+        import snakebite.frontend.storage: compoundTarget;
+
+        auto target = compoundTarget(expression);
         const targetFacts = TypeFacts.of(target.type);
-        const operationFacts = promotion is null
-            ? targetFacts : TypeFacts.of(promotion.type);
+        const operationFacts = TypeFacts.of(expression.e1.type);
         auto handler = compoundHandler(
-            expression, operationFacts.isUnsigned);
+            expression, operationFacts.isUnsigned,
+            isFloatingType(expression.e1.type),
+        );
         if (handler is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        const rightOffset = reserveTemp(operationFacts);
-        evalInto(expression.e2, rightOffset, operationFacts.size);
         auto field = target.isDotVarExp;
         auto fieldDeclaration = field is null
             ? null : field.var.isVarDeclaration;
@@ -2889,10 +2938,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || fieldDeclaration.isBitFieldDeclaration is null
                 ? ScalarStorage.Kind.indirect : ScalarStorage.Kind.bitfield,
             targetFacts, targetOffset, fieldDeclaration,
+            isFloatingType(target.type),
         );
-        const valueOffset = readScalar(storage, operationFacts);
+        const mixedFloating = storage.isFloating
+            && operationFacts.size != storage.facts.size;
+        size_t valueOffset;
+        if (mixedFloating)
+            valueOffset = readScalar(storage, operationFacts);
+
+        const rightOffset = reserveTemp(operationFacts);
+        evalInto(expression.e2, rightOffset, operationFacts.size);
+        if (!mixedFloating)
+            valueOffset = readScalar(storage, operationFacts);
         emit(handler, valueOffset, rightOffset, operationFacts.size);
-        writeScalar(storage, valueOffset, operationFacts.size);
+        valueOffset = writeScalar(storage, valueOffset, operationFacts.size);
 
         if (destOffset != discardResult)
             emit(&opCopy, destOffset, valueOffset, storage.facts.size);
@@ -2905,6 +2964,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         TypeFacts facts;
         size_t offset;
         VarDeclaration variable;
+        bool isFloating;
     }
 
     private ScalarStorage scalarStorage(
@@ -2976,11 +3036,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         loadScalar(storage, valueOffset, storage.facts.size);
-        emit(
-            storage.facts.isUnsigned
-                ? &opCastWidenUnsigned : &opCastWidenSigned,
-            valueOffset, storage.facts.size, resultFacts.size,
-        );
+        if (storage.isFloating && !resultFacts.isIntegral)
+            emit(&opFloatWidthCast, valueOffset, valueOffset,
+                resultFacts.size, storage.facts.size);
+        else
+            emit(
+                storage.facts.isUnsigned
+                    ? &opCastWidenUnsigned : &opCastWidenSigned,
+                valueOffset, storage.facts.size, resultFacts.size,
+            );
         return valueOffset;
     }
 
@@ -3006,27 +3070,36 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
-    private void writeScalar(
+    private size_t writeScalar(
         ScalarStorage storage, in size_t valueOffset,
         in size_t valueWidth,
     ) {
+        size_t storedOffset = valueOffset;
+        if (storage.isFloating && valueWidth != storage.facts.size) {
+            storedOffset = reserveTemp(storage.facts);
+            emit(&opFloatWidthCast, storedOffset, valueOffset,
+                storage.facts.size, valueWidth);
+        }
+
         final switch (storage.kind) with (ScalarStorage.Kind) {
         case frame:
-            if (storage.offset != valueOffset)
-                emit(&opCopy, storage.offset, valueOffset, storage.facts.size);
+            if (storage.offset != storedOffset)
+                emit(&opCopy, storage.offset, storedOffset,
+                    storage.facts.size);
             break;
         case staticData:
-            emitStaticStore(storage.variable, valueOffset, storage.facts.size);
+            emitStaticStore(storage.variable, storedOffset, storage.facts.size);
             break;
         case indirect:
-            emit(&opStoreIndirect, storage.offset, valueOffset,
+            emit(&opStoreIndirect, storage.offset, storedOffset,
                 storage.facts.size);
             break;
         case bitfield:
-            emitBitfieldStore(storage.variable, storage.offset, valueOffset,
+            emitBitfieldStore(storage.variable, storage.offset, storedOffset,
                 valueWidth);
             break;
         }
+        return storedOffset;
     }
 
     private void emitStaticLoad(
@@ -3038,11 +3111,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private Instruction.Handler compoundHandler(
-        BinAssignExp expression, in bool unsigned,
+        BinAssignExp expression, in bool unsigned, in bool floating,
     ) {
-        if (expression.isAddAssignExp) return &opAdd;
-        if (expression.isMinAssignExp) return &opSubtract;
-        if (expression.isMulAssignExp) return &opMultiply;
+        if (expression.isAddAssignExp)
+            return floating ? &opFloatAdd : &opAdd;
+        if (expression.isMinAssignExp)
+            return floating ? &opFloatSubtract : &opSubtract;
+        if (expression.isMulAssignExp)
+            return floating ? &opFloatMultiply : &opMultiply;
         if (expression.isAndAssignExp) return &opBitAnd;
         if (expression.isOrAssignExp) return &opBitOr;
         if (expression.isXorAssignExp) return &opBitXor;
@@ -3051,9 +3127,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return unsigned ? &opShiftRightLogical : &opShiftRightArithmetic;
         if (expression.isUshrAssignExp) return &opShiftRightLogical;
         if (expression.isDivAssignExp)
-            return unsigned ? &opDivideUnsigned : &opDivideSigned;
+            return floating
+                ? &opFloatDivide
+                : (unsigned ? &opDivideUnsigned : &opDivideSigned);
         if (expression.isModAssignExp)
-            return unsigned ? &opModuloUnsigned : &opModuloSigned;
+            return floating
+                ? &opFloatModulo
+                : (unsigned ? &opModuloUnsigned : &opModuloSigned);
 
         return null;
     }
@@ -5266,14 +5346,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // for a call run at statement level, whose result (`void` or
     // otherwise) is discarded.
     private void compileCall(CallExp expression, in size_t destOffset) {
+        import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
+
         auto callee = expression.f;
-        if (callee is null) {
-            auto calleeExp = expression.e1.isVarExp;
-            if (calleeExp !is null)
-                callee = calleeExp.var.isFuncDeclaration;
-            else if (auto dot = expression.e1.isDotVarExp)
-                callee = dot.var.isFuncDeclaration;
-        }
+        if (callee is null)
+            callee = unresolvedCalleeOf(expression);
         // `super(args)`/`this(args)` constructor delegation reaches here
         // the same as any other call: dmd's own semantic pass always
         // resolves `expression.f` to the constructor it picked. A `null`
@@ -5789,6 +5866,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (compiler.isThisField(variable))
                 return compiler.compileThisFieldAddress(variable);
             return compiler.addressOfVariable(variable);
+        }
+
+        public size_t storageReferenceInit(AssignExp expression) {
+            auto variable = expression.e1.isVarExp;
+            auto declaration = variable is null
+                ? null : variable.var.isVarDeclaration;
+            if (declaration is null)
+                throw rejection(compiler._function, expression.loc,
+                    expressionText(expression));
+
+            const target = compiler.referenceSlotAddress(
+                declaration);
+            const source = compiler.compileAddress(expression.e2);
+            compiler.emit(&opCopy, target, source, size_t.sizeof);
+            return source;
         }
 
         public size_t storagePointer(PtrExp expression) {

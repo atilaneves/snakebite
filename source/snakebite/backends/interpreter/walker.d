@@ -1781,6 +1781,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (facts.isIntegral)
             return asIntegral(expression, facts) != 0;
 
+        const baseType = type.toBasetype;
+        if (baseType.ty == Tfloat32 || baseType.ty == Tfloat64
+                || baseType.ty == Tfloat80)
+            return asFloating(expression) != 0;
+
         // The pointer alone decides. dmd 2.112 and ldc2 1.42 disagree on
         // an array with a length but a null pointer - dmd calls it true,
         // ldc2 false - so that half is not something to assert as a
@@ -2567,6 +2572,26 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return evaluator.slotOf(expression);
         }
 
+        public void* storageReferenceInit(AssignExp expression) {
+            auto variable = expression.e1.isVarExp;
+            auto declaration = variable is null
+                ? null : variable.var.isVarDeclaration;
+            if (declaration is null)
+                throw new SnakebiteException(
+                    "interpreter cannot initialize a non-variable reference",
+                );
+
+            import snakebite.nativelayout: storeIntegral;
+
+            // DMD marks reference construction separately from ordinary
+            // assignment. Keep the declaration's own slot, rather than
+            // resolving it through the reference it does not hold yet.
+            auto target = evaluator.storageOf(declaration);
+            auto source = evaluator.addressOf(expression.e2);
+            storeIntegral(target, cast(size_t) source, size_t.sizeof);
+            return source;
+        }
+
         public void* storagePointer(PtrExp expression) {
             return evaluator.asPointer(expression.e1);
         }
@@ -2915,17 +2940,64 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             expression, target);
     }
 
-    // The target is looked up once, not once to read and again to write:
-    // D evaluates the left side of a compound assignment a single time. The
-    // right side runs before the target is read, since evaluating it can
-    // change what the target holds.
+    // The target is looked up once, not once to read and again to write. DMD
+    // reads a promoted floating target before its right side; same-width and
+    // integral assignments keep the ordinary right-side-first order.
     //
     // `extern(D)`: a string template parameter has no C++ mangling.
     private extern(D) void storeAssignExp(string op)(
         BinAssignExp expression, void* resolvedTarget = null,
     ) {
+        import snakebite.frontend.storage: compoundTarget;
+        import snakebite.nativevalue: loadFloating, storeFloating;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
         import std.conv: text;
+
+        auto target_ = compoundTarget(expression);
+        const operationType = expression.e1.type.toBasetype;
+        static if (op == "+" || op == "-" || op == "*" || op == "/"
+                || op == "%")
+        if (operationType.ty == Tfloat32 || operationType.ty == Tfloat64
+                || operationType.ty == Tfloat80) {
+            auto target = resolvedTarget;
+            if (target is null)
+                try {
+                    target = addressOf(target_);
+                } catch (SnakebiteException) {
+                    throw new SnakebiteException(
+                        text("interpreter cannot assign to `",
+                            expression.e1.toString, "`: ",
+                            expression.toString),
+                    );
+                }
+
+            const targetFacts = factsOf(target_.type);
+            const operationFacts = factsOf(expression.e1.type);
+            const mixedPromotion = targetFacts.size != operationFacts.size;
+            real current;
+            if (mixedPromotion)
+                current = loadFloating(target, targetFacts.size);
+            const step = asFloating(expression.e2);
+            if (!mixedPromotion)
+                current = loadFloating(target, targetFacts.size);
+            real result;
+            if (operationType.ty == Tfloat32)
+                result = cast(real) mixin(
+                    "cast(float) current " ~ op ~ " cast(float) step");
+            else if (operationType.ty == Tfloat64)
+                result = cast(real) mixin(
+                    "cast(double) current " ~ op ~ " cast(double) step");
+            else
+                result = mixin("current " ~ op ~ " step");
+
+            storeFloating(target, result, targetFacts.size);
+            storeFloating(
+                _place,
+                loadFloating(target, targetFacts.size),
+                _facts.size,
+            );
+            return;
+        }
 
         const targetFacts = factsOf(expression.e1.type);
         if (!targetFacts.isIntegral && expression.e1.type.ty != Tpointer)
@@ -2950,8 +3022,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // A narrow target (`ubyte`, `short`, ...) arrives wrapped in the
         // `CastExp` dmd's `integralPromotions` adds for the operation
         // itself; the field behind it is what is stored to.
-        auto promotion = expression.e1.isCastExp;
-        auto target_ = promotion is null ? expression.e1 : promotion.e1;
         if (auto dot = target_.isDotVarExp) {
             auto field = dot.var.isVarDeclaration;
             if (field !is null && field.isBitFieldDeclaration !is null) {
@@ -4745,11 +4815,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallExp expression, void* returnPlace,
     ) {
         import core.stdc.string: memcpy;
+        import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
         import std.conv: text;
 
-        auto callee = expression.f is null
+        auto resolved = expression.f is null
+            ? unresolvedCalleeOf(expression) : expression.f;
+        auto callee = resolved is null
             ? calleeOf(expression)
-            : Callee(expression.f, null, false);
+            : Callee(resolved, null, false);
         if (callee.address !is null) {
             const target = _plans.guestTarget(callee.address);
             if (target.word is null)
@@ -4948,10 +5021,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import std.conv: text;
 
         auto callee = expression.e1;
-        if (auto dot = callee.isDotVarExp)
-            if (auto function_ = dot.var.isFuncDeclaration)
-                return Callee(function_, null, false);
-
         if (auto deref = callee.isPtrExp) {
             auto function_ = cast(FuncDeclaration) asPointer(deref.e1);
             if (function_ is null)
