@@ -327,6 +327,93 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// Two overloads of one template share the name `answer!int`, so the address
+// expression `&answer!int` is ambiguous without a target type. Each overload
+// still has its own mangled name, and the registry must answer a lookup by
+// that name with the overload that the mangle names, not with its sibling.
+// The registry is the only route to such instances when an image keeps its
+// template bodies out of the dynamic symbol table (LDC, `-linkonce-templates`),
+// so the test calls it directly instead of relying on `dlsym` missing.
+@("image.overloadRegistryAnswersEachOverload")
+@Serial
+unittest {
+    import std.conv: text;
+
+    const sandbox = Sandbox();
+    enum moduleName = "image_registry_overloads";
+    sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+        "module " ~ moduleName ~ ";\n" ~ q{
+            template answer(T) {
+                T answer() { return 17; }
+                T answer(T value) { return value + 1; }
+            }
+        });
+    sandbox.writeFile("app/root_" ~ moduleName ~ ".d", "module root_" ~ moduleName ~ ";\nimport "
+        ~ moduleName ~ ";\n" ~ q{
+            int main() {
+                return answer!int() + answer!int(23);
+            }
+        });
+    auto project = prepareProject(
+        sandbox.inSandboxPath("app"), [sandbox.inSandboxPath("deps")]).project;
+    const image = project.program.dependencyImage;
+    image.should.not == null;
+
+    // The image compiler infers `pure nothrow @nogc @safe` for both bodies,
+    // and the mangle spells that out. `Qk` repeats the instance name.
+    const prefix = text("_D", moduleName.length, moduleName, "__T6answerTiZQkFNaNbNiNf");
+    alias NoArguments = int function();
+    alias OneArgument = int function(int);
+    const noArguments = cast(NoArguments) (*image).registryAnswer(prefix ~ "Zi");
+    const oneArgument = cast(OneArgument) (*image).registryAnswer(prefix ~ "iZi");
+    noArguments.should.not == null;
+    oneArgument.should.not == null;
+    noArguments().should == 17;
+    oneArgument(23).should == 24;
+}
+
+
+// `rebindable` has two template overloads that give the same signature for an
+// array argument, so even a typed address cannot choose between them. The
+// registry then selects the declaration by its position among the overloads
+// of that name, the order `__traits(getOverloads)` uses.
+@("image.overloadRegistrySelectsByPosition")
+@Serial
+unittest {
+    auto module_ = parseSnippet(q{
+        import std.typecons: rebindable;
+        int[] answer(int[] values) {
+            return rebindable(values);
+        }
+    });
+    auto program = Program([module_]);
+    const image = prepareImage(imageSource(program), sharedImageCache,
+        defaultCompiler, null, null, null, ["-w"]);
+    alias Rebindable = int[] function(int[]);
+    // The mangle is that of `rebindable!(int[])` with its inferred attributes.
+    const rebindable = cast(Rebindable) image.registryAnswer(
+        "_D3std8typecons__T10rebindableTAiZQqFNaNbNiNfQoZQr");
+    rebindable.should.not == null;
+    auto values = [17];
+    rebindable(values).should == [17];
+}
+
+// The image exports its registry under `DependencyImage.registrySymbol`.
+// `resolve` reaches it only after `dlsym` misses, and a DMD image keeps every
+// instance in its symbol table, so a direct call is the way to see its answer.
+private void* registryAnswer(in DependencyImage image, in char[] name) {
+    import core.sys.posix.dlfcn: RTLD_NOW, dlopen, dlsym;
+    import std.string: toStringz;
+
+    // The image stays loaded, so this returns the handle that it already holds.
+    auto handle = dlopen(image.path.toStringz, RTLD_NOW);
+    handle.should.not == null;
+    alias Registry = extern(C) void* function(const(char)[]);
+    const registry = cast(Registry) dlsym(handle, DependencyImage.registrySymbol.toStringz);
+    registry.should.not == null;
+    return registry(name);
+}
+
 
 static foreach (backend; Matrix!()) {
     @("image.templateAliasOverloads." ~ backend.stringof)
