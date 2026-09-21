@@ -13,6 +13,24 @@ import snakebite.frontend.compiler: parseSnippet;
 import std.process: execute;
 
 
+static foreach (backend; Matrix!()) {
+    @("floatVectorDeclaration." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            version (D_SIMD) {} else static assert(0);
+
+            alias float4 = __vector(float[4]);
+
+            static assert(float4.sizeof == 16);
+            static assert(float4.alignof == 16);
+
+            void main() {}
+        });
+    }
+}
+
+
 static foreach (withTls; [false, true])
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,

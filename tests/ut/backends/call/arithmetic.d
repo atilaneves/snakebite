@@ -793,6 +793,404 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// Each target is indirect so its evaluation count is observable. The
+// operation result is checked before the next assignment uses the target.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.floatingCompoundAssign.float." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.0f.shouldBeRetOf!(
+            backend,
+            q{
+                ref float target(ref float value, ref int calls) {
+                    ++calls;
+                    return value;
+                }
+
+                float result() {
+                    float value = 0.5f;
+                    int targetCalls;
+                    assert((target(value, targetCalls) += 0.5f) == 1.0f);
+                    assert((target(value, targetCalls) -= 0.5f) == 0.5f);
+                    assert((target(value, targetCalls) *= 2.0f) == 1.0f);
+                    assert((target(value, targetCalls) /= 2.0f) == 0.5f);
+                    assert((target(value, targetCalls) %= 0.25f) == 0.0f);
+                    assert(targetCalls == 5);
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arithmetic.floatingCompoundAssign.double." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        5.0.shouldBeRetOf!(
+            backend,
+            q{
+                ref double target(ref double value, ref int calls) {
+                    ++calls;
+                    return value;
+                }
+
+                float rhs(ref double value) {
+                    value = 3.0;
+                    return 2.0f;
+                }
+
+                double result() {
+                    double value = 0.5;
+                    int targetCalls;
+                    assert((target(value, targetCalls) += 0.5) == 1.0);
+                    assert((target(value, targetCalls) -= 0.5) == 0.5);
+                    assert((target(value, targetCalls) *= 2.0) == 1.0);
+                    assert((target(value, targetCalls) /= 2.0) == 0.5);
+                    float factor = 2.0f;
+                    assert((target(value, targetCalls) *= factor) == 1.0);
+                    assert((target(value, targetCalls) %= 0.25) == 0.0);
+                    assert((target(value, targetCalls) += rhs(value)) == 5.0);
+                    assert(targetCalls == 7);
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arithmetic.floatingCompoundAssign.real." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.0L.shouldBeRetOf!(
+            backend,
+            q{
+                ref real target(ref real value, ref int calls) {
+                    ++calls;
+                    return value;
+                }
+
+                real result() {
+                    real value = 0.5L;
+                    int targetCalls;
+                    assert((target(value, targetCalls) += 0.5L) == 1.0L);
+                    assert((target(value, targetCalls) -= 0.5L) == 0.5L);
+                    assert((target(value, targetCalls) *= 2.0L) == 1.0L);
+                    assert((target(value, targetCalls) /= 2.0L) == 0.5L);
+                    assert((target(value, targetCalls) %= 0.25L) == 0.0L);
+                    assert(targetCalls == 5);
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+// DMD promotes a mixed-width floating target before the operation and reads
+// that promoted value before evaluating the right side. The target is still
+// evaluated once, and both the stored value and expression result are
+// rounded back to the target's type.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE reads the promoted target after the right side"),
+)) {
+    @("arithmetic.floatingCompoundAssign.floatDouble." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.0f.shouldBeRetOf!(
+            backend,
+            q{
+                ref float target(ref float value, ref int calls) {
+                    ++calls;
+                    return value;
+                }
+
+                double rhs(ref float value, double step) {
+                    value = 1.5f;
+                    return step;
+                }
+
+                float result() {
+                    float value = 10.0f;
+                    int targetCalls;
+                    value = 10.0f;
+                    assert((target(value, targetCalls)
+                        += rhs(value, 2.25)) == 12.25f);
+                    assert(value == 12.25f);
+                    value = 10.0f;
+                    assert((target(value, targetCalls)
+                        -= rhs(value, 2.25)) == 7.75f);
+                    assert(value == 7.75f);
+                    value = 10.0f;
+                    assert((target(value, targetCalls)
+                        *= rhs(value, 2.25)) == 22.5f);
+                    assert(value == 22.5f);
+                    value = 10.0f;
+                    assert((target(value, targetCalls)
+                        /= rhs(value, 2.0)) == 5.0f);
+                    assert(value == 5.0f);
+                    value = 10.0f;
+                    assert((target(value, targetCalls)
+                        %= rhs(value, 2.25)) == 1.0f);
+                    assert(value == 1.0f);
+                    assert(targetCalls == 5);
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE reads the promoted target after the right side"),
+)) {
+    @("arithmetic.floatingCompoundAssign.floatReal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.0f.shouldBeRetOf!(
+            backend,
+            q{
+                ref float target(ref float value, ref int calls) {
+                    ++calls;
+                    return value;
+                }
+
+                real rhs(ref float value, real step) {
+                    value = 1.5f;
+                    return step;
+                }
+
+                float result() {
+                    float value = 10.0f;
+                    int targetCalls;
+                    value = 10.0f;
+                    assert((target(value, targetCalls)
+                        += rhs(value, 2.25L)) == 12.25f);
+                    assert(value == 12.25f);
+                    value = 10.0f;
+                    assert((target(value, targetCalls)
+                        -= rhs(value, 2.25L)) == 7.75f);
+                    assert(value == 7.75f);
+                    value = 10.0f;
+                    assert((target(value, targetCalls)
+                        *= rhs(value, 2.25L)) == 22.5f);
+                    assert(value == 22.5f);
+                    value = 10.0f;
+                    assert((target(value, targetCalls)
+                        /= rhs(value, 2.0L)) == 5.0f);
+                    assert(value == 5.0f);
+                    value = 10.0f;
+                    assert((target(value, targetCalls)
+                        %= rhs(value, 2.25L)) == 1.0f);
+                    assert(value == 1.0f);
+                    assert(targetCalls == 5);
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE reads the promoted target after the right side"),
+)) {
+    @("arithmetic.floatingCompoundAssign.doubleReal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        1.0.shouldBeRetOf!(
+            backend,
+            q{
+                ref double target(ref double value, ref int calls) {
+                    ++calls;
+                    return value;
+                }
+
+                real rhs(ref double value, real step) {
+                    value = 1.5;
+                    return step;
+                }
+
+                double result() {
+                    double value = 10.0;
+                    int targetCalls;
+                    value = 10.0;
+                    assert((target(value, targetCalls)
+                        += rhs(value, 2.25L)) == 12.25);
+                    assert(value == 12.25);
+                    value = 10.0;
+                    assert((target(value, targetCalls)
+                        -= rhs(value, 2.25L)) == 7.75);
+                    assert(value == 7.75);
+                    value = 10.0;
+                    assert((target(value, targetCalls)
+                        *= rhs(value, 2.25L)) == 22.5);
+                    assert(value == 22.5);
+                    value = 10.0;
+                    assert((target(value, targetCalls)
+                        /= rhs(value, 2.0L)) == 5.0);
+                    assert(value == 5.0);
+                    value = 10.0;
+                    assert((target(value, targetCalls)
+                        %= rhs(value, 2.25L)) == 1.0);
+                    assert(value == 1.0);
+                    assert(targetCalls == 5);
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+// CTFE keeps its own post-RHS order for these promoted operations. Keep one
+// small sibling for each target/RHS width pair so the omission above remains
+// a pinned behavior, not an untested backend.
+@("arithmetic.floatingCompoundAssign.floatDouble.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    3.75f.shouldBeRetOf!(
+        Ctfe,
+        q{
+            double rhs(ref float value) {
+                value = 1.5f;
+                return 2.25;
+            }
+
+            float result() {
+                float value = 10.0f;
+                value += rhs(value);
+                return value;
+            }
+        },
+        "result",
+    );
+}
+
+@("arithmetic.floatingCompoundAssign.floatReal.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    3.75f.shouldBeRetOf!(
+        Ctfe,
+        q{
+            real rhs(ref float value) {
+                value = 1.5f;
+                return 2.25L;
+            }
+
+            float result() {
+                float value = 10.0f;
+                value += rhs(value);
+                return value;
+            }
+        },
+        "result",
+    );
+}
+
+@("arithmetic.floatingCompoundAssign.doubleReal.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    3.75.shouldBeRetOf!(
+        Ctfe,
+        q{
+            real rhs(ref double value) {
+                value = 1.5;
+                return 2.25L;
+            }
+
+            double result() {
+                double value = 10.0;
+                value += rhs(value);
+                return value;
+            }
+        },
+        "result",
+    );
+}
+
+// Without a RHS side effect, mixed-width arithmetic has the same result on
+// every backend, including CTFE. Keep these basic operations on the full
+// matrix beside the order-specific regressions above.
+static foreach (backend; Matrix!()) {
+    @("arithmetic.floatingCompoundAssign.floatDouble.ordinary."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.5f.shouldBeRetOf!(
+            backend,
+            q{
+                float result() {
+                    float value = 0.5f;
+                    double step = 2.0;
+                    value += step;
+                    value -= step;
+                    value *= step;
+                    value /= step;
+                    value %= step;
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arithmetic.floatingCompoundAssign.floatReal.ordinary."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.5f.shouldBeRetOf!(
+            backend,
+            q{
+                float result() {
+                    float value = 0.5f;
+                    real step = 2.0L;
+                    value += step;
+                    value -= step;
+                    value *= step;
+                    value /= step;
+                    value %= step;
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("arithmetic.floatingCompoundAssign.doubleReal.ordinary."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.5.shouldBeRetOf!(
+            backend,
+            q{
+                double result() {
+                    double value = 0.5;
+                    real step = 2.0L;
+                    value += step;
+                    value -= step;
+                    value *= step;
+                    value /= step;
+                    value %= step;
+                    return value;
+                }
+            },
+            "result",
+        );
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("arithmetic.andAssign." ~ backend.stringof)
     @Tags(backend.stringof)

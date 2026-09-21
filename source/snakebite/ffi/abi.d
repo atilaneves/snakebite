@@ -92,6 +92,7 @@ public struct Register {
         pointer,
         integer,
         sse,
+        x87,
         none, // nothing travels: a `void` return
     }
 
@@ -151,6 +152,24 @@ public struct ArgumentPlan {
             validateMemoryParameter(type);
         return plan;
     }
+
+    public static ArgumentPlan ofReturn(Type type) {
+        import dmd.astenums: Tfloat80;
+        import dmd.typesem: size;
+
+        if (type.ty == Tfloat80)
+            return ArgumentPlan(
+                [Register(Register.Kind.x87, cast(ubyte) type.size),
+                    Register.init],
+                1,
+                false,
+            );
+        if (containsReal(type))
+            throw new Exception(
+                "ffi cannot return an aggregate containing `real`",
+            );
+        return of(type);
+    }
 }
 
 // Only explicit MEMORY-class parameters need the stack alignment check.
@@ -183,8 +202,31 @@ private void validateMemoryParameter(
 // places on the stack, so `ArgumentPlan.of`'s alignment limit does not
 // apply to it.
 public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type type) {
+    import dmd.astenums: Tfloat80;
+
+    if (type.ty == Tfloat80)
+        return false;
+    if (type.ty != Tfloat80 && containsReal(type))
+        throw new Exception(
+            "ffi cannot return an aggregate containing `real`",
+        );
     const plan = aggregatePlan(type);
     return plan.memory || plan.indirect;
+}
+
+private bool containsReal(imported!"dmd.mtype".Type type) {
+    import dmd.astenums: Tfloat80;
+    import dmd.typesem: nextOf;
+
+    if (type.ty == Tfloat80)
+        return true;
+    if (auto array = type.isTypeSArray)
+        return containsReal(type.nextOf);
+    if (auto aggregate = type.isTypeStruct)
+        foreach (field; aggregate.sym.fields)
+            if (field.type !is null && containsReal(field.type))
+                return true;
+    return false;
 }
 
 // Whether `type` is a non-trivially-copyable struct, possibly through a
@@ -211,7 +253,8 @@ private bool isNonTriviallyCopyable(imported!"dmd.mtype".Type type) {
 
 private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
     import dmd.astenums:
-        Taarray, Tclass, Tfloat32, Tfloat64, Tnull, Tpointer, Tvoid;
+        Taarray, Tclass, Tfloat32, Tfloat64, Tfloat80, Tnull, Tpointer,
+        Tvoid;
     import dmd.typesem: alignsize, isIntegral, isUnsigned, size;
     import std.algorithm: min;
 
@@ -239,6 +282,13 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
             cast(ubyte) type.size,
         );
         plan.count = 1;
+        return plan;
+    }
+
+    if (type.ty == Tfloat80) {
+        plan.memory = true;
+        plan.memoryBytes = type.size;
+        plan.memoryAlignment = type.alignsize;
         return plan;
     }
 

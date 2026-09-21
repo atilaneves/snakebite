@@ -28,6 +28,7 @@ import std.conv: text;
 private struct Recorded {
     long[] integers;
     double[] doubles;
+    real[] reals;
     void* context;
     bool hasContext;
     size_t calls;
@@ -67,6 +68,8 @@ private struct ContextValue {
 
 private alias IntOfInt = extern(C) int function(int);
 private alias DoubleOfMixed = extern(C) double function(double, long, float);
+private alias RealOfReal = extern(C) real function(real);
+private alias ReverseReal = extern(D) real function(long, real);
 private alias TripleOfLong = extern(C) Triple function(long);
 private alias LongOfEight = extern(C) long function(
     long, long, long, long, long, long, long, long);
@@ -126,6 +129,28 @@ private extern(C) void recordMixed(void* owner, CallbackCall* call) {
 }
 
 
+private extern(C) void recordReal(void* owner, CallbackCall* call) {
+    auto recorded = cast(Recorded*) owner;
+    ++recorded.calls;
+    const value = *cast(const real*) call.arguments[0];
+    recorded.reals ~= value;
+    *cast(real*) call.returnPlace = value + real.epsilon;
+}
+
+
+private extern(C) void recordReverseReal(
+    void* owner, CallbackCall* call,
+) {
+    auto recorded = cast(Recorded*) owner;
+    ++recorded.calls;
+    const integer = *cast(const long*) call.arguments[0];
+    const value = *cast(const real*) call.arguments[1];
+    recorded.integers ~= integer;
+    recorded.reals ~= value;
+    *cast(real*) call.returnPlace = value + integer;
+}
+
+
 // SSE-class arguments and an SSE-class result travel through the entry
 // as their own registers, a `float` at its own four-byte width.
 @("entry.sse")
@@ -142,6 +167,44 @@ unittest {
 
     recorded.doubles.should == [1.5, 0.25];
     recorded.integers.should == [10];
+}
+
+
+@("entry.scalarReal")
+unittest {
+    auto function_ = declarationOf(
+        q{ extern(C) real realCallback(real value); }, "realCallback");
+    Recorded recorded;
+    auto bridge = new CallbackBridge(&recordReal, &recorded);
+    int word;
+    bridge.register(&word, function_);
+
+    auto entry = cast(RealOfReal) bridge.entryOf(&word);
+    const value = 1.0L + real.epsilon;
+    entry(value).should == value + real.epsilon;
+
+    recorded.calls.should == 1;
+    recorded.reals.should == [value];
+}
+
+
+@("entry.scalarReal.reverseD")
+unittest {
+    auto function_ = declarationOf(q{
+        extern(D) real reverseReal(long integer, real value);
+    }, "reverseReal");
+    Recorded recorded;
+    auto bridge = new CallbackBridge(&recordReverseReal, &recorded);
+    int word;
+    bridge.register(&word, function_);
+
+    auto entry = cast(ReverseReal) bridge.entryOf(&word);
+    const value = 1.0L + real.epsilon;
+    entry(3, value).should == value + 3;
+
+    recorded.calls.should == 1;
+    recorded.integers.should == [3];
+    recorded.reals.should == [value];
 }
 
 
