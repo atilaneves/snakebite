@@ -364,6 +364,7 @@ static foreach (backend; Matrix!()) {
 // the exact mangle of the function itself.
 static foreach (backend; Matrix!()) {
     @("image.importedTemplateDelegate." ~ backend.stringof)
+    @Serial
     unittest {
         enum code = q{
             import std.algorithm.comparison: among;
