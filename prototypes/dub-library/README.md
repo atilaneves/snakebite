@@ -74,3 +74,63 @@ generation-hook inputs before it can replace fresh descriptions.
 
 The prototype remains on `prototype/dub-library-cost`. No production integration
 is justified by these measurements alone.
+
+## Profile of repeated descriptions
+
+Run the focused profile with:
+
+```sh
+prototypes/dub-library/prototype . 15 profile
+```
+
+This mode loads the project and compiler settings once. It then measures full
+descriptions, metadata-only descriptions (`buildType = ""`), and individual
+package descriptions. It excludes JSON conversion. Each row has 15 samples.
+
+| Median | Original | Without root import paths | Restored |
+|---|---:|---:|---:|
+| Loaded project description | 97.355 ms | 56.163 ms | 80.272 ms |
+| Package metadata only | 40.072 ms | 17.008 ms | 31.302 ms |
+| Snakebite package metadata | 21.039 ms | 2.619 ms | 16.602 ms |
+
+The middle run temporarily removed the five `importPaths "."` entries in
+this worktree's manifest. All five were restored. This changes the description
+and is only a diagnostic experiment, not a valid implementation change.
+Other packages also got faster between runs, so do not attribute the entire
+initial-to-middle difference to the manifest edit.
+
+The DUB 1.42.0 source explains the repeated work:
+
+- `package_.d:613` calls both `getBuildSettings` and
+  `getCombinedBuildSettings` for each package description. The latter includes
+  every configuration and platform, even those not used for this build.
+- `compilers/buildsettings.d:527` recursively enumerates directories with
+  `dirEntries(..., SpanMode.depth)`. This includes import paths, not only
+  source paths. It filters hidden entries after traversal has reached them.
+- `generators/generator.d:145` gathers build settings again for targets.
+  Line 176 gathers them again after generation hooks. Line 189 gathers them
+  again during finalization.
+
+A CPU profile of the original full benchmark had 1,852 samples. Notable self
+samples were GC spin locks (17.2%), wildcard matching (5.7%), path construction
+(3.9%), GC allocation (3.9%), and GC marking (3.8%). These percentages cover
+the full benchmark, including startup and JSON work. They must not be treated
+as a breakdown of the isolated loaded-project call. Stack unwinding did not
+give a useful inclusive call tree.
+
+A process trace of the focused mode showed one compiler probe during setup.
+Each full description, including the warm-up, ran DMD's generation hook. That
+hook starts DUB, probes DMD, runs the cached config executable, and runs Git.
+The hook alone took a median of 9.962 ms over 15 runs, with a range of
+9.580 to 10.837 ms. This separate measurement is not an exact subtraction
+from the full-call timing because its environment differs from the hook call.
+
+The main cost is repeated file discovery and build-settings construction.
+Keeping a `Dub` object alive does not preserve these results. Target generation
+adds more scans and an unconditional hook call. A suitable next experiment is
+to gather only the active build information once, then reuse file-discovery
+results until directory contents or build inputs change. Hook reuse needs an
+explicit input rule. Source-content edits alone need not change file lists.
+
+The four existing `ut.dub` tests passed after the prototype edit. The focused
+mode passed on the small project and Snakebite. No production change remains.

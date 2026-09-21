@@ -76,6 +76,32 @@ int main(string[] args) {
     const count = args.length > 2 ? args[2].to!size_t : 7;
     assert(count > 0);
     setLogLevel(LogLevel.error);
+    if (args.length > 3 && args[3] == "profile") {
+        auto dub = new Dub(root);
+        dub.loadPackage;
+        dub.project.validate;
+        auto settings = settingsFor(dub, root);
+        auto result = dub.project.describe(settings);
+        measure("Loaded project describe", count, {
+            result = dub.project.describe(settings);
+        });
+        auto metadataSettings = settings;
+        metadataSettings.buildType = "";
+        measure("Package metadata only", count, {
+            result = dub.project.describe(metadataSettings);
+        });
+        const configs = dub.project.getPackageConfigs(settings.platform, settings.config);
+        foreach (pack; [dub.project.rootPackage] ~ dub.project.dependencies) {
+            const config = pack.name == dub.project.rootPackage.name
+                ? settings.config : configs[pack.name];
+            measure("Package " ~ pack.name, count, {
+                auto description = pack.describe(settings.platform, config);
+                assert(description.name == pack.name);
+            });
+        }
+        writefln("Profile complete: %s packages", result.packages.length);
+        return 0;
+    }
     size_t packages;
     size_t sourceFiles;
     string[] expectedSources;
