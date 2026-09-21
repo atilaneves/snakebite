@@ -99,6 +99,24 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// dub's debug and unittest build types pass the compiler `-debug`, so a
+// `debug` block in a root module is compiled in. A project loaded here
+// gets the same flag from its dub options, and the frontend has to
+// honour the bare flag, not only `-debug=identifier`.
+static foreach (backend; Matrix!()) {
+    @("dubDebugModeCompilesDebugBlocks." ~ backend.stringof)
+    @Serial
+    unittest {
+        enum moduleName = "debug_mode_" ~ backend.stringof;
+        const sandbox = Sandbox();
+        sandbox.writeFile("app/dub.sdl", dubProjectRecipe("debugmode"));
+        sandbox.writeFile("app/source/" ~ moduleName ~ ".d",
+            "module " ~ moduleName ~ ";\n"
+            ~ "int main() { debug { return 0; } return 1; }\n");
+        dubProjectMainShouldSucceed!backend(sandbox.inSandboxPath("app"));
+    }
+}
+
 // A dub recipe whose unittest configuration is an executable: dub's own
 // synthetic unittest configuration would put a generated stub with its
 // own `main` first, and a program takes the first root `main` it finds.

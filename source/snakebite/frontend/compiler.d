@@ -608,6 +608,7 @@ private struct SavedFrontendFlags {
     imported!"dmd.globals".FeatureState dtorFields;
     imported!"dmd.globals".FeatureState systemVariables;
     bool bitfields;
+    bool debugEnabled;
 }
 
 private SavedFrontendFlags saveFrontendFlags() {
@@ -636,6 +637,7 @@ private SavedFrontendFlags saveFrontendFlags() {
         global.params.dtorFields,
         global.params.systemVariables,
         global.params.bitfields,
+        global.params.debugEnabled,
     );
 }
 
@@ -665,6 +667,7 @@ private void restoreFrontendFlags(ref const SavedFrontendFlags saved) {
     global.params.dtorFields = saved.dtorFields;
     global.params.systemVariables = saved.systemVariables;
     global.params.bitfields = saved.bitfields;
+    global.params.debugEnabled = saved.debugEnabled;
 }
 
 private void applyFrontendFlags(in FrontendFlags flags) {
@@ -717,6 +720,8 @@ private void applyFrontendFlags(in FrontendFlags flags) {
             parsedParams.ehnogc = true;
         else if (arg.startsWith("-version="))
             VersionCondition.addGlobalIdent(arg["-version=".length .. $]);
+        else if (arg == "-debug")
+            parsedParams.debugEnabled = true;
         else if (arg.startsWith("-debug="))
             DebugCondition.addGlobalIdent(arg["-debug=".length .. $]);
         else if (arg.length > 2 && arg.startsWith("-J="))
@@ -797,6 +802,7 @@ private void applyParsedFrontendParams(ref const imported!"dmd.globals".Param pa
     global.params.dtorFields = params.dtorFields;
     global.params.systemVariables = params.systemVariables;
     global.params.bitfields = params.bitfields;
+    global.params.debugEnabled = params.debugEnabled;
 }
 
 private string sourceFileName(imported!"dmd.dmodule".Module module_) @trusted {
