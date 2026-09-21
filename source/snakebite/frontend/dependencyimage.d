@@ -205,14 +205,14 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
         // expressions. Distinct declarations can also share a mangled name,
         // so use the same traversal order as __traits(getOverloads).
         const selection = text("alias overload = __traits(getOverloads, ",
-            moduleName, ", \"", identifier, "\", true)[", ordinal, "];\n",
-            "mixin(q{alias selected = ", candidate, ";});\n");
+            moduleName, ", \"", identifier, "\", true)[", ordinal, "];\n");
+        const selectedPointer = text("mixin(q{",
+            sourceSpelling(pointerType.toChars.fromStringz),
+            " pointer = &", candidate, ";});\n");
         return result ~ text("static if (__traits(compiles, { ", selection,
-            "auto pointer = &selected; })) {\n", selection,
-            "static if (!is(typeof(&selected) == delegate)\n",
-            "    && selected.mangleof == q{", mangled, "})\n",
+            selectedPointer, "})) {\n", selection, selectedPointer,
             "if (name == q{", mangled,
-            "}) return cast(void*) &selected;\n",
+            "}) return cast(void*) pointer;\n",
             "}\n}\n}\n");
     }
 
