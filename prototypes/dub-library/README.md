@@ -134,3 +134,6 @@ explicit input rule. Source-content edits alone need not change file lists.
 
 The four existing `ut.dub` tests passed after the prototype edit. The focused
 mode passed on the small project and Snakebite. No production change remains.
+
+See [SNAPSHOT.md](SNAPSHOT.md) for the follow-up experiment that caches
+resolved inputs in Snakebite without changing or linking DUB.
