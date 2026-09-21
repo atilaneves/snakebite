@@ -97,12 +97,6 @@ public DependencyImage prepareImage(
         ~ importPaths.map!(path => "-I" ~ path).array
         ~ stringImportPaths.map!(path => "-J" ~ path).array;
     const executable = compilerPath(compiler);
-    const identityOutput = compilerIdentity([executable]);
-    import std.algorithm: startsWith;
-    version (DigitalMars)
-        require(identityOutput.startsWith("DMD"), "Image compiler must be DMD");
-    else version (LDC)
-        require(identityOutput.startsWith("LDC"), "Image compiler must be LDC");
 
     // The image must emit transitive template bodies too, including runtime
     // helpers introduced by assertion lowering. No guest object supplies them.
@@ -140,6 +134,48 @@ public DependencyImage prepareImage(
         else
             dependencyFlags ~= path;
     }
+    // The C++ compiler is only ever asked for when a caller actually
+    // wants C++ code in the image - a build with no `cppSource` probes
+    // no C++ toolchain and its fingerprint is byte-for-byte what it was
+    // before this parameter existed.
+    const hasCppSource = cppSource.length != 0;
+    string[] cxxCommand;
+    string cxxExecutable;
+    if (hasCppSource) {
+        cxxCommand = resolveCxxCommand(cxxCompiler);
+        cxxExecutable = cxxCommand[0];
+    }
+
+    // Everything the content fingerprint below depends on, minus file
+    // contents, keys a stamp record. An unchanged compiler, input set and
+    // source hits there without a compiler probe or a content hash: the
+    // record was written after a successful build, and a compiler whose
+    // stamp is unchanged is the one whose version output and binary that
+    // build recorded. A CLI run pays this path once per invocation, so it
+    // has to cost a few stats, not a 20 ms subprocess and a hash of the
+    // whole compiler executable.
+    const directory = cacheDirectory.absolutePath;
+    const settings = text("snakebite-image-v1\n", executable, "\n",
+        __VERSION__, "\n", compileFlags, "\n", linkFlags, "\n", importFlags,
+        "\n", dependencyFlags, "\n", linkerArguments, "\n",
+        inputs.map!(input => input.absolutePath).array, "\n",
+        source.length, ":", source, "\ncxx:", cxxCommand, "\n",
+        cxxCompileFlags, "\n", cxxCompilerArguments, "\n",
+        cppSource.length, ":", cppSource);
+    auto stamps = ProjectImageCache(
+        directory.buildPath(sourceDigest(settings) ~ ".json"), settings, null,
+        executable);
+    DependencyImage image;
+    if (stamps.restore(image, () => source))
+        return image;
+
+    const identityOutput = compilerIdentity([executable]);
+    import std.algorithm: startsWith;
+    version (DigitalMars)
+        require(identityOutput.startsWith("DMD"), "Image compiler must be DMD");
+    else version (LDC)
+        require(identityOutput.startsWith("LDC"), "Image compiler must be LDC");
+
     string fingerprint = text("snakebite-image-v1\n", executable, "\n",
         read(executable).sha256Of.toHexString, "\n", identityOutput,
         "\n", __VERSION__, "\n", compileFlags, "\n", linkFlags,
@@ -149,17 +185,8 @@ public DependencyImage prepareImage(
         fingerprint ~= text("\n", input.absolutePath.length, ":",
             input.absolutePath, ":", read(input).sha256Of.toHexString);
 
-    // The C++ compiler is only ever asked for when a caller actually
-    // wants C++ code in the image - a build with no `cppSource` probes
-    // no C++ toolchain and its fingerprint is byte-for-byte what it was
-    // before this parameter existed.
-    const hasCppSource = cppSource.length != 0;
-    string[] cxxCommand;
-    string cxxExecutable;
     string cxxRuntimeLibrary;
     if (hasCppSource) {
-        cxxCommand = resolveCxxCommand(cxxCompiler);
-        cxxExecutable = cxxCommand[0];
         const cxxIdentity = compilerIdentity(cxxCommand);
         // The C++ runtime library this pulls in is what gives the image
         // `operator new`/`delete`, RTTI and the exception personality
@@ -177,7 +204,6 @@ public DependencyImage prepareImage(
             "\n", cxxRuntimeLibrary, "\n", cppSource.length, ":", cppSource);
     }
 
-    const directory = cacheDirectory.absolutePath;
     directory.mkdirRecurse;
     const destination = directory.buildPath(fingerprint.sha256Of.toHexString ~ ".so");
     if (!destination.exists) {
@@ -221,14 +247,17 @@ public DependencyImage prepareImage(
         // builders publish equivalent complete files with atomic rename.
         rename(imagePath, destination);
     }
-    return loadImage(destination);
+    image = loadImage(destination);
+    stamps.save(destination, source,
+        inputs ~ linkerFiles ~ (hasCppSource ? [cxxExecutable] : null));
+    return image;
 }
 
 
 private DependencyImage loadImage(in string path) {
     import core.runtime: Runtime;
     import core.sys.posix.dlfcn:
-        dlclose, dlerror, dlopen, RTLD_LAZY, RTLD_NODELETE;
+        dlerror, dlopen, RTLD_LAZY, RTLD_NODELETE;
     import std.string: fromStringz, toStringz;
     import std.conv: text;
 
@@ -256,16 +285,22 @@ private DependencyImage loadImage(in string path) {
     }
     // druntime releases a thread's library references when that thread exits.
     // Symbols must remain valid for the executable after the loading thread ends.
-    const pinned = dlopen(path.toStringz, RTLD_LAZY | RTLD_NODELETE);
-    if (pinned is null)
-        require(false, text("Cannot retain dependency image ", path,
-            ": ", dlerror.fromStringz));
-    dlclose(cast(void*) pinned);
+    if (path !in _pinnedImages) {
+        const pinned = dlopen(path.toStringz, RTLD_LAZY | RTLD_NODELETE);
+        if (pinned is null)
+            require(false, text("Cannot retain dependency image ", path,
+                ": ", dlerror.fromStringz));
+        // Keep one loader reference until process exit. Closing it here lets
+        // the loader run DSO teardown after druntime released the loading
+        // thread's reference, so the DSO is no longer in its DSO list.
+        _pinnedImages[path] = cast(void*) pinned;
+    }
     return image;
 }
 
 
 private __gshared TestHooks[void*] _imageTestHooks;
+private __gshared void*[string] _pinnedImages;
 private __gshared imported!"core.sync.mutex".Mutex _imageLoadLock;
 
 
@@ -307,30 +342,15 @@ private void runCompiler(
 }
 
 
-// The compiler's identity does not change while a process runs (the
-// installation at a given path is assumed immutable, see the doc comment
-// on prepareImage above), so probe it once per command, not once per
-// image build. `command` is the whole invocation - a wrapper such as
-// `ccache` ahead of the real compiler counts, since it can change what
-// actually runs - joined to one string as the cache key.
-private __gshared string[string] _compilerIdentityCache;
-private __gshared string[string] _cxxRuntimeLibraryCache;
-private __gshared Object _compilerIdentityMutex = new Object();
-
+// `command` is the whole invocation - a wrapper such as `ccache` ahead of
+// the real compiler counts, since it can change what actually runs. This
+// runs only when an image's stamp record misses, so the stamp record is
+// what keeps it to one probe per compiler, across processes as well.
 private string compilerIdentity(in string[] command) {
-    import std.conv: text;
     import std.process: execute;
 
-    const key = command.text;
-    synchronized (_compilerIdentityMutex) {
-        if (auto found = key in _compilerIdentityCache)
-            return *found;
-    }
     const identity = execute(command ~ ["--version"]);
     require(identity.status == 0, "Cannot identify image compiler: " ~ identity.output);
-    synchronized (_compilerIdentityMutex) {
-        _compilerIdentityCache[key] = identity.output;
-    }
     return identity.output;
 }
 
@@ -354,12 +374,6 @@ private string probeCxxRuntimeLibrary(in string[] cxxCommand) {
     import std.process: execute;
     import std.uuid: randomUUID;
 
-    const key = cxxCommand.text;
-    synchronized (_compilerIdentityMutex) {
-        if (auto found = key in _cxxRuntimeLibraryCache)
-            return *found;
-    }
-
     const probeSource = buildPath(
         tempDir(), text("snakebite-cxx-probe-", randomUUID, ".cpp"));
     probeSource.write("int snakebite_cxx_runtime_probe() { return 0; }\n");
@@ -380,10 +394,6 @@ private string probeCxxRuntimeLibrary(in string[] cxxCommand) {
     else
         require(false, text("Cannot tell which C++ runtime library `",
             cxxCommand, "` links: ", probe.output));
-
-    synchronized (_compilerIdentityMutex) {
-        _cxxRuntimeLibraryCache[key] = library;
-    }
     return library;
 }
 
@@ -435,20 +445,27 @@ private void require(in bool condition, in string message) {
 }
 
 
-// Unchanged projects need only metadata checks and a loader reference.
+// An unchanged image needs only metadata checks and a loader reference:
+// file stamps for the compiler and every input stand in for their contents.
 // A root edit can reuse the same image if it requests the same templates.
 public struct ProjectImageCache {
     private string _path;
     private string _settings;
     private string[] _roots;
+    private string _compiler;
 
-    public this(in string directory, in string settings, in string[] roots) {
-        import std.path: buildPath;
+    public this(
+        in string recordPath,
+        in string settings,
+        in string[] roots,
+        in string compiler = defaultCompiler,
+    ) {
         import std.conv: text;
 
-        _path = buildPath(directory, "project.json");
+        _path = recordPath;
         _settings = sourceDigest(text("snakebite-project-image-v2", __VERSION__, settings));
         _roots = roots.dup;
+        _compiler = compilerPath(compiler);
     }
 
     public bool restore(ref DependencyImage image, scope string delegate() source) {
@@ -459,7 +476,7 @@ public struct ProjectImageCache {
             return false;
         auto record = parseJSON(_path.readText);
         if (record["settings"].str != _settings
-                || record["compiler"].str != compilerPath(defaultCompiler))
+                || record["compiler"].str != _compiler)
             return false;
         foreach (path, stamp; record["inputs"].object)
             if (fileStamp(path) != stamp.str)
@@ -491,12 +508,11 @@ public struct ProjectImageCache {
     public void save(in string path, in string source, in string[] inputs) const {
         import std.json: JSONValue;
 
-        const compiler = compilerPath(defaultCompiler);
         JSONValue record;
         record["settings"] = _settings;
-        record["compiler"] = compiler;
+        record["compiler"] = _compiler;
         record["roots"] = fileStamps(_roots);
-        record["inputs"] = fileStamps(inputs ~ [compiler, path]);
+        record["inputs"] = fileStamps(inputs ~ [_compiler, path]);
         record["source"] = sourceDigest(source);
         record["image"] = path;
         publish(record.toString);

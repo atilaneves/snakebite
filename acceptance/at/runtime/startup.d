@@ -50,6 +50,21 @@ static foreach (backend; Matrix!()) {
             ["All unit tests have been run successfully."]);
     }
 
+    // `Nullable` declares unittests inside the template. DMD only parses
+    // those in a root module; a Phobos instance carries empty placeholders
+    // that compiled D never runs.
+    @("phobosTemplateInstanceTests." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        checkStartup!backend("phobos", [q{
+            module probe;
+            import std.typecons: Nullable;
+            struct Probe { int value; }
+            unittest { Nullable!Probe maybe; assert(maybe.isNull); }
+        }], [], 0, ["1 modules passed unittests"],
+            ["All unit tests have been run successfully."]);
+    }
+
     @("defaultTestRunner." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

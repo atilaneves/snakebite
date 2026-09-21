@@ -39,18 +39,27 @@ private enum registrySource = q{
         registry(&data);
         _unregister = registry;
     }
-    // The pinned image outlives guest workers. Its ELF destructor is the
-    // same point at which compiler-generated registrations are removed.
-    pragma(crt_destructor) extern(C) void unregisterTests() {
+    export extern(C) void snakebite_unregister_tests() {
         if (_slot !is null) {
             auto data = CompilerDSOData(1, &_slot, null, null);
             _unregister(&data);
         }
     }
+    // Keep the destructor as a fallback for an interrupted test startup.
+    pragma(crt_destructor) extern(C) void unregisterTests() {
+        snakebite_unregister_tests();
+    }
 };
 
 
-public int runTestsAndMain(
+public struct TestStartupReport {
+    public int status;
+    public imported!"core.time".Duration constructorDuration;
+    public imported!"core.time".Duration activationDuration;
+}
+
+
+public TestStartupReport runTestsAndMain(
     imported!"snakebite.backends.backend".Backend backend,
     imported!"snakebite.backends.backend".Program program,
     in string[] arguments,
@@ -58,6 +67,7 @@ public int runTestsAndMain(
     import snakebite.backends.backend: TestHooks, runMain, runModuleConstructors;
     import std.algorithm.iteration: map;
     import std.array: array;
+    import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.string: toStringz;
 
     const savedHooks = TestHooks.current;
@@ -76,17 +86,35 @@ public int runTestsAndMain(
     _runtimeCArgs.argc = cast(int) _runtimeArgs.length;
     _runtimeCArgs.argv = cArguments.ptr;
 
-    if (runModuleConstructors(backend, program.moduleConstructors))
-        return 1;
+    auto stopWatch = StopWatch(AutoStart.yes);
+    const constructorStatus = runModuleConstructors(
+        backend,
+        program.moduleConstructors,
+    );
+    const constructorDuration = stopWatch.peek;
+    if (constructorStatus) {
+        TestStartupReport report;
+        report.status = 1;
+        report.constructorDuration = constructorDuration;
+        return report;
+    }
 
+    stopWatch.reset;
     auto modules = activateModules(backend, program);
-    scope(exit) foreach (module_; modules)
-        *testEntry(module_) = null;
+    const activationDuration = stopWatch.peek;
+    scope(exit) {
+        foreach (module_; modules)
+            *testEntry(module_) = null;
+    }
 
     _main = (string[] args) => runMain(backend, program, args);
     // druntime owns runner selection, summaries, failure status and the
     // decision to call main. Its nested init/term pair is reference counted.
-    return _d_run_main(_runtimeCArgs.argc, cArguments.ptr, &callMain);
+    TestStartupReport report;
+    report.status = _d_run_main(_runtimeCArgs.argc, cArguments.ptr, &callMain);
+    report.constructorDuration = constructorDuration;
+    report.activationDuration = activationDuration;
+    return report;
 }
 
 
@@ -106,19 +134,29 @@ private ModuleInfo*[] activateModules(
         assert(existing.length == modules.length);
         foreach (i, module_; *existing)
             *testEntry(module_) = *testEntry(modules[i]);
-        return *existing;
-    }
+        modules = *existing;
+    } else {
+        _registeredModules[path] = modules;
 
-    _registeredModules[path] = modules;
-    alias Registry = extern(C) void function(void*);
-    alias Register = extern(C) void function(Registry, const(void*)*, size_t);
-    const register = cast(Register) program.testStartupImage.resolve("snakebite_register_tests");
-    assert(register !is null);
-    if (modules.length)
-        register(&_d_dso_registry, cast(const(void*)*) modules.ptr, modules.length);
+        alias Registry = extern(C) void function(void*);
+        alias Register = extern(C) void function(
+            Registry,
+            const(void*)*,
+            size_t,
+        );
+        const register = cast(Register) program.testStartupImage.resolve(
+            "snakebite_register_tests",
+        );
+        assert(register !is null);
+        if (modules.length)
+            register(
+                &_d_dso_registry,
+                cast(const(void*)*) modules.ptr,
+                modules.length,
+            );
+    }
     return modules;
 }
-
 
 private int delegate(string[]) _main;
 

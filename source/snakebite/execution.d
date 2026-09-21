@@ -7,6 +7,8 @@ private:
 public struct ExecutionReport {
     public int status;
     public imported!"core.time".Duration runTime;
+    public imported!"core.time".Duration constructorDuration;
+    public imported!"core.time".Duration activationDuration;
     public imported!"snakebite.backends".CompilationStatistics compilation;
 }
 
@@ -81,10 +83,11 @@ public ExecutionReport executeBackend(
     in imported!"snakebite.backends".BackendName name,
     imported!"snakebite.backends".Program program,
     in string[] hostArguments = null,
+    in bool collectGarbage = true,
 ) {
     import snakebite.backends: makeBackend;
     import snakebite.backends.backend: run;
-    import snakebite.teststartup: runTestsAndMain;
+    import snakebite.teststartup: TestStartupReport, runTestsAndMain;
     import std.datetime.stopwatch: AutoStart, StopWatch;
 
     import std.stdio: stdin, stdout, stderr;
@@ -102,17 +105,25 @@ public ExecutionReport executeBackend(
 
     auto stopWatch = StopWatch(AutoStart.yes);
     scope backend = makeBackend(name, program);
+    TestStartupReport startup;
+    int status;
     // Snippet callers construct Programs without project startup metadata.
-    const status = program.testStartupImage is null
-        ? run(backend, program, hostArguments)
-        : runTestsAndMain(backend, program, hostArguments);
+    if (program.testStartupImage is null)
+        status = run(backend, program, hostArguments);
+    else {
+        startup = runTestsAndMain(backend, program, hostArguments);
+        status = startup.status;
+    }
     // Native objects can hold callback entries for guest destructors. Run
     // their finalizers while the backend and the frontend declarations that
     // those entries name are still alive.
-    imported!"core.memory".GC.collect;
+    if (collectGarbage)
+        imported!"core.memory".GC.collect;
     return ExecutionReport(
         status,
         stopWatch.peek,
+        startup.constructorDuration,
+        startup.activationDuration,
         backend.compilationStatistics,
     );
 }
