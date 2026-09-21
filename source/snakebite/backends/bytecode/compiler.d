@@ -5672,7 +5672,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         });
         // An unused branch can refer to a compiler intrinsic with no host
         // symbol. Resolve it only if execution reaches the call. Known native
-        // targets stay prepared for callbacks that first run during GC.
+        // targets stay prepared for callbacks that first run during GC. A
+        // target with no symbol has no plan to prepare early: the lookup
+        // misses again, so the call fails whenever it executes.
         const returnWidth = returnShape.returnFacts.size;
         if (hasNativeSymbol) {
             const plan = preparation.prepare(_bytecode._plans, callee);
