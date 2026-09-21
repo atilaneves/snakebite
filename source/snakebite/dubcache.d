@@ -178,7 +178,10 @@ private imported!"std.json".JSONValue collectWatches(
                 // Unresolved external or variable paths cannot be inferred from
                 // the description when their directories do not yet exist.
                 if (recipe.canFind("..") || recipe.canFind("$")
-                        || recipe.canFind("\"/") || recipe.canFind("\"~"))
+                        || recipe.canFind("\"/") || recipe.canFind("\"~")
+                        || recipe.canFind("\\") || recipe.canFind("`")
+                        || recipe.canFind(".dub") || recipe.canFind(".git")
+                        || recipe.canFind(".snakebite"))
                     cacheable = false;
             }
         }

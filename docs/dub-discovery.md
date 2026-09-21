@@ -11,7 +11,7 @@ current source files.
 
 The cache tracks package recipes, selections, directory contents, DUB and
 compiler binaries, compiler configuration, and local package registrations.
-Compiler versions requested by the caller and environment changes also
+Version identifiers requested by the caller and environment changes also
 invalidate it. The shell bookkeeping variables `_` and `SHLVL` are ignored.
 Files added, removed, or renamed cause discovery to run again. An atomic
 save with the same directory entries does not by itself invalidate the
