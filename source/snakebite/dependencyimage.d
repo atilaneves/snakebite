@@ -28,6 +28,10 @@ public struct DependencyImage {
     private string _path;
     public TestHooks testHooks;
 
+    // The image exports its function registry under this name. The frontend
+    // generator writes the definition and `resolve` looks it up.
+    public enum registrySymbol = "snakebite_dependency_image_symbols_v1";
+
     public string path() @safe @nogc nothrow pure const return scope {
         return _path;
     }
@@ -47,7 +51,7 @@ public struct DependencyImage {
         alias Registry = extern(C) void* function(const(char)[]);
         dlerror;
         const registry = cast(Registry) dlsym(cast(void*) _handle,
-            "snakebite_dependency_image_symbols_v1".toStringz);
+            registrySymbol.toStringz);
         if (dlerror !is null || registry is null)
             return null;
         return registry(name);

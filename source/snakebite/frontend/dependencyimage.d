@@ -92,6 +92,7 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
         import std.algorithm: sort;
         import std.array: array;
         import dmd.mangle: mangleExact;
+        import snakebite.dependencyimage: DependencyImage;
         // A dependency template can import a root module internally, even
         // when its template arguments contain no root-owned declarations.
         // Propagate through cycles before deciding which bodies can be linked.
@@ -114,7 +115,7 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
         foreach (name; _imports.keys.sort)
             result ~= "import " ~ name ~ ";\n";
         string registry = "export extern(C) void* "
-            ~ "snakebite_dependency_image_symbols_v1(const(char)[] name) {\n";
+            ~ DependencyImage.registrySymbol ~ "(const(char)[] name) {\n";
         foreach (i, key; _references.keys.sort.array) {
             auto reference = _references[key]; // Function identities are mutable AST nodes.
             import std.algorithm: canFind;
