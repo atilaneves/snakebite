@@ -42,7 +42,11 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
     import dmd.visitor: SemanticTimeTransitiveVisitor;
     alias visit = SemanticTimeTransitiveVisitor.visit;
 
-    import dmd.func: FuncDeclaration;
+    import dmd.func: CtorDeclaration, DtorDeclaration,
+        FuncDeclaration, FuncLiteralDeclaration, InvariantDeclaration,
+        NewDeclaration, PostBlitDeclaration, SharedStaticCtorDeclaration,
+        SharedStaticDtorDeclaration, StaticCtorDeclaration,
+        StaticDtorDeclaration, UnitTestDeclaration;
     import dmd.dmodule: Module;
     import dmd.expression: CallExp, VarExp, DelegateExp, FuncExp;
     import dmd.dtemplate: TemplateDeclaration, TemplateInstance;
@@ -225,6 +229,50 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
             }
         }
         function_.fbody.accept(this);
+    }
+
+    override void visit(FuncLiteralDeclaration function_) {
+        visit(cast(FuncDeclaration) function_);
+    }
+
+    override void visit(PostBlitDeclaration function_) {
+        visit(cast(FuncDeclaration) function_);
+    }
+
+    override void visit(CtorDeclaration function_) {
+        visit(cast(FuncDeclaration) function_);
+    }
+
+    override void visit(DtorDeclaration function_) {
+        visit(cast(FuncDeclaration) function_);
+    }
+
+    override void visit(InvariantDeclaration function_) {
+        visit(cast(FuncDeclaration) function_);
+    }
+
+    override void visit(UnitTestDeclaration function_) {
+        visit(cast(FuncDeclaration) function_);
+    }
+
+    override void visit(NewDeclaration function_) {
+        visit(cast(FuncDeclaration) function_);
+    }
+
+    override void visit(StaticCtorDeclaration function_) {
+        visit(cast(FuncDeclaration) function_);
+    }
+
+    override void visit(StaticDtorDeclaration function_) {
+        visit(cast(FuncDeclaration) function_);
+    }
+
+    override void visit(SharedStaticCtorDeclaration function_) {
+        visit(cast(FuncDeclaration) function_);
+    }
+
+    override void visit(SharedStaticDtorDeclaration function_) {
+        visit(cast(FuncDeclaration) function_);
     }
 
     override void visit(CallExp expression) {
