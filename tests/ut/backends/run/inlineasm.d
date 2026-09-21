@@ -100,8 +100,6 @@ static foreach (backend; Backends) {
     @("inlineasm.loadDiagnostic.unguardedAsmFailsLoad." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        import std.algorithm.searching: canFind;
-
         const thrown = parseSnippet(q{
             void asmFunction() {
                 asm { nop; }
@@ -111,10 +109,9 @@ static foreach (backend; Backends) {
             }
         }).shouldThrow;
 
-        thrown.msg.canFind("inline assembler is not supported in")
-            .should == true;
-        thrown.msg.canFind("asmFunction").should == true;
-        thrown.msg.canFind("version (D_InlineAsm_X86_64)").should == true;
+        "inline assembler is not supported in".should.be in thrown.msg;
+        "asmFunction".should.be in thrown.msg;
+        "version (D_InlineAsm_X86_64)".should.be in thrown.msg;
     }
 }
 
@@ -214,7 +211,6 @@ static foreach (backend; Backends) {
     @Tags(backend.stringof)
     unittest {
         import dmd.frontend: addImport;
-        import std.algorithm.searching: canFind;
 
         // dmd registers a parsed module process-globally by its module
         // identifier, not by file path, so the module name must be unique
@@ -247,7 +243,6 @@ static foreach (backend; Backends) {
             [directory],
         ).shouldThrow;
 
-        thrown.msg.canFind("inline assembler is not supported in")
-            .should == true;
+        "inline assembler is not supported in".should.be in thrown.msg;
     }
 }
