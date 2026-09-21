@@ -41,7 +41,16 @@ public struct DependencyImage {
         dlerror;
         // const qualifies this description, not the loader's opaque handle.
         const address = dlsym(cast(void*) _handle, name.toStringz);
-        return dlerror is null ? cast(void*) address : null;
+        if (dlerror is null)
+            return cast(void*) address;
+
+        alias Registry = extern(C) void* function(const(char)[]);
+        dlerror;
+        const registry = cast(Registry) dlsym(cast(void*) _handle,
+            "snakebite_dependency_image_symbols_v1".toStringz);
+        if (dlerror !is null || registry is null)
+            return null;
+        return registry(name);
     }
 }
 
@@ -105,7 +114,10 @@ public DependencyImage prepareImage(
         const linkFlags = ["-shared", "-defaultlib=libphobos2.so",
             "-L--no-undefined"];
     } else version (LDC) {
-        const compileFlags = ["-c", "-relocation-model=pic", "-O", "-allinst"];
+        // -allinst also analyzes unused template members, which can fail
+        // under the project's compiler options. Emit referenced bodies instead.
+        const compileFlags = ["-c", "-relocation-model=pic", "-O",
+            "--linkonce-templates"];
         const linkFlags = ["-shared", "-link-defaultlib-shared",
             "-L--no-undefined"];
     } else {
