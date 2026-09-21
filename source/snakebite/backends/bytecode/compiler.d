@@ -5672,10 +5672,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // An unused branch can refer to a compiler intrinsic with no host
         // symbol. Resolve it only if execution reaches the call. Known native
         // targets stay prepared for callbacks that first run during GC.
+        const returnWidth = returnShape.returnFacts.size;
         if (hasNativeSymbol) {
             const plan = preparation.prepare(_bytecode._plans, callee);
             _callSites ~= CallSite.native(
-                cast(const(void)*) plan, args, returnShape.returnFacts.size);
+                cast(const(void)*) plan, args, returnWidth,
+            );
         } else {
             // The delegate outlives this compiler, so it captures the
             // backend and not `this`; `PlanCache` is a struct.
@@ -5683,7 +5685,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _callSites ~= CallSite.native(
                 deferred(() => cast(const(void)*)
                     preparation.prepare(bytecode._plans, callee)),
-                args, returnShape.returnFacts.size,
+                args, returnWidth,
             );
         }
         emit(&opCall,
