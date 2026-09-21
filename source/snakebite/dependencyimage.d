@@ -19,47 +19,48 @@ public struct TestHooks {
         Runtime.extendedModuleUnitTester = _extended;
     }
 
-    // The same hooks, each behind a wrapper that records a throwable
-    // escaping it before letting it go on. druntime's `runModuleUnitTests`
-    // calls at most one of them - the extended one when it is set - and
-    // does not catch what escapes; the caller reads `escaped` afterwards.
-    // Hooks are plain function pointers, so the originals live in one
-    // process-wide slot: guest runs already share `Runtime`'s own hook
-    // slots the same way.
-    public static TestHooks watched(in TestHooks hooks) {
-        _watchedHooks = hooks;
-        _escaped = false;
-        return TestHooks(
-            hooks._legacy is null ? null : &watchedLegacy,
-            hooks._extended is null ? null : &watchedExtended,
-        );
-    }
+    // Runtime hooks are function pointers, so they need a shared slot.
+    // Each nested run must restore the enclosing run's tracking state.
+    public struct Watch {
+        private TestHooks _hooks;
+        private Watch* _previous;
+        public bool escaped;
 
-    public static bool escaped() {
-        return _escaped;
+        public void install(in TestHooks hooks) {
+            _hooks = hooks;
+            _previous = _watch;
+            _watch = &this;
+            TestHooks(
+                hooks._legacy is null ? null : &watchedLegacy,
+                hooks._extended is null ? null : &watchedExtended,
+            ).install;
+        }
+
+        public void restore() {
+            _watch = _previous;
+        }
     }
 
     private static bool watchedLegacy() {
         try
-            return _watchedHooks._legacy();
+            return _watch._hooks._legacy();
         catch (Throwable throwable) {
-            _escaped = true;
+            _watch.escaped = true;
             throw throwable;
         }
     }
 
     private static typeof(Runtime.extendedModuleUnitTester()()) watchedExtended() {
         try
-            return _watchedHooks._extended();
+            return _watch._hooks._extended();
         catch (Throwable throwable) {
-            _escaped = true;
+            _watch.escaped = true;
             throw throwable;
         }
     }
 }
 
-private __gshared TestHooks _watchedHooks;
-private __gshared bool _escaped;
+private __gshared TestHooks.Watch* _watch;
 
 
 // A project's dependency image stays loaded until the executable exits.

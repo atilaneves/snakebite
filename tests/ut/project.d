@@ -1,6 +1,12 @@
 module ut.project;
 
 
+import core.atomic: atomicLoad;
+import core.runtime: Runtime, UnitTestResult;
+import snakebite.backends: BackendName, backendIdentity;
+import snakebite.backends.backend: Program;
+import snakebite.dependencyimage: TestHooks;
+import snakebite.execution: prepareProject, executeBackend;
 import snakebite.dub: DubDescription;
 import snakebite.project: dubSourceSetFromDescription,
     projectStateDirectory, sourceSet;
@@ -179,8 +185,6 @@ static foreach (backend; Matrix!(
     @("runtime.escapingUnittestThrowableKeepsInitDepth." ~ backend.stringof)
     @Serial
     unittest {
-        import core.atomic: atomicLoad;
-
         const sandbox = Sandbox();
         sandbox.writeFile("app/dub.sdl", q{
             name "escaping-throwable-app"
@@ -210,7 +214,6 @@ static foreach (backend; Matrix!(
             execute(["dub", "test", "--compiler=" ~ defaultCompiler],
                 null, Config.none, size_t.max, directory).status.should == 2;
         } else {
-            import snakebite.backends: backendIdentity;
             import snakebite.execution: executeBackend, prepareProject;
 
             auto program = prepareProject(directory).project.program;
@@ -228,7 +231,6 @@ pragma(mangle, "_D2rt6dmain210_initCountOm")
 private extern shared size_t runtimeInitDepth;
 
 private bool runtimeInitDepthReturnsTo(in size_t depth) {
-    import core.atomic: atomicLoad;
     import core.thread: Thread;
     import core.time: msecs, MonoTime, seconds;
 
@@ -239,4 +241,57 @@ private bool runtimeInitDepthReturnsTo(in size_t depth) {
         Thread.sleep(10.msecs);
     }
     return true;
+}
+
+
+private Program _innerProgram;
+private BackendName _nestedBackend;
+private extern(C) int rt_init();
+private extern(C) int rt_term();
+
+private UnitTestResult throwingInnerRunner() {
+    throw new Exception("inner runner failed");
+}
+
+private UnitTestResult successfulOuterRunner() {
+    executeBackend(_nestedBackend, _innerProgram, null, false).status.should == 1;
+    return UnitTestResult(1, 1, false, false);
+}
+
+// A handled inner runner failure must not terminate the outer runtime.
+static foreach (backend; Matrix!()) {
+    @("runtime.nestedRunnerKeepsInitDepth." ~ backend.stringof)
+    @Serial
+    unittest {
+        static if (is(backend == Native)) {
+            rt_init;
+            const depth = atomicLoad(runtimeInitDepth);
+            rt_init;
+            rt_term;
+            atomicLoad(runtimeInitDepth).should == depth;
+            rt_term;
+        } else {
+            const saved = TestHooks.current;
+            scope(exit) saved.install;
+            const sandbox = Sandbox();
+            sandbox.writeFile("outer/outer.d", "module outer; int main() { return 0; }");
+            sandbox.writeFile("inner/inner.d", "module inner; int main() { return 0; }");
+            auto outer = prepareProject(sandbox.inSandboxPath("outer")).project.program; // Hooks are set below.
+            _innerProgram = prepareProject(sandbox.inSandboxPath("inner")).project.program;
+            _nestedBackend = backendIdentity!backend;
+            Runtime.extendedModuleUnitTester = &throwingInnerRunner;
+            _innerProgram.testHooks = TestHooks.current;
+            Runtime.extendedModuleUnitTester = &successfulOuterRunner;
+            outer.testHooks = TestHooks.current;
+            rt_init;
+            const depth = atomicLoad(runtimeInitDepth);
+            scope(exit) {
+                while (atomicLoad(runtimeInitDepth) < depth)
+                    rt_init;
+                rt_term;
+            }
+            executeBackend(_nestedBackend, outer, null, false).status.should == 0;
+            atomicLoad(runtimeInitDepth).should == depth;
+        }
+    }
 }

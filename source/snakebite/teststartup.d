@@ -129,9 +129,11 @@ public TestStartupReport runTestsAndMain(
     // constructors left installed, and pay the skipped `rt_term` back, so
     // the host terminates the way compiled D does: guest threads joined
     // and destructors run before `exit`.
-    TestHooks.watched(TestHooks.current).install;
+    TestHooks.Watch watch;
+    watch.install(TestHooks.current);
+    scope(exit) watch.restore;
     report.status = _d_run_main(_runtimeCArgs.argc, cArguments.ptr, &callMain);
-    if (TestHooks.escaped)
+    if (watch.escaped)
         rt_term();
     report.constructorDuration = constructorDuration;
     report.activationDuration = activationDuration;
