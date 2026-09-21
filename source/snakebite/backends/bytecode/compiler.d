@@ -805,6 +805,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const contextOffset = _layout.hiddenThis.variable is null
             ? size_t.max : _layout.hiddenThis.parameter.offset;
+        size_t[] parameterOffsets;
+        foreach (parameter; _layout.parameters)
+            parameterOffsets ~= parameter.offset;
+        if (_layout.variadicTypes != size_t.max) {
+            parameterOffsets ~= _layout.variadicTypes;
+            parameterOffsets ~= _layout.variadicCursor;
+        }
         return Function(
             _instructions, _constants, _callSites, _assertSites,
             exceptionHandlers,
@@ -813,6 +820,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _closureOffset == size_t.max ? 0 : _closureLayout.size,
             _closureOffset == size_t.max ? 1 : _closureLayout.alignment,
             closureSlots,
+            parameterOffsets,
         );
     }
 
@@ -5211,6 +5219,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _callSites ~= CallSite.indirect(
             calleeSlotOffset, args, isVoidCallee ? 0 : returnFacts.size,
             _bytecode._plans.signatureOf(calleeType, true),
+            true,
         );
         emit(&opCall, destOffset, siteIndex, 0);
     }
@@ -5682,6 +5691,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             calleeOffset, args, isVoidCallee ? 0 : returnShape.returnFacts.size,
             functionType.isDstyleVariadic ? null
                 : _bytecode._plans.signatureOf(functionType, isDelegateCall),
+            isDelegateCall,
         );
         emit(&opCall, destOffset, siteIndex, 0);
     }

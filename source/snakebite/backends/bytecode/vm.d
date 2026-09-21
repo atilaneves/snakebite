@@ -94,11 +94,13 @@ public struct CallSite {
     public static CallSite indirect(
         size_t calleeSlotOffset, Arg[] args, size_t returnWidth,
         const(void)* nativePlan = null,
+        bool hasContext = false,
     ) {
         CallSite site;
         site.kind = Kind.indirect;
         site.nativePlan = nativePlan;
         site.calleeSlotOffset = calleeSlotOffset;
+        site.hasContext = hasContext;
         site.args = args;
         site.returnWidth = returnWidth;
         return site;
@@ -110,6 +112,7 @@ public struct CallSite {
     package const(Function)* callee;
     package const(void)* nativePlan;
     package size_t calleeSlotOffset;
+    package bool hasContext;
     package size_t cleanupStartIndex = size_t.max;
     package size_t cleanupEndIndex = size_t.max;
     package const(void)* cleanupStart;
@@ -342,6 +345,7 @@ public struct Function {
     package size_t closureSize;
     package uint closureAlignment = 1;
     package ClosureSlot[] closureSlots;
+    package size_t[] parameterOffsets;
 }
 
 
@@ -932,9 +936,18 @@ private const(Instruction)* callFunction(Decoded)(
     activation.frame = execution.frames.reserve(
         callee.frameSize, callee.frameAlignment);
 
-    foreach (arg; site.args)
-        memcpy(activation.frame + arg.calleeOffset,
-            execution.storage(arg.callerOffset), arg.width);
+    // An inferred function literal can convert to a delegate without
+    // gaining a context parameter. Use its declared parameter layout;
+    // removing a context word can also change argument alignment.
+    if (site.hasContext && callee.contextOffset == size_t.max) {
+        foreach (i, arg; site.args[1 .. $])
+            memcpy(activation.frame + callee.parameterOffsets[i],
+                execution.storage(arg.callerOffset), arg.width);
+    } else {
+        foreach (arg; site.args)
+            memcpy(activation.frame + arg.calleeOffset,
+                execution.storage(arg.callerOffset), arg.width);
+    }
 
     if (contextAdjustment != 0) {
         auto context = cast(ubyte**) (activation.frame + site.args[0].calleeOffset);

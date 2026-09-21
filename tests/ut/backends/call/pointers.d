@@ -1762,6 +1762,15 @@ static foreach (backend; Matrix!()) {
                 assert(increment(4) == 5);
                 assert(difference(11, 4) == 7);
                 assert(bound(4) == 6);
+                int invoke(bool delegate(byte, out int, double) fetch) {
+                    int result;
+                    assert(fetch(2, result, 40.0));
+                    return result;
+                }
+                assert(invoke((byte first, out int value, double last) {
+                    value = first + cast(int) last;
+                    return true;
+                }) == 42);
                 return 0;
             }
         });
