@@ -20,9 +20,16 @@ keep the normal backend fallback.
 
 For dub projects, the same `dub describe` call supplies root sources and the
 full dependency description. Snakebite uses the host compiler with `dub build
---deep` to build missing or changed dependencies with position-independent
-code. The image includes every member of every static archive in the transitive
-link dependency chain, including members that no template reference uses. Dub
+--deep` to build missing or changed dependencies. The image links each
+dependency's artifact in dub's build cache, which dub keys by compiler and
+build settings, not the copy dub leaves in the package's target path: any
+compiler's build of that package replaces the copy. For the same reason
+Snakebite runs every dub command in the process environment as it is. A flag
+added through `DFLAGS` for the build alone would move the artifacts to paths
+the description does not name. Both host compilers emit position-independent
+code by default on the supported platform, which the shared image needs. The
+image includes every member of every static archive in the transitive link
+dependency chain, including members that no template reference uses. Dub
 linker files, linker flags, and system libraries are also supplied to the link.
 The root package is not linked into the image.
 
