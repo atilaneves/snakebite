@@ -726,7 +726,7 @@ private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
             if (matchedPath is null)
                 continue;
 
-            auto loaded = alreadyParsedModule(matchedPath);
+            auto loaded = alreadyParsedModule(segments);
             if (loaded is null) {
                 auto result = dmdParseModule(matchedPath, matchedPath.readText);
                 if (result.diagnostics.hasErrors)
@@ -750,23 +750,55 @@ private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
     return discovered;
 }
 
-// Whether `wantedPath` (already an absolute, normalised path) was parsed
-// earlier in this process, the same check `Compiler.parsedModuleForFile`
-// makes before re-registering a dub project's own file.
+// Whether `segments` (an import's `packages ~ id` chain, e.g.
+// `["automem", "vector"]` for `import automem.vector;`) already names a
+// module parsed earlier in this process - by a project's own root-set
+// parse (`parseRootModulesLocked`), an earlier cell's call here, or this
+// same walk. dmd keys a module's identity by this fully qualified name,
+// not by its display filename: `Module.parse`'s `dst.insert` looks the
+// module up by `ident` inside the `Package` its own `md.packages` resolve
+// to (`dmodule.d`'s `Package.resolve`), and reports "conflicts with
+// another module" whenever two parses of that same name carry different
+// `srcfile` strings, which happens here because `Compiler.dmdFileName`
+// names a project's root file relative to its own project directory,
+// not relative to `rootImportPaths` - two parses of the very same file
+// can carry different `srcfile`s even though dmd considers them one
+// module. Comparing qualified names instead of paths matches the
+// already-parsed module correctly regardless of which relative name its
+// own parse gave it, and is exactly the check dmd's own insert would
+// make - so a hit here reuses that module instead of parsing a second,
+// differently-named copy of it into the same conflict.
 private imported!"dmd.dmodule".Module alreadyParsedModule(
-    in string wantedPath,
+    in string[] segments,
 ) {
     import dmd.dmodule: Module;
-    import std.path: absolutePath, buildNormalizedPath;
 
-    foreach (module_; Module.amodules) {
-        const candidatePath =
-            sourceFileName(module_).absolutePath.buildNormalizedPath;
-        if (candidatePath == wantedPath)
+    foreach (module_; Module.amodules)
+        if (moduleQualifiedName(module_) == segments)
             return module_;
-    }
 
     return null;
+}
+
+// The fully qualified name `Module.parse` resolves an explicit
+// `module a.b.c;` declaration into (`md.packages ~ md.id`) before
+// inserting the module into its package's symbol table. A module with no
+// such declaration (parsed from a bare `<name>.d` with no `module`
+// statement) keeps dmd's own fallback identity, its file-derived `ident`.
+private string[] moduleQualifiedName(
+    imported!"dmd.dmodule".Module module_,
+) {
+    import std.algorithm.iteration: map;
+    import std.array: array;
+    import std.string: fromStringz;
+
+    if (module_.md is null)
+        return [module_.ident.toString.fromStringz.idup];
+
+    return module_.md.packages
+        .map!(id => id.toString.fromStringz.idup)
+        .array
+        ~ module_.md.id.toString.fromStringz.idup;
 }
 
 private struct SavedFrontendFlags {
