@@ -145,6 +145,7 @@ public struct CallPlan {
     // pair when the return classifies to two eightbytes.
     private ResultMove[2] _resultMoves;
     private size_t _resultCount;
+    private bool _realResult;
     // The stub entry this plan calls through - `snakebite_ffi_call_sysv_
     // amd64` or `snakebite_ffi_call_sysv_amd64_integer`, chosen once in
     // `buildMoves` from `_sseCount`/`_stackWordCount`. This is a
@@ -402,7 +403,7 @@ public struct CallPlan {
         if (_hiddenReturnPointer)
             return *cast(void**)
                 (cast(const(ubyte)*) frame + _returnPointerOffset);
-        if (_resultCount == 0)
+        if (_resultCount == 0 && !_realResult)
             return null;
         return scratch + _returnOffset;
     }
@@ -414,6 +415,13 @@ public struct CallPlan {
     package void packResult(
         CallFrame* frame, const(void)* returnPlace,
     ) const {
+        frame.realResultUsed = _realResult;
+        if (_realResult) {
+            import core.stdc.string: memcpy;
+
+            memcpy(&frame.realResult, returnPlace, real.sizeof);
+            return;
+        }
         if (_hiddenReturnPointer) {
             frame.integerResult[0] = cast(size_t) returnPlace;
             return;
@@ -486,6 +494,8 @@ public struct CallPlan {
         void* returnPlace,
         scope const(void*)[] arguments,
     ) const {
+        *cast(bool*) (frameBytes + CallFrame.realResultUsed.offsetof) =
+            _realResult;
         if (_hiddenReturnPointer)
             *cast(size_t*) (frameBytes + _returnPointerOffset) =
                 cast(size_t) returnPlace;
@@ -509,6 +519,18 @@ public struct CallPlan {
     // address, not the result.
     pragma(inline, true)
     private void readResult(ubyte* frameBytes, void* returnPlace) const {
+        if (_realResult) {
+            if (returnPlace !is null) {
+                import core.stdc.string: memcpy;
+
+                memcpy(
+                    returnPlace,
+                    frameBytes + CallFrame.realResult.offsetof,
+                    real.sizeof,
+                );
+            }
+            return;
+        }
         if (returnPlace is null || _resultCount == 0)
             return;
 
@@ -835,9 +857,12 @@ public struct CallPlan {
         _moveCount = moveCount;
         _sseCount = floatingCount;
         _stackWordCount = stackCount;
+        _realResult = _return.count == 1
+            && _return.registers[0].kind == Register.Kind.x87;
         // The leaner entry is safe exactly when this plan fills no SSE
         // register and spills no stack word - see `_entry`'s own doc.
-        _integerOnly = _sseCount == 0 && _stackWordCount == 0;
+        _integerOnly = !_realResult
+            && _sseCount == 0 && _stackWordCount == 0;
         _entry = _integerOnly
             ? &snakebite_ffi_call_sysv_amd64_integer
             : &snakebite_ffi_call_sysv_amd64;
@@ -846,19 +871,21 @@ public struct CallPlan {
         // its own register file's next result slot - see `callAt`.
         size_t integerResultIndex;
         size_t floatingResultIndex;
-        foreach (i; 0 .. _return.count) {
-            const fromSse = _return.registers[i].kind == Register.Kind.sse;
-            const sourceOffset = fromSse
-                ? CallFrame.sseResult.offsetof
-                    + (floatingResultIndex++) * size_t.sizeof
-                : CallFrame.integerResult.offsetof
-                    + (integerResultIndex++) * size_t.sizeof;
-            _resultMoves[i] = ResultMove(
-                cast(ushort) sourceOffset,
-                storeOf(_return.registers[i].size),
-            );
-        }
-        _resultCount = _return.count;
+        if (!_realResult)
+            foreach (i; 0 .. _return.count) {
+                const fromSse = _return.registers[i].kind
+                    == Register.Kind.sse;
+                const sourceOffset = fromSse
+                    ? CallFrame.sseResult.offsetof
+                        + (floatingResultIndex++) * size_t.sizeof
+                    : CallFrame.integerResult.offsetof
+                        + (integerResultIndex++) * size_t.sizeof;
+                _resultMoves[i] = ResultMove(
+                    cast(ushort) sourceOffset,
+                    storeOf(_return.registers[i].size),
+                );
+            }
+        _resultCount = _realResult ? 0 : _return.count;
     }
 
     // `register`'s source bytes, as a `Load` tag - see `Load` and
@@ -898,6 +925,9 @@ public struct CallPlan {
                 if (register.size == 8)
                     return Load.word64;
                 return register.size == 4 ? Load.zero32 : Load.copy;
+
+            case x87:
+                assert(false, "an x87 result has no argument load");
 
             case none:
                 assert(false, "a `void` argument has nothing to pass");
@@ -1628,7 +1658,7 @@ private CallPlan _shapeOf(
                 false,
             );
         } else if (!plan._hiddenReturnPointer)
-            plan._return = ArgumentPlan.of(type.nextOf);
+            plan._return = ArgumentPlan.ofReturn(type.nextOf);
 
         plan.buildMoves;
 
