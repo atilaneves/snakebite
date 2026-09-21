@@ -75,6 +75,24 @@ Prepare the image before constructing any backend. Each backend searches the
 image handle first, then the process symbols. Symbol misses and call plans stay
 cached. There is no compile step on symbol lookup.
 
+The image handle search has two steps. First, `dlsym` looks up the mangled name
+in the image. If `dlsym` misses, the lookup asks the image's function registry,
+the exported `extern(C)` function `snakebite_dependency_image_symbols_v1`. The
+generated source defines the registry. It returns the address of the retained
+function for a mangled name, or `null`. The registry is needed because LDC
+images use `--linkonce-templates`. A template body then has no name that
+`dlsym` can find, but the address that the generated source takes still reaches
+the body. DMD images keep `-allinst`.
+
+The registry key is the exact mangle of the frontend function declaration, the
+same value that the call plan uses. It is not the `.mangleof` of the template
+expression that the generated source writes. For an eponymous template, such as
+`f!int`, `.mangleof` can name the template instance and not the function that
+`&f!int` returns. Such a name does not match what the backend looks up.
+Overloads of one template are selected with `__traits(getOverloads)`, in the
+same order as the frontend, so each overload keeps its own key. The registry
+does not hold delegate values.
+
 `DependencyImage` is a copyable description. Its scope does not control the
 image lifetime. The native loader retains the image with `RTLD_NODELETE`, while
 druntime still performs D module initialization and thread cleanup.
