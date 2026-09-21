@@ -4,6 +4,35 @@ module ut.backends.call.cast_;
 import ut.backends;
 
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot reinterpret overlapping union fields"),
+)) {
+    @("cast.vector.preservesBits." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            union Input {
+                int[4] lanes;
+                __vector(int[4]) packed;
+            }
+
+            void main() {
+                Input input;
+                input.lanes = [1, -2, int.min, int.max];
+                auto bytes = cast(__vector(void[16])) input.packed;
+                auto restored = cast(__vector(int[4])) bytes;
+                auto lanes = cast(int[4]*) &restored;
+                assert((*lanes)[0] == 1);
+                assert((*lanes)[1] == -2);
+                assert((*lanes)[2] == int.min);
+                assert((*lanes)[3] == int.max);
+            }
+        });
+    }
+}
+
+
 // Dropping function attributes must preserve both the callable and its
 // context, including when the conversion supplies a constructor argument.
 static foreach (backend; Matrix!()) {
