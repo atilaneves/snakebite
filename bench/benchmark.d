@@ -261,7 +261,6 @@ public BackendReport benchmark(
     import bench.capture: captureStdout;
     import bench.report: timingStatistics, updateTestCounts;
     import snakebite.execution: executeBackend, ExecutionReport;
-    import std.stdio: write;
 
     BackendReport report;
     report.name = name;
@@ -296,8 +295,6 @@ public BackendReport benchmark(
         const compilation = execution.compilation;
         report.hasCompile = report.hasCompile || compilation.hasCompiler;
         if (round >= warmup) {
-            if (round == warmup || result.status != 0)
-                write(result.output);
             report.passed = report.passed && result.status == 0;
             times ~= execution.runTime;
             if (compilation.hasCompiler)
