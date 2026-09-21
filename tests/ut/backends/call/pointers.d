@@ -2103,3 +2103,24 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// dmd folds `cast(int*) 42` to an `IntegerExp` whose type is `int*`,
+// the same encoding it uses for `null`. A non-zero value is a pointer
+// with that address, not a layout the backend refuses.
+static foreach (backend; Matrix!()) {
+    @("pointers.integerLiteral.nonZero." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42L.shouldBeRetOf!(
+            backend,
+            q{
+                long address() {
+                    int* ptr = cast(int*) 42;
+                    return cast(long) ptr;
+                }
+            },
+            "address",
+        );
+    }
+}

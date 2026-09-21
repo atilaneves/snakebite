@@ -626,10 +626,11 @@ private void storeValue(
         return;
     }
 
-    // DMD represents a null pointer used in an identity expression as an
-    // integer literal. It is still a pointer value in the native layout.
-    if (type.ty == Tpointer && value.isIntegerExp && value.toInteger == 0) {
-        memset(place, 0, facts.size);
+    // DMD represents a null pointer used in an identity expression, and a
+    // folded `cast(T*) 42`, as an integer literal. It is still a pointer
+    // value in the native layout: the integer is the address.
+    if (type.toBasetype.ty == Tpointer && value.isIntegerExp) {
+        storeIntegral(place, value.toInteger, facts.size);
         return;
     }
 
