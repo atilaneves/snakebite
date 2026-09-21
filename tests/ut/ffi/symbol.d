@@ -998,25 +998,99 @@ unittest {
     const dependency = sandbox.inSandboxPath("dependency.d");
     const directory = sandbox.sandboxPath;
     const record = buildPath(directory, "project.json");
-    auto image = prepareImage(atomicSource, directory);
     auto cache = ProjectImageCache(record, "settings", [root]);
-    cache.save(image.path, atomicSource, [dependency]);
+    auto image = new DependencyImage;
+    size_t builds;
+    size_t sources;
+    size_t inputReads;
+    string[] dependencyInputs() {
+        ++inputReads;
+        return [dependency.idup];
+    }
+    DependencyImage makeImage(in string source) {
+        return prepareImage(source, directory);
+    }
+    cache.prepare(*image,
+        () {
+            ++sources;
+            return atomicSource;
+        },
+        () {
+            ++builds;
+        },
+        &makeImage,
+        true,
+        &dependencyInputs).should == true;
+    builds.should == 1;
+    sources.should == 1;
+    inputReads.should == 1;
     auto next = ProjectImageCache(record, "settings", [root]);
     DependencyImage hit;
-    string unexpectedSource() {
-        throw new Exception("An unchanged image must skip source generation");
+    void failPreparation() {
+        throw new Exception("An unchanged image must skip preparation");
     }
-    next.restore(hit, &unexpectedSource).should == true;
+    DependencyImage failImage(in string) {
+        failPreparation;
+        assert(0);
+    }
+    next.prepare(hit, () {
+            failPreparation;
+            return "";
+        },
+        &failPreparation,
+        &failImage,
+        true,
+        &dependencyInputs)
+        .should == true;
     hit.path.should == image.path;
 
     sandbox.writeFile("root.d", "changed root");
-    next.restore(hit, () => atomicSource).should == true;
+    next.prepare(hit, () {
+            ++sources;
+            return atomicSource;
+        },
+        () {
+            throw new Exception("A root edit with the same source skips build");
+        },
+        &failImage,
+        true,
+        &dependencyInputs).should == true;
+    sources.should == 2;
+    inputReads.should == 1;
     auto changedSettings = ProjectImageCache(record, "other settings", [root]);
-    changedSettings.restore(hit, () => atomicSource).should == false;
+    changedSettings.prepare(hit, () => atomicSource, () {
+            ++builds;
+        }, &makeImage, true,
+        &dependencyInputs).should == true;
+    builds.should == 2;
+    inputReads.should == 2;
 
     // A preserved mtime and size must not hide a changed dependency.
     const stamp = timeLastModified(dependency);
     sandbox.writeFile("dependency.d", "after!");
     setTimes(dependency, stamp, stamp);
-    next.restore(hit, () => atomicSource).should == false;
+    changedSettings.prepare(hit, () => atomicSource, () {
+            ++builds;
+        }, &makeImage, true,
+        &dependencyInputs).should == true;
+    builds.should == 3;
+    inputReads.should == 3;
+
+    sandbox.writeFile("root.d", "changed root again");
+    changedSettings.prepare(hit, () {
+            ++sources;
+            return atomicSource ~ "\nenum changedSource = 1;\n";
+        },
+        () {
+            ++builds;
+        },
+        &makeImage, true, &dependencyInputs).should == true;
+    sources.should == 3;
+    builds.should == 4;
+    inputReads.should == 4;
+
+    auto empty = ProjectImageCache(buildPath(directory, "empty.json"),
+        "settings", [root]);
+    empty.prepare(hit, () => "", () {}, &failImage, false,
+        &dependencyInputs).should == false;
 }
