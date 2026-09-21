@@ -156,11 +156,8 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
     private extern(D) string overloadRegistry(
         FuncDeclaration function_, in string key,
     ) {
-        import dmd.dsymbol: Dsymbol;
-        import dmd.funcsem: overloadApply;
         import dmd.mangle: mangleExact;
         import dmd.typesem: pointerTo;
-        import std.algorithm: startsWith;
 
         if (function_.type.isTypeFunction is null)
             return "";
@@ -172,18 +169,33 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
             "}); })) {\nmixin(q{", pointer, "});\n",
             "if (name == q{", mangled,
             "}) return cast(void*) pointer;\n} else {\n");
+        const selected = selectedOverload(
+            function_, key, sourceSpelling(pointerType.toChars.fromStringz), mangled,
+        );
+        return result ~ selected ~ "}\n}\n";
+    }
+
+    // Empty when the function does not come from a module-scope template
+    // whose overload can be selected by ordinal.
+    private extern(D) string selectedOverload(
+        FuncDeclaration function_, in string key, in const(char)[] pointerSpelling, in const(char)[] mangled,
+    ) {
+        import dmd.dsymbol: Dsymbol;
+        import dmd.funcsem: overloadApply;
+        import std.algorithm: startsWith;
+
         auto instance = function_.parent.isTemplateInstance; // AST queries require mutable nodes.
         auto declaration = instance.tempdecl; // AST queries require mutable nodes.
         if (declaration.parent.isModule is null)
-            return result ~ "}\n}\n";
+            return "";
         const moduleName = declaration.getModule.toPrettyChars.fromStringz;
         const identifier = declaration.ident.toChars.fromStringz;
         const prefix = text(moduleName, ".", identifier);
         if (!key.startsWith(prefix ~ "!("))
-            return result ~ "}\n}\n";
+            return "";
         auto head = declaration.getModule.symtab.lookup(declaration.ident); // Overload traversal requires mutable nodes.
         if (head is null)
-            return result ~ "}\n}\n";
+            return "";
         if (auto template_ = head.isTemplateDeclaration) {
             if (template_.funcroot !is null)
                 head = template_.funcroot;
@@ -200,21 +212,20 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
             return 0;
         });
         if (!found)
-            return result ~ "}\n}\n";
+            return "";
         const candidate = "overload" ~ key[prefix.length .. $];
         // Selecting the template declaration first avoids ambiguous source
         // expressions. Distinct declarations can also share a mangled name,
         // so use the same traversal order as __traits(getOverloads).
         const selection = text("alias overload = __traits(getOverloads, ",
             moduleName, ", \"", identifier, "\", true)[", ordinal, "];\n");
-        const selectedPointer = text("mixin(q{",
-            sourceSpelling(pointerType.toChars.fromStringz),
+        const selectedPointer = text("mixin(q{", pointerSpelling,
             " pointer = &", candidate, ";});\n");
-        return result ~ text("static if (__traits(compiles, { ", selection,
+        return text("static if (__traits(compiles, { ", selection,
             selectedPointer, "})) {\n", selection, selectedPointer,
             "if (name == q{", mangled,
             "}) return cast(void*) pointer;\n",
-            "}\n}\n}\n");
+            "}\n");
     }
 
     private extern(D) string overloadAnchor(
