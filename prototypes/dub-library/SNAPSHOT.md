@@ -42,6 +42,47 @@ The full and selected-field DUB commands both use `--config=unittest`,
 `--build=unittest`, and `--compiler=ldc`. Selecting fields does not bypass
 DUB's full project-description path.
 
+## Cache-hit optimization
+
+The initial snapshot is committed as `b6b8ac1`. The follow-up preserves all
+564 path checks and the generation-hook policy, but removes intermediate
+text formatting and nested watch objects.
+
+Add `--timings` to report environment, read/decode, and validation costs.
+An initial warm sample spent 426 us on the environment fingerprint, 276 us
+on reading and decoding, and 996 us on filesystem validation.
+
+The changes are:
+
+- Hash environment entries directly from the POSIX environment, with lengths
+  separating entries. Avoid constructing and sorting a temporary map.
+- Store device, inode, mtime, and ctime as six fixed-size fields. Avoid
+  formatting six numbers on every path check.
+- Store each watch as one binary string rather than a nested object.
+
+SHA-256 remains the fingerprint algorithm. A trial with MurmurHash did not
+give a useful gain and was reverted. The main environment cost was building
+the temporary map, not the hash algorithm.
+
+Nine warm optimized samples had a median of 0.872 ms, ranging from 0.797 to
+0.987 ms. A separate alternating comparison reduced sensitivity to changing
+machine load:
+
+| Seven alternating warm runs | Median | Range |
+|---|---:|---:|
+| Initial cache | 1.604 ms | 1.564-1.966 ms |
+| Optimized cache | 0.956 ms | 0.872-1.017 ms |
+
+That is about 40% less elapsed time in the alternating comparison. The cache
+shrunk from 159,355 to 133,017 bytes. No watched paths were removed. Typical
+optimized costs were 33 us for context, 250 us for reading/decoding, and
+570 us for path validation. Filesystem checks are now the largest cost.
+
+These remain in-process operation times, excluding process startup and
+Snakebite's frontend or native dependency preparation. A hit is often below
+1 ms here, but that is not a strict upper bound. The initial miss still
+costs about 212 ms. The remaining prototype limits below still apply.
+
 ## What is cached
 
 The small record contains the root target's resolved source files, import
@@ -62,15 +103,18 @@ timestamp but leaves its final entry set unchanged, so it can still hit.
 New or removed files and directories cause a fresh DUB description.
 
 Recipe and selection files use file timestamps and inode identity. The
-environment fingerprint is sorted and excludes `_` and `SHLVL`, which change
-with the launching shell but do not describe the DUB build setup.
+environment fingerprint excludes `_` and `SHLVL`, which change with the
+launching shell but do not describe the DUB build setup. Environment order
+is retained; reordering causes a conservative cache miss. Environment access
+assumes this single-threaded prototype has no concurrent environment edits.
 
 ## Checks
 
-The executable's `--test` runs 15 checks against real DUB. They cover first
+The executable's `--test` runs 19 checks against real DUB. They cover first
 load, repeated access, in-place source edits, atomic source replacement,
 file additions and removals, new directories, files in new directories,
-recipe edits, forced refresh, default hook bypass, and explicit hook reuse.
+recipe edits, forced refresh, environment changes and restoration, default
+hook bypass, and explicit hook reuse.
 All passed. The binary encoder also checks lossless round trips on each
 cache miss. The four existing `ut.dub` tests passed after each D edit.
 

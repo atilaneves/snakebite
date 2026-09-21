@@ -99,15 +99,18 @@ string stamp(string path) {
     const status = stat(path.toStringz, &s);
     if (status != 0 && (errno == ENOENT || errno == ENOTDIR)) return "missing";
     enforce(status == 0, "Cannot stat " ~ path);
-    return text(s.st_dev, ":", s.st_ino, ":", s.st_mtim.tv_sec, ":",
-        s.st_mtim.tv_nsec, ":", s.st_ctim.tv_sec, ":", s.st_ctim.tv_nsec);
+    // Explicit fields avoid padding and retain the previous stamp's checks.
+    ulong[6] fields = [s.st_dev, s.st_ino, cast(ulong)s.st_mtim.tv_sec,
+        cast(ulong)s.st_mtim.tv_nsec, cast(ulong)s.st_ctim.tv_sec,
+        cast(ulong)s.st_ctim.tv_nsec];
+    return (cast(const(char)[])fields[]).idup;
 }
 
 JSONValue watches(JSONValue description) {
     JSONValue[string] watched;
     void directory(string path) {
         if (path in watched) return;
-        watched[path] = JSONValue(["stamp": stamp(path), "entries": entries(path)]);
+        watched[path] = JSONValue(watchValue(stamp(path), entries(path)));
         if (!path.exists || !path.isDir) return;
         foreach (entry; dirEntries(path, SpanMode.shallow)) {
             if (entry.name.baseName == ".git" || entry.name.baseName == ".dub"
@@ -119,12 +122,17 @@ JSONValue watches(JSONValue description) {
         const path = pack["path"].str.buildNormalizedPath;
         directory(path);
         foreach (file; ["dub.json", "dub.sdl", "dub.selections.json"])
-            watched[buildPath(path, file)] = JSONValue(stamp(buildPath(path, file)));
+            watched[buildPath(path, file)] = JSONValue(watchValue(stamp(buildPath(path, file))));
         foreach (key; ["importPaths", "stringImportPaths"])
             foreach (entry; pack[key].array)
                 directory(buildPath(path, entry.str).buildNormalizedPath);
     }
     return JSONValue(watched);
+}
+
+string watchValue(string stampValue, string entryValue = null) {
+    return (entryValue.length ? "D" : "F") ~ cast(char)stampValue.length
+        ~ stampValue ~ entryValue;
 }
 
 string entries(string path) {
@@ -143,36 +151,60 @@ int main(string[] args) {
     const cache = args[2].absolutePath;
     bool freezeHooks;
     bool refresh;
+    bool timings;
     foreach (option; args[3 .. $]) {
         if (option == "--freeze-hooks") freezeHooks = true;
         else if (option == "--refresh") refresh = true;
+        else if (option == "--timings") timings = true;
         else enforce(false, "Unknown option " ~ option);
     }
     auto timer = StopWatch(AutoStart.yes);
-    string[] variables;
-    foreach (key, value; environment.toAA)
-        if (key != "_" && key != "SHLVL")
-            variables ~= text(key.length, ":", key, value.length, ":", value);
-    variables.sort;
-    const context = text(root, variables).sha256Of.toHexString.idup;
+    import std.digest.sha: SHA256;
+    SHA256 digest;
+    void hashString(const(char)[] value) {
+        ulong[1] length = [value.length];
+        digest.put(cast(const(ubyte)[])length[]);
+        digest.put(cast(const(ubyte)[])value);
+    }
+    hashString(root);
+    hashString("snapshot-flat-v1");
+    import core.sys.posix.unistd: environ;
+    import std.string: fromStringz;
+    // The prototype is single-threaded. Borrow the environment during hashing.
+    // A different entry order causes only a conservative cache miss.
+    for (size_t i; environ[i] !is null; ++i) {
+        const entry = environ[i].fromStringz;
+        if (!entry.startsWith("_=") && !entry.startsWith("SHLVL="))
+            hashString(entry);
+    }
+    const context = digest.finish.toHexString.idup;
+    const contextTime = timer.peek;
+    import core.time: Duration;
+    Duration decodeTime;
+    Duration checkTime;
     JSONValue record;
     bool hit;
     bool restamped;
     string reason = refresh ? "refresh" : "no cache";
     if (!refresh && cache.exists) {
         record = decode(cast(ubyte[])read(cache));
+        decodeTime = timer.peek - contextTime;
         hit = record["context"].str == context;
         if (!hit) reason = "environment";
-        foreach (path, ref saved; record["watches"].object) {
+        if (hit) foreach (path, ref saved; record["watches"].object) {
             const current = stamp(path);
-            if (saved.type == JSONType.object) {
-                if (current == saved["stamp"].str) continue;
-                if (entries(path) == saved["entries"].str) {
-                    saved["stamp"] = current;
+            const data = saved.str;
+            enforce(data.length >= 2);
+            const stampEnd = 2 + cast(ubyte)data[1];
+            enforce(stampEnd <= data.length);
+            if (current == data[2 .. stampEnd]) continue;
+            if (data[0] == 'D') {
+                if (entries(path) == data[stampEnd .. $]) {
+                    saved = watchValue(current, data[stampEnd .. $]);
                     restamped = true;
                     continue;
                 }
-            } else if (current == saved.str) continue;
+            }
             hit = false;
             reason = path;
             break;
@@ -181,6 +213,7 @@ int main(string[] args) {
             hit = false;
             reason = "generation hooks";
         }
+        checkTime = timer.peek - contextTime - decodeTime;
     }
     if (!hit) {
         const result = execute(["dub", "describe", "--root=" ~ root,
@@ -222,6 +255,8 @@ int main(string[] args) {
         record["hooks"].boolean, record["packageCount"].uinteger,
         getSize(cache));
     if (!hit) writefln("Reason: %s", reason);
+    if (timings) writefln("context=%s us read+decode=%s us checks=%s us",
+        contextTime.total!"usecs", decodeTime.total!"usecs", checkTime.total!"usecs");
     return 0;
 }
 
@@ -267,6 +302,16 @@ int testCache() {
     expect("MISS");
     expect("HIT");
     expect("MISS", ["--refresh"]);
+    const variable = "SNAKEBITE_SNAPSHOT_TEST_CONTEXT";
+    const previous = environment.get(variable, "");
+    const existed = variable in environment;
+    environment[variable] = previous ~ "changed";
+    expect("MISS");
+    expect("HIT");
+    if (existed) environment[variable] = previous;
+    else environment.remove(variable);
+    expect("MISS");
+    expect("HIT");
     write(recipe, recipeText ~ "preGenerateCommands \"true\"\n");
     expect("MISS");
     expect("MISS");
