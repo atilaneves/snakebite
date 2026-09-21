@@ -91,6 +91,7 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
             return "";
         import std.algorithm: sort;
         import std.array: array;
+        import dmd.mangle: mangleExact;
         // A dependency template can import a root module internally, even
         // when its template arguments contain no root-owned declarations.
         // Propagate through cycles before deciding which bodies can be linked.
@@ -127,9 +128,14 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
                 "} else {\n");
             registry ~= text("    static if (__traits(compiles, { auto pointer = mixin(q{&", key,
                 "}); })) { static if (!is(typeof(mixin(q{&", key,
-                "})) == delegate)) if (name == mixin(q{", key,
-                ".mangleof})) return cast(void*) mixin(q{&", key, "});\n",
-                "} else {\n");
+                "})) == delegate)) {\n");
+            // An eponymous template's .mangleof can name its template
+            // instance rather than the function returned by its address.
+            foreach (function_; reference.functions)
+                registry ~= text("if (name == q{",
+                    mangleExact(function_).fromStringz,
+                    "}) return cast(void*) mixin(q{&", key, "});\n");
+            registry ~= "}\n} else {\n";
             foreach (j, function_; reference.functions) {
                 registry ~= overloadRegistry(function_, key);
                 const anchor = overloadAnchor(function_, key, text("retained", i, "_", j));
@@ -199,13 +205,14 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
         // expressions. Distinct declarations can also share a mangled name,
         // so use the same traversal order as __traits(getOverloads).
         const selection = text("alias overload = __traits(getOverloads, ",
-            moduleName, ", \"", identifier, "\", true)[", ordinal, "];\n");
+            moduleName, ", \"", identifier, "\", true)[", ordinal, "];\n",
+            "mixin(q{alias selected = ", candidate, ";});\n");
         return result ~ text("static if (__traits(compiles, { ", selection,
-            "auto pointer = mixin(q{&", candidate, "}); })) {\n", selection,
-            "static if (!is(typeof(mixin(q{&", candidate, "})) == delegate))\n",
-            "static if (mixin(q{", candidate, ".mangleof}) == q{", mangled, "})\n",
+            "auto pointer = &selected; })) {\n", selection,
+            "static if (!is(typeof(&selected) == delegate)\n",
+            "    && selected.mangleof == q{", mangled, "})\n",
             "if (name == q{", mangled,
-            "}) return cast(void*) mixin(q{&", candidate, "});\n",
+            "}) return cast(void*) &selected;\n",
             "}\n}\n}\n");
     }
 

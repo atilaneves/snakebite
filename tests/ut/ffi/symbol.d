@@ -359,6 +359,34 @@ static foreach (backend; Matrix!()) {
 }
 
 
+static foreach (backend; Matrix!()) {
+    @("image.importedTemplateDelegate." ~ backend.stringof)
+    unittest {
+        enum code = q{
+            import std.algorithm.comparison: among;
+
+            int answer() {
+                return among!((a, b) => a == b)("a", "x", "a");
+            }
+        };
+        static if (is(backend == Native)) {
+            mixin(code);
+            answer.should == 2;
+        } else {
+            auto module_ = parseSnippet(code);
+            auto program = Program([module_]);
+            auto image = prepareImage(imageSource(program), sharedImageCache,
+                defaultCompiler, null, null, null, ["-w"]);
+            program.dependencyImage = &image;
+            scope instance = new backend(program);
+            int result;
+            instance.call(findFunction(module_, "answer"), &result, []);
+            result.should == 2;
+        }
+    }
+}
+
+
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     "CTFE cannot call a function in a loaded native image"))) {
     @("image.atomicLoad." ~ backend.stringof)
