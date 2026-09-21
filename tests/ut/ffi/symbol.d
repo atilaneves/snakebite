@@ -700,6 +700,70 @@ static foreach (backend; Matrix!()) {
 
 
 static foreach (backend; Matrix!()) {
+    @("image.recursiveConstructorCollector." ~ backend.stringof)
+    @Serial
+    unittest {
+        enum code = q{
+            struct Recursive {
+                this(int depth) {
+                    if (depth > 0) {
+                        auto child = Recursive(depth - 1);
+                    }
+                }
+            }
+            int answer() {
+                auto value = Recursive(0);
+                return 0;
+            }
+        };
+        static if (is(backend == Native)) {
+            mixin(code);
+            answer.should == 0;
+        } else {
+            auto module_ = parseSnippet(code);
+            auto program = Program([module_]);
+            auto image = prepareImage(imageSource(program), sharedImageCache);
+            program.dependencyImage = &image;
+            scope instance = new backend(program);
+            int result;
+            instance.call(findFunction(module_, "answer"), &result, []);
+            result.should == 0;
+        }
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("image.recursiveFunctionLiteralCollector." ~ backend.stringof)
+    @Serial
+    unittest {
+        enum code = q{
+            int answer() {
+                int delegate(int) recursive = (int depth) {
+                    if (depth > 0) return __traits(parent, depth)(depth - 1);
+                    return 7;
+                };
+                return recursive(3);
+            }
+        };
+        static if (is(backend == Native)) {
+            mixin(code);
+            answer.should == 7;
+        } else {
+            auto module_ = parseSnippet(code);
+            auto program = Program([module_]);
+            auto image = prepareImage(imageSource(program), sharedImageCache);
+            program.dependencyImage = &image;
+            scope instance = new backend(program);
+            int result;
+            instance.call(findFunction(module_, "answer"), &result, []);
+            result.should == 7;
+        }
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
     @("image.constructorLocalTypes." ~ backend.stringof)
     @Serial
     unittest {
