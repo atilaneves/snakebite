@@ -280,15 +280,12 @@ private extern(C++) class InlineAsmVersionGate
 
     // A version LEVEL condition, `version (2) { ... }`, has a `null`
     // `VersionCondition.ident` (dmd's `DVCondition` doc comment: "If
-    // `null`, this condition will use an integer level"). dmd's own
-    // semantic-time `IncludeVisitor.visit(VersionCondition)` guards the
-    // same field with `if (vc.ident)` before touching it; this override
-    // must do the same, or a level condition crashes this walk instead of
-    // being left alone (it can never be `D_InlineAsm_X86_64`, which is
-    // never anonymous).
+    // `null`, this condition will use an integer level"). `is` identity
+    // comparison does not dereference either side, so a `null` `ident`
+    // simply compares unequal to the pooled identifier below; it can never
+    // be `D_InlineAsm_X86_64`, which is never anonymous.
     override void visit(VersionCondition condition) {
-        if (condition.ident !is null
-                && condition.ident is Identifier.idPool("D_InlineAsm_X86_64"))
+        if (condition.ident is Identifier.idPool("D_InlineAsm_X86_64"))
             condition.inc = Include.no;
     }
 }

@@ -81,38 +81,6 @@ static foreach (backend; Backends) {
     }
 }
 
-// `VersionCondition.ident` is `null` for a version LEVEL condition, e.g.
-// `version (2) { ... }` (dmd's `DVCondition` doc comment: "If `null`, this
-// condition will use an integer level"). `InlineAsmVersionGate.visit`
-// compared `condition.ident.toString` against a string with no null check,
-// so any module holding a level condition anywhere in its syntax tree
-// crashed `disableInlineAsmVersion` (a null `Identifier` dereference) - the
-// same shape dmd's own semantic-time `IncludeVisitor.visit(VersionCondition)`
-// already guards with `if (vc.ident)` before touching it.
-//
-// The pinned `dmd:frontend` (2.113.0) has since removed numeric version
-// levels from the grammar, so `version (2)` is now a parse error (dmd's
-// `parseVersionCondition` still builds the null-`ident` node on this error
-// path, it just never reaches semantic - `parseSnippet` throws from the
-// parse-error check, before `disableInlineAsmVersion` ever runs on this
-// module). This pins today's real, non-crashing outcome; the `ident !is
-// null` guard on the gate itself is defence in depth for the shape the
-// class comment still documents as valid.
-static foreach (backend; Backends) {
-    @("inlineasm.versionLevel.doesNotCrashTheGate." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        parseSnippet(q{
-            int f() {
-                version (2) return 1;
-                else return 2;
-            }
-        }).shouldThrowWithMessage(
-            "identifier expected inside `version(...)`, not `2`",
-        );
-    }
-}
-
 // A root-owned function that still has an unguarded `asm` block must not
 // reach any backend: `dmd.iasm.asmSemantic` (the shim `dmd:frontend` needs
 // because the dub package does not ship `dmd.iasm`) sets
