@@ -72,6 +72,32 @@ public imported!"dmd.mtype".TypeFunction typeFunctionOf(
     return type.isTypeFunction;
 }
 
+// The `FuncDeclaration` `expression.e1` already names directly, for a
+// call dmd built by hand instead of running it through the usual
+// semantic pass that would otherwise resolve `expression.f` itself.
+// Two such calls reach here: a native aggregate method's own call
+// (`e1` a `VarExp` naming the `FuncDeclaration` directly), and a
+// struct or class invariant's entry/exit call, which `addInvariant`
+// (dmd's `funcsem.d`) builds as `CallExp(DotVarExp(ThisExp, inv))`
+// with the `expressionSemantic` call that would otherwise set `.f`
+// commented out - bugzilla 13113 wants a virtual invariant call to
+// bypass attribute enforcement rather than run through it.
+// `DotVarExp.var` already names `inv` directly in that shape. Returns
+// `null` for a call reached only through a runtime value, a delegate
+// or a function pointer, which has no `FuncDeclaration` to name until
+// that value itself is read.
+public imported!"dmd.func".FuncDeclaration unresolvedCalleeOf(
+    imported!"dmd.expression".CallExp expression,
+) {
+    if (auto variable = expression.e1.isVarExp)
+        return variable.var.isFuncDeclaration;
+
+    if (auto dot = expression.e1.isDotVarExp)
+        return dot.var.isFuncDeclaration;
+
+    return null;
+}
+
 // Every unittest in `module_`, in declaration order, as druntime's
 // `__modtest` runs them: the ones nested in a struct or a class count too,
 // so the search descends into aggregates as well as attributes.
