@@ -413,6 +413,42 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `Item` is nested (its declared postblit gives it a `vthis`, dmd fact:
+// `AggregateDeclaration.makeNested` runs for any non-generated member
+// function of a struct declared inside a function), but `fill`, whose body
+// assigns `T.init` into a slice, is `Box!Item`'s own member function, not a
+// function nested inside `main` - `Box` is declared at module scope, so no
+// static chain reaches `main`'s frame from inside `fill` at all. Compiled D
+// gives `T.init` a null context in this shape (dmd only ever fills a
+// nested struct's `vthis` from a live enclosing frame when building an
+// actual instance in scope, never for a type's own static `.init` value),
+// so a backend must do the same instead of rejecting the assignment or
+// otherwise trying to reach a context that provably is not there.
+static foreach (backend; Matrix!()) {
+    @("nested.staticChain.structInitIntoSliceNeedsNoOuterContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Box(T) {
+                T[1] storage;
+                void fill() {
+                    storage[] = T.init;
+                }
+            }
+
+            int main() {
+                struct Item {
+                    int i = 42;
+                    @disable this(this);
+                }
+                Box!Item box;
+                box.fill();
+                return box.storage[0].i == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
 // Taking `captureIt`'s address makes dmd move `x` to a heap-allocated
 // closure. Returning the delegate proves that the captured storage remains
 // available after the function that created it has returned.
