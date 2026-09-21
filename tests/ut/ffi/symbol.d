@@ -966,6 +966,60 @@ unittest {
     (cast(Answer) image.resolve("answer"))().should == 42;
 }
 
+// D checks a member function of a template instance only when something uses
+// it, so a dependency can hold an unused member that a strict project flag
+// such as `-preview=dip1000` would reject. `-allinst` forces the compiler to
+// check every member of every instance, including the ones no call reaches,
+// so an LDC image built with it fails on such a dependency even though the
+// dependency's own build passes. The image must build with the flag that
+// emits only the referenced bodies. A DMD image keeps `-allinst`, which its
+// symbol table needs, so this runs on LDC only.
+version (LDC)
+@("image.unusedTemplateMemberIsNotAnalysed")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    const dependency = sandbox.inSandboxPath("deps/image_unused_member.d");
+    sandbox.writeFile("deps/image_unused_member.d", q{
+        module image_unused_member;
+
+        int* stored;
+
+        struct Colored(T) {
+            T value;
+
+            T get() @safe { return value; }
+
+            // Never called. Only `-preview=dip1000` rejects this store.
+            void leak(scope int* pointer) @safe { stored = pointer; }
+        }
+
+        Colored!T paint(T)(T value) { return Colored!T(value); }
+
+        // A dependency's own function has its machine code in the dependency's
+        // object, not in the image. Its return type instantiates `Colored!int`
+        // outside every module that the image compiles as a root.
+        Colored!int paintInt(int value) @safe pure nothrow @nogc {
+            return value.paint;
+        }
+    });
+    const objectPath = sandbox.inSandboxPath("image_unused_member.o");
+    const compiled = execute([defaultCompiler, "-c", "-relocation-model=pic",
+        dependency, "-of=" ~ objectPath]);
+    compiled.status.shouldEqual(0, compiled.output);
+
+    auto image = prepareImage(q{
+        module image;
+        import image_unused_member;
+
+        export extern(C) int answer() { return paintInt(42).get; }
+    }, sharedImageCache, defaultCompiler, [dependency],
+        [sandbox.inSandboxPath("deps")], null, ["-preview=dip1000"],
+        [objectPath]);
+    alias Answer = extern(C) int function();
+    (cast(Answer) image.resolve("answer"))().should == 42;
+}
+
 static foreach (backend; Matrix!()) {
     @("image.hashWithCtfeHelper." ~ backend.stringof)
     @Serial

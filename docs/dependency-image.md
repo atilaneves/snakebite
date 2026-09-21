@@ -162,3 +162,5 @@ automatic project preparation, image lifetime, and cache reuse. CTFE cannot
 execute loaded native code. The dub fixture checks the full backend matrix,
 transitive archive members, paths with spaces, missing archives, changed
 dependency sources, and reuse after a root source edit.
+The LDC acceptance runner also checks that an image accepts a dependency with
+an unused template member that fails under `-preview=dip1000`.
