@@ -34,6 +34,53 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+private enum importedLiteralModule = q{
+    module routing_literal_helper;
+    struct Helper {
+        enum increment = function(int x) { return x + 1; };
+    }
+};
+
+// A function literal stored in an enum inside an imported, non-template
+// struct has a body but no native symbol. Both a direct call and a function
+// pointer must use that body.
+static foreach (backend; Matrix!()) {
+    @("importedStructFunctionLiteral.directAndPointer."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        static if (is(backend == Native)) {
+            struct Helper {
+                enum increment = function(int x) { return x + 1; };
+            }
+
+            const direct = Helper.increment(41);
+            int function(int) pointer = Helper.increment;
+            (direct + pointer(0)).should == 43;
+        } else {
+            auto modules = parseSnippets([
+                q{
+                    module routing_literal_root;
+                    import routing_literal_helper: Helper;
+
+                    int answer() {
+                        const direct = Helper.increment(41);
+                        int function(int) pointer = Helper.increment;
+                        return direct + pointer(0);
+                    }
+                },
+                importedLiteralModule,
+            ]);
+            auto function_ = findFunction(modules[0], "answer");
+            auto backend_ = new backend(Program([modules[0]]));
+
+            int result;
+            backend_.call(function_, &result, []);
+            result.should == 43;
+        }
+    }
+}
+
 
 // A callee in a module outside `Program.rootModules` is executed
 // natively even though it has `extern(D)` linkage and a body the
