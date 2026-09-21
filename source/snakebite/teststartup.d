@@ -70,6 +70,13 @@ public TestStartupReport runTestsAndMain(
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.string: toStringz;
 
+    // A guest run owns process-wide state for its duration: druntime's
+    // runner hooks, its argument storage, `_main`, and the watched hooks
+    // below. Two runs on two threads would clobber each other's, so one
+    // runs at a time. The lock is recursive: a guest run that starts
+    // another on the same thread still nests.
+    _guestRunLock.lock;
+    scope(exit) _guestRunLock.unlock;
     const savedHooks = TestHooks.current;
     auto savedArgs = _runtimeArgs; // Restore mutable host argument storage.
     auto savedCArgs = _runtimeCArgs; // C argv contains mutable pointers.
@@ -111,7 +118,23 @@ public TestStartupReport runTestsAndMain(
     // druntime owns runner selection, summaries, failure status and the
     // decision to call main. Its nested init/term pair is reference counted.
     TestStartupReport report;
+    // `_d_run_main` pairs its `rt_init` with `rt_term` only when
+    // `runModuleUnitTests` returns. A runner hook that lets a throwable
+    // escape - unit-threaded's own does, running its suite - skips that
+    // `rt_term`, and druntime's init depth stays one too high. The host's
+    // own `rt_term` would then only decrement: no `thread_joinAll`, no
+    // module destructors, and the loader would run those at `exit` in
+    // dependency order instead, after freeing the DSO records a guest
+    // thread still walks when it ends. Watch the hooks the guest's
+    // constructors left installed, and pay the skipped `rt_term` back, so
+    // the host terminates the way compiled D does: guest threads joined
+    // and destructors run before `exit`.
+    TestHooks.Watch watch;
+    watch.install(TestHooks.current);
+    scope(exit) watch.restore;
     report.status = _d_run_main(_runtimeCArgs.argc, cArguments.ptr, &callMain);
+    if (watch.escaped)
+        rt_term();
     report.constructorDuration = constructorDuration;
     report.activationDuration = activationDuration;
     return report;
@@ -159,6 +182,13 @@ private ModuleInfo*[] activateModules(
 }
 
 private int delegate(string[]) _main;
+private __gshared imported!"core.sync.mutex".Mutex _guestRunLock;
+
+shared static this() {
+    import core.sync.mutex: Mutex;
+
+    _guestRunLock = new Mutex;
+}
 
 
 private extern(C) int callMain(char[][] arguments) {
@@ -176,6 +206,7 @@ private alias MainFunction = extern(C) int function(char[][]);
 private extern(C) int _d_run_main(
     int argc, char** argv, MainFunction main,
 );
+private extern(C) int rt_term();
 private extern(C) void _d_dso_registry(void* data);
 
 

@@ -421,6 +421,23 @@ private void classify(
     }
 
     if (auto aggregate = type.isTypeStruct) {
+        // dmd's own rule (`argtypes_sysv_x64.d`'s `toArgTypes_sysv_x64`:
+        // "if (nfields == 0) return memory();"): a struct with no fields
+        // classifies MEMORY, not `none` - an empty `fields` walk below
+        // would otherwise leave every eightbyte class untouched instead
+        // of reaching either outcome. Both host compilers still return
+        // such a value through a hidden pointer, one byte written
+        // through whatever the calling convention's hidden-pointer
+        // register already held (verified with `objdump`: `struct E {}
+        // E f() { return E(); }` compiles to `mov rax, rdi; mov byte
+        // [rdi], 0; ret` on both dmd and ldc) - this is the same MEMORY
+        // rule `aggregatePlan` already gives an oversized or unaligned
+        // aggregate, just triggered by a field count of zero instead.
+        if (aggregate.sym.fields.length == 0) {
+            memory = true;
+            return;
+        }
+
         // A nested non-POD field already made the whole aggregate
         // non-POD - `dmd.dsymbolsem.isPOD` checks every field itself -
         // and `aggregatePlan` catches that case before it ever reaches
