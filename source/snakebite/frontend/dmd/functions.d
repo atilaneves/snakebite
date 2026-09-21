@@ -144,7 +144,14 @@ private void appendUnittests(
 
     foreach (member; *symbols) {
         if (auto unittest_ = member.isUnitTestDeclaration) {
-            unittests ~= unittest_;
+            // DMD's parser skips the unittest blocks of a non-root module
+            // but still declares an empty placeholder for each one, so a
+            // scope's symbol count does not depend on `-unittest`. An
+            // instance of a Phobos template in a root module carries those
+            // placeholders. Compiled D never emits a function without a
+            // body, so `__modtest` never calls one; neither does this.
+            if (unittest_.fbody !is null)
+                unittests ~= unittest_;
             continue;
         }
 
