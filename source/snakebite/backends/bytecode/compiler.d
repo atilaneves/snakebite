@@ -2611,20 +2611,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import dmd.astenums: Tsarray;
 
-        // A dynamic-length target - a dynamic array's own whole slice, or
-        // a pointer sliced to a run-time length - has no compile-time
-        // element count to unroll a loop over, unlike a static array's
-        // own fixed `dim` below.
-        if (target.e1.type.ty != Tsarray)
+        // A bounded slice - whether of a dynamic array, a pointer, or a
+        // static array's own sub-range - has no compile-time-fixed
+        // element count to unroll a loop over the way a static array's
+        // own *whole* slice does below. Evaluating `target` computes its
+        // `{length, pointer}` pair at run time either way: for a static
+        // array's own sub-range, through `visit(SliceExp)`'s own
+        // `compileBoundedSlice`, the same machinery a bare read of that
+        // sub-range already goes through, bounds checks included.
+        if (target.e1.type.ty != Tsarray
+                || target.lwr !is null || target.upr !is null)
             return compileDynamicSliceAssign(
                 expression, target, destOffset, resolvedTarget);
 
         import dmd.astenums: Tarray;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
-
-        if (target.lwr !is null || target.upr !is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
 
         auto sarrayType = target.e1.type.isTypeSArray;
         const elementFacts = TypeFacts.of(sarrayType.next);
@@ -2765,15 +2766,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // evaluated once, then copied into every element through
     // `opSliceFill`, the run-time counterpart to `compileSliceAssign`'s
     // own compile-time-unrolled scalar fill for a static array.
+    //
+    // `target.e1` is a static array here whenever `compileSliceAssign`
+    // routed a bounded sub-slice of it this way instead of unrolling it
+    // as a whole-slice fill or copy; `target.type` (this function's own
+    // `Tarray`/`Tvoid` checks below look at that, not `target.e1.type`)
+    // is the dynamic shape the slice itself has either way.
     private void compileDynamicSliceAssign(
         AssignExp expression, SliceExp target, in size_t destOffset,
         in size_t resolvedTarget = size_t.max,
     ) {
-        import dmd.astenums: Tarray, Tpointer, Tvoid;
+        import dmd.astenums: Tarray, Tpointer, Tsarray, Tvoid;
         import dmd.expression: MemorySet;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
-        if (target.e1.type.ty != Tarray && target.e1.type.ty != Tpointer)
+        if (target.e1.type.ty != Tarray && target.e1.type.ty != Tpointer
+                && target.e1.type.ty != Tsarray)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
