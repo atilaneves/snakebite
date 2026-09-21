@@ -4,7 +4,8 @@ private:
 
 
 import dmd.expression:
-    AssignExp, BinAssignExp, CatAssignExp, Expression, IndexExp, SymOffExp;
+    AssignExp, BinAssignExp, CatAssignExp, Expression, IndexExp, MemorySet,
+    SymOffExp;
 import dmd.astenums: Tarray, Tpointer, Tsarray;
 import dmd.typesem: isIntegral;
 
@@ -69,6 +70,9 @@ public struct StorageResolver(Result, Adapter) {
             return _adapter.storageSlice(slice);
 
         if (auto construct = expression.isConstructExp) {
+            if (construct.memset == MemorySet.referenceInit)
+                return assignmentResult(cast(AssignExp) construct,
+                    construct.e1);
             if (construct.lowering !is null)
                 return _adapter.storageLowered(construct);
         }
@@ -163,6 +167,9 @@ public struct StorageResolver(Result, Adapter) {
     private Result assignmentResult(
         AssignExp expression, Expression targetExpression,
     ) {
+        if (expression.memset == MemorySet.referenceInit)
+            return _adapter.storageReferenceInit(expression);
+
         // Resolve the target first. This is the only evaluation of the
         // assignment's left side; the adapter receives its location and can
         // then evaluate and store the right side exactly once.

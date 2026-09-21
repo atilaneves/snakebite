@@ -2567,6 +2567,26 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return evaluator.slotOf(expression);
         }
 
+        public void* storageReferenceInit(AssignExp expression) {
+            auto variable = expression.e1.isVarExp;
+            auto declaration = variable is null
+                ? null : variable.var.isVarDeclaration;
+            if (declaration is null)
+                throw new SnakebiteException(
+                    "interpreter cannot initialize a non-variable reference",
+                );
+
+            import snakebite.nativelayout: storeIntegral;
+
+            // DMD marks reference construction separately from ordinary
+            // assignment. Keep the declaration's own slot, rather than
+            // resolving it through the reference it does not hold yet.
+            auto target = evaluator.storageOf(declaration);
+            auto source = evaluator.addressOf(expression.e2);
+            storeIntegral(target, cast(size_t) source, size_t.sizeof);
+            return source;
+        }
+
         public void* storagePointer(PtrExp expression) {
             return evaluator.asPointer(expression.e1);
         }

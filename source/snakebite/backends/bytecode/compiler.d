@@ -2366,6 +2366,36 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return context;
     }
 
+    // The raw slot for a reference declaration. Unlike addressOfVariable,
+    // this must not load the pointer stored in that slot: referenceInit is
+    // the first write to the slot.
+    private size_t referenceSlotAddress(VarDeclaration variable) {
+        if (isClosureVariable(variable)) {
+            const slot = _closureLayout.slotOf(variable);
+            return closureSlotAddress(slot.offset);
+        }
+
+        auto owner = outerFunctionOf(variable);
+        if (owner is _function)
+            return _layout.offsetOf(variable);
+
+        if (owner is null)
+            throw rejection(_function, variable.loc, "a local variable");
+
+        auto context = contextAddressOf(owner);
+        if (functionNeedsClosure(owner)) {
+            const closure = ClosureLayout.of(owner);
+            if (!closure.hasSlot(variable))
+                throw rejection(_function, variable.loc, "a local variable");
+            return addPointerOffset(context, closure.slotOf(variable).offset);
+        }
+
+        const layout = FrameLayout.of(owner);
+        if (!layout.hasSlot(variable))
+            throw rejection(_function, variable.loc, "a local variable");
+        return addPointerOffset(context, layout.offsetOf(variable));
+    }
+
     private size_t closureSlotAddress(in size_t offset) {
         const closure = reserveTemp(pointerFacts);
         emit(&opCopy, closure, _closureOffset, size_t.sizeof);
@@ -5803,6 +5833,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (compiler.isThisField(variable))
                 return compiler.compileThisFieldAddress(variable);
             return compiler.addressOfVariable(variable);
+        }
+
+        public size_t storageReferenceInit(AssignExp expression) {
+            auto variable = expression.e1.isVarExp;
+            auto declaration = variable is null
+                ? null : variable.var.isVarDeclaration;
+            if (declaration is null)
+                throw rejection(compiler._function, expression.loc,
+                    expressionText(expression));
+
+            const target = compiler.referenceSlotAddress(
+                declaration);
+            const source = compiler.compileAddress(expression.e2);
+            compiler.emit(&opCopy, target, source, size_t.sizeof);
+            return source;
         }
 
         public size_t storagePointer(PtrExp expression) {

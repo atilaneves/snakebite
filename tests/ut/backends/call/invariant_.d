@@ -79,6 +79,99 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A struct constructor writes through dmd's hidden result reference on its
+// lowered return path. The result storage must be valid when that path and
+// the invariant observe the completed value.
+static foreach (backend; Matrix!()) {
+    @("invariant_.structConstructor.referenceInitPreservesResult."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        123.shouldBeRetOf!(backend, q{
+            struct S {
+                int[4] data;
+
+                this(int value) {
+                    data[0] = value;
+                }
+
+                invariant {
+                    assert(data[0] >= 0);
+                }
+            }
+
+            int result() {
+                auto value = S(123);
+                assert(value.data[0] == 123);
+                return value.data[0];
+            }
+        }, "result");
+    }
+}
+
+// The same constructor invariant must execute, not only compile. A bad
+// constructor value makes the invariant throw at the constructor boundary.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns the failing constructor invariant into a compile-time " ~
+        "error, so it cannot be caught at run time"),
+)) {
+    @("invariant_.structConstructor.failureRunsInvariant."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            import core.exception: AssertError;
+
+            struct S {
+                int[4] data;
+
+                this(int value) {
+                    data[0] = value;
+                }
+
+                invariant {
+                    assert(data[0] >= 0);
+                }
+            }
+
+            int result() {
+                try {
+                    auto value = S(-1);
+                } catch (AssertError) {
+                    return 42;
+                }
+                return 0;
+            }
+        }, "result");
+    }
+}
+
+// A ref-returning function's `out(result)` contract uses dmd's hidden
+// result reference. Both that contract and the caller's ref initializer
+// must preserve the returned storage identity.
+static foreach (backend; Matrix!()) {
+    @("invariant_.refReturn.outReferenceInitPreservesIdentity."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            ref int get(ref int value) out (result) {
+                assert(&result == &value);
+            } do {
+                return value;
+            }
+
+            int result() {
+                int value = 42;
+                ref int refValue = get(value);
+                assert(&refValue == &value);
+                return refValue;
+            }
+        }, "result");
+    }
+}
+
 // The same hand-built call shape (`funcsem.addInvariant`) also fires for a
 // class invariant: `ad.inv` there is a `ClassDeclaration`'s own
 // `invariant`, and `addInvariant` builds the identical
