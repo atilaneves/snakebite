@@ -5266,14 +5266,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // for a call run at statement level, whose result (`void` or
     // otherwise) is discarded.
     private void compileCall(CallExp expression, in size_t destOffset) {
+        import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
+
         auto callee = expression.f;
-        if (callee is null) {
-            auto calleeExp = expression.e1.isVarExp;
-            if (calleeExp !is null)
-                callee = calleeExp.var.isFuncDeclaration;
-            else if (auto dot = expression.e1.isDotVarExp)
-                callee = dot.var.isFuncDeclaration;
-        }
+        if (callee is null)
+            callee = unresolvedCalleeOf(expression);
         // `super(args)`/`this(args)` constructor delegation reaches here
         // the same as any other call: dmd's own semantic pass always
         // resolves `expression.f` to the constructor it picked. A `null`

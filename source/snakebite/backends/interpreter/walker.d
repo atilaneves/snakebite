@@ -4745,11 +4745,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallExp expression, void* returnPlace,
     ) {
         import core.stdc.string: memcpy;
+        import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
         import std.conv: text;
 
-        auto callee = expression.f is null
+        auto resolved = expression.f is null
+            ? unresolvedCalleeOf(expression) : expression.f;
+        auto callee = resolved is null
             ? calleeOf(expression)
-            : Callee(expression.f, null, false);
+            : Callee(resolved, null, false);
         if (callee.address !is null) {
             const target = _plans.guestTarget(callee.address);
             if (target.word is null)
@@ -4948,10 +4951,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import std.conv: text;
 
         auto callee = expression.e1;
-        if (auto dot = callee.isDotVarExp)
-            if (auto function_ = dot.var.isFuncDeclaration)
-                return Callee(function_, null, false);
-
         if (auto deref = callee.isPtrExp) {
             auto function_ = cast(FuncDeclaration) asPointer(deref.e1);
             if (function_ is null)
