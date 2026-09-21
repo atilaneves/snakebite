@@ -139,6 +139,8 @@ private size_t trailerOffset() {
 // The address host code calls for `slot`: the next free entry, from a new
 // chunk if every existing one is full. Never released.
 private const(void)* reserve(Slot slot) {
+    import core.memory: GC;
+
     mutex.lock;
     scope(exit) mutex.unlock;
 
@@ -148,6 +150,14 @@ private const(void)* reserve(Slot slot) {
     auto chunk = &chunks[$ - 1];
     const index = chunk.used++;
     chunk.slots[index] = slot;
+    // A slot is permanent, and host code can call it until process exit.
+    // The template slot table is static storage, which the GC does not scan.
+    // Root the owner field explicitly so its backend remains valid for every
+    // later callback, including a finalizer in the process-exit collection.
+    GC.addRange(
+        &chunk.slots[index].owner,
+        void*.sizeof,
+    );
     return chunk.base + index * callbackEntryBytes;
 }
 
@@ -424,13 +434,19 @@ public struct CallbackBridge {
     private SharedTable!(const(void)*, const(void)*) _wordOfEntry;
     private CallbackHandler _handler;
     private void* _owner;
+    private void function(void*, FuncDeclaration) _prepare;
 
-    public this(CallbackHandler handler, void* owner) {
+    public this(
+        CallbackHandler handler,
+        void* owner,
+        void function(void*, FuncDeclaration) prepare = null,
+    ) {
         if (handler is null)
             throw new Exception("ffi callback bridge has no handler");
 
         _handler = handler;
         _owner = owner;
+        _prepare = prepare;
     }
 
     public void register(
@@ -454,6 +470,9 @@ public struct CallbackBridge {
 
         if (auto entry = atomicLoad!(MemoryOrder.acq)(registered.entry))
             return entry;
+
+        if (_prepare !is null)
+            _prepare(_owner, registered.declaration);
 
         // `prepareCallback` touches dmd (finding 1.2), so this takes the
         // compiler lock in place of a bridge-only mutex: one lock order

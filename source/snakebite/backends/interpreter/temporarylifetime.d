@@ -179,8 +179,7 @@ public final class TemporaryLifetime {
         scope(exit) {
             if (_temporaries.length > mark)
                 _frames.release(_temporaries[mark].mark);
-            _temporaries.length = mark;
-            _temporaries.assumeSafeAppend;
+            _temporaries = _temporaries[0 .. mark];
         }
 
         _stack.finish(stackMark, (in TemporaryStack.Entry entry) {

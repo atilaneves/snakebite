@@ -16,8 +16,6 @@ import std.string: endsWith;
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot access class destructors through TypeInfo"),
-    Omit!(Interpreter, Because.diverges,
-        "The interpreter allocates while executing a GC finalizer"),
 )) {
     @("firstDestructorCallFromGc." ~ backend.stringof)
     @Tags(backend.stringof)
