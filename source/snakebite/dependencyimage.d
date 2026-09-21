@@ -468,7 +468,37 @@ public struct ProjectImageCache {
         _compiler = compilerPath(compiler);
     }
 
-    public bool restore(ref DependencyImage image, scope string delegate() source) {
+    public bool prepare(
+        ref DependencyImage image,
+        scope string delegate() source,
+        scope void delegate() buildDependencies,
+        scope DependencyImage delegate(in string) buildImage,
+        in bool hasLinkerFiles,
+        scope string[] delegate() inputs,
+    ) {
+        string generated;
+        bool generatedOnce;
+        string generateSource() {
+            if (!generatedOnce) {
+                generated = source();
+                generatedOnce = true;
+            }
+            return generated;
+        }
+        if (restore(image, &generateSource))
+            return true;
+
+        buildDependencies();
+        const generatedSource = generateSource();
+        if (!generatedSource.length && !hasLinkerFiles)
+            return false;
+        image = buildImage(generatedSource.length
+            ? generatedSource : "module snakebite_dependency_image;\n");
+        save(image.path, generatedSource, inputs());
+        return true;
+    }
+
+    private bool restore(ref DependencyImage image, scope string delegate() source) {
         import std.file: exists, readText;
         import std.json: parseJSON;
 
@@ -505,7 +535,7 @@ public struct ProjectImageCache {
         rename(temporary, _path);
     }
 
-    public void save(in string path, in string source, in string[] inputs) const {
+    private void save(in string path, in string source, in string[] inputs) const {
         import std.json: JSONValue;
 
         JSONValue record;
