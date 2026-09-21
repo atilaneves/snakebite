@@ -33,6 +33,7 @@ struct BackendReport {
     string cycleOverheadLabel;
     TimingStatistics cycleOverhead;
     TimingStatistics cycleFrontend;
+    string timingNote;
 }
 
 void updateTestCounts(ref BackendReport report, in string output) {
@@ -136,6 +137,10 @@ void printTable(in BackendReport[] reports) {
     foreach (report; ordered)
         if (report.isOracle)
             writeln("\n", cycleLine(report));
+
+    foreach (report; ordered)
+        if (report.timingNote.length)
+            writeln("\n", report.name, ": ", report.timingNote);
 }
 
 // The oracle's per-cycle costs, in the header's shape so the two add up

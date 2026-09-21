@@ -43,10 +43,16 @@ jobs:
           version: "0.11.32"
 
       # The REPL links GNU readline for interactive line editing.
-      - name: Install libreadline
+      - name: Install native build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libreadline-dev
+          sudo apt-get install -y libreadline-dev clang lld
+
+      - name: Cache Wasm toolchain
+        uses: actions/cache@v4
+        with:
+          path: .tools/wasm32
+          key: wasm32-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/setup-wasm32.sh') }}
 
       - name: Run CI
         run: build/ci.sh
