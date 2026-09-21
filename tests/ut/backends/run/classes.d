@@ -26,6 +26,30 @@ static foreach (backend; Matrix!(
             class Resource {
                 int* count;
                 this(int* count) { this.count = count; }
+                ~this() { ++*count; }
+            }
+            void main() {
+                int count;
+                auto resource = new Resource(&count);
+                const address = cast(const void*) typeid(Resource).destructor;
+                GC.runFinalizers(address[0 .. 1]);
+                assert(count == 1);
+            }
+        });
+    }
+
+    // A destructor runs from GC finalization, where the GC must not
+    // allocate. Its first call to another function therefore has to reach
+    // code that was already prepared before the finalizer started.
+    @("firstDestructorHelperCallFromGc." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.memory: GC;
+            class Resource {
+                int* count;
+                this(int* count) { this.count = count; }
                 void increment() { ++*count; }
                 ~this() { increment(); }
             }
