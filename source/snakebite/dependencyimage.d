@@ -18,7 +18,48 @@ public struct TestHooks {
         Runtime.moduleUnitTester = _legacy;
         Runtime.extendedModuleUnitTester = _extended;
     }
+
+    // The same hooks, each behind a wrapper that records a throwable
+    // escaping it before letting it go on. druntime's `runModuleUnitTests`
+    // calls at most one of them - the extended one when it is set - and
+    // does not catch what escapes; the caller reads `escaped` afterwards.
+    // Hooks are plain function pointers, so the originals live in one
+    // process-wide slot: guest runs already share `Runtime`'s own hook
+    // slots the same way.
+    public static TestHooks watched(in TestHooks hooks) {
+        _watchedHooks = hooks;
+        _escaped = false;
+        return TestHooks(
+            hooks._legacy is null ? null : &watchedLegacy,
+            hooks._extended is null ? null : &watchedExtended,
+        );
+    }
+
+    public static bool escaped() {
+        return _escaped;
+    }
+
+    private static bool watchedLegacy() {
+        try
+            return _watchedHooks._legacy();
+        catch (Throwable throwable) {
+            _escaped = true;
+            throw throwable;
+        }
+    }
+
+    private static typeof(Runtime.extendedModuleUnitTester()()) watchedExtended() {
+        try
+            return _watchedHooks._extended();
+        catch (Throwable throwable) {
+            _escaped = true;
+            throw throwable;
+        }
+    }
 }
+
+private __gshared TestHooks _watchedHooks;
+private __gshared bool _escaped;
 
 
 // A project's dependency image stays loaded until the executable exits.
@@ -255,7 +296,6 @@ public DependencyImage prepareImage(
 
 
 private DependencyImage loadImage(in string path) {
-    import core.runtime: Runtime;
     import core.sys.posix.dlfcn:
         dlerror, dlopen, RTLD_LAZY, RTLD_NODELETE;
     import std.string: fromStringz, toStringz;
@@ -271,36 +311,40 @@ private DependencyImage loadImage(in string path) {
 
     DependencyImage image;
     image._path = path;
-    image._handle = Runtime.loadLibrary(path);
+    // A plain `dlopen`, not `Runtime.loadLibrary`. Both register the
+    // image with druntime on this thread (`_d_dso_registry` runs from
+    // the image's own constructor): the GC scans its TLS, its module and
+    // TLS constructors run, and the record lives until the loader's own
+    // teardown at process exit finds and frees it. `Runtime.loadLibrary`
+    // additionally marks the record as an *explicit* load this thread
+    // must `dlclose` itself, and every thread this one starts inherits
+    // that duty (`core.thread`'s `pinLoadedLibraries` and druntime's
+    // `cleanupLoadedLibraries`). A guest thread still alive at process
+    // exit then reads the record after the loader freed it - a dependency
+    // image's finalizer runs before druntime's and libphobos's - and
+    // segfaults inside `dlclose`. Releasing that explicit reference is no
+    // answer either: druntime drops the whole record with it, so the
+    // GC stops scanning the image's TLS and the loader warns at exit.
+    // `RTLD_NODELETE` keeps the one loader reference taken here for the
+    // whole process, so symbols stay valid after this call returns and
+    // nothing ever closes the image.
+    image._handle = dlopen(path.toStringz, RTLD_LAZY | RTLD_NODELETE);
     if (image._handle is null)
         require(false, text("Cannot load dependency image ", path,
             ": ", dlerror.fromStringz));
     // Shared constructors run only on the first load. Retain their hooks
-    // even if later preparation fails, since the loaded image stays pinned.
+    // even if later preparation fails, since the loaded image stays open.
     if (auto hooks = image._handle in _imageTestHooks)
         image.testHooks = *hooks;
     else {
         image.testHooks = TestHooks.current;
         _imageTestHooks[image._handle] = image.testHooks;
     }
-    // druntime releases a thread's library references when that thread exits.
-    // Symbols must remain valid for the executable after the loading thread ends.
-    if (path !in _pinnedImages) {
-        const pinned = dlopen(path.toStringz, RTLD_LAZY | RTLD_NODELETE);
-        if (pinned is null)
-            require(false, text("Cannot retain dependency image ", path,
-                ": ", dlerror.fromStringz));
-        // Keep one loader reference until process exit. Closing it here lets
-        // the loader run DSO teardown after druntime released the loading
-        // thread's reference, so the DSO is no longer in its DSO list.
-        _pinnedImages[path] = cast(void*) pinned;
-    }
     return image;
 }
 
 
 private __gshared TestHooks[void*] _imageTestHooks;
-private __gshared void*[string] _pinnedImages;
 private __gshared imported!"core.sync.mutex".Mutex _imageLoadLock;
 
 
