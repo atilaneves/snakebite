@@ -36,10 +36,12 @@ private imported!"snakebite.nativelayout".TypeFacts pointerFactsOf() {
 }
 
 public final class Bytecode: imported!"snakebite.backends.backend".Backend {
+    import core.time: Duration;
+    import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
     import dmd.root.string: toDString;
-    import snakebite.backends.backend: Program;
+    import snakebite.backends.backend: CompilationStatistics, Program;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.classinfo;
     import snakebite.backends.bytecode.vm: Function, Vm;
@@ -83,7 +85,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
     private size_t _compilationDepth;
     private size_t _cacheMisses;
-    private imported!"core.time".Duration _compilationTime;
+    private Duration _compilationTime;
     // The frame layout of every guest function reached through
     // `runHostToGuest`, built once per declaration and shared by the
     // program runner's top-level call and a callback's re-entry.
@@ -117,9 +119,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _plans.resolve(nativeSymbolName(symbol));
     }
 
-    public override imported!"snakebite.backends.backend".CompilationStatistics
-        compilationStatistics() const {
-        return imported!"snakebite.backends.backend".CompilationStatistics(
+    public override CompilationStatistics compilationStatistics() const {
+        return CompilationStatistics(
             true,
             _cacheMisses,
             _compilationTime,
@@ -318,7 +319,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // only how a vtable slot gets its callable value is this backend's
     // own.
     package TypeInfo_Class classRuntimeInfo(
-        imported!"dmd.dclass".ClassDeclaration declaration,
+        ClassDeclaration declaration,
     ) {
         import snakebite.backends.classinfo:
             classRuntimeInfo_ = classRuntimeInfo, Hooks;
@@ -398,7 +399,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     }
 
     private void fillFieldInits(
-        imported!"dmd.dclass".ClassDeclaration declaration, ubyte* base,
+        ClassDeclaration declaration, ubyte* base,
     ) {
         _nativeData.fillFields(declaration, base);
     }
@@ -496,13 +497,14 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 // ever handed back through `FrameLayout` itself.
 extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.ffi.call: CallAdapter;
+    import dmd.arraytypes: Expressions;
     import dmd.declaration: VarDeclaration;
     import dmd.identifier: Identifier;
     import dmd.init: ExpInitializer;
     import dmd.location: Loc;
     import dmd.expression;
     import dmd.func: FuncDeclaration;
-    import dmd.mtype: Type;
+    import dmd.mtype: Type, TypeFunction;
     import dmd.statement:
         BreakStatement, CaseStatement, CompoundStatement, ContinueStatement,
         DefaultStatement, DoStatement, ExpStatement, ForStatement,
@@ -552,6 +554,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, delegateTargetOf, functionNeedsClosure,
         outerFunctionOf;
+    import snakebite.backends.aggregateinit: InitStep;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
     import snakebite.exception: SnakebiteException;
@@ -585,7 +588,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private struct Temporary {
         size_t base;
         size_t site;
-        imported!"dmd.expression".Expression destructor;
+        Expression destructor;
     }
     private Temporary[] _temporaries;
     private size_t[] _lifetimeMarkers;
@@ -2177,7 +2180,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // declaration of its own to render).
     private void compileVariableInitializer(
         VarDeclaration variable,
-        imported!"dmd.location".Loc loc,
+        Loc loc,
         in string operation,
     ) {
         auto expInitializer = variable._init.isExpInitializer;
@@ -3593,12 +3596,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // here: leaving `vthis` at its `.init` zero instead reads back a null
     // context the first time a method on that instance uses it.
     private void applyStep(
-        imported!"snakebite.backends.aggregateinit".InitStep step,
-        imported!"dmd.location".Loc loc,
+        InitStep step,
+        Loc loc,
         in size_t base,
     ) {
-        import snakebite.backends.aggregateinit: InitStep;
-
         final switch (step.kind) with (InitStep.Kind) {
         case vthis:
             if (step.parentFunction is null)
@@ -4068,7 +4069,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // constructor and a bare `new Reader` (no arguments at all) get
         // a real context rather than `.init`'s zero.
         import snakebite.backends.aggregateinit:
-            AggregateInitPlan, InitStep, planPositionalFields;
+            AggregateInitPlan, planPositionalFields;
 
         auto plan = structType is null
             ? AggregateInitPlan.init
@@ -5484,8 +5485,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // whichever branch below actually needs it.
     private void compileResolvedCall(
         FuncDeclaration callee,
-        imported!"dmd.arraytypes".Expressions* arguments,
-        imported!"dmd.location".Loc loc,
+        Expressions* arguments,
+        Loc loc,
         string exprText,
         bool hasThis,
         size_t delegate() thisOffsetOf,
@@ -5508,8 +5509,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private void compileResolvedCallBody(
         FuncDeclaration callee,
-        imported!"dmd.arraytypes".Expressions* arguments,
-        imported!"dmd.location".Loc loc,
+        Expressions* arguments,
+        Loc loc,
         string exprText,
         bool hasThis,
         size_t receiverOffset,
@@ -5646,9 +5647,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // the callee takes.
     private void compileNativeCall(
         FuncDeclaration callee,
-        imported!"dmd.mtype".TypeFunction type,
-        imported!"dmd.arraytypes".Expressions* arguments,
-        imported!"dmd.location".Loc loc,
+        TypeFunction type,
+        Expressions* arguments,
+        Loc loc,
         string exprText,
         Arg[] initialArgs,
         in size_t destOffset,
@@ -5707,7 +5708,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private Arg[] compileVariadicArguments(
-        imported!"dmd.arraytypes".Expressions* arguments,
+        Expressions* arguments,
         in FrameLayout layout,
     ) {
         import snakebite.backends.variadic: VariadicLayout;
@@ -5775,7 +5776,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `hasContext` doc).
     private void compileIndirectCall(CallExp expression, in size_t destOffset) {
         import dmd.astenums: STC, Tdelegate;
-        import dmd.mtype: TypeFunction;
         import snakebite.backends.calls: arityMismatches;
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize;
@@ -5904,7 +5904,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         string hookName,
         scope const(Register)[] parameterRegisters,
         Arg[] extraArgs,
-        in imported!"dmd.location".Loc loc,
+        in Loc loc,
     ) {
         auto plan = _bytecode._plans.rawPlanOf(hookName, parameterRegisters);
         if (plan is null)
