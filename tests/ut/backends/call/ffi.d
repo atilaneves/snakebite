@@ -9,6 +9,27 @@ import snakebite.frontend.dmd.functions: findFunction;
 import std.conv: text;
 
 
+static foreach (backend; Matrix!()) {
+    @("ffi.unexecutedIntrinsicCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: fabs;
+
+            float absoluteIfNegative(float value) {
+                if (value < 0)
+                    return fabs(value);
+                return value;
+            }
+
+            void main() {
+                assert(absoluteIfNegative(1.0f) == 1.0f);
+            }
+        });
+    }
+}
+
+
 public extern(C) typeof(null) snakebite_ut_null_value(typeof(null) value) {
     assert(value is null);
     return value;

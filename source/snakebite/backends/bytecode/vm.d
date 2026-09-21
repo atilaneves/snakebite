@@ -46,8 +46,8 @@ public struct Arg {
 // only the one field its `Kind` names.
 public struct CallSite {
     public enum Kind {
-        // `callee` already names a function this compiler compiled to
-        // its own `Instruction`s.
+        // `callee` names a compiled function, or `prepareGuest` compiles
+        // and caches it when the call first executes.
         guest,
         // `nativePlan` is a `snakebite.ffi.plan.CallPlan`, opaque to this
         // module, run through `executeCallPlan` - prepared either for a
@@ -55,6 +55,7 @@ public struct CallSite {
         // compiler resolved by linker symbol (an allocation, a `~=`
         // dchar append, a bounds check): the same shape either way, so
         // this VM hardcodes no druntime signature for any of them.
+        // An unresolved target uses `prepareNativePlan` on first execution.
         native,
         // `calleeSlotOffset` is the caller's own frame offset holding a
         // `const(Function)*` value read back at run time in place of a
@@ -76,6 +77,14 @@ public struct CallSite {
         return site;
     }
 
+    public static CallSite guest(
+        const(Function)* delegate() prepare, Arg[] args, size_t returnWidth,
+    ) {
+        auto site = guest(cast(const(Function)*) null, args, returnWidth);
+        site.prepareGuest = prepare;
+        return site;
+    }
+
     // A prepared FFI plan for a native symbol, called through
     // `executeCallPlan`.
     public static CallSite native(
@@ -86,6 +95,14 @@ public struct CallSite {
         site.nativePlan = nativePlan;
         site.args = args;
         site.returnWidth = returnWidth;
+        return site;
+    }
+
+    public static CallSite native(
+        const(void)* delegate() prepare, Arg[] args, size_t returnWidth,
+    ) {
+        auto site = native(cast(const(void)*) null, args, returnWidth);
+        site.prepareNativePlan = prepare;
         return site;
     }
 
@@ -110,7 +127,9 @@ public struct CallSite {
     package Arg[] args;
     package size_t returnWidth;
     package const(Function)* callee;
+    package const(Function)* delegate() prepareGuest;
     package const(void)* nativePlan;
+    package const(void)* delegate() prepareNativePlan;
     package size_t calleeSlotOffset;
     package bool hasContext;
     package size_t cleanupStartIndex = size_t.max;
@@ -884,7 +903,8 @@ private const(Instruction)* runCall(Decoded)(
     const site = execution.callSites[execution.source];
     final switch (site.kind) with (CallSite.Kind) {
     case guest:
-        return callFunction(execution, site, site.callee);
+        return callFunction(execution, site,
+            site.callee !is null ? site.callee : site.prepareGuest());
     case indirect:
         auto callee =
             *cast(const(void)**) (execution.storage(site.calleeSlotOffset));
@@ -909,7 +929,8 @@ private const(Instruction)* runCall(Decoded)(
             values[i] = execution.storage(arg.callerOffset);
         auto result = execution.destination;
         executeCallPlan(
-            site.nativePlan, result, values.ptr, values.length,
+            site.nativePlan !is null ? site.nativePlan : site.prepareNativePlan(),
+            result, values.ptr, values.length,
         );
         return execution.next;
     }

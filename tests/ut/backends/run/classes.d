@@ -26,7 +26,8 @@ static foreach (backend; Matrix!(
             class Resource {
                 int* count;
                 this(int* count) { this.count = count; }
-                ~this() { ++*count; }
+                void increment() { ++*count; }
+                ~this() { increment(); }
             }
             void main() {
                 int count;

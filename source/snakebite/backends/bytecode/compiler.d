@@ -67,6 +67,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // once and never relocates, unlike an associative array's own
     // storage, which can rehash as more entries go in.
     private Function*[FuncDeclaration] _compiled;
+    private const(Function)*[] _callbackRoots;
+    private bool _preparingCallbacks;
     // The prepared FFI plan for druntime's own allocator, built once and
     // reused by every `new T[](n)`/array literal any function compiles -
     // the same `rawPlanOf` a bounds hook already goes through, so this
@@ -239,6 +241,45 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _program.isInterpreted(function_);
     }
 
+    private const(void)* delegate() deferredNativePlan(
+        FuncDeclaration callee,
+        imported!"snakebite.ffi.call".CallAdapter.Arguments preparation,
+    ) {
+        import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+        import snakebite.ffi.plan: CallPlan;
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        const(CallPlan)* cached;
+        return () {
+            if (auto plan = atomicLoad!(MemoryOrder.acq)(cached))
+                return cast(const(void)*) plan;
+            withCompilerLock({
+                if (atomicLoad!(MemoryOrder.acq)(cached) is null)
+                    atomicStore!(MemoryOrder.rel)(cached,
+                        preparation.prepare(_plans, callee));
+            });
+            return cast(const(void)*) atomicLoad!(MemoryOrder.acq)(cached);
+        };
+    }
+
+    private const(Function)* delegate() deferredGuestFunction(
+        FuncDeclaration callee,
+    ) {
+        import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        const(Function)* cached;
+        return () {
+            if (auto compiled = atomicLoad!(MemoryOrder.acq)(cached))
+                return compiled;
+            withCompilerLock({
+                if (atomicLoad!(MemoryOrder.acq)(cached) is null)
+                    atomicStore!(MemoryOrder.rel)(cached, compileFunction(callee));
+            });
+            return atomicLoad!(MemoryOrder.acq)(cached);
+        };
+    }
+
     // Records that `compiled` is the word this backend stores for
     // `function_`'s address - what the plan swaps for a pool entry
     // (ADR-0003) when the word crosses to host code, and what
@@ -357,8 +398,42 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 hasNativeSymbol(method))) {
             word = compileFunction(method);
             registerGuestWord(method, cast(const(Function)*) word);
+            _callbackRoots ~= cast(const(Function)*) word;
+            if (_compilationDepth == 0)
+                prepareCallbackBodies;
         }
         return _plans.callableAddress(word, method, adjustment);
+    }
+
+    // A callback can first execute during GC finalization. Compile its
+    // direct callees before exposing it to host execution, while allocation
+    // is allowed. Wait for recursive placeholders to have complete bodies.
+    private void prepareCallbackBodies() {
+        import snakebite.backends.bytecode.vm: CallSite;
+
+        if (_preparingCallbacks || !_callbackRoots.length)
+            return;
+        _preparingCallbacks = true;
+        scope(exit) _preparingCallbacks = false;
+        bool[const(Function)*] visited;
+        void prepare(const(Function)* function_) {
+            if (function_ in visited)
+                return;
+            visited[function_] = true;
+            foreach (ref site; function_.callSites) {
+                // Temporary-cleanup entries also occupy this table, but
+                // have neither a callee nor a compilation callback.
+                if (site.kind == CallSite.Kind.guest
+                        && (site.callee !is null || site.prepareGuest !is null))
+                    prepare(site.callee !is null ? site.callee : site.prepareGuest());
+            }
+        }
+        while (_callbackRoots.length) {
+            const roots = _callbackRoots;
+            _callbackRoots = null;
+            foreach (root; roots)
+                prepare(root);
+        }
     }
 
     private void fillFieldInits(
@@ -366,8 +441,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     ) {
         _nativeData.fillFields(declaration, base);
     }
-    // `function_`'s compiled form, compiling it - and, transitively,
-    // whatever it calls - on first use. Reused on every later call to the
+    // `function_`'s compiled form, compiling its body on first use.
+    // Reused on every later call to the
     // same function, the way compiled code only ever compiles a function
     // once. Returns a stable pointer (see `_compiled`) so a call site
     // reached while this very function is still being compiled can point
@@ -443,6 +518,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         scope compiler = new FunctionCompiler(
             this, function_, layout, returnFacts, isVoidReturn, isRefReturn);
         *placeholder = compiler.build(body_);
+        if (outermost)
+            prepareCallbackBodies;
 
         return placeholder;
     }
@@ -5483,9 +5560,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto type = typeFunctionOf(callee);
 
+        const hasNativeSymbol = _bytecode.hasNativeSymbol(callee);
         const guest = _bytecode._callSelection.usesGuestBody(
             callee, &_bytecode.isGuestFunction,
-            _bytecode.hasNativeSymbol(callee),
+            hasNativeSymbol,
         );
         if (!guest) {
             Arg[] initialArgs;
@@ -5494,10 +5572,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             compileNativeCall(
                 callee, type, arguments, loc, exprText, initialArgs,
-                destOffset);
+                destOffset, hasNativeSymbol);
             return;
         }
-        auto calleeFunction = _bytecode.compileFunction(callee);
         auto calleeLayout = FrameLayout.of(callee);
         auto calleeType = typeFunctionOf(callee);
 
@@ -5560,7 +5637,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const siteIndex = _callSites.length;
         _callSites ~= CallSite.guest(
-            calleeFunction, args,
+            _bytecode.deferredGuestFunction(callee), args,
             returnShape.returnFacts.size,
         );
         emit(&opCall, destOffset, siteIndex, 0);
@@ -5581,6 +5658,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         string exprText,
         Arg[] initialArgs,
         in size_t destOffset,
+        in bool hasNativeSymbol,
     ) {
         import snakebite.backends.calls: arityMismatches;
         import snakebite.ffi.call: CallAdapter;
@@ -5593,15 +5671,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, loc, exprText);
 
         auto preparation = CallAdapter.Arguments.of(type, arguments);
-        const plan = preparation.prepare(_bytecode._plans, callee);
         Arg[] args = initialArgs;
         preparation.each((value) {
             args ~= compileBarrierArgument(value);
         });
-        _callSites ~= CallSite.native(
-            cast(const(void)*) plan, args,
-            returnShape.returnFacts.size,
-        );
+        // An unused branch can refer to a compiler intrinsic with no host
+        // symbol. Resolve it only if execution reaches the call. Known native
+        // targets stay prepared for callbacks that first run during GC.
+        if (hasNativeSymbol) {
+            const plan = preparation.prepare(_bytecode._plans, callee);
+            _callSites ~= CallSite.native(
+                cast(const(void)*) plan, args, returnShape.returnFacts.size);
+        } else {
+            _callSites ~= CallSite.native(
+                _bytecode.deferredNativePlan(callee, preparation), args,
+                returnShape.returnFacts.size);
+        }
         emit(&opCall,
             nativeResultPlace(destOffset, returnShape.isVoid,
                 returnShape.returnFacts),

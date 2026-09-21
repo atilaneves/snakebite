@@ -7,6 +7,28 @@ import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 
 
+static foreach (backend; Matrix!()) {
+    @("unexecutedAssemblyCallee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void assemblyBody() {
+                asm { nop; }
+            }
+
+            void choose(bool execute) {
+                if (execute)
+                    assemblyBody();
+            }
+
+            void main() {
+                choose(false);
+            }
+        });
+    }
+}
+
+
 // Floating conditions use D's value semantics: both signed zeros are false,
 // every nonzero value is true, and NaN is true because it is not zero.
 static foreach (backend; Matrix!()) {
