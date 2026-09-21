@@ -1040,6 +1040,44 @@ static foreach (backend; Matrix!(
 }
 
 
+// A MEMORY-class result the caller discards. The callee writes it
+// through its hidden return pointer whatever the caller does with it,
+// so the call needs a place for the result even when no expression
+// reads it: unit-threaded's `shouldThrow` returns such a struct and is
+// called as a statement.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("memoryClassParameter.discardedResult." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                struct MemoryTriple {
+                    size_t first;
+                    size_t second;
+                    size_t third;
+                }
+
+                pragma(mangle, "snakebite_ut_memory_triple_transform_backend")
+                extern(C) MemoryTriple nativeMemoryTripleTransform(
+                    MemoryTriple value,
+                );
+
+                int answer() {
+                    MemoryTriple value;
+                    value.first = 17;
+                    nativeMemoryTripleTransform(value);
+                    return 42;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
 // Two MEMORY-class parameters in one call - both always spill, and dmd's
 // reversed `extern(D)` convention places every spilled argument on the
 // stack in descending declaration order, so `second`'s four eightbytes

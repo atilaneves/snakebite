@@ -5525,7 +5525,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             cast(const(void)*) plan, args,
             returnShape.returnFacts.size,
         );
-        emit(&opCall, destOffset, _callSites.length - 1, 0);
+        emit(&opCall,
+            nativeResultPlace(destOffset, returnShape.isVoid,
+                returnShape.returnFacts),
+            _callSites.length - 1, 0);
+    }
+
+    // Where a native callee's result lands. A caller at statement level
+    // discards it, but a MEMORY-class result is written through the
+    // hidden return pointer whatever the caller does with it, so the
+    // call still needs a place: a scratch slot then, never no place. A
+    // result with no bytes (`void`, `noreturn`) needs none.
+    private size_t nativeResultPlace(
+        in size_t destOffset, in bool isVoid, in TypeFacts returnFacts,
+    ) {
+        return destOffset == discardResult && !isVoid && returnFacts.size != 0
+            ? reserveTemp(returnFacts) : destOffset;
     }
 
     private Arg[] compileVariadicArguments(
@@ -5695,7 +5710,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 : _bytecode._plans.signatureOf(functionType, isDelegateCall),
             isDelegateCall,
         );
-        emit(&opCall, destOffset, siteIndex, 0);
+        emit(&opCall,
+            nativeResultPlace(destOffset, isVoidCallee, returnShape.returnFacts),
+            siteIndex, 0);
     }
 
     private TypeFacts pointerFacts() {
