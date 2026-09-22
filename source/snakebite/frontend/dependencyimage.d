@@ -280,24 +280,25 @@ private extern(C++) class Collector
                     && !hasFunctionLocalType(instance)) {
                 const name = instance.tempdecl.getModule.toPrettyChars.fromStringz.idup;
                 _imports[name] = true;
-                import dmd.dtemplate: getType;
-                import dmd.typesem: nextOf, toDsymbol;
+                import dmd.mtype: Type;
+                bool[Type] visited;
                 foreach (argument; *instance.tiargs) {
-                    // Pointer and array arguments can also name dependency types.
-                    for (auto type = getType(argument); type !is null; type = type.nextOf) {
-                        if (auto symbol = type.toDsymbol(null)) {
-                            auto module_ = symbol.getModule; // DMD symbol queries are mutable.
-                            if (module_ !is null) {
-                                // DMD can home another program's instances on
-                                // this root. Their types are not dependencies
-                                // of the program being compiled into an image.
-                                if (_program.isRootOwned(module_) || module_ !in _modules)
-                                    _needsRoot[function_] = true;
-                                else
-                                    _imports[module_.toPrettyChars.fromStringz.idup] = true;
-                            }
+                    // Pointer, array, delegate parameter, associative array
+                    // key, tuple element, and nested template instance
+                    // arguments can all also name dependency types.
+                    eachTemplateArgument(argument, visited, (symbol) {
+                        auto module_ = symbol.getModule; // DMD symbol queries are mutable.
+                        if (module_ !is null) {
+                            // DMD can home another program's instances on
+                            // this root. Their types are not dependencies
+                            // of the program being compiled into an image.
+                            if (_program.isRootOwned(module_) || module_ !in _modules)
+                                _needsRoot[function_] = true;
+                            else
+                                _imports[module_.toPrettyChars.fromStringz.idup] = true;
                         }
-                    }
+                        return false;
+                    });
                 }
                 const key = sourceSpelling(instance.toPrettyChars(true).fromStringz);
                 if (key !in _references)
@@ -331,16 +332,89 @@ private extern(C++) class Collector
 // Function-local types cannot be named from an independent module. Their
 // enclosing dependency body can still instantiate them when it is compiled.
 private bool hasFunctionLocalType(imported!"dmd.dtemplate".TemplateInstance instance) {
-    import dmd.dtemplate: getType;
+    import dmd.mtype: Type;
+
+    bool[Type] visited;
+    foreach (argument; *instance.tiargs) {
+        const found = eachTemplateArgument(argument, visited, (symbol) {
+            for (auto ancestor = symbol; ancestor !is null; ancestor = ancestor.parent)
+                if (ancestor.isFuncDeclaration)
+                    return true;
+            return false;
+        });
+        if (found)
+            return true;
+    }
+    return false;
+}
+
+
+// A template argument's type can hide a dependency-relevant symbol several
+// levels deep: through a pointer/array/delegate return type (dmd's own
+// `nextOf` chain), through a function or delegate parameter type, through an
+// associative array's key type, through a tuple's element types, or through
+// the arguments of a nested template instance (e.g. `Outer!(Inner!Deep)`,
+// or a member such as `Appender!Deep.Appender.Data`). Visit every symbol
+// reachable this way and hand it to `each`; returning `true` from `each`
+// stops the walk early. A previously-seen type also stops the walk, guarding
+// against cycles through self-referential template instances.
+private extern(D) bool eachTemplateArgumentSymbol(
+    imported!"dmd.mtype".Type type,
+    ref bool[imported!"dmd.mtype".Type] visited,
+    scope bool delegate(imported!"dmd.dsymbol".Dsymbol) each,
+) {
     import dmd.typesem: nextOf, toDsymbol;
 
-    foreach (argument; *instance.tiargs) {
-        for (auto type = getType(argument); type !is null; type = type.nextOf) {
-            for (auto symbol = type.toDsymbol(null); symbol !is null; symbol = symbol.parent)
-                if (symbol.isFuncDeclaration)
+    while (type !is null) {
+        if (type in visited)
+            return false;
+        visited[type] = true;
+
+        if (auto function_ = type.isTypeFunction) {
+            foreach (i; 0 .. function_.parameterList.length)
+                if (eachTemplateArgumentSymbol(function_.parameterList[i].type, visited, each))
                     return true;
+        } else if (auto associativeArray = type.isTypeAArray) {
+            if (eachTemplateArgumentSymbol(associativeArray.index, visited, each))
+                return true;
+        } else if (auto tuple = type.isTypeTuple) {
+            if (tuple.arguments !is null)
+                foreach (parameter; *tuple.arguments)
+                    if (eachTemplateArgumentSymbol(parameter.type, visited, each))
+                        return true;
         }
+
+        if (auto symbol = type.toDsymbol(null)) {
+            if (each(symbol))
+                return true;
+            for (auto ancestor = symbol.parent; ancestor !is null; ancestor = ancestor.parent) {
+                if (auto instance = ancestor.isTemplateInstance) {
+                    if (instance.tiargs !is null)
+                        foreach (argument; *instance.tiargs)
+                            if (eachTemplateArgument(argument, visited, each))
+                                return true;
+                }
+            }
+        }
+
+        type = type.nextOf;
     }
+    return false;
+}
+
+
+// An alias argument names a symbol directly, with no type to recurse through.
+private extern(D) bool eachTemplateArgument(
+    imported!"dmd.rootobject".RootObject argument,
+    ref bool[imported!"dmd.mtype".Type] visited,
+    scope bool delegate(imported!"dmd.dsymbol".Dsymbol) each,
+) {
+    import dmd.dtemplate: getType, isDsymbol;
+
+    if (auto type = getType(argument))
+        return eachTemplateArgumentSymbol(type, visited, each);
+    if (auto symbol = isDsymbol(argument))
+        return each(symbol);
     return false;
 }
 
