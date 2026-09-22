@@ -46,21 +46,6 @@ public BuiltinCall entryOf(in string name, in ParameterType type) {
 }
 
 
-// Every `core.math` intrinsic snakebite has a builtin wrapper for, split
-// by how many arguments it takes and, for the two-argument ones, whether
-// the second argument shares the call's own floating point type.
-// `rint` and `rndtol` are real `core.math` intrinsics too, but dmd's own
-// `BUILTIN` enum (`dmd.func`) has no member for either one - dmd's
-// `isBuiltin` always answers `BUILTIN.unimp` for them, the same answer a
-// function that is not a compiler intrinsic at all gets, and so does
-// dmd's own CTFE engine (`dmd.dinterpret.evaluateIfBuiltin` gates on the
-// identical check). A call to either of them never reaches this table:
-// `CallSelection` keeps routing it through FFI, same as before this
-// module existed.
-private enum oneArgumentNames = ["fabs", "sqrt", "sin", "cos"];
-private enum sameTypeTwoArgumentNames = ["yl2x", "yl2xp1"];
-
-
 private BuiltinCall widthEntryOf(T)(in string name) {
     switch (name) {
         static foreach (oneArgumentName; oneArgumentNames)
@@ -80,16 +65,19 @@ private BuiltinCall widthEntryOf(T)(in string name) {
 }
 
 
-// Every `core.bitop` intrinsic snakebite has a builtin wrapper for.
-// `bsf` and `bsr` also classify (`BUILTIN.bsf`/`BUILTIN.bsr`), but both
-// have real bodies in `core.bitop` (`pragma(inline, false)` wrapping a
-// soft fallback, kept so intrinsic detection still works on the type
-// this table never sees them through) - `CallSelection.buildDecision`
-// only ever asks `builtinDecision` about a function whose `fbody is
-// null`, so a name here is only ever one dmd itself declared bodiless:
-// `bswap` and `_popcnt`.
-private enum sameTypeIntegerNames = ["bswap"];
-private enum ownReturnTypeIntegerNames = ["_popcnt"];
+// Every `core.math` intrinsic snakebite has a builtin wrapper for, split
+// by how many arguments it takes and, for the two-argument ones, whether
+// the second argument shares the call's own floating point type.
+// `rint` and `rndtol` are real `core.math` intrinsics too, but dmd's own
+// `BUILTIN` enum (`dmd.func`) has no member for either one - dmd's
+// `isBuiltin` always answers `BUILTIN.unimp` for them, the same answer a
+// function that is not a compiler intrinsic at all gets, and so does
+// dmd's own CTFE engine (`dmd.dinterpret.evaluateIfBuiltin` gates on the
+// identical check). A call to either of them never reaches this table:
+// `CallSelection` keeps routing it through FFI, same as before this
+// module existed.
+private enum oneArgumentNames = ["fabs", "sqrt", "sin", "cos"];
+private enum sameTypeTwoArgumentNames = ["yl2x", "yl2xp1"];
 
 
 private BuiltinCall integerEntryOf(T)(in string name) {
@@ -119,6 +107,18 @@ private BuiltinCall integerEntryOf(T)(in string name) {
             return null;
     }
 }
+
+
+// Every `core.bitop` intrinsic snakebite has a builtin wrapper for.
+// `bsf` and `bsr` also classify (`BUILTIN.bsf`/`BUILTIN.bsr`), but both
+// have real bodies in `core.bitop` (`pragma(inline, false)` wrapping a
+// soft fallback, kept so intrinsic detection still works on the type
+// this table never sees them through) - `CallSelection.buildDecision`
+// only ever asks `builtinDecision` about a function whose `fbody is
+// null`, so a name here is only ever one dmd itself declared bodiless:
+// `bswap` and `_popcnt`.
+private enum sameTypeIntegerNames = ["bswap"];
+private enum ownReturnTypeIntegerNames = ["_popcnt"];
 
 
 // Every entry this table serves is one concept: read each argument at
