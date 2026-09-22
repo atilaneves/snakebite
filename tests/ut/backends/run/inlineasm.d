@@ -78,26 +78,24 @@ static foreach (backend; Backends) {
 }
 
 // A root-owned function with an unguarded `asm` block must not reach any
-// backend (see docs/adr/0012). Every load path shares the same check
-// (`driveSharedSemantic`), so one test per backend is enough. `Native`
-// never can reach this: a real x86-64 build implements inline assembler,
-// so `asmFunction` just runs.
-static foreach (backend; Backends) {
-    @("inlineasm.loadDiagnostic.unguardedAsmFailsLoad." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        parseSnippet(q{
-            void asmFunction() {
-                asm { nop; }
-            }
-            unittest {
-                asmFunction();
-            }
-        }).shouldThrow.msg.withoutSnippetCounter.should ==
-            "inline assembler is not supported in `snippet_N.asmFunction`: "
-            ~ "guard it with `version (D_InlineAsm_X86_64)`, which "
-            ~ "snakebite does not define";
-    }
+// backend (see docs/adr/0012). The check runs inside `driveSharedSemantic`,
+// which every load path shares - `loadProject`, the REPL, and
+// `parseSnippet` itself - before any backend is chosen, so `parseSnippet`
+// alone already pins the diagnostic; no backend runs here for a tag to
+// name.
+@("inlineasm.loadDiagnostic.unguardedAsmFailsLoad")
+unittest {
+    parseSnippet(q{
+        void asmFunction() {
+            asm { nop; }
+        }
+        unittest {
+            asmFunction();
+        }
+    }).shouldThrow.msg.withoutSnippetCounter.should ==
+        "inline assembler is not supported in `snippet_N.asmFunction`: "
+        ~ "guard it with `version (D_InlineAsm_X86_64)`, which "
+        ~ "snakebite does not define";
 }
 
 // A root-owned function template's `TemplateInstance` is reached twice by
@@ -109,32 +107,30 @@ static foreach (backend; Backends) {
 // inside a `unittest` block's body takes both paths at once. Without the
 // `_visited` guard keyed by `FuncDeclaration`, that would report the same
 // `asm` block twice, joined by a newline (`diagnosticMessage`). The exact
-// equality below pins a single line.
-static foreach (backend; Backends) {
-    @("inlineasm.loadDiagnostic.templateInstanceReachedTwiceReportsOnce." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        parseSnippet(q{
-            void asmFunction(T)() {
-                asm { nop; }
-            }
-            unittest {
-                asmFunction!int();
-            }
-        }).shouldThrow.msg.withoutSnippetCounter.should ==
-            "inline assembler is not supported in "
-            ~ "`snippet_N.asmFunction!int.asmFunction`: guard it with "
-            ~ "`version (D_InlineAsm_X86_64)`, which snakebite does not "
-            ~ "define";
-    }
+// equality below pins a single line. This is the same load-time check as
+// above, reached through `parseSnippet` alone, so one test is enough.
+@("inlineasm.loadDiagnostic.templateInstanceReachedTwiceReportsOnce")
+unittest {
+    parseSnippet(q{
+        void asmFunction(T)() {
+            asm { nop; }
+        }
+        unittest {
+            asmFunction!int();
+        }
+    }).shouldThrow.msg.withoutSnippetCounter.should ==
+        "inline assembler is not supported in "
+        ~ "`snippet_N.asmFunction!int.asmFunction`: guard it with "
+        ~ "`version (D_InlineAsm_X86_64)`, which snakebite does not "
+        ~ "define";
 }
 
 // `parseSnippet` names each root module `snippet_<N>`. One counter gives
-// out `N` for every `parseSnippet` call in the whole `bin/ut` process,
-// not only this file, and backend variants of these tests run in
-// parallel threads. So `N` is not stable across runs. This helper
-// replaces it with a fixed placeholder, so the test can compare dmd's
-// whole message instead of a few separate substrings.
+// out `N` for every `parseSnippet` call in the whole `bin/ut` process, not
+// only this file, and unit-threaded runs tests in parallel threads. So `N`
+// is not stable across runs. This helper replaces it with a fixed
+// placeholder, so the test can compare dmd's whole message instead of a
+// few separate substrings.
 private string withoutSnippetCounter(in string message) {
     import std.regex: regex, replaceFirst;
 
@@ -152,52 +148,50 @@ private string withoutSnippetCounter(in string message) {
 // mixin template's own body was not walked and its unguarded `asm` block
 // escaped the load diagnostic. Unlike the string-mixin gap above, this is
 // not a documented, accepted gap: the mixin template's syntax tree is
-// available up front, so the collector must walk it.
-static foreach (backend; Backends) {
-    @("inlineasm.loadDiagnostic.templateMixinFailsLoad." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        parseSnippet(q{
-            mixin template WithAsm() {
-                void unsupported() { asm { nop; } }
-            }
-            mixin WithAsm;
-            unittest {
-                unsupported();
-            }
-        }).shouldThrow.msg.withoutSnippetCounter.should ==
-            "inline assembler is not supported in "
-            ~ "`snippet_N.WithAsm!().unsupported`: guard it with "
-            ~ "`version (D_InlineAsm_X86_64)`, which snakebite does not "
-            ~ "define";
-    }
+// available up front, so the collector must walk it. This is the same
+// load-time check pinned above, reached through `parseSnippet` alone, so
+// one test is enough.
+@("inlineasm.loadDiagnostic.templateMixinFailsLoad")
+unittest {
+    parseSnippet(q{
+        mixin template WithAsm() {
+            void unsupported() { asm { nop; } }
+        }
+        mixin WithAsm;
+        unittest {
+            unsupported();
+        }
+    }).shouldThrow.msg.withoutSnippetCounter.should ==
+        "inline assembler is not supported in "
+        ~ "`snippet_N.WithAsm!().unsupported`: guard it with "
+        ~ "`version (D_InlineAsm_X86_64)`, which snakebite does not "
+        ~ "define";
 }
 
 // Known, accepted gap (see docs/adr/0012): a `version (D_InlineAsm_X86_64)`
 // inside a string mixin is not part of the syntax tree the gate walks.
 // So the mixed-in `asm` branch compiles in. The load-time scan for an
 // unguarded `asm` block still catches it: it does not care how a
-// root-owned function came to have one.
-static foreach (backend; Backends) {
-    @("inlineasm.versionIdentifier.mixinGapFailsLoad." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        parseSnippet(q{
-            mixin(`
-                version (D_InlineAsm_X86_64) {
-                    int f() { asm { nop; } return 1; }
-                } else {
-                    int f() { return 2; }
-                }
-            `);
-            unittest {
-                f();
+// root-owned function came to have one. This is the same load-time check
+// pinned above, reached through `parseSnippet` alone, so one test is
+// enough.
+@("inlineasm.versionIdentifier.mixinGapFailsLoad")
+unittest {
+    parseSnippet(q{
+        mixin(`
+            version (D_InlineAsm_X86_64) {
+                int f() { asm { nop; } return 1; }
+            } else {
+                int f() { return 2; }
             }
-        }).shouldThrow.msg.withoutSnippetCounter.should ==
-            "inline assembler is not supported in `snippet_N.f`: guard it "
-            ~ "with `version (D_InlineAsm_X86_64)`, which snakebite does "
-            ~ "not define";
-    }
+        `);
+        unittest {
+            f();
+        }
+    }).shouldThrow.msg.withoutSnippetCounter.should ==
+        "inline assembler is not supported in `snippet_N.f`: guard it "
+        ~ "with `version (D_InlineAsm_X86_64)`, which snakebite does "
+        ~ "not define";
 }
 
 // `InlineAsmCollector` had no visited set. `SemanticTimeTransitiveVisitor`'s
@@ -229,48 +223,42 @@ static foreach (backend; TestBackends) {
 // `importAll`, so an unguarded `asm` block in it must still be scanned and
 // reported at load time - the same failure `unguardedAsmFailsLoad` above
 // pins for a snippet's own module, but reached through an import instead.
-static foreach (backend; Backends) {
-    @("inlineasm.loadDiagnostic.projectImportFailsLoad." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        import dmd.frontend: addImport;
+// This is still `parseSnippet` alone, so one test is enough.
+@("inlineasm.loadDiagnostic.projectImportFailsLoad")
+unittest {
+    import dmd.frontend: addImport;
 
-        // dmd registers a parsed module process-globally by its module
-        // identifier, not by file path, so the module name must be unique
-        // to this backend: reusing one across the three variants below
-        // would resolve later ones to whichever variant loaded it first.
-        const moduleName = text("inlineasm_project_import_", backend.stringof);
-        const directory = buildPath(
-            tempDir,
-            text("inlineasm_project_import_", backend.stringof, "_", thisProcessID),
-        );
-        mkdirRecurse(directory);
-        scope(exit) rmdirRecurse(directory);
+    const moduleName = "inlineasm_project_import";
+    const directory = buildPath(
+        tempDir,
+        text("inlineasm_project_import_", thisProcessID),
+    );
+    mkdirRecurse(directory);
+    scope(exit) rmdirRecurse(directory);
 
-        write(
-            buildPath(directory, moduleName ~ ".d"),
-            "module " ~ moduleName ~ ";\n"
-            ~ "void asmFunction() { asm { nop; } }\n",
-        );
+    write(
+        buildPath(directory, moduleName ~ ".d"),
+        "module " ~ moduleName ~ ";\n"
+        ~ "void asmFunction() { asm { nop; } }\n",
+    );
 
-        // dmd looks up an import under `global.path`, a process-global
-        // list `rootImportPaths` below does not itself populate; add it
-        // the same way `snakebite.repl.Repl.this()` does for a real
-        // session, but under the frontend's own lock. `Repl.this()` does
-        // not take that lock around its own `addImport` call - a separate,
-        // pre-existing thread-safety gap, not this finding.
-        withCompilerLock({ addImport(directory); });
+    // dmd looks up an import under `global.path`, a process-global
+    // list `rootImportPaths` below does not itself populate; add it
+    // the same way `snakebite.repl.Repl.this()` does for a real
+    // session, but under the frontend's own lock. `Repl.this()` does
+    // not take that lock around its own `addImport` call - a separate,
+    // pre-existing thread-safety gap, not this finding.
+    withCompilerLock({ addImport(directory); });
 
-        parseSnippet(
-            "import " ~ moduleName ~ ";",
-            [directory],
-        ).shouldThrowWithMessage(
-            text(
-                "inline assembler is not supported in `", moduleName,
-                ".asmFunction`: guard it with "
-                ~ "`version (D_InlineAsm_X86_64)`, which snakebite does "
-                ~ "not define",
-            ),
-        );
-    }
+    parseSnippet(
+        "import " ~ moduleName ~ ";",
+        [directory],
+    ).shouldThrowWithMessage(
+        text(
+            "inline assembler is not supported in `", moduleName,
+            ".asmFunction`: guard it with "
+            ~ "`version (D_InlineAsm_X86_64)`, which snakebite does "
+            ~ "not define",
+        ),
+    );
 }
