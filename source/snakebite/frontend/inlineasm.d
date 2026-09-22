@@ -67,7 +67,7 @@ private extern(C++) class InlineAsmCollector
     // The same question `Program.isRootOwned` (backend.d) answers, so the
     // predicate itself lives once, in `snakebite.frontend.dmd.functions`;
     // both forward to it (docs/adr/0009: one root-owned predicate).
-    private extern(D) bool isRootOwned(FuncDeclaration function_) {
+    private extern(D) bool isRootOwned(FuncDeclaration function_) const {
         import snakebite.frontend.dmd.functions:
             frontendIsRootOwned = isRootOwned;
 
@@ -157,6 +157,16 @@ private extern(C++) class InlineAsmVersionGate
     import dmd.cond: Include, VersionCondition;
     import dmd.identifier: Identifier;
 
+    // Pooled once per walk, not on every `VersionCondition` visited:
+    // `Identifier.idPool` hashes and looks up its argument in dmd's global
+    // identifier table on every call, and a root module's syntax tree can
+    // hold many `version (...)` conditions.
+    private const Identifier _inlineAsmIdent;
+
+    private extern(D) this() {
+        _inlineAsmIdent = Identifier.idPool("D_InlineAsm_X86_64");
+    }
+
     // A version LEVEL condition, `version (2) { ... }`, has a `null`
     // `VersionCondition.ident` (dmd's `DVCondition` doc comment: "If
     // `null`, this condition will use an integer level"). `is` identity
@@ -164,7 +174,7 @@ private extern(C++) class InlineAsmVersionGate
     // simply compares unequal to the pooled identifier below; it can never
     // be `D_InlineAsm_X86_64`, which is never anonymous.
     override void visit(VersionCondition condition) {
-        if (condition.ident is Identifier.idPool("D_InlineAsm_X86_64"))
+        if (condition.ident is _inlineAsmIdent)
             condition.inc = Include.no;
     }
 }
