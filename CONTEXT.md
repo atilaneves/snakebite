@@ -52,8 +52,12 @@ executes next, after required cleanup. A control transfer from cleanup
 replaces the pending one.
 
 **Call selection**:
-The decision to execute a function as guest code or call its host body
-across the barrier, using root ownership and the call's requirements.
+The decision for one call, with three possible outcomes: run the
+callee's own guest body, call its host body across the barrier, or run
+snakebite's own builtin wrapper. Root ownership and the call's
+requirements choose between the guest and barrier outcomes. A bodiless
+declaration takes the builtin outcome instead when dmd's own
+`isBuiltin` classifies it as a compiler intrinsic (ADR-0013).
 
 **Call arguments**:
 The values supplied to a call: hidden context and type information,
