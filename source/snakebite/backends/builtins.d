@@ -64,64 +64,18 @@ private BuiltinCall widthEntryOf(T)(in string name) {
     switch (name) {
         static foreach (oneArgumentName; oneArgumentNames)
             case oneArgumentName:
-                return &oneArgument!(oneArgumentName, T);
+                return &entry!(oneArgumentName, T);
         static foreach (twoArgumentName; sameTypeTwoArgumentNames)
             case twoArgumentName:
-                return &sameTypeTwoArguments!(twoArgumentName, T);
+                return &entry!(twoArgumentName, T, T);
         case "ldexp":
-            return &ldexpEntry!T;
+            // `ldexp`'s second argument is always `int`, never the
+            // call's own floating point type - the one intrinsic here
+            // whose arguments do not all share one type.
+            return &entry!("ldexp", T, int);
         default:
             return null;
     }
-}
-
-
-// `core.math`'s own one-argument intrinsics (`fabs`, `sqrt`, `sin`,
-// `cos`): one entry per `(name, T)` pair, generated instead of
-// hand-written so the four names above are the only place a new
-// one-argument intrinsic needs adding.
-private extern(C) void oneArgument(string name, T)(
-    void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
-) @trusted nothrow @nogc {
-    import core.math;
-
-    assert(argumentCount == 1, name ~ " takes one argument");
-    const value = *cast(const(T)*) arguments[0];
-    *cast(T*) returnPlace = __traits(getMember, core.math, name)(value);
-}
-
-
-// `core.math`'s two-argument intrinsics whose second argument shares the
-// first's type (`yl2x`, `yl2xp1`): `yl2x(x, y)` computes `y * log2(x)`,
-// `yl2xp1(x, y)` computes `y * log2(x + 1)` - both real `core.math`
-// intrinsics on every type this table serves (verified against both dmd
-// and ldc for `float`, `double` and `real`), so neither needs the
-// `std.math` fallback a host lacking them would.
-private extern(C) void sameTypeTwoArguments(string name, T)(
-    void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
-) @trusted nothrow @nogc {
-    import core.math;
-
-    assert(argumentCount == 2, name ~ " takes two arguments");
-    const x = *cast(const(T)*) arguments[0];
-    const y = *cast(const(T)*) arguments[1];
-    *cast(T*) returnPlace = __traits(getMember, core.math, name)(x, y);
-}
-
-
-// `ldexp`'s second argument is always `int`, never the call's own
-// floating point type - the one intrinsic here whose arguments do not
-// all share one type, so it keeps its own entry instead of fitting
-// `sameTypeTwoArguments`.
-private extern(C) void ldexpEntry(T)(
-    void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
-) @trusted nothrow @nogc {
-    import core.math: ldexp;
-
-    assert(argumentCount == 2, "ldexp takes two arguments");
-    const value = *cast(const(T)*) arguments[0];
-    const exponent = *cast(const(int)*) arguments[1];
-    *cast(T*) returnPlace = ldexp(value, exponent);
 }
 
 
@@ -154,46 +108,39 @@ private BuiltinCall integerEntryOf(T)(in string name) {
                 typeof(mixin("core.bitop." ~ integerName ~ "(T.init)")) == T
             ))
                 case integerName:
-                    return &sameTypeInteger!(integerName, T);
+                    return &entry!(integerName, T);
         static foreach (integerName; ownReturnTypeIntegerNames)
             static if (__traits(compiles,
                 mixin("core.bitop." ~ integerName ~ "(T.init)")))
                 case integerName:
-                    return &ownReturnTypeInteger!(integerName, T);
+                    return &entry!(integerName, T);
         default:
             return null;
     }
 }
 
 
-// `core.bitop`'s own single-argument intrinsics whose result shares
-// their argument's type (`bswap(uint)` returns `uint`, `bswap(ulong)`
-// returns `ulong`) - the integer counterpart of `oneArgument` above,
-// against `core.bitop` rather than `core.math`.
-private extern(C) void sameTypeInteger(string name, T)(
+// Every entry this table serves is one concept: read each argument at
+// its own parameter type from the argument pointers, call the named
+// `core.math`/`core.bitop` intrinsic with those values, and write the
+// result at whatever type the call itself returns - `Result` comes from
+// `typeof(call(values))`, not from `Params`, so this one template covers
+// a same-type result (`fabs`, `bswap`), a mixed-type argument list
+// (`ldexp`'s trailing `int`) and a result narrower than the argument
+// (`_popcnt(uint)` returns `int`) without a separate template per shape.
+// `core.math` and `core.bitop` declare no name in common, so importing
+// both here and looking `name` up unqualified never collides.
+private extern(C) void entry(string name, Params...)(
     void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
 ) @trusted nothrow @nogc {
+    import core.math;
     import core.bitop;
 
-    assert(argumentCount == 1, name ~ " takes one argument");
-    const value = *cast(const(T)*) arguments[0];
-    *cast(T*) returnPlace = __traits(getMember, core.bitop, name)(value);
-}
-
-
-// `_popcnt`'s result does not share its argument's type for every
-// overload (`ushort _popcnt(ushort)`, but `int _popcnt(uint)` and `int
-// _popcnt(ulong)`) - `typeof` reads each overload's own declared return
-// type back from `core.bitop` itself rather than this table
-// hand-deriving it.
-private extern(C) void ownReturnTypeInteger(string name, T)(
-    void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
-) @trusted nothrow @nogc {
-    import core.bitop;
-
-    assert(argumentCount == 1, name ~ " takes one argument");
-    const value = *cast(const(T)*) arguments[0];
-    alias call = __traits(getMember, core.bitop, name);
-    alias Result = typeof(call(value));
-    *cast(Result*) returnPlace = call(value);
+    assert(argumentCount == Params.length, name ~ " arity");
+    Params values;
+    static foreach (i, P; Params)
+        values[i] = *cast(const(P)*) arguments[i];
+    alias call = mixin(name);
+    alias Result = typeof(call(values));
+    *cast(Result*) returnPlace = call(values);
 }
