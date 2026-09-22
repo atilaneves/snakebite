@@ -987,6 +987,79 @@ unittest {
 }
 
 
+// `apply!(plain)`'s only template argument is an alias to `plain`, a
+// module-level dependency function - a normal dependency, not a local one.
+// A walk that treats the aliased symbol itself as "function-local" merely
+// because it is a `FuncDeclaration` (rather than checking its *ancestors*
+// for an enclosing function, see `dependencyimage.d`'s
+// `hasFunctionLocalType`) wrongly drops this instantiation from the image.
+@("image.aliasArgumentDependencyFunction")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    enum moduleName = "image_alias_argument";
+    sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+        "module " ~ moduleName ~ ";\n" ~ q{
+            void apply(alias f)() { f(); }
+            void plain() {}
+        });
+    sandbox.writeFile("app/root_" ~ moduleName ~ ".d",
+        "module root_" ~ moduleName ~ ";\nimport " ~ moduleName ~ ";\n" ~ q{
+        void trigger() {
+            apply!(plain)();
+        }
+    });
+    const imports = [sandbox.inSandboxPath("deps")];
+    // `plain` is not itself part of a linkable dependency library in this
+    // sandbox, so building the real dependency image would fail to link;
+    // this test only checks what `imageSource` generates, not that it links.
+    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false).project;
+    const source = imageSource(project.program);
+    "apply!".should.be in source;
+}
+
+
+// `apply!(pick!Thing)`'s alias argument names `pick!Thing`, a dependency
+// template function instance whose own template argument (`Thing`) is
+// root-owned. `pick!Thing.getModule` resolves to the dependency module (dmd
+// homes an instantiated symbol on its template declaration's module), so
+// checking only the aliased symbol's own module misses the root-owned type
+// nested inside *its* template arguments - the same class of hole that
+// `image.nestedTemplateArgumentRootType` covers for a type argument, but
+// reached here through an alias argument instead (see `dependencyimage.d`'s
+// `eachFoundSymbol`, used from both `eachTemplateArgumentSymbol`'s
+// `toDsymbol` path and `eachTemplateArgument`'s `isDsymbol` path). The
+// instantiation must not leak an unresolvable, unqualified `Thing` spelling
+// into the image.
+@("image.aliasArgumentNestedRootType")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    enum moduleName = "image_alias_nested_root";
+    // `apply`'s body never calls `f`: the aliased `pick!Thing` instance is
+    // therefore never itself visited (and so never itself directly marked
+    // as needing root through the ordinary call-graph propagation). Only
+    // the alias-argument walk over `apply!(pick!Thing)`'s own tiargs can
+    // discover that `Thing` is root-owned.
+    sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+        "module " ~ moduleName ~ ";\n" ~ q{
+            void apply(alias f)() {}
+            void pick(T)() {}
+        });
+    sandbox.writeFile("app/root_" ~ moduleName ~ ".d",
+        "module root_" ~ moduleName ~ ";\nimport " ~ moduleName ~ ";\n" ~ q{
+        class Thing {}
+        void trigger() {
+            apply!(pick!Thing)();
+        }
+    });
+    const imports = [sandbox.inSandboxPath("deps")];
+    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false).project;
+    const source = imageSource(project.program);
+    "apply!".should.not.be in source;
+}
+
+
 @("image.compilerArguments")
 @Serial
 unittest {

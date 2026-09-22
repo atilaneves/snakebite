@@ -337,7 +337,7 @@ private bool hasFunctionLocalType(imported!"dmd.dtemplate".TemplateInstance inst
     bool[Type] visited;
     foreach (argument; *instance.tiargs) {
         const found = eachTemplateArgument(argument, visited, (symbol) {
-            for (auto ancestor = symbol; ancestor !is null; ancestor = ancestor.parent)
+            for (auto ancestor = symbol.parent; ancestor !is null; ancestor = ancestor.parent)
                 if (ancestor.isFuncDeclaration)
                     return true;
             return false;
@@ -385,19 +385,38 @@ private extern(D) bool eachTemplateArgumentSymbol(
         }
 
         if (auto symbol = type.toDsymbol(null)) {
-            if (each(symbol))
+            if (eachFoundSymbol(symbol, visited, each))
                 return true;
-            for (auto ancestor = symbol.parent; ancestor !is null; ancestor = ancestor.parent) {
-                if (auto instance = ancestor.isTemplateInstance) {
-                    if (instance.tiargs !is null)
-                        foreach (argument; *instance.tiargs)
-                            if (eachTemplateArgument(argument, visited, each))
-                                return true;
-                }
-            }
         }
 
         type = type.nextOf;
+    }
+    return false;
+}
+
+
+// A found symbol (whether named by a type or directly by an alias argument)
+// is handed to `each`, then its ancestors are climbed: any enclosing
+// `TemplateInstance` can itself carry tiargs that name further
+// dependency-relevant symbols (e.g. `Bucket!(string, X)` found through a
+// type reaches here for `Bucket`, whose enclosing instance's tiargs still
+// need inspecting for `X`; an alias argument such as `apply!(pick!Thing)`
+// reaches here for `pick`, whose enclosing instance's tiargs still need
+// inspecting for `Thing`). One rule, shared by both callers below.
+private extern(D) bool eachFoundSymbol(
+    imported!"dmd.dsymbol".Dsymbol symbol,
+    ref bool[imported!"dmd.mtype".Type] visited,
+    scope bool delegate(imported!"dmd.dsymbol".Dsymbol) each,
+) {
+    if (each(symbol))
+        return true;
+    for (auto ancestor = symbol.parent; ancestor !is null; ancestor = ancestor.parent) {
+        if (auto instance = ancestor.isTemplateInstance) {
+            if (instance.tiargs !is null)
+                foreach (argument; *instance.tiargs)
+                    if (eachTemplateArgument(argument, visited, each))
+                        return true;
+        }
     }
     return false;
 }
@@ -414,7 +433,7 @@ private extern(D) bool eachTemplateArgument(
     if (auto type = getType(argument))
         return eachTemplateArgumentSymbol(type, visited, each);
     if (auto symbol = isDsymbol(argument))
-        return each(symbol);
+        return eachFoundSymbol(symbol, visited, each);
     return false;
 }
 
