@@ -9,9 +9,13 @@ import snakebite.frontend.dmd.functions: findFunction;
 import std.conv: text;
 
 
-// `core.math.fabs` is a compiler intrinsic: it has no host symbol to bind.
-// A call site that never executes must not need one, so a program that
-// never takes the branch must run without a symbol for the intrinsic.
+// `core.math.fabs` takes the builtin route (`dmd.builtin.isBuiltin`
+// classifies it, so the call runs through snakebite's own compiled
+// wrapper, never across the FFI barrier). This test pins an unexecuted
+// builtin call: a call site that never executes must run without
+// resolving the intrinsic at all, unlike `ffi.unexecutedIntrinsicCall.
+// rndtol` and `.rint` below, which pin the native route with no host
+// symbol.
 static foreach (backend; Matrix!()) {
     @("ffi.unexecutedIntrinsicCall." ~ backend.stringof)
     @Tags(backend.stringof)
