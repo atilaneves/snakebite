@@ -33,6 +33,26 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// The same intrinsic reached by a call that does execute. Compiled D
+// emits the instruction inline, so no symbol for `core.math.fabs` exists
+// anywhere in the process: a backend has to evaluate the bodiless
+// intrinsic itself instead of binding it through FFI.
+static foreach (backend; Matrix!()) {
+    @("ffi.executedIntrinsicCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: fabs;
+
+            void main() {
+                float value = -1.0f;
+                assert(fabs(value) == 1.0f);
+            }
+        });
+    }
+}
+
+
 public extern(C) typeof(null) snakebite_ut_null_value(typeof(null) value) {
     assert(value is null);
     return value;
