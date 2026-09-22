@@ -282,24 +282,22 @@ private extern(C++) class Collector
                 _imports[name] = true;
                 import dmd.mtype: Type;
                 bool[Type] visited;
-                foreach (argument; *instance.tiargs) {
-                    // Pointer, array, delegate parameter, associative array
-                    // key, tuple element, and nested template instance
-                    // arguments can all also name dependency types.
-                    eachTemplateArgument(argument, visited, (symbol) {
-                        auto module_ = symbol.getModule; // DMD symbol queries are mutable.
-                        if (module_ !is null) {
-                            // DMD can home another program's instances on
-                            // this root. Their types are not dependencies
-                            // of the program being compiled into an image.
-                            if (_program.isRootOwned(module_) || module_ !in _modules)
-                                _needsRoot[function_] = true;
-                            else
-                                _imports[module_.toPrettyChars.fromStringz.idup] = true;
-                        }
-                        return false;
-                    });
-                }
+                // Pointer, array, delegate parameter, associative array
+                // key, tuple element, and nested template instance
+                // arguments can all also name dependency types.
+                eachTemplateArgument(instance, visited, (symbol) {
+                    auto module_ = symbol.getModule; // DMD symbol queries are mutable.
+                    if (module_ !is null) {
+                        // DMD can home another program's instances on
+                        // this root. Their types are not dependencies
+                        // of the program being compiled into an image.
+                        if (_program.isRootOwned(module_) || module_ !in _modules)
+                            _needsRoot[function_] = true;
+                        else
+                            _imports[module_.toPrettyChars.fromStringz.idup] = true;
+                    }
+                    return false;
+                });
                 const key = sourceSpelling(instance.toPrettyChars(true).fromStringz);
                 if (key !in _references)
                     _references[key] = Reference.init;
@@ -335,17 +333,12 @@ private bool hasFunctionLocalType(imported!"dmd.dtemplate".TemplateInstance inst
     import dmd.mtype: Type;
 
     bool[Type] visited;
-    foreach (argument; *instance.tiargs) {
-        const found = eachTemplateArgument(argument, visited, (symbol) {
-            for (auto ancestor = symbol.parent; ancestor !is null; ancestor = ancestor.parent)
-                if (ancestor.isFuncDeclaration)
-                    return true;
-            return false;
-        });
-        if (found)
-            return true;
-    }
-    return false;
+    return eachTemplateArgument(instance, visited, (symbol) {
+        for (auto ancestor = symbol.parent; ancestor !is null; ancestor = ancestor.parent)
+            if (ancestor.isFuncDeclaration)
+                return true;
+        return false;
+    });
 }
 
 
@@ -396,13 +389,17 @@ private bool eachTemplateArgumentSymbol(
 
 
 // A found symbol (whether named by a type or directly by an alias argument)
-// is handed to `each`, then its ancestors are climbed: any enclosing
-// `TemplateInstance` can itself carry tiargs that name further
-// dependency-relevant symbols (e.g. `Bucket!(string, X)` found through a
-// type reaches here for `Bucket`, whose enclosing instance's tiargs still
-// need inspecting for `X`; an alias argument such as `apply!(pick!Thing)`
-// reaches here for `pick`, whose enclosing instance's tiargs still need
-// inspecting for `Thing`). One rule, shared by both callers below.
+// is handed to `each`, then it and its ancestors are climbed: any enclosing
+// `TemplateInstance` (or the symbol itself, when it is one) can carry
+// tiargs that name further dependency-relevant symbols (e.g.
+// `Bucket!(string, X)` found through a type reaches here for `Bucket`,
+// whose enclosing instance's tiargs still need inspecting for `X`; an alias
+// argument such as `apply!(pick!Thing)` for a single-member eponymous
+// `pick` reaches here for `pick`, whose enclosing instance's tiargs still
+// need inspecting for `Thing` - but for a multi-member `pick`, dmd does not
+// collapse the argument to a member: it reaches here as the `pick!Thing`
+// `TemplateInstance` itself, so the climb must inspect its own tiargs too,
+// not just an enclosing instance's). One rule, shared by both callers below.
 private bool eachFoundSymbol(
     imported!"dmd.dsymbol".Dsymbol symbol,
     ref bool[imported!"dmd.mtype".Type] visited,
@@ -410,14 +407,10 @@ private bool eachFoundSymbol(
 ) {
     if (each(symbol))
         return true;
-    for (auto ancestor = symbol.parent; ancestor !is null; ancestor = ancestor.parent) {
-        if (auto instance = ancestor.isTemplateInstance) {
-            if (instance.tiargs !is null)
-                foreach (argument; *instance.tiargs)
-                    if (eachTemplateArgument(argument, visited, each))
-                        return true;
-        }
-    }
+    for (auto ancestor = symbol; ancestor !is null; ancestor = ancestor.parent)
+        if (auto instance = ancestor.isTemplateInstance)
+            if (eachTemplateArgument(instance, visited, each))
+                return true;
     return false;
 }
 
@@ -434,6 +427,23 @@ private bool eachTemplateArgument(
         return eachTemplateArgumentSymbol(type, visited, each);
     if (auto symbol = isDsymbol(argument))
         return eachFoundSymbol(symbol, visited, each);
+    return false;
+}
+
+
+// Walks every one of a `TemplateInstance`'s own tiargs, stopping early when
+// `each` (reached through `eachTemplateArgument` above) returns `true`. The
+// three sites that inspect a `TemplateInstance`'s tiargs share this loop.
+private bool eachTemplateArgument(
+    imported!"dmd.dtemplate".TemplateInstance instance,
+    ref bool[imported!"dmd.mtype".Type] visited,
+    scope bool delegate(imported!"dmd.dsymbol".Dsymbol) each,
+) {
+    if (instance.tiargs is null)
+        return false;
+    foreach (argument; *instance.tiargs)
+        if (eachTemplateArgument(argument, visited, each))
+            return true;
     return false;
 }
 

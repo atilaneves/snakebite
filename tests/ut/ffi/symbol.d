@@ -1069,6 +1069,47 @@ unittest {
 }
 
 
+// `image.aliasArgumentNestedRootType` uses a single-member eponymous
+// template (`pick(T)()`), so dmd collapses `pick!Thing` in `apply`'s tiargs
+// down to the member `pick!Thing.pick` before it ever reaches
+// `eachFoundSymbol` - the enclosing `TemplateInstance` is already
+// `symbol.parent`, so climbing ancestors starting there finds it. A
+// multi-member dependency template is not collapsed: the alias argument
+// *is* the `TemplateInstance` itself, whose `.parent` is the module, so a
+// climb starting at `symbol.parent` never reaches its tiargs and the
+// root-owned `Thing` nested inside leaks through unresolved. The climb in
+// `eachFoundSymbol` must therefore start at `symbol` itself, not
+// `symbol.parent`. `apply!(pick!int)()` is the positive control: every type
+// it nests is dependency-owned or built in, so it must still resolve.
+@("image.aliasArgumentTemplateInstanceRootType")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    enum moduleName = "image_alias_instance_root";
+    sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+        "module " ~ moduleName ~ ";\n" ~ q{
+            void apply(alias f)() {}
+            template pick(T) {
+                void one() {}
+                void two() {}
+            }
+        });
+    sandbox.writeFile("app/root_" ~ moduleName ~ ".d",
+        "module root_" ~ moduleName ~ ";\nimport " ~ moduleName ~ ";\n" ~ q{
+        class Thing {}
+        void trigger() {
+            apply!(pick!Thing)();
+            apply!(pick!int)();
+        }
+    });
+    const imports = [sandbox.inSandboxPath("deps")];
+    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false).project;
+    const source = imageSource(project.program);
+    "Thing".should.not.be in source;
+    "apply!".should.be in source;
+}
+
+
 @("image.compilerArguments")
 @Serial
 unittest {
