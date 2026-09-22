@@ -952,16 +952,21 @@ unittest {
 }
 
 
-// `store`'s only instantiation nests a root-owned type (`Thing`) two levels
-// deep: inside `Bucket`'s own template arguments, inside a delegate
+// `store`'s first instantiation nests a root-owned type (`Thing`) two
+// levels deep: inside `Bucket`'s own template arguments, inside a delegate
 // parameter type. A walk that only follows pointer, array, and
 // delegate-return-type links (dmd's `nextOf` chain) never reaches `Thing`,
 // so it wrongly treats the instantiation as fully resolvable from the
 // dependency module alone and emits it with `Thing` unqualified - a
 // spelling that cannot resolve, and that the dmd 2.113.0 frontend segfaults
-// on while trying to report as such (see `dependencyimage.d`'s
-// `eachTemplateArgumentSymbol`). The instantiation must instead be excluded
-// and left to the normal guest fallback.
+// on while trying to report as such. The instantiation must instead be
+// excluded and left to the normal guest fallback. `store`'s second
+// instantiation is the positive control: every type it nests (`string`,
+// `int`, `Bucket` itself) is either built in or dependency-owned, so it
+// must still resolve and be emitted with its correctly qualified spelling.
+// An over-broad fix that excludes every nested-template-argument
+// instantiation, not just root-owned ones, would pass the first assertion
+// but fail the second.
 @("image.nestedTemplateArgumentRootType")
 @Serial
 unittest {
@@ -978,12 +983,16 @@ unittest {
         void trigger() {
             Bucket!(string, void delegate(Thing)) bucket;
             store(bucket);
+            Bucket!(string, void delegate(int)) other;
+            store(other);
         }
     });
     const imports = [sandbox.inSandboxPath("deps")];
     auto project = prepareProject(sandbox.inSandboxPath("app"), imports).project;
     const source = imageSource(project.program);
-    "store!".should.not.be in source;
+    "Thing".should.not.be in source;
+    (moduleName ~ ".store!(" ~ moduleName ~ ".Bucket!(string, void delegate(int)))")
+        .should.be in source;
 }
 
 

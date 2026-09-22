@@ -358,7 +358,7 @@ private bool hasFunctionLocalType(imported!"dmd.dtemplate".TemplateInstance inst
 // reachable this way and hand it to `each`; returning `true` from `each`
 // stops the walk early. A previously-seen type also stops the walk, guarding
 // against cycles through self-referential template instances.
-private extern(D) bool eachTemplateArgumentSymbol(
+private bool eachTemplateArgumentSymbol(
     imported!"dmd.mtype".Type type,
     ref bool[imported!"dmd.mtype".Type] visited,
     scope bool delegate(imported!"dmd.dsymbol".Dsymbol) each,
@@ -403,7 +403,7 @@ private extern(D) bool eachTemplateArgumentSymbol(
 // need inspecting for `X`; an alias argument such as `apply!(pick!Thing)`
 // reaches here for `pick`, whose enclosing instance's tiargs still need
 // inspecting for `Thing`). One rule, shared by both callers below.
-private extern(D) bool eachFoundSymbol(
+private bool eachFoundSymbol(
     imported!"dmd.dsymbol".Dsymbol symbol,
     ref bool[imported!"dmd.mtype".Type] visited,
     scope bool delegate(imported!"dmd.dsymbol".Dsymbol) each,
@@ -423,7 +423,7 @@ private extern(D) bool eachFoundSymbol(
 
 
 // An alias argument names a symbol directly, with no type to recurse through.
-private extern(D) bool eachTemplateArgument(
+private bool eachTemplateArgument(
     imported!"dmd.rootobject".RootObject argument,
     ref bool[imported!"dmd.mtype".Type] visited,
     scope bool delegate(imported!"dmd.dsymbol".Dsymbol) each,
