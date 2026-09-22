@@ -14,8 +14,8 @@ guess-and-crash at run time.
 ## Decision
 
 Snakebite does not implement DMD-style inline assembler. A root
-module is parsed with `D_InlineAsm_X86_64` undefined. Guarded code
-then compiles out, the same way it would under a compiler without
+module is analysed as if `D_InlineAsm_X86_64` were undefined. Guarded
+code then compiles out, the same way it would under a compiler without
 this assembler, such as GDC on an unsupported target. A dependency
 module (druntime, phobos, a dub dependency) keeps the identifier
 defined. ADR-0009 already has real dmd compile dependency modules and
