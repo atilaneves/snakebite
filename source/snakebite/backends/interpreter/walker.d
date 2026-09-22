@@ -887,15 +887,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // no function name, package, or template argument gets a vote.
         // Other non-root declarations still run as native code already
         // linked into the process.
-        // A declaration without a body can only describe a host call,
-        // regardless of which module owns it.
+        // A declaration without a body can only describe a native call
+        // or a builtin, regardless of which module owns it - never a
+        // guest one, since there is no guest body to walk.
         auto body_ = function_.fbody;
-        const interprets = _callSelection.usesGuestBody(
+        const decision = _callSelection.decisionOf(
             function_,
             (callee) => _program.isInterpreted(callee),
             hasNativeSymbol(function_),
         );
-        if (!interprets) {
+        final switch (decision.route) with (CallSelection.Route) {
+        case native:
             const plan = callSite is null
                 ? _plans.of(function_)
                 : callPlanOf(callSite, function_);
@@ -903,6 +905,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 function_, plan, returnPlace, arguments, argumentCount,
             );
             return;
+        case builtin:
+            decision.builtinEntry(returnPlace, arguments, argumentCount);
+            return;
+        case guest:
+            break;
         }
 
         const guard = CallStateGuard(this);
