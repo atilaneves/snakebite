@@ -952,6 +952,164 @@ unittest {
 }
 
 
+// `store`'s first instantiation nests a root-owned type (`Thing`) two
+// levels deep: inside `Bucket`'s own template arguments, inside a delegate
+// parameter type. A walk that only follows pointer, array, and
+// delegate-return-type links (dmd's `nextOf` chain) never reaches `Thing`,
+// so it wrongly treats the instantiation as fully resolvable from the
+// dependency module alone and emits it with `Thing` unqualified - a
+// spelling that cannot resolve, and that the dmd 2.113.0 frontend segfaults
+// on while trying to report as such. The instantiation must instead be
+// excluded and left to the normal guest fallback. `store`'s second
+// instantiation is the positive control: every type it nests (`string`,
+// `int`, `Bucket` itself) is either built in or dependency-owned, so it
+// must still resolve and be emitted with its correctly qualified spelling.
+// An over-broad fix that excludes every nested-template-argument
+// instantiation, not just root-owned ones, would pass the first assertion
+// but fail the second.
+@("image.nestedTemplateArgumentRootType")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    enum moduleName = "image_nested_root_type";
+    sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+        "module " ~ moduleName ~ ";\n" ~ q{
+            struct Bucket(K, V) { K key; V value; }
+            void store(T)(T value) {}
+        });
+    sandbox.writeFile("app/root_" ~ moduleName ~ ".d",
+        "module root_" ~ moduleName ~ ";\nimport " ~ moduleName ~ ";\n" ~ q{
+        class Thing {}
+        void trigger() {
+            Bucket!(string, void delegate(Thing)) bucket;
+            store(bucket);
+            Bucket!(string, void delegate(int)) other;
+            store(other);
+        }
+    });
+    const imports = [sandbox.inSandboxPath("deps")];
+    auto project = prepareProject(sandbox.inSandboxPath("app"), imports).project;
+    const source = imageSource(project.program);
+    "Thing".should.not.be in source;
+    (moduleName ~ ".store!(" ~ moduleName ~ ".Bucket!(string, void delegate(int)))")
+        .should.be in source;
+}
+
+
+// `apply!(plain)`'s only template argument is an alias to `plain`, a
+// module-level dependency function - a normal dependency, not a local one.
+// A walk that treats the aliased symbol itself as "function-local" merely
+// because it is a `FuncDeclaration` (rather than checking its *ancestors*
+// for an enclosing function, see `dependencyimage.d`'s
+// `hasFunctionLocalType`) wrongly drops this instantiation from the image.
+@("image.aliasArgumentDependencyFunction")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    enum moduleName = "image_alias_argument";
+    sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+        "module " ~ moduleName ~ ";\n" ~ q{
+            void apply(alias f)() { f(); }
+            void plain() {}
+        });
+    sandbox.writeFile("app/root_" ~ moduleName ~ ".d",
+        "module root_" ~ moduleName ~ ";\nimport " ~ moduleName ~ ";\n" ~ q{
+        void trigger() {
+            apply!(plain)();
+        }
+    });
+    const imports = [sandbox.inSandboxPath("deps")];
+    // `plain` is not itself part of a linkable dependency library in this
+    // sandbox, so building the real dependency image would fail to link;
+    // this test only checks what `imageSource` generates, not that it links.
+    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false).project;
+    const source = imageSource(project.program);
+    "apply!".should.be in source;
+}
+
+
+// `apply!(pick!Thing)`'s alias argument names `pick!Thing`, a dependency
+// template function instance whose own template argument (`Thing`) is
+// root-owned. `pick!Thing.getModule` resolves to the dependency module (dmd
+// homes an instantiated symbol on its template declaration's module), so
+// checking only the aliased symbol's own module misses the root-owned type
+// nested inside *its* template arguments - the same class of hole that
+// `image.nestedTemplateArgumentRootType` covers for a type argument, but
+// reached here through an alias argument instead (see `dependencyimage.d`'s
+// `eachFoundSymbol`, used from both `eachTemplateArgumentSymbol`'s
+// `toDsymbol` path and `eachTemplateArgument`'s `isDsymbol` path). The
+// instantiation must not leak an unresolvable, unqualified `Thing` spelling
+// into the image.
+@("image.aliasArgumentNestedRootType")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    enum moduleName = "image_alias_nested_root";
+    // `apply`'s body never calls `f`: the aliased `pick!Thing` instance is
+    // therefore never itself visited (and so never itself directly marked
+    // as needing root through the ordinary call-graph propagation). Only
+    // the alias-argument walk over `apply!(pick!Thing)`'s own tiargs can
+    // discover that `Thing` is root-owned.
+    sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+        "module " ~ moduleName ~ ";\n" ~ q{
+            void apply(alias f)() {}
+            void pick(T)() {}
+        });
+    sandbox.writeFile("app/root_" ~ moduleName ~ ".d",
+        "module root_" ~ moduleName ~ ";\nimport " ~ moduleName ~ ";\n" ~ q{
+        class Thing {}
+        void trigger() {
+            apply!(pick!Thing)();
+        }
+    });
+    const imports = [sandbox.inSandboxPath("deps")];
+    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false).project;
+    const source = imageSource(project.program);
+    "apply!".should.not.be in source;
+}
+
+
+// `image.aliasArgumentNestedRootType` uses a single-member eponymous
+// template (`pick(T)()`), so dmd collapses `pick!Thing` in `apply`'s tiargs
+// down to the member `pick!Thing.pick` before it ever reaches
+// `eachFoundSymbol` - the enclosing `TemplateInstance` is already
+// `symbol.parent`, so climbing ancestors starting there finds it. A
+// multi-member dependency template is not collapsed: the alias argument
+// *is* the `TemplateInstance` itself, whose `.parent` is the module, so a
+// climb starting at `symbol.parent` never reaches its tiargs and the
+// root-owned `Thing` nested inside leaks through unresolved. The climb in
+// `eachFoundSymbol` must therefore start at `symbol` itself, not
+// `symbol.parent`. `apply!(pick!int)()` is the positive control: every type
+// it nests is dependency-owned or built in, so it must still resolve.
+@("image.aliasArgumentTemplateInstanceRootType")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    enum moduleName = "image_alias_instance_root";
+    sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+        "module " ~ moduleName ~ ";\n" ~ q{
+            void apply(alias f)() {}
+            template pick(T) {
+                void one() {}
+                void two() {}
+            }
+        });
+    sandbox.writeFile("app/root_" ~ moduleName ~ ".d",
+        "module root_" ~ moduleName ~ ";\nimport " ~ moduleName ~ ";\n" ~ q{
+        class Thing {}
+        void trigger() {
+            apply!(pick!Thing)();
+            apply!(pick!int)();
+        }
+    });
+    const imports = [sandbox.inSandboxPath("deps")];
+    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false).project;
+    const source = imageSource(project.program);
+    "Thing".should.not.be in source;
+    "apply!".should.be in source;
+}
+
+
 @("image.compilerArguments")
 @Serial
 unittest {

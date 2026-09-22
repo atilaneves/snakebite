@@ -133,3 +133,29 @@ unittest {
     plan.steps[0].kind.should == InitStep.Kind.value;
     plan.steps[1].kind.should == InitStep.Kind.value;
 }
+
+
+@("positionalFields.omittedZeroSizeFieldIsSkipped")
+unittest {
+    // `value` is a zero-size field (`void[0]`), always omitted from a
+    // `new Entry(a)` call with no matching argument. dmd's own `fill`
+    // (`expressionsem.d`) still pads `new_.arguments` out to one entry
+    // per non-hidden field, but stores `null` for an omitted zero-size
+    // field rather than a default-initializer expression: there is
+    // nothing to evaluate, so the plan must skip it instead of crashing
+    // on a null `source`.
+    auto new_ = newOf(q{
+        struct Entry { int key; void[0] value; }
+        Entry* make(int a) { return new Entry(a); }
+    });
+
+    auto structType = new_.newtype.isTypeStruct;
+    assert(structType !is null, "Expected `new` of a struct type");
+
+    const plan = planPositionalFields(structType.sym, new_.arguments);
+
+    plan.zeroFill.should == false;
+    plan.steps.length.should == 1;
+    plan.steps[0].kind.should == InitStep.Kind.value;
+    plan.steps[0].offset.should == 0;
+}

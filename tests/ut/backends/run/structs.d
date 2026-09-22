@@ -973,6 +973,31 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `new S(args)` omits a zero-size field (`void[0]`) from the argument
+// list entirely - dmd's own `fill` pads the call's `arguments` with a
+// `null` entry for it rather than a default-initializer expression,
+// since there is nothing to evaluate for a field that occupies no
+// storage. druntime's templated hash-table internals rely on exactly
+// this shape (a `void[0]` value type for a set-like associative array),
+// so this is the shape dub's own build actually hits.
+static foreach (backend; Matrix!()) {
+    @("newStructWithZeroSizeField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        41.shouldBeRetOf!(backend, q{
+            struct Entry {
+                int key;
+                void[0] value;
+            }
+
+            int main() {
+                auto entry = new Entry(41);
+                return entry.key;
+            }
+        }, "main");
+    }
+}
+
 // A discarded allocation still runs its constructor exactly once.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
