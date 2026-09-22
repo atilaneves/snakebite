@@ -132,9 +132,8 @@ public struct CallSite {
         return site;
     }
 
-    // `entry` is already resolved: a builtin needs no lazy preparation,
-    // unlike `native`'s own unresolved-symbol case, since it is never
-    // reached by looking up a linker symbol at all.
+    // No lazy-preparation overload: unlike `native`, a builtin's entry
+    // is already resolved and never depends on a linker symbol lookup.
     public static CallSite builtin(
         BuiltinCall entry, Arg[] args, size_t returnWidth,
     ) {

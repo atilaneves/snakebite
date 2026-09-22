@@ -24,16 +24,12 @@ public alias BuiltinCall = extern(C) void function(
 public enum ParameterType { float_, double_, real_, ushort_, uint_, ulong_ }
 
 
-// `name` and `type`'s wrapper, or `null` when snakebite has none for a
-// builtin dmd itself does classify. `name` is dmd's own `BUILTIN`
-// classification (`dmd.builtin.isBuiltin`), as that enum member's bare
-// name (`snakebite.backends.calls` converts it with `std.conv.text`
-// before calling here) rather than the enum value itself, so this
-// module never needs a DMD frontend import path - and neither does the
-// bytecode VM, which imports only `BuiltinCall` from here (CODING.md,
-// "Code organisation"). `CallSelection.buildDecision`
-// (`snakebite.backends.calls`) turns a `null` here into a refusal at
-// decision time, never at first execution.
+// `name` is a string key, not dmd's `BUILTIN` enum value, so this
+// module and the bytecode VM that calls into it need no DMD frontend
+// import path (CODING.md, "Code organisation"). `null` means snakebite
+// has no wrapper for a builtin dmd itself classifies;
+// `CallSelection.buildDecision` turns that into a refusal at decision
+// time, never at the call's first execution.
 public BuiltinCall entryOf(in string name, in ParameterType type)
 @safe pure nothrow @nogc {
     final switch (type) with (ParameterType) {

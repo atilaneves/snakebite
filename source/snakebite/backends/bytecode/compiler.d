@@ -5769,13 +5769,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             });
     }
 
-    // Builds and emits a call to a builtin `entry`
-    // (`snakebite.backends.builtins`), resolved by `CallSelection`
-    // (`snakebite.backends.calls`) when it decided this route - never an
-    // FFI plan, never a symbol lookup: a builtin needs neither. Arguments
-    // bind the same way a native call's own do (`compileBarrierArgument`),
-    // since a `core.math` intrinsic's parameters are plain by-value
-    // scalars, never `ref` or field reads.
+    // A builtin needs no FFI plan and no symbol lookup, unlike a native
+    // call, so `site` here builds a `CallSite` straight from `entry`.
+    // Arguments still bind through `compileBarrierArgument`, since a
+    // `core.math`/`core.bitop` intrinsic's parameters are plain
+    // by-value scalars, never `ref` or field reads.
     private void compileBuiltinCall(
         TypeFunction type,
         Expressions* arguments,
