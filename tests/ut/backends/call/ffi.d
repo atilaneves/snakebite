@@ -152,20 +152,22 @@ static foreach (backend; Matrix!()) {
 // inherits the same gap: it never reaches this call in the first place,
 // so it still needs a host symbol FFI cannot find. Only `Native` - which
 // runs real compiled D, unaffected by dmd's own classification - can
-// run this today.
+// run this today. Tracked as issue #423.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
-        "dmd's own BUILTIN enum has no member for `rndtol`, so dmd's " ~
-        "CTFE (dmd.dinterpret.evaluateIfBuiltin) cannot evaluate it " ~
-        "either, the same as this backend"),
+        "dmd's own BUILTIN enum has no member for `rndtol` (issue " ~
+        "#423), so dmd's CTFE (dmd.dinterpret.evaluateIfBuiltin) " ~
+        "cannot evaluate it either, the same as this backend"),
     Omit!(Bytecode, Because.unconfirmed,
-        "dmd's own BUILTIN enum has no member for `rndtol`, so " ~
-        "`dmd.builtin.isBuiltin` never classifies it as a builtin; " ~
-        "the call still reaches FFI, which has no host symbol for it"),
+        "dmd's own BUILTIN enum has no member for `rndtol` (issue " ~
+        "#423), so `dmd.builtin.isBuiltin` never classifies it as a " ~
+        "builtin; the call still reaches FFI, which has no host " ~
+        "symbol for it"),
     Omit!(Interpreter, Because.unconfirmed,
-        "dmd's own BUILTIN enum has no member for `rndtol`, so " ~
-        "`dmd.builtin.isBuiltin` never classifies it as a builtin; " ~
-        "the call still reaches FFI, which has no host symbol for it"),
+        "dmd's own BUILTIN enum has no member for `rndtol` (issue " ~
+        "#423), so `dmd.builtin.isBuiltin` never classifies it as a " ~
+        "builtin; the call still reaches FFI, which has no host " ~
+        "symbol for it"),
 )) {
     @("ffi.executedIntrinsicCall.rndtol." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -206,6 +208,69 @@ static foreach (backend; Matrix!()) {
 
             void main() {
                 assert(roundIfAsked(false, 2.7) == 0);
+            }
+        });
+    }
+}
+
+
+// `core.math.rint` has the same gap as `rndtol` above: dmd's own
+// `BUILTIN` enum (`dmd.func`) has no member for it either, so
+// `dmd.builtin.isBuiltin` always answers `BUILTIN.unimp` for it, and
+// dmd's own CTFE engine (`dmd.dinterpret.evaluateIfBuiltin`, gated on
+// that same check) cannot evaluate it. Only `Native` runs this today.
+// Tracked as issue #423.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's own BUILTIN enum has no member for `rint` (issue " ~
+        "#423), so dmd's CTFE (dmd.dinterpret.evaluateIfBuiltin) " ~
+        "cannot evaluate it either, the same as this backend"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "dmd's own BUILTIN enum has no member for `rint` (issue " ~
+        "#423), so `dmd.builtin.isBuiltin` never classifies it as a " ~
+        "builtin; the call still reaches FFI, which has no host " ~
+        "symbol for it"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "dmd's own BUILTIN enum has no member for `rint` (issue " ~
+        "#423), so `dmd.builtin.isBuiltin` never classifies it as a " ~
+        "builtin; the call still reaches FFI, which has no host " ~
+        "symbol for it"),
+)) {
+    @("ffi.executedIntrinsicCall.rint." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: rint;
+
+            void main() {
+                assert(rint(2.5f) == 2.0f);
+                assert(rint(2.5) == 2.0);
+                assert(rint(2.5L) == 2.0L);
+            }
+        });
+    }
+}
+
+
+// `rint` never takes the builtin route either (`dmd.builtin.isBuiltin`
+// has no member for it, above), so an unexecuted call to it stays on
+// the plain native route with no host symbol - the same shape
+// `ffi.unexecutedIntrinsicCall.rndtol` above pins for `rndtol`.
+static foreach (backend; Matrix!()) {
+    @("ffi.unexecutedIntrinsicCall.rint." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: rint;
+
+            double rintIfAsked(bool ask, double value) {
+                if (ask)
+                    return rint(value);
+                return 0;
+            }
+
+            void main() {
+                assert(rintIfAsked(false, 2.5) == 0);
             }
         });
     }
