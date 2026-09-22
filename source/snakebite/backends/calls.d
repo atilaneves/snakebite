@@ -182,7 +182,15 @@ public struct CallSelection {
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import std.conv: text;
 
-        const parameterType = typeFunctionOf(function_).parameterList[0].type;
+        // `const` fails: `ParameterList.length` and `opIndex` are not
+        // `const` methods.
+        auto parameterList = typeFunctionOf(function_).parameterList;
+        if (parameterList.length == 0)
+            throw new SnakebiteException(text(
+                "snakebite's builtin table has no entry for `",
+                function_.toString, "`, which takes no parameters"));
+
+        const parameterType = parameterList[0].type;
         switch (parameterType.ty) {
             case Tfloat32: return ParameterType.float_;
             case Tfloat64: return ParameterType.double_;
