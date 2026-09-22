@@ -935,10 +935,8 @@ private const(Instruction)* runCall(Decoded)(
             *cast(const(void)**) (execution.storage(site.calleeSlotOffset));
         ptrdiff_t contextAdjustment;
         if (site.nativePlan !is null) {
-            auto arguments = CallArguments(site.args.length);
+            auto arguments = gatherArguments(execution, site.args);
             auto values = arguments.values;
-            foreach (i, arg; site.args)
-                values[i] = execution.storage(arg.callerOffset);
             if (executeIndirectCallPlan(site.nativePlan, callee,
                     execution.destination, values.ptr, values.length,
                     contextAdjustment))
@@ -947,11 +945,8 @@ private const(Instruction)* runCall(Decoded)(
         return callFunction(execution, site, cast(const(Function)*) callee,
             contextAdjustment);
     case native:
-        auto arguments = CallArguments(site.args.length);
-        // const would make the address slots read-only.
+        auto arguments = gatherArguments(execution, site.args);
         auto values = arguments.values;
-        foreach (i, arg; site.args)
-            values[i] = execution.storage(arg.callerOffset);
         auto result = execution.destination;
         executeCallPlan(
             site.nativePlan !is null ? site.nativePlan : site.prepareNativePlan(),
@@ -959,13 +954,27 @@ private const(Instruction)* runCall(Decoded)(
         );
         return execution.next;
     case builtin:
-        auto arguments = CallArguments(site.args.length);
+        auto arguments = gatherArguments(execution, site.args);
         auto values = arguments.values;
-        foreach (i, arg; site.args)
-            values[i] = execution.storage(arg.callerOffset);
         site.builtinEntry(execution.destination, values.ptr, values.length);
         return execution.next;
     }
+}
+
+
+// Copies each argument's address out of the caller's frame, in the order
+// `args` names, for a call reached through a plan or a resolved entry
+// (`indirect`, `native`, `builtin` in `runCall`'s switch) rather than a
+// callee frame `callFunction` copies into directly.
+private CallArguments gatherArguments(Decoded)(
+    ref Decoded execution, in Arg[] args,
+) {
+    auto arguments = CallArguments(args.length);
+    // const would make the address slots read-only.
+    auto values = arguments.values;
+    foreach (i, arg; args)
+        values[i] = execution.storage(arg.callerOffset);
+    return arguments;
 }
 
 
