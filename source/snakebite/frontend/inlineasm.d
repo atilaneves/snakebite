@@ -4,28 +4,16 @@ module snakebite.frontend.inlineasm;
 private:
 
 
-// No backend executes inline assembler (see docs/adr/0012). dmd's own
-// statement semantic sets `FuncDeclaration.hasInlineAsm` on the function
-// that holds an `asm` block instead of erroring (the shim at
-// `source/dmd/iasm/package.d` does this on purpose, so druntime modules
-// with `asm` still pass semantic analysis). Walk every root module's own
-// declarations once, after semantic analysis finishes, and report one
-// `dmd.errors.error` per function that still has an unguarded `asm`
-// block, so the frontend fails the load with a clear message instead of a
-// backend hitting the block at run time. Reporting through `error` (not a
-// thrown exception of its own) increments `global.errors` the same way
-// every other frontend error does, so the caller's own `global.errors`
-// check formats this failure exactly like any other semantic error.
-// Dependency modules keep `D_InlineAsm_X86_64` defined (docs/adr/0012), so
-// a dependency template such as `core.internal.atomic.atomicFetchAdd`
-// really does compile its `asm` body in and set `hasInlineAsm` on its own
-// `FuncDeclaration`. Root code instantiating that template makes dmd home
-// the resulting `TemplateInstance` in the root module's own scope, so a
-// walk from the root module reaches that dependency `FuncDeclaration`
-// too; `Dsymbol.getModule` gives back the module that owns the
-// declaration regardless of where the walk reached it from, so only a
-// `FuncDeclaration` whose own module is one of `rootModules` is
-// root-owned and worth a diagnostic.
+// No backend executes inline assembler (see docs/adr/0012). Walk every
+// root module's own declarations once, after semantic analysis finishes.
+// Report one `dmd.errors.error` for each function that still has an
+// unguarded `asm` block. This fails the load with a clear message,
+// instead of a backend hitting the block at run time. Reporting through
+// `error`, not a thrown exception, increases `global.errors` the same
+// way every other frontend error does. So the caller's own
+// `global.errors` check formats this failure like any other semantic
+// error. See docs/adr/0012 for why only a root-owned function is
+// reported.
 public void reportInlineAsmDiagnostics(
     imported!"dmd.dmodule".Module[] rootModules,
 ) {
@@ -34,26 +22,14 @@ public void reportInlineAsmDiagnostics(
         module_.accept(collector);
 }
 
-// The D language specification gives `D_InlineAsm_X86_64` one meaning:
-// "inline assembler for X86-64 is implemented" (docs/adr/0012). Snakebite
-// does not implement it, so a root module is parsed as if this identifier
-// were undefined, while dependency modules keep it (ADR-0009: they are
-// compiled by real dmd and called across the barrier, and their own
-// type-checking, e.g. `core.internal.atomic`, needs it).
-//
-// dmd resolves a `version (...)` block through
-// `IncludeVisitor.visit(VersionCondition)`: once `Condition.inc` is no
-// longer `notComputed`, that cached value wins and the identifier lookup
-// never runs again. `vc.mod` (the module a `VersionCondition` checks
-// itself against, before falling back to `global.versionids`) is fixed at
-// parse time to the module whose source text holds the `version (...)`,
-// and a template body resolves against its declaring module. So walk
-// `rootModule`'s freshly parsed, not yet semantically analysed syntax
-// tree once, and pre-compute every `D_InlineAsm_X86_64`
-// `VersionCondition` to `Include.no` - exactly what dmd would compute
-// were the identifier undefined - before any semantic pass reaches it.
-// Call this once per freshly parsed root module, before the shared
-// semantic phases run.
+// Snakebite does not implement `D_InlineAsm_X86_64` (see docs/adr/0012).
+// Walk `rootModule`'s freshly parsed, not yet semantically analysed
+// syntax tree once. Pre-compute every `D_InlineAsm_X86_64`
+// `VersionCondition` to `Include.no`. This is exactly what dmd would
+// compute if the identifier were undefined. Do this before any semantic
+// pass reaches the condition. Call this once per freshly parsed root
+// module, before the shared semantic phases run. See docs/adr/0012 for
+// why the walk must run this early.
 public void disableInlineAsmVersion(
     imported!"dmd.dmodule".Module rootModule,
 ) {
@@ -163,19 +139,16 @@ private extern(C++) class InlineAsmCollector
 // no explicit C++ namespace mangles by name alone, so a duplicate name
 // would silently collide at link time instead of erroring.
 //
-// Reuses `SemanticTimeTransitiveVisitor`'s default traversal rather than
-// the parse-time-only `ParseTimeTransitiveVisitor` template: every AST
-// node's own `accept` takes the one concrete `Visitor` class dmd's AST
-// headers are built against, and only `SemanticTimeTransitiveVisitor`
-// (also `Visitor`'s descendant) is usable with it. The two share the same
-// per-node traversal mixin (`dmd.visitor.transitive`'s
-// `ParseVisitMethods`), so nothing here depends on semantic results:
-// `ConditionalDeclaration`/`ConditionalStatement` walk their condition and
-// both branches unconditionally (not just the branch `include` would
-// pick), `TemplateDeclaration` walks its syntactic `members` directly
-// (not through `TemplateInstance`, which has none yet at this point), and
-// `StaticIfCondition` (`static if`, not a version) never reaches
-// `visit(VersionCondition)` below.
+// Extends `SemanticTimeTransitiveVisitor`, not the parse-time-only
+// `ParseTimeTransitiveVisitor` template. Every AST node's `accept` takes
+// the one concrete `Visitor` class dmd's headers build against. Only
+// `SemanticTimeTransitiveVisitor` works here. The walk covers every
+// branch unconditionally, not only the branch `include` would pick. It
+// reaches `TemplateDeclaration` through its own syntactic `members`,
+// not through `TemplateInstance`, which has none yet at this point. See
+// docs/adr/0012 for why the walk must cover a root module's whole syntax
+// tree this way. `StaticIfCondition` (`static if`, not a version) never
+// reaches `visit(VersionCondition)` below.
 private extern(C++) class InlineAsmVersionGate
         : imported!"dmd.visitor".SemanticTimeTransitiveVisitor {
     import dmd.visitor: SemanticTimeTransitiveVisitor;

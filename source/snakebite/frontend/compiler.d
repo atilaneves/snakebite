@@ -601,18 +601,13 @@ final class Compiler {
 // check: what counts as fatal differs (root-set parsing reports locations,
 // snippet parsing does not).
 //
-// `modules` is the root set for whichever call site is driving semantic
-// (the whole file-backed root set, one REPL snippet, or one batch of
-// snippets), so it is also exactly the "root-owned" set for both the
-// `D_InlineAsm_X86_64` version gate and the inline assembler check (issue
-// #415): every path that loads guest code (`loadProject`, the snippet/REPL
-// path, `bin/ut`) converges here, so this is the one place to gate a
-// root-owned `version (D_InlineAsm_X86_64)` and to fail a root-owned `asm`
-// block for all of them. The gate runs first, before any semantic phase
-// can resolve a `VersionCondition` (docs/adr/0012); the `asm` check only
-// runs when semantic itself is otherwise clean, since a module with
-// unrelated errors may have an incomplete AST that is not safe to walk,
-// and its own errors are reported first regardless.
+// `modules` is also the root-owned set for the `D_InlineAsm_X86_64`
+// version gate and the inline assembler check (issue #415; see
+// docs/adr/0012). Every load path converges here, so this is the one
+// place to run both checks for all of them. The gate runs first, before
+// any semantic phase can resolve a `VersionCondition`. The `asm` check
+// runs only when semantic left no errors. A module with unrelated
+// errors may have an incomplete AST, and that AST is not safe to walk.
 //
 // `rootImportPaths` covers the one path where `modules` alone is not the
 // whole root-owned set: a REPL cell's own `Program` (`snakebite.repl`)

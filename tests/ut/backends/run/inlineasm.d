@@ -9,16 +9,12 @@ import std.path: buildPath;
 import std.process: thisProcessID;
 
 
-// The D language specification defines `D_InlineAsm_X86_64` to mean
-// "inline assembler for X86-64 is implemented". Snakebite does not
-// implement DMD-style inline assembler (issue #415), so it parses a root
-// module as if this identifier were undefined
-// (`snakebite.frontend.inlineasm.disableInlineAsmVersion`), unlike a real
-// x86-64 build of `bin/ut` itself, which defines it unconditionally (dmd's
-// `Target._init`). `Native` is the diverging case, pinned in the sibling
-// test below instead of joining this Matrix: `Omit!(Native, ...)` is
-// never allowed, because there is no native oracle here for these three
-// backends to agree with - Native disagrees with all of them on purpose.
+// Snakebite parses a root module as if `D_InlineAsm_X86_64` were
+// undefined (see docs/adr/0012). A real x86-64 build of `bin/ut` defines
+// it unconditionally (dmd's `Target._init`), so `Native` diverges by
+// design. The sibling test below pins that divergence instead of
+// joining this Matrix. There is no native oracle here for these three
+// backends to agree with, so `Omit!(Native, ...)` is not allowed.
 static foreach (backend; Backends) {
     @("inlineasm.versionIdentifier.notDefinedForGuestCode." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -81,21 +77,11 @@ static foreach (backend; Backends) {
     }
 }
 
-// A root-owned function that still has an unguarded `asm` block must not
-// reach any backend: `dmd.iasm.asmSemantic` (the shim `dmd:frontend` needs
-// because the dub package does not ship `dmd.iasm`) sets
-// `FuncDeclaration.hasInlineAsm` instead of erroring, on purpose, so that
-// druntime modules with `asm` still pass semantic analysis. The walk added
-// for issue #415 turns that flag into one load-time diagnostic, naming the
-// function and the guard that would have made this compile out, the same
-// way `version (D_InlineAsm_X86_64)` compiles it out under a compiler that
-// does not implement inline assembler either (e.g. GDC on an unsupported
-// target). This check lives in the frontend's single shared semantic path
-// (`driveSharedSemantic`), so every load path - `loadProject`, the
-// snippet/REPL path, and `bin/ut`'s own snippet parsing - fails the same
-// way; one test per backend is enough to show every backend's load path
-// reaches it, and `Native` never can, since a real x86-64 build implements
-// inline assembler and `asmFunction` simply runs.
+// A root-owned function with an unguarded `asm` block must not reach any
+// backend (see docs/adr/0012). Every load path shares the same check
+// (`driveSharedSemantic`), so one test per backend is enough. `Native`
+// never can reach this: a real x86-64 build implements inline assembler,
+// so `asmFunction` just runs.
 static foreach (backend; Backends) {
     @("inlineasm.loadDiagnostic.unguardedAsmFailsLoad." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -158,17 +144,11 @@ static foreach (backend; Backends) {
     }
 }
 
-// Known, accepted gap (docs/adr/0012): a `version (D_InlineAsm_X86_64)`
-// written inside a string mixin is not part of the syntax tree
-// `disableInlineAsmVersion` walks, because the mixin's own source text is
-// not parsed until dmd expands it during semantic analysis, after the
-// gate has already run. The fresh `VersionCondition` that expansion
-// builds finds no cached value and falls back to `global.versionids`,
-// which still carries the identifier (dependency modules keep it), so the
-// mixed-in `asm` branch compiles in. Root ownership still catches it: the
-// load-time scan for an unguarded `asm` block does not distinguish how a
-// root-owned function came to have one, so it fails the load with the
-// same diagnostic as an `asm` block written directly.
+// Known, accepted gap (see docs/adr/0012): a `version (D_InlineAsm_X86_64)`
+// inside a string mixin is not part of the syntax tree the gate walks.
+// So the mixed-in `asm` branch compiles in. The load-time scan for an
+// unguarded `asm` block still catches it: it does not care how a
+// root-owned function came to have one.
 static foreach (backend; Backends) {
     @("inlineasm.versionIdentifier.mixinGapFailsLoad." ~ backend.stringof)
     @Tags(backend.stringof)
