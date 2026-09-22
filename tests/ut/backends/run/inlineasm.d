@@ -100,19 +100,30 @@ static foreach (backend; Backends) {
     @("inlineasm.loadDiagnostic.unguardedAsmFailsLoad." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        const thrown = parseSnippet(q{
+        parseSnippet(q{
             void asmFunction() {
                 asm { nop; }
             }
             unittest {
                 asmFunction();
             }
-        }).shouldThrow;
-
-        "inline assembler is not supported in".should.be in thrown.msg;
-        "asmFunction".should.be in thrown.msg;
-        "version (D_InlineAsm_X86_64)".should.be in thrown.msg;
+        }).shouldThrow.msg.withoutSnippetCounter.should ==
+            "inline assembler is not supported in `snippet_N.asmFunction`: "
+            ~ "guard it with `version (D_InlineAsm_X86_64)`, which "
+            ~ "snakebite does not define";
     }
+}
+
+// `parseSnippet` names each root module `snippet_<N>`. One counter gives
+// out `N` for every `parseSnippet` call in the whole `bin/ut` process,
+// not only this file, and backend variants of these tests run in
+// parallel threads. So `N` is not stable across runs. This helper
+// replaces it with a fixed placeholder, so the test can compare dmd's
+// whole message instead of a few separate substrings.
+private string withoutSnippetCounter(in string message) {
+    import std.regex: regex, replaceFirst;
+
+    return message.replaceFirst(regex(`snippet_\d+`), "snippet_N");
 }
 
 // `mixin WithAsm;` instantiates a `mixin template` as a `TemplateMixin`,
@@ -131,7 +142,7 @@ static foreach (backend; Backends) {
     @("inlineasm.loadDiagnostic.templateMixinFailsLoad." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        const thrown = parseSnippet(q{
+        parseSnippet(q{
             mixin template WithAsm() {
                 void unsupported() { asm { nop; } }
             }
@@ -139,9 +150,11 @@ static foreach (backend; Backends) {
             unittest {
                 unsupported();
             }
-        }).shouldThrow;
-
-        "inline assembler is not supported in".should.be in thrown.msg;
+        }).shouldThrow.msg.withoutSnippetCounter.should ==
+            "inline assembler is not supported in "
+            ~ "`snippet_N.WithAsm!().unsupported`: guard it with "
+            ~ "`version (D_InlineAsm_X86_64)`, which snakebite does not "
+            ~ "define";
     }
 }
 
@@ -160,7 +173,7 @@ static foreach (backend; Backends) {
     @("inlineasm.versionIdentifier.mixinGapFailsLoad." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        const thrown = parseSnippet(q{
+        parseSnippet(q{
             mixin(`
                 version (D_InlineAsm_X86_64) {
                     int f() { asm { nop; } return 1; }
@@ -171,9 +184,10 @@ static foreach (backend; Backends) {
             unittest {
                 f();
             }
-        }).shouldThrow;
-
-        "inline assembler is not supported in".should.be in thrown.msg;
+        }).shouldThrow.msg.withoutSnippetCounter.should ==
+            "inline assembler is not supported in `snippet_N.f`: guard it "
+            ~ "with `version (D_InlineAsm_X86_64)`, which snakebite does "
+            ~ "not define";
     }
 }
 
@@ -238,11 +252,16 @@ static foreach (backend; Backends) {
         // pre-existing thread-safety gap, not this finding.
         withCompilerLock({ addImport(directory); });
 
-        const thrown = parseSnippet(
+        parseSnippet(
             "import " ~ moduleName ~ ";",
             [directory],
-        ).shouldThrow;
-
-        "inline assembler is not supported in".should.be in thrown.msg;
+        ).shouldThrowWithMessage(
+            text(
+                "inline assembler is not supported in `", moduleName,
+                ".asmFunction`: guard it with "
+                ~ "`version (D_InlineAsm_X86_64)`, which snakebite does "
+                ~ "not define",
+            ),
+        );
     }
 }
