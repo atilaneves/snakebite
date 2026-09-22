@@ -90,6 +90,54 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// `core.bitop.bswap` is a bodiless intrinsic dmd's own `BUILTIN`
+// classification recognises (`BUILTIN.bswap`), the same as the
+// `core.math` names above, but its parameters are `uint`/`ulong`, not a
+// floating point type. A call site that never executes must not need a
+// host symbol for it, the same as `ffi.unexecutedIntrinsicCall` pins for
+// `fabs`.
+static foreach (backend; Matrix!()) {
+    @("ffi.unexecutedIntrinsicCall.bswap." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.bitop: bswap;
+
+            uint swapIfSet(uint value, bool doIt) {
+                if (doIt)
+                    return bswap(value);
+                return value;
+            }
+
+            void main() {
+                assert(swapIfSet(1u, false) == 1u);
+            }
+        });
+    }
+}
+
+
+// The same intrinsic reached by a call that does execute, for both
+// overloads dmd classifies (`uint` and `ulong`): compiled D emits
+// `bswap` inline, so no symbol exists anywhere in the process for it,
+// the same reason `ffi.executedIntrinsicCall` above exercises the
+// `core.math` wrappers directly rather than through FFI.
+static foreach (backend; Matrix!()) {
+    @("ffi.executedIntrinsicCall.bswap." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.bitop: bswap;
+
+            void main() {
+                assert(bswap(0x01020304u) == 0x04030201u);
+                assert(bswap(0x01020304_05060708uL) == 0x08070605_04030201uL);
+            }
+        });
+    }
+}
+
+
 // `core.math.rndtol` is a bodiless intrinsic like the ones above, but
 // dmd's own `BUILTIN` enum (`dmd.func`) has no member for it - unlike
 // `fabs`/`sqrt`/`sin`/`cos`/`ldexp`/`yl2x`/`yl2xp1` above, `dmd.builtin.

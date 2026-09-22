@@ -13,7 +13,7 @@ public struct CallSelection {
 
     import dmd.func: BUILTIN, FuncDeclaration;
 
-    import snakebite.backends.builtins: BuiltinCall, FloatWidth;
+    import snakebite.backends.builtins: BuiltinCall, ParameterType;
     import snakebite.sharedtable: SharedTable;
 
     // Every call site resolves to exactly one of these. `guest` and
@@ -150,7 +150,7 @@ public struct CallSelection {
         if (kind == BUILTIN.unimp)
             return Decision(Route.native);
 
-        auto entry = entryOf(text(kind), floatWidthOf(function_));
+        auto entry = entryOf(text(kind), parameterTypeOf(function_));
         if (entry is null)
             throw new SnakebiteException(text(
                 "snakebite has no builtin wrapper for `",
@@ -160,29 +160,34 @@ public struct CallSelection {
         return Decision(Route.builtin, entry);
     }
 
-    // The floating point width `function_`'s own first parameter
-    // declares - the half of `snakebite.backends.builtins.entryOf`'s
-    // lookup key dmd's `BUILTIN` classification does not carry, since it
-    // goes by name alone: `sin(float)` and `sin(double)` both classify as
-    // `BUILTIN.sin`. Every builtin this table serves takes at least one
-    // floating point argument of the type its result (or, for `ldexp`'s
-    // second argument, an unrelated `int`) shares.
-    private static FloatWidth floatWidthOf(FuncDeclaration function_) {
-        import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
+    // The concrete type `function_`'s own first parameter declares - the
+    // half of `snakebite.backends.builtins.entryOf`'s lookup key dmd's
+    // `BUILTIN` classification does not carry, since it goes by name
+    // alone: `sin(float)` and `sin(double)` both classify as `BUILTIN.
+    // sin`, and `bswap(uint)`/`bswap(ulong)` both classify as `BUILTIN.
+    // bswap`. Every builtin this table serves takes at least one
+    // argument of the type its result (or, for `ldexp`'s second
+    // argument, an unrelated `int`) shares.
+    private static ParameterType parameterTypeOf(FuncDeclaration function_) {
+        import dmd.astenums: Tfloat32, Tfloat64, Tfloat80,
+            Tuns16, Tuns32, Tuns64;
         import snakebite.exception: SnakebiteException;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import std.conv: text;
 
         const parameterType = typeFunctionOf(function_).parameterList[0].type;
         switch (parameterType.ty) {
-            case Tfloat32: return FloatWidth.float_;
-            case Tfloat64: return FloatWidth.double_;
-            case Tfloat80: return FloatWidth.real_;
+            case Tfloat32: return ParameterType.float_;
+            case Tfloat64: return ParameterType.double_;
+            case Tfloat80: return ParameterType.real_;
+            case Tuns16: return ParameterType.ushort_;
+            case Tuns32: return ParameterType.uint_;
+            case Tuns64: return ParameterType.ulong_;
             default:
                 throw new SnakebiteException(text(
-                    "snakebite's builtin table has no floating point ",
-                    "width for `", function_.toString, "`'s first ",
-                    "parameter type `", parameterType.toString, "`"));
+                    "snakebite's builtin table has no entry for `",
+                    function_.toString, "`'s first parameter type `",
+                    parameterType.toString, "`"));
         }
     }
 }

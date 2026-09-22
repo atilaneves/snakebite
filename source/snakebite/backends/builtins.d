@@ -15,14 +15,15 @@ public alias BuiltinCall = extern(C) void function(
     void* returnPlace, scope const(void*)* arguments, size_t argumentCount);
 
 
-// Which of `core.math`'s `float`/`double`/`real` overloads a call
-// resolved to - the other half of this table's lookup key, since dmd's
-// own `BUILTIN` classification (`dmd.builtin.isBuiltin`) does not carry
-// it: `sin(float)` and `sin(double)` both classify as `BUILTIN.sin`.
-public enum FloatWidth { float_, double_, real_ }
+// The concrete type a call's own first parameter declares - the other
+// half of this table's lookup key, since dmd's own `BUILTIN`
+// classification (`dmd.builtin.isBuiltin`) does not carry it: `sin
+// (float)` and `sin(double)` both classify as `BUILTIN.sin`, and `bswap
+// (uint)`/`bswap(ulong)` both classify as `BUILTIN.bswap`.
+public enum ParameterType { float_, double_, real_, ushort_, uint_, ulong_ }
 
 
-// `name` and `width`'s wrapper, or `null` when snakebite has none for a
+// `name` and `type`'s wrapper, or `null` when snakebite has none for a
 // builtin dmd itself does classify. `name` is dmd's own `BUILTIN`
 // classification (`dmd.builtin.isBuiltin`), as that enum member's bare
 // name (`snakebite.backends.calls` converts it with `std.conv.text`
@@ -32,11 +33,14 @@ public enum FloatWidth { float_, double_, real_ }
 // "Code organisation"). `CallSelection.buildDecision`
 // (`snakebite.backends.calls`) turns a `null` here into a refusal at
 // decision time, never at first execution.
-public BuiltinCall entryOf(in string name, in FloatWidth width) {
-    final switch (width) with (FloatWidth) {
+public BuiltinCall entryOf(in string name, in ParameterType type) {
+    final switch (type) with (ParameterType) {
         case float_: return widthEntryOf!float(name);
         case double_: return widthEntryOf!double(name);
         case real_: return widthEntryOf!real(name);
+        case ushort_: return integerEntryOf!ushort(name);
+        case uint_: return integerEntryOf!uint(name);
+        case ulong_: return integerEntryOf!ulong(name);
     }
 }
 
@@ -118,4 +122,78 @@ private extern(C) void ldexpEntry(T)(
     const value = *cast(const(T)*) arguments[0];
     const exponent = *cast(const(int)*) arguments[1];
     *cast(T*) returnPlace = ldexp(value, exponent);
+}
+
+
+// Every `core.bitop` intrinsic snakebite has a builtin wrapper for.
+// `bsf` and `bsr` also classify (`BUILTIN.bsf`/`BUILTIN.bsr`), but both
+// have real bodies in `core.bitop` (`pragma(inline, false)` wrapping a
+// soft fallback, kept so intrinsic detection still works on the type
+// this table never sees them through) - `CallSelection.buildDecision`
+// only ever asks `builtinDecision` about a function whose `fbody is
+// null`, so a name here is only ever one dmd itself declared bodiless:
+// `bswap` and `_popcnt`.
+private enum sameTypeIntegerNames = ["bswap"];
+private enum ownReturnTypeIntegerNames = ["_popcnt"];
+
+
+private BuiltinCall integerEntryOf(T)(in string name) {
+    import core.bitop;
+
+    switch (name) {
+        // `bswap` has no `ushort` overload (`core.bitop` declares only
+        // `bswap(uint)`/`bswap(ulong)` bodiless) - a plain `case` here
+        // for every `T` this function is ever instantiated with would
+        // still need to compile for `T == ushort`, where the call above
+        // silently widens to `bswap(uint)` and returns the wrong type.
+        // The `static if` keeps that case out of `T == ushort` instead,
+        // matching dmd's own declarations rather than special-casing
+        // `ushort` by name.
+        static foreach (integerName; sameTypeIntegerNames)
+            static if (is(
+                typeof(mixin("core.bitop." ~ integerName ~ "(T.init)")) == T
+            ))
+                case integerName:
+                    return &sameTypeInteger!(integerName, T);
+        static foreach (integerName; ownReturnTypeIntegerNames)
+            static if (__traits(compiles,
+                mixin("core.bitop." ~ integerName ~ "(T.init)")))
+                case integerName:
+                    return &ownReturnTypeInteger!(integerName, T);
+        default:
+            return null;
+    }
+}
+
+
+// `core.bitop`'s own single-argument intrinsics whose result shares
+// their argument's type (`bswap(uint)` returns `uint`, `bswap(ulong)`
+// returns `ulong`) - the integer counterpart of `oneArgument` above,
+// against `core.bitop` rather than `core.math`.
+private extern(C) void sameTypeInteger(string name, T)(
+    void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
+) @trusted nothrow @nogc {
+    import core.bitop;
+
+    assert(argumentCount == 1, name ~ " takes one argument");
+    const value = *cast(const(T)*) arguments[0];
+    *cast(T*) returnPlace = __traits(getMember, core.bitop, name)(value);
+}
+
+
+// `_popcnt`'s result does not share its argument's type for every
+// overload (`ushort _popcnt(ushort)`, but `int _popcnt(uint)` and `int
+// _popcnt(ulong)`) - `typeof` reads each overload's own declared return
+// type back from `core.bitop` itself rather than this table
+// hand-deriving it.
+private extern(C) void ownReturnTypeInteger(string name, T)(
+    void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
+) @trusted nothrow @nogc {
+    import core.bitop;
+
+    assert(argumentCount == 1, name ~ " takes one argument");
+    const value = *cast(const(T)*) arguments[0];
+    alias call = __traits(getMember, core.bitop, name);
+    alias Result = typeof(call(value));
+    *cast(Result*) returnPlace = call(value);
 }
