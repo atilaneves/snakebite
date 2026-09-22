@@ -9,9 +9,13 @@ import snakebite.frontend.dmd.functions: findFunction;
 import std.conv: text;
 
 
-// `core.math.fabs` is a compiler intrinsic: it has no host symbol to bind.
-// A call site that never executes must not need one, so a program that
-// never takes the branch must run without a symbol for the intrinsic.
+// `core.math.fabs` takes the builtin route (`dmd.builtin.isBuiltin`
+// classifies it, so the call runs through snakebite's own compiled
+// wrapper, never across the FFI barrier). This test pins an unexecuted
+// builtin call: a call site that never executes must run without
+// resolving the intrinsic at all, unlike `ffi.unexecutedIntrinsicCall.
+// rndtol` and `.rint` below, which pin the native route with no host
+// symbol.
 static foreach (backend; Matrix!()) {
     @("ffi.unexecutedIntrinsicCall." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -27,6 +31,298 @@ static foreach (backend; Matrix!()) {
 
             void main() {
                 assert(absoluteIfNegative(1.0f) == 1.0f);
+            }
+        });
+    }
+}
+
+
+// The same intrinsics reached by calls that do execute. Compiled D emits
+// every one of them inline, so no symbol exists anywhere in the process
+// for any of them: a backend has to evaluate the bodiless intrinsic
+// itself instead of binding it through FFI. dmd's own `BUILTIN`
+// classification (`dmd.builtin.isBuiltin`) does not distinguish a
+// `float`/`double`/`real` overload - it goes by name alone - so one
+// assertion per type below is what actually exercises a backend's own
+// per-type wrapper, not dmd's classification. `ldexp` is a two-argument
+// intrinsic (its second argument, `int`, is never the same type as the
+// first); the rest take one argument of the overload's own type.
+static foreach (backend; Matrix!()) {
+    @("ffi.executedIntrinsicCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math:
+                fabs, sqrt, sin, cos, ldexp, yl2x, yl2xp1;
+
+            void main() {
+                float fValue = -1.0f;
+                double dValue = -1.0;
+                real rValue = -1.0L;
+                assert(fabs(fValue) == 1.0f);
+                assert(fabs(dValue) == 1.0);
+                assert(fabs(rValue) == 1.0L);
+
+                assert(sqrt(4.0f) == 2.0f);
+                assert(sqrt(4.0) == 2.0);
+                assert(sqrt(4.0L) == 2.0L);
+
+                assert(sin(0.0f) == 0.0f);
+                assert(sin(0.0) == 0.0);
+                assert(sin(0.0L) == 0.0L);
+
+                assert(cos(0.0f) == 1.0f);
+                assert(cos(0.0) == 1.0);
+                assert(cos(0.0L) == 1.0L);
+
+                assert(ldexp(1.0f, 3) == 8.0f);
+                assert(ldexp(1.0, 3) == 8.0);
+                assert(ldexp(1.0L, 3) == 8.0L);
+
+                // yl2x(x, y) computes y * log2(x); yl2xp1 computes
+                // y * log2(x + 1).
+                assert(yl2x(8.0f, 1.0f) == 3.0f);
+                assert(yl2x(8.0, 1.0) == 3.0);
+                assert(yl2x(8.0L, 1.0L) == 3.0L);
+
+                assert(yl2xp1(7.0f, 1.0f) == 3.0f);
+                assert(yl2xp1(7.0, 1.0) == 3.0);
+                assert(yl2xp1(7.0L, 1.0L) == 3.0L);
+            }
+        });
+    }
+}
+
+
+// `core.bitop.bswap` is a bodiless intrinsic dmd's own `BUILTIN`
+// classification recognises (`BUILTIN.bswap`), the same as the
+// `core.math` names above, but its parameters are `uint`/`ulong`, not a
+// floating point type. A call site that never executes must not need a
+// host symbol for it, the same as `ffi.unexecutedIntrinsicCall` pins for
+// `fabs`.
+static foreach (backend; Matrix!()) {
+    @("ffi.unexecutedIntrinsicCall.bswap." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.bitop: bswap;
+
+            uint swapIfSet(uint value, bool doIt) {
+                if (doIt)
+                    return bswap(value);
+                return value;
+            }
+
+            void main() {
+                assert(swapIfSet(1u, false) == 1u);
+            }
+        });
+    }
+}
+
+
+// The same intrinsic reached by a call that does execute, for both
+// overloads dmd classifies (`uint` and `ulong`): compiled D emits
+// `bswap` inline, so no symbol exists anywhere in the process for it,
+// the same reason `ffi.executedIntrinsicCall` above exercises the
+// `core.math` wrappers directly rather than through FFI.
+static foreach (backend; Matrix!()) {
+    @("ffi.executedIntrinsicCall.bswap." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.bitop: bswap;
+
+            void main() {
+                assert(bswap(0x01020304u) == 0x04030201u);
+                assert(bswap(0x01020304_05060708uL) == 0x08070605_04030201uL);
+            }
+        });
+    }
+}
+
+
+// `core.bitop._popcnt` is a bodiless intrinsic dmd's own `BUILTIN`
+// classification recognises, but under `BUILTIN.popcnt` - a bare name
+// that is not the declared identifier `_popcnt`. A call site that never
+// executes must not need a host symbol for it, the same as
+// `ffi.unexecutedIntrinsicCall.bswap` above pins for `bswap`.
+static foreach (backend; Matrix!()) {
+    @("ffi.unexecutedIntrinsicCall._popcnt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.bitop: _popcnt;
+
+            uint countIfSet(uint value, bool doIt) {
+                if (doIt)
+                    return _popcnt(value);
+                return 0;
+            }
+
+            void main() {
+                assert(countIfSet(0xFFu, false) == 0);
+            }
+        });
+    }
+}
+
+
+// The same intrinsic reached by a call that does execute, for every
+// overload dmd classifies (`ushort`, `uint`, `ulong`): compiled D emits
+// `_popcnt` inline, so no symbol exists anywhere in the process for it,
+// the same reason `ffi.executedIntrinsicCall.bswap` above exercises the
+// `core.bitop` wrapper directly rather than through FFI.
+static foreach (backend; Matrix!()) {
+    @("ffi.executedIntrinsicCall._popcnt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.bitop: _popcnt;
+
+            void main() {
+                assert(_popcnt(cast(ushort) 0xFFu) == 8);
+                assert(_popcnt(0xFFu) == 8);
+                assert(_popcnt(0xFFuL) == 8);
+            }
+        });
+    }
+}
+
+
+// `core.math.rndtol` is a bodiless intrinsic like the ones above, but
+// dmd's own `BUILTIN` enum (`dmd.func`) has no member for it - unlike
+// `fabs`/`sqrt`/`sin`/`cos`/`ldexp`/`yl2x`/`yl2xp1` above, `dmd.builtin.
+// isBuiltin(fd)` always answers `BUILTIN.unimp` for `rndtol`, the same
+// answer it gives a function that is not a compiler intrinsic at all.
+// dmd's own CTFE engine (`dmd.dinterpret.evaluateIfBuiltin`) gates on
+// that exact same `isBuiltin` check, so `rndtol` is uncomputable at
+// compile time in plain dmd too, not only here - `Ctfe` fails for the
+// same reason a real `static assert(rndtol(2.7f) == 3)` would. A
+// snakebite backend that routes a builtin call by asking dmd for this
+// classification (the design every other intrinsic above now uses)
+// inherits the same gap: it never reaches this call in the first place,
+// so it still needs a host symbol FFI cannot find. Only `Native` - which
+// runs real compiled D, unaffected by dmd's own classification - can
+// run this today. Tracked as issue #423.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's own BUILTIN enum has no member for `rndtol` (issue " ~
+        "#423), so dmd's CTFE (dmd.dinterpret.evaluateIfBuiltin) " ~
+        "cannot evaluate it either, the same as this backend"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "dmd's own BUILTIN enum has no member for `rndtol` (issue " ~
+        "#423), so `dmd.builtin.isBuiltin` never classifies it as a " ~
+        "builtin; the call still reaches FFI, which has no host " ~
+        "symbol for it"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "dmd's own BUILTIN enum has no member for `rndtol` (issue " ~
+        "#423), so `dmd.builtin.isBuiltin` never classifies it as a " ~
+        "builtin; the call still reaches FFI, which has no host " ~
+        "symbol for it"),
+)) {
+    @("ffi.executedIntrinsicCall.rndtol." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: rndtol;
+
+            void main() {
+                assert(rndtol(2.7f) == 3L);
+                assert(rndtol(2.7) == 3L);
+                assert(rndtol(2.7L) == 3L);
+            }
+        });
+    }
+}
+
+
+// `rndtol` never takes the builtin route (`dmd.builtin.isBuiltin` has no
+// member for it, above), so an unexecuted call to it stays on the plain
+// native route with no host symbol - the same shape
+// `ffi.unexecutedIntrinsicCall` above pins for `fabs`, which now takes
+// the builtin route instead and so no longer exercises this. A call
+// site that never runs must not need a symbol lookup that would only
+// fail, on every backend, including the ones that treat `rndtol` as an
+// ordinary bodiless native call.
+static foreach (backend; Matrix!()) {
+    @("ffi.unexecutedIntrinsicCall.rndtol." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: rndtol;
+
+            long roundIfAsked(bool ask, double value) {
+                if (ask)
+                    return rndtol(value);
+                return 0;
+            }
+
+            void main() {
+                assert(roundIfAsked(false, 2.7) == 0);
+            }
+        });
+    }
+}
+
+
+// `core.math.rint` has the same gap as `rndtol` above: dmd's own
+// `BUILTIN` enum (`dmd.func`) has no member for it either, so
+// `dmd.builtin.isBuiltin` always answers `BUILTIN.unimp` for it, and
+// dmd's own CTFE engine (`dmd.dinterpret.evaluateIfBuiltin`, gated on
+// that same check) cannot evaluate it. Only `Native` runs this today.
+// Tracked as issue #423.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's own BUILTIN enum has no member for `rint` (issue " ~
+        "#423), so dmd's CTFE (dmd.dinterpret.evaluateIfBuiltin) " ~
+        "cannot evaluate it either, the same as this backend"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "dmd's own BUILTIN enum has no member for `rint` (issue " ~
+        "#423), so `dmd.builtin.isBuiltin` never classifies it as a " ~
+        "builtin; the call still reaches FFI, which has no host " ~
+        "symbol for it"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "dmd's own BUILTIN enum has no member for `rint` (issue " ~
+        "#423), so `dmd.builtin.isBuiltin` never classifies it as a " ~
+        "builtin; the call still reaches FFI, which has no host " ~
+        "symbol for it"),
+)) {
+    @("ffi.executedIntrinsicCall.rint." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: rint;
+
+            void main() {
+                assert(rint(2.5f) == 2.0f);
+                assert(rint(2.5) == 2.0);
+                assert(rint(2.5L) == 2.0L);
+            }
+        });
+    }
+}
+
+
+// `rint` never takes the builtin route either (`dmd.builtin.isBuiltin`
+// has no member for it, above), so an unexecuted call to it stays on
+// the plain native route with no host symbol - the same shape
+// `ffi.unexecutedIntrinsicCall.rndtol` above pins for `rndtol`.
+static foreach (backend; Matrix!()) {
+    @("ffi.unexecutedIntrinsicCall.rint." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: rint;
+
+            double rintIfAsked(bool ask, double value) {
+                if (ask)
+                    return rint(value);
+                return 0;
+            }
+
+            void main() {
+                assert(rintIfAsked(false, 2.5) == 0);
             }
         });
     }

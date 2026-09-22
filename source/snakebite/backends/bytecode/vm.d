@@ -17,6 +17,7 @@ extern(C) bool executeIndirectCallPlan(
     out ptrdiff_t contextAdjustment,
 );
 
+import snakebite.backends.builtins: BuiltinCall;
 import snakebite.callarguments: CallArguments;
 import snakebite.nativevalue:
     floatingToBool, floatingToIntegral, integralToFloating, loadFloating,
@@ -64,6 +65,13 @@ public struct CallSite {
         // value. Native addresses, including vtable entries, use the
         // call site's prepared native plan.
         indirect,
+        // `builtinEntry` is a `snakebite.backends.builtins.BuiltinCall`,
+        // resolved once by `CallSelection` (`snakebite.backends.calls`)
+        // and never re-resolved: a compiler intrinsic dmd itself
+        // classifies (`core.math.fabs` and the like), which has no host
+        // symbol FFI could ever find, so this VM calls the entry
+        // directly instead of going through `executeCallPlan`.
+        builtin,
     }
 
     // `callee` already compiled, called directly.
@@ -124,6 +132,19 @@ public struct CallSite {
         return site;
     }
 
+    // No lazy-preparation overload: unlike `native`, a builtin's entry
+    // is already resolved and never depends on a linker symbol lookup.
+    public static CallSite builtin(
+        BuiltinCall entry, Arg[] args, size_t returnWidth,
+    ) {
+        CallSite site;
+        site.kind = Kind.builtin;
+        site.builtinEntry = entry;
+        site.args = args;
+        site.returnWidth = returnWidth;
+        return site;
+    }
+
     package Kind kind;
     package Arg[] args;
     package size_t returnWidth;
@@ -131,6 +152,7 @@ public struct CallSite {
     package const(Function)* delegate() prepareGuest;
     package const(void)* nativePlan;
     package const(void)* delegate() prepareNativePlan;
+    package BuiltinCall builtinEntry;
     package size_t calleeSlotOffset;
     package bool hasContext;
     package size_t cleanupStartIndex = size_t.max;
@@ -890,11 +912,12 @@ private const(Instruction)* runThrow(Decoded)(
 }
 
 
-// Calls `callSites[execution.source]`'s callee, one of the three
+// Calls `callSites[execution.source]`'s callee, one of the four
 // `CallSite.Kind`s:
 // a guest callee already compiled to `Instruction`s, a native one reached
-// through a prepared FFI plan, or an indirect one whose own address sits
-// in the caller's frame. `execution.width` is unused.
+// through a prepared FFI plan, an indirect one whose own address sits in
+// the caller's frame, or a builtin one reached through its own resolved
+// entry directly. `execution.width` is unused.
 public alias opCall =
     execute!(runCall, OperandKind.result, OperandKind.immediate);
 
@@ -911,10 +934,8 @@ private const(Instruction)* runCall(Decoded)(
             *cast(const(void)**) (execution.storage(site.calleeSlotOffset));
         ptrdiff_t contextAdjustment;
         if (site.nativePlan !is null) {
-            auto arguments = CallArguments(site.args.length);
+            auto arguments = gatherArguments(execution, site.args);
             auto values = arguments.values;
-            foreach (i, arg; site.args)
-                values[i] = execution.storage(arg.callerOffset);
             if (executeIndirectCallPlan(site.nativePlan, callee,
                     execution.destination, values.ptr, values.length,
                     contextAdjustment))
@@ -923,18 +944,36 @@ private const(Instruction)* runCall(Decoded)(
         return callFunction(execution, site, cast(const(Function)*) callee,
             contextAdjustment);
     case native:
-        auto arguments = CallArguments(site.args.length);
-        // const would make the address slots read-only.
+        auto arguments = gatherArguments(execution, site.args);
         auto values = arguments.values;
-        foreach (i, arg; site.args)
-            values[i] = execution.storage(arg.callerOffset);
         auto result = execution.destination;
         executeCallPlan(
             site.nativePlan !is null ? site.nativePlan : site.prepareNativePlan(),
             result, values.ptr, values.length,
         );
         return execution.next;
+    case builtin:
+        auto arguments = gatherArguments(execution, site.args);
+        auto values = arguments.values;
+        site.builtinEntry(execution.destination, values.ptr, values.length);
+        return execution.next;
     }
+}
+
+
+// Copies each argument's address out of the caller's frame, in the order
+// `args` names, for a call reached through a plan or a resolved entry
+// (`indirect`, `native`, `builtin` in `runCall`'s switch) rather than a
+// callee frame `callFunction` copies into directly.
+private CallArguments gatherArguments(Decoded)(
+    ref Decoded execution, in Arg[] args,
+) {
+    auto arguments = CallArguments(args.length);
+    // const would make the address slots read-only.
+    auto values = arguments.values;
+    foreach (i, arg; args)
+        values[i] = execution.storage(arg.callerOffset);
+    return arguments;
 }
 
 
