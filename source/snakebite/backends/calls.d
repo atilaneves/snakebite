@@ -149,7 +149,7 @@ public struct CallSelection {
         if (kind == BUILTIN.unimp)
             return Decision(Route.native);
 
-        auto entry = entryOf(kind, floatWidthOf(function_));
+        auto entry = entryOf(text(kind), floatWidthOf(function_));
         if (entry is null)
             throw new Exception(text(
                 "snakebite has no builtin wrapper for `",

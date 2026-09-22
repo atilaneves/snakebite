@@ -22,17 +22,21 @@ public alias BuiltinCall = extern(C) void function(
 public enum FloatWidth { float_, double_, real_ }
 
 
-// `kind` and `width`'s wrapper, or `null` when snakebite has none for a
-// builtin dmd itself does classify. `CallSelection.buildDecision`
+// `name` and `width`'s wrapper, or `null` when snakebite has none for a
+// builtin dmd itself does classify. `name` is dmd's own `BUILTIN`
+// classification (`dmd.builtin.isBuiltin`), as that enum member's bare
+// name (`snakebite.backends.calls` converts it with `std.conv.text`
+// before calling here) rather than the enum value itself, so this
+// module never needs a DMD frontend import path - and neither does the
+// bytecode VM, which imports only `BuiltinCall` from here (CODING.md,
+// "Code organisation"). `CallSelection.buildDecision`
 // (`snakebite.backends.calls`) turns a `null` here into a refusal at
 // decision time, never at first execution.
-public BuiltinCall entryOf(
-    in imported!"dmd.func".BUILTIN kind, in FloatWidth width,
-) {
+public BuiltinCall entryOf(in string name, in FloatWidth width) {
     final switch (width) with (FloatWidth) {
-        case float_: return widthEntryOf!float(kind);
-        case double_: return widthEntryOf!double(kind);
-        case real_: return widthEntryOf!real(kind);
+        case float_: return widthEntryOf!float(name);
+        case double_: return widthEntryOf!double(name);
+        case real_: return widthEntryOf!real(name);
     }
 }
 
@@ -52,17 +56,15 @@ private enum oneArgumentNames = ["fabs", "sqrt", "sin", "cos"];
 private enum sameTypeTwoArgumentNames = ["yl2x", "yl2xp1"];
 
 
-private BuiltinCall widthEntryOf(T)(in imported!"dmd.func".BUILTIN kind) {
-    import dmd.func: BUILTIN;
-
-    switch (kind) with (BUILTIN) {
-        static foreach (name; oneArgumentNames)
-            case __traits(getMember, BUILTIN, name):
-                return &oneArgument!(name, T);
-        static foreach (name; sameTypeTwoArgumentNames)
-            case __traits(getMember, BUILTIN, name):
-                return &sameTypeTwoArguments!(name, T);
-        case ldexp:
+private BuiltinCall widthEntryOf(T)(in string name) {
+    switch (name) {
+        static foreach (oneArgumentName; oneArgumentNames)
+            case oneArgumentName:
+                return &oneArgument!(oneArgumentName, T);
+        static foreach (twoArgumentName; sameTypeTwoArgumentNames)
+            case twoArgumentName:
+                return &sameTypeTwoArguments!(twoArgumentName, T);
+        case "ldexp":
             return &ldexpEntry!T;
         default:
             return null;
