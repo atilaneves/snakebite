@@ -46,6 +46,21 @@ Target sysvAmd64Object() {
     );
 }
 
+// The interpreter's own native-stack-switch primitive
+// (`snakebite_interpreter_call_on_stack`,
+// `source/snakebite/backends/interpreter/interpreter_stack_amd64.S`),
+// assembled and linked the same way, and for the same reasons, as
+// `sysvAmd64Object` above.
+Target interpreterStackAmd64Object() {
+    return Target(
+        "$project/interpreter_stack_amd64.o",
+        "cc -c $in -o $out",
+        Target(
+            "source/snakebite/backends/interpreter/"
+                ~ "interpreter_stack_amd64.S"),
+    );
+}
+
 Target dubTarget(string compiler, string config, string objectSet,
                  string output, CompilerFlags flags = CompilerFlags()) {
     auto buildOptions = options.dup;
@@ -120,6 +135,7 @@ Target dubTarget(string compiler, string config, string objectSet,
     // `sysvAmd64Object`. Reggae sweeps a dub package's own `.o` files
     // into the same link line as the D-compiled ones.
     info.packages[0].files ~= "$project/sysv_amd64.o";
+    info.packages[0].files ~= "$project/interpreter_stack_amd64.o";
 
     auto target = dubBuild(buildOptions, info, CompilationMode.options, flags);
     target.rawOutputs[0] = "bin/" ~ output;
@@ -129,6 +145,7 @@ Target dubTarget(string compiler, string config, string objectSet,
 Build reggaeBuild() {
     auto build = Build(
         sysvAmd64Object(),
+        interpreterStackAmd64Object(),
         dubTarget("dmd", "unittest", "unittest", "ut"),
         dubTarget("ldc2", "acceptance-test", "release", "at", CompilerFlags("-release", "-O", "-flto=thin")),
         dubTarget("ldc2", "sb", "release", "sb", CompilerFlags("-release", "-O", "-flto=thin")),
