@@ -150,7 +150,14 @@ public struct CallSelection {
         if (kind == BUILTIN.unimp)
             return Decision(Route.native);
 
-        auto entry = entryOf(text(kind), parameterTypeOf(function_));
+        // dmd's own classification (`BUILTIN.popcnt` for the declared
+        // identifier `_popcnt`, for one) does not always echo the
+        // identifier back as its bare name, but the table's key is
+        // every one of those identifiers - the same one dmd's own
+        // `determine_builtin` keys on (`dmd/builtin.d`: `id3 = fd.
+        // ident`) - so `function_.ident` is the lookup key, not `kind`.
+        auto entry = entryOf(
+            function_.ident.toString.idup, parameterTypeOf(function_));
         if (entry is null)
             throw new SnakebiteException(text(
                 "snakebite has no builtin wrapper for `",

@@ -138,6 +138,54 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// `core.bitop._popcnt` is a bodiless intrinsic dmd's own `BUILTIN`
+// classification recognises, but under `BUILTIN.popcnt` - a bare name
+// that is not the declared identifier `_popcnt`. A call site that never
+// executes must not need a host symbol for it, the same as
+// `ffi.unexecutedIntrinsicCall.bswap` above pins for `bswap`.
+static foreach (backend; Matrix!()) {
+    @("ffi.unexecutedIntrinsicCall._popcnt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.bitop: _popcnt;
+
+            uint countIfSet(uint value, bool doIt) {
+                if (doIt)
+                    return _popcnt(value);
+                return 0;
+            }
+
+            void main() {
+                assert(countIfSet(0xFFu, false) == 0);
+            }
+        });
+    }
+}
+
+
+// The same intrinsic reached by a call that does execute, for every
+// overload dmd classifies (`ushort`, `uint`, `ulong`): compiled D emits
+// `_popcnt` inline, so no symbol exists anywhere in the process for it,
+// the same reason `ffi.executedIntrinsicCall.bswap` above exercises the
+// `core.bitop` wrapper directly rather than through FFI.
+static foreach (backend; Matrix!()) {
+    @("ffi.executedIntrinsicCall._popcnt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.bitop: _popcnt;
+
+            void main() {
+                assert(_popcnt(cast(ushort) 0xFFu) == 8);
+                assert(_popcnt(0xFFu) == 8);
+                assert(_popcnt(0xFFuL) == 8);
+            }
+        });
+    }
+}
+
+
 // `core.math.rndtol` is a bodiless intrinsic like the ones above, but
 // dmd's own `BUILTIN` enum (`dmd.func`) has no member for it - unlike
 // `fabs`/`sqrt`/`sin`/`cos`/`ldexp`/`yl2x`/`yl2xp1` above, `dmd.builtin.
