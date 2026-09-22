@@ -581,6 +581,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         DelegateTarget, delegateTargetOf, functionNeedsClosure,
         outerFunctionOf;
     import snakebite.backends.aggregateinit: InitStep;
+    import snakebite.backends.builtins: BuiltinCall;
+    import snakebite.backends.calls: CallSelection;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
     import snakebite.exception: SnakebiteException;
@@ -5549,19 +5551,25 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto type = typeFunctionOf(callee);
 
         const hasNativeSymbol = _bytecode.hasNativeSymbol(callee);
-        const guest = _bytecode._callSelection.usesGuestBody(
-            callee, &_bytecode.isGuestFunction,
-            hasNativeSymbol,
+        const decision = _bytecode._callSelection.decisionOf(
+            callee, &_bytecode.isGuestFunction, hasNativeSymbol,
         );
-        if (!guest) {
+        final switch (decision.route) with (CallSelection.Route) {
+        case native:
             Arg[] initialArgs;
             if (hasThis)
                 initialArgs ~= Arg(receiverOffset, 0, size_t.sizeof);
 
             compileNativeCall(
                 callee, type, arguments, loc, exprText, initialArgs,
-                destOffset, hasNativeSymbol);
+                destOffset);
             return;
+        case builtin:
+            compileBuiltinCall(callee, type, arguments, loc, exprText,
+                destOffset, decision.builtinEntry);
+            return;
+        case guest:
+            break;
         }
         auto calleeLayout = FrameLayout.of(callee);
         auto calleeType = typeFunctionOf(callee);
@@ -5683,7 +5691,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         string exprText,
         Arg[] initialArgs,
         in size_t destOffset,
-        in bool hasNativeSymbol,
     ) {
         import snakebite.backends.calls: arityMismatches;
         import snakebite.ffi.call: CallAdapter;
@@ -5700,27 +5707,57 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         preparation.each((value) {
             args ~= compileBarrierArgument(value);
         });
-        // An unused branch can refer to a compiler intrinsic with no host
-        // symbol. Resolve it only if execution reaches the call. Known native
-        // targets stay prepared for callbacks that first run during GC. A
-        // target with no symbol has no plan to prepare early: the lookup
-        // misses again, so the call fails whenever it executes.
+        // A `core.math` compiler intrinsic with no host symbol (`fabs`
+        // and the like) used to reach here too, which is why this call's
+        // plan used to stay unresolved until the call's first execution.
+        // `CallSelection` now routes every builtin dmd classifies to
+        // `compileBuiltinCall` instead, before this is ever reached, so
+        // the only native calls left here either have a symbol or fail
+        // to resolve one loudly right now - never lazily, and never
+        // merely because a branch calling them was not taken.
         const returnWidth = returnShape.returnFacts.size;
-        if (hasNativeSymbol) {
-            const plan = preparation.prepare(_bytecode._plans, callee);
-            _callSites ~= CallSite.native(
-                cast(const(void)*) plan, args, returnWidth,
-            );
-        } else {
-            // The delegate outlives this compiler, so it captures the
-            // backend and not `this`; `PlanCache` is a struct.
-            auto bytecode = _bytecode;
-            _callSites ~= CallSite.native(
-                deferred(() => cast(const(void)*)
-                    preparation.prepare(bytecode._plans, callee)),
-                args, returnWidth,
-            );
-        }
+        const plan = preparation.prepare(_bytecode._plans, callee);
+        _callSites ~= CallSite.native(
+            cast(const(void)*) plan, args, returnWidth,
+        );
+        emit(&opCall,
+            nativeResultPlace(destOffset, returnShape.isVoid,
+                returnShape.returnFacts),
+            _callSites.length - 1, 0);
+    }
+
+    // Builds and emits a call to `callee`'s builtin `entry`
+    // (`snakebite.backends.builtins`), resolved by `CallSelection`
+    // (`snakebite.backends.calls`) when it decided this route - never an
+    // FFI plan, never a symbol lookup: a builtin needs neither. Arguments
+    // bind the same way a native call's own do (`compileBarrierArgument`),
+    // since a `core.math` intrinsic's parameters are plain by-value
+    // scalars, never `ref` or field reads.
+    private void compileBuiltinCall(
+        FuncDeclaration callee,
+        TypeFunction type,
+        Expressions* arguments,
+        Loc loc,
+        string exprText,
+        in size_t destOffset,
+        BuiltinCall entry,
+    ) {
+        import snakebite.backends.calls: arityMismatches;
+        import snakebite.ffi.call: CallAdapter;
+
+        if (arityMismatches(type.parameterList, arguments))
+            throw rejection(_function, loc, exprText);
+
+        const returnShape = CallAdapter.ofType(type);
+
+        auto preparation = CallAdapter.Arguments.of(type, arguments);
+        Arg[] args;
+        preparation.each((value) {
+            args ~= compileBarrierArgument(value);
+        });
+
+        _callSites ~= CallSite.builtin(
+            entry, args, returnShape.returnFacts.size);
         emit(&opCall,
             nativeResultPlace(destOffset, returnShape.isVoid,
                 returnShape.returnFacts),

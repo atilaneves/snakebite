@@ -17,6 +17,7 @@ extern(C) bool executeIndirectCallPlan(
     out ptrdiff_t contextAdjustment,
 );
 
+import snakebite.backends.builtins: BuiltinCall;
 import snakebite.callarguments: CallArguments;
 import snakebite.nativevalue:
     floatingToBool, floatingToIntegral, integralToFloating, loadFloating,
@@ -43,8 +44,10 @@ public struct Arg {
 // This is the whole interface the bytecode compiler and this VM agree on
 // for a call: the compiler picks a `Kind` and builds the site through
 // that kind's own factory below, and `opCall`'s `final switch` reads back
-// only the fields its `Kind` names: `guest` and `native` each read either
-// the prepared value or the delegate that prepares it on first execution.
+// only the fields its `Kind` names. `guest` alone can still read a
+// delegate that compiles and caches its callee on first execution
+// instead of an already-prepared value; every other `Kind` is always
+// resolved by the time the compiler emits its call site.
 public struct CallSite {
     public enum Kind {
         // `callee` names a compiled function, or `prepareGuest` compiles
@@ -56,7 +59,6 @@ public struct CallSite {
         // compiler resolved by linker symbol (an allocation, a `~=`
         // dchar append, a bounds check): the same shape either way, so
         // this VM hardcodes no druntime signature for any of them.
-        // An unresolved target uses `prepareNativePlan` on first execution.
         native,
         // `calleeSlotOffset` is the caller's own frame offset holding a
         // `const(Function)*` value read back at run time in place of a
@@ -64,6 +66,13 @@ public struct CallSite {
         // value. Native addresses, including vtable entries, use the
         // call site's prepared native plan.
         indirect,
+        // `builtinEntry` is a `snakebite.backends.builtins.BuiltinCall`,
+        // resolved once by `CallSelection` (`snakebite.backends.calls`)
+        // and never re-resolved: a compiler intrinsic dmd itself
+        // classifies (`core.math.fabs` and the like), which has no host
+        // symbol FFI could ever find, so this VM calls the entry
+        // directly instead of going through `executeCallPlan`.
+        builtin,
     }
 
     // `callee` already compiled, called directly.
@@ -99,14 +108,6 @@ public struct CallSite {
         return site;
     }
 
-    public static CallSite native(
-        const(void)* delegate() prepare, Arg[] args, size_t returnWidth,
-    ) {
-        auto site = native(cast(const(void)*) null, args, returnWidth);
-        site.prepareNativePlan = prepare;
-        return site;
-    }
-
     // `calleeSlotOffset` names the caller frame slot `opCall` reads the
     // callee's own address back out of at run time.
     public static CallSite indirect(
@@ -124,13 +125,27 @@ public struct CallSite {
         return site;
     }
 
+    // `entry` is already resolved: a builtin needs no lazy preparation,
+    // unlike `native`'s own unresolved-symbol case, since it is never
+    // reached by looking up a linker symbol at all.
+    public static CallSite builtin(
+        BuiltinCall entry, Arg[] args, size_t returnWidth,
+    ) {
+        CallSite site;
+        site.kind = Kind.builtin;
+        site.builtinEntry = entry;
+        site.args = args;
+        site.returnWidth = returnWidth;
+        return site;
+    }
+
     package Kind kind;
     package Arg[] args;
     package size_t returnWidth;
     package const(Function)* callee;
     package const(Function)* delegate() prepareGuest;
     package const(void)* nativePlan;
-    package const(void)* delegate() prepareNativePlan;
+    package BuiltinCall builtinEntry;
     package size_t calleeSlotOffset;
     package bool hasContext;
     package size_t cleanupStartIndex = size_t.max;
@@ -890,11 +905,12 @@ private const(Instruction)* runThrow(Decoded)(
 }
 
 
-// Calls `callSites[execution.source]`'s callee, one of the three
+// Calls `callSites[execution.source]`'s callee, one of the four
 // `CallSite.Kind`s:
 // a guest callee already compiled to `Instruction`s, a native one reached
-// through a prepared FFI plan, or an indirect one whose own address sits
-// in the caller's frame. `execution.width` is unused.
+// through a prepared FFI plan, an indirect one whose own address sits in
+// the caller's frame, or a builtin one reached through its own resolved
+// entry directly. `execution.width` is unused.
 public alias opCall =
     execute!(runCall, OperandKind.result, OperandKind.immediate);
 
@@ -928,11 +944,16 @@ private const(Instruction)* runCall(Decoded)(
         auto values = arguments.values;
         foreach (i, arg; site.args)
             values[i] = execution.storage(arg.callerOffset);
-        auto result = execution.destination;
         executeCallPlan(
-            site.nativePlan !is null ? site.nativePlan : site.prepareNativePlan(),
-            result, values.ptr, values.length,
+            site.nativePlan, execution.destination, values.ptr, values.length,
         );
+        return execution.next;
+    case builtin:
+        auto arguments = CallArguments(site.args.length);
+        auto values = arguments.values;
+        foreach (i, arg; site.args)
+            values[i] = execution.storage(arg.callerOffset);
+        site.builtinEntry(execution.destination, values.ptr, values.length);
         return execution.next;
     }
 }
