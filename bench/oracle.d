@@ -286,7 +286,7 @@ private ProcessResult run(in string[] command, in string workDir = null) {
     import std.conv: text, to;
     import std.file: readText, remove, tempDir;
     import std.path: buildPath;
-    import std.process: spawnProcess, thisProcessID, wait;
+    import std.process: Config, spawnProcess, thisProcessID, wait;
     import std.regex: matchFirst, regex;
     import std.stdio: File, stdin;
 
@@ -307,7 +307,7 @@ private ProcessResult run(in string[] command, in string workDir = null) {
     auto pid = spawnProcess(
         ["/usr/bin/time", "-v", "-o", timePath] ~ command,
         stdin, stdoutFile, stderrFile, null,
-        imported!"std.process".Config.none, workDir,
+        Config.none, workDir,
     );
     const status = wait(pid);
     stdoutFile.close;

@@ -336,8 +336,10 @@ private struct Shared {
 // functions of the same `FuncDeclaration`'s type, so both are worked
 // out from it together and kept in one table.
 private struct CallShape {
-    private imported!"snakebite.ffi".CallAdapter adapter;
-    private imported!"snakebite.ffi".CallAdapter.Argument[] arguments;
+    import snakebite.ffi: CallAdapter;
+
+    private CallAdapter adapter;
+    private CallAdapter.Argument[] arguments;
 }
 
 // The evaluation context: executes statements and evaluates expressions,
@@ -351,6 +353,7 @@ private struct CallShape {
 // state, and reads every per-function answer from the `Shared` tables
 // the program's evaluators fill together.
 extern(C++) private final class Evaluator: LoweringVisitor {
+    import snakebite.backends.aggregateinit: InitStep;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.backend: Program;
     import snakebite.frontend.dmd.delegates: DelegateTarget, outerFunctionOf;
@@ -4622,11 +4625,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // place from a pointer the way the bytecode compiler's frame offsets
     // do.
     private void applyStep(
-        imported!"snakebite.backends.aggregateinit".InitStep step,
+        InitStep step,
         ubyte* base,
     ) {
         import core.stdc.string: memcpy;
-        import snakebite.backends.aggregateinit: InitStep;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
 
         final switch (step.kind) with (InitStep.Kind) {

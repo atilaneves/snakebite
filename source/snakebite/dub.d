@@ -43,7 +43,9 @@ public string[][] dubDescribe(
 
 
 public struct DubDescription {
-    public imported!"std.json".JSONValue value;
+    import std.json: JSONValue;
+
+    public JSONValue value;
     public string[] buildArguments;
 }
 

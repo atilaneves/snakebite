@@ -1111,7 +1111,7 @@ public struct PlanCache {
     // barrier unchanged.
     public void registerGuestFunction(
         const(void)* word,
-        imported!"dmd.func".FuncDeclaration declaration,
+        FuncDeclaration declaration,
     ) {
         if (_callbacks is null)
             throw new Exception(
@@ -1122,6 +1122,8 @@ public struct PlanCache {
     }
 
     import dmd.func: FuncDeclaration;
+    import dmd.mtype: Type;
+    import snakebite.ffi.abi: Register;
     import snakebite.sharedtable: SharedTable;
 
     // Read without a lock by every thread that runs guest code
@@ -1147,7 +1149,7 @@ public struct PlanCache {
     // are cached too because a synthesized function with a body can validly
     // have no native counterpart.
     public bool hasNativeSymbol(
-        imported!"dmd.func".FuncDeclaration function_,
+        FuncDeclaration function_,
     ) {
         import dmd.mangle: mangleExact;
         import snakebite.druntime.constructoratomic: nativeTarget;
@@ -1211,7 +1213,7 @@ public struct PlanCache {
     // the plan stays in the cache, and a caller only ever calls through
     // it.
     public const(CallPlan)* of(
-        imported!"dmd.func".FuncDeclaration function_,
+        FuncDeclaration function_,
     ) {
         if (auto cached = function_ in _plans)
             return *cached;
@@ -1245,8 +1247,8 @@ public struct PlanCache {
     // calls this only once, while compiling the one `CallSite` a guest
     // `CallExp` ever produces.
     public const(CallPlan)* variadicOf(
-        imported!"dmd.func".FuncDeclaration function_,
-        scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+        FuncDeclaration function_,
+        scope Type[] extraArgumentTypes,
     ) {
         import snakebite.frontend.compiler: withCompilerLock;
 
@@ -1271,11 +1273,10 @@ public struct PlanCache {
     // `resolve` itself uses.
     public const(CallPlan)* rawPlanOf(
         string name,
-        scope const(imported!"snakebite.ffi.abi".Register)[]
+        scope const(Register)[]
             parameterRegisters,
-        imported!"snakebite.ffi.abi".Register returnRegister =
-            imported!"snakebite.ffi.abi".Register(
-                imported!"snakebite.ffi.abi".Register.Kind.none, 0),
+        Register returnRegister =
+            Register(Register.Kind.none, 0),
     ) {
         if (auto cached = name in _rawPlans) {
             import std.conv: text;

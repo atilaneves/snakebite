@@ -12,6 +12,7 @@ public struct RuntimeTypes {
     // storage with the original until one side grows.
     @disable this(this);
 
+    import dmd.aggregate: AggregateDeclaration;
     import dmd.dclass: ClassDeclaration;
     import dmd.denum: EnumDeclaration;
     import dmd.location: Loc;
@@ -49,7 +50,7 @@ public struct RuntimeTypes {
     }
 
     public const(void)[] initializer(
-        imported!"dmd.aggregate".AggregateDeclaration declaration,
+        AggregateDeclaration declaration,
     ) {
         // A class variable defaults to null; its instance initializer
         // instead includes the header and the default field values.

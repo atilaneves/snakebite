@@ -35,6 +35,7 @@ struct Options {
 public int run(string[] args) {
     import bench.report: printTable;
     import std.stdio: stderr, writeln;
+    import snakebite.execution: PreparationReport;
 
     Options options;
     try
@@ -52,7 +53,7 @@ public int run(string[] args) {
         return 1;
     }
 
-    imported!"snakebite.execution".PreparationReport preparation;
+    PreparationReport preparation;
     try
         preparation = loadProject(options);
     catch (Exception exception) {
@@ -218,13 +219,14 @@ private BackendReport[] benchmarkAll(
     in Options options,
 ) {
     import bench.oracle: oracleName, oracleReport;
+    import snakebite.backends: Backends, backendIdentity;
 
     BackendReport[] reports;
-    static foreach (BackendType; imported!"snakebite.backends".Backends)
+    static foreach (BackendType; Backends)
         if (selected(options, backendName!BackendType)) {
             reports ~= benchmark(
                 backendName!BackendType,
-                imported!"snakebite.backends".backendIdentity!BackendType,
+                backendIdentity!BackendType,
                 project.program,
                 options.warmup,
                 options.runs,
@@ -318,10 +320,13 @@ private enum backendName(BackendType) =
     imported!"std.uni".toLower(BackendType.stringof);
 
 private enum knownBackendNames = () {
+    import snakebite.backends: Backends;
+    import bench.oracle: oracleName;
+
     string[] names;
-    static foreach (BackendType; imported!"snakebite.backends".Backends)
+    static foreach (BackendType; Backends)
         names ~= backendName!BackendType;
-    names ~= imported!"bench.oracle".oracleName;
+    names ~= oracleName;
     return names;
 }();
 

@@ -13,18 +13,21 @@ public alias TestHooks = imported!"snakebite.dependencyimage".TestHooks;
 // these.
 public struct Program {
     import snakebite.dependencyimage: DependencyImage;
+    import dmd.dmodule: Module;
+    import dmd.func: FuncDeclaration;
+    import dmd.dsymbol: Dsymbol;
 
     // `func` is null when the program has no `main`, which is not an error: a
     // bare directory of `.d` files can be a library.
     struct Main {
-        imported!"dmd.func".FuncDeclaration func;
+        FuncDeclaration func;
     }
 
-    imported!"dmd.dmodule".Module[] rootModules;
+    Module[] rootModules;
     // Built once from `rootModules`, for `isRootOwned`'s `O(1)` lookup; see
     // `snakebite.frontend.dmd.functions.isRootOwned`.
-    private bool[imported!"dmd.dmodule".Module] _rootModuleSet;
-    imported!"dmd.func".FuncDeclaration[] moduleConstructors;
+    private bool[Module] _rootModuleSet;
+    FuncDeclaration[] moduleConstructors;
     Main main;
     string name;
     // Prepared for this project's execution before any guest code runs.
@@ -34,12 +37,12 @@ public struct Program {
 
     // The entry point is found the way a compiled build finds it: the first
     // root module declaring a module-level `main`.
-    this(imported!"dmd.dmodule".Module[] rootModules) {
+    this(Module[] rootModules) {
         this(rootModules, "");
     }
 
     this(
-        imported!"dmd.dmodule".Module[] rootModules,
+        Module[] rootModules,
         in string name,
     ) {
         import snakebite.frontend.dmd.functions:
@@ -63,7 +66,7 @@ public struct Program {
     }
 
     public bool isInterpreted(
-        imported!"dmd.func".FuncDeclaration function_,
+        FuncDeclaration function_,
     ) const {
         return function_ !is null && isRootOwned(function_);
     }
@@ -77,7 +80,7 @@ public struct Program {
     // the identical question, so the predicate itself lives once in
     // `snakebite.frontend.dmd.functions` and this forwards to it.
     public bool isRootOwned(
-        imported!"dmd.dsymbol".Dsymbol declaration,
+        Dsymbol declaration,
     ) const {
         import snakebite.frontend.dmd.functions:
             frontendIsRootOwned = isRootOwned;
@@ -91,9 +94,11 @@ public struct Program {
 // compilation phase leaves `hasCompiler` false; this is distinct from a
 // compiler whose measured duration is zero.
 public struct CompilationStatistics {
+    import core.time: Duration;
+
     bool hasCompiler;
     size_t cacheMisses;
-    imported!"core.time".Duration duration;
+    Duration duration;
 }
 
 

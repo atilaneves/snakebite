@@ -5,22 +5,27 @@ private:
 
 
 public struct SourceSet {
+    import snakebite.frontend.compiler: FrontendFlags;
+    import snakebite.dub: DubDescription;
+
     public string[] files;
     public string[] importPaths;
     public string[] stringImportPaths;
     public string[] linkerFlags;
-    public imported!"snakebite.frontend.compiler".FrontendFlags flags;
+    public FrontendFlags flags;
     public string[string] sourceOverrides;
     public string[] linkerFiles;
-    public imported!"snakebite.dub".DubDescription dubDescription;
+    public DubDescription dubDescription;
 }
 
 
 public struct Project {
+    import snakebite.backends: Program;
+
     public string name;
     public string directory;
     public SourceSet sources;
-    public imported!"snakebite.backends".Program program;
+    public Program program;
 }
 
 

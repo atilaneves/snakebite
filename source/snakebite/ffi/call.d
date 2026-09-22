@@ -37,6 +37,8 @@ public alias CallInvoker = void delegate(
 // once while a function's frame layout is prepared. Calls then cross this
 // seam using only the native-layout facts kept here.
 public struct CallAdapter {
+    import dmd.func: FuncDeclaration;
+    import dmd.mtype: TypeFunction;
     import snakebite.nativelayout: TypeFacts;
 
     private bool _referenceResult;
@@ -45,10 +47,12 @@ public struct CallAdapter {
     private TypeFacts _returnFacts;
 
     public struct Argument {
+        import dmd.mtype: Parameter;
+
         private bool _reference;
 
         public static Argument of(
-            imported!"dmd.mtype".Parameter parameter,
+            Parameter parameter,
         ) {
             import dmd.astenums: STC;
 
@@ -242,7 +246,7 @@ public struct CallAdapter {
     }
 
     public static CallAdapter of(
-        imported!"dmd.func".FuncDeclaration function_,
+        FuncDeclaration function_,
     ) {
         // dmd's function-type accessors are mutable, even for a read-only
         // declaration query.
@@ -266,7 +270,7 @@ public struct CallAdapter {
     // own semantics already treat as returning nothing regardless of its
     // declared return type.
     public static CallAdapter ofType(
-        imported!"dmd.mtype".TypeFunction type,
+        TypeFunction type,
         in bool isVoidResult = false,
     ) {
         import dmd.astenums: Tvoid;

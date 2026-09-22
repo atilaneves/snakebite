@@ -53,9 +53,11 @@ private enum registrySource = q{
 
 
 public struct TestStartupReport {
+    import core.time: Duration;
+
     public int status;
-    public imported!"core.time".Duration constructorDuration;
-    public imported!"core.time".Duration activationDuration;
+    public Duration constructorDuration;
+    public Duration activationDuration;
 }
 
 
