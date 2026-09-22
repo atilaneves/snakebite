@@ -9,6 +9,30 @@ import snakebite.frontend.dmd.functions: findFunction;
 import std.conv: text;
 
 
+// `core.math.fabs` is a compiler intrinsic: it has no host symbol to bind.
+// A call site that never executes must not need one, so a program that
+// never takes the branch must run without a symbol for the intrinsic.
+static foreach (backend; Matrix!()) {
+    @("ffi.unexecutedIntrinsicCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: fabs;
+
+            float absoluteIfNegative(float value) {
+                if (value < 0)
+                    return fabs(value);
+                return value;
+            }
+
+            void main() {
+                assert(absoluteIfNegative(1.0f) == 1.0f);
+            }
+        });
+    }
+}
+
+
 public extern(C) typeof(null) snakebite_ut_null_value(typeof(null) value) {
     assert(value is null);
     return value;

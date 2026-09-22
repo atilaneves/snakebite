@@ -327,6 +327,93 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// Two overloads of one template share the name `answer!int`, so the address
+// expression `&answer!int` is ambiguous without a target type. Each overload
+// still has its own mangled name, and the registry must answer a lookup by
+// that name with the overload that the mangle names, not with its sibling.
+// The registry is the only route to such instances when an image keeps its
+// template bodies out of the dynamic symbol table (LDC, `-linkonce-templates`),
+// so the test calls it directly instead of relying on `dlsym` missing.
+@("image.overloadRegistryAnswersEachOverload")
+@Serial
+unittest {
+    import std.conv: text;
+
+    const sandbox = Sandbox();
+    enum moduleName = "image_registry_overloads";
+    sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+        "module " ~ moduleName ~ ";\n" ~ q{
+            template answer(T) {
+                T answer() { return 17; }
+                T answer(T value) { return value + 1; }
+            }
+        });
+    sandbox.writeFile("app/root_" ~ moduleName ~ ".d", "module root_" ~ moduleName ~ ";\nimport "
+        ~ moduleName ~ ";\n" ~ q{
+            int main() {
+                return answer!int() + answer!int(23);
+            }
+        });
+    auto project = prepareProject(
+        sandbox.inSandboxPath("app"), [sandbox.inSandboxPath("deps")]).project;
+    const image = project.program.dependencyImage;
+    image.should.not == null;
+
+    // The image compiler infers `pure nothrow @nogc @safe` for both bodies,
+    // and the mangle spells that out. `Qk` repeats the instance name.
+    const prefix = text("_D", moduleName.length, moduleName, "__T6answerTiZQkFNaNbNiNf");
+    alias NoArguments = int function();
+    alias OneArgument = int function(int);
+    const noArguments = cast(NoArguments) (*image).registryAnswer(prefix ~ "Zi");
+    const oneArgument = cast(OneArgument) (*image).registryAnswer(prefix ~ "iZi");
+    noArguments.should.not == null;
+    oneArgument.should.not == null;
+    noArguments().should == 17;
+    oneArgument(23).should == 24;
+}
+
+
+// `rebindable` has two template overloads that give the same signature for an
+// array argument, so even a typed address cannot choose between them. The
+// registry then selects the declaration by its position among the overloads
+// of that name, the order `__traits(getOverloads)` uses.
+@("image.overloadRegistrySelectsByPosition")
+@Serial
+unittest {
+    auto module_ = parseSnippet(q{
+        import std.typecons: rebindable;
+        int[] answer(int[] values) {
+            return rebindable(values);
+        }
+    });
+    auto program = Program([module_]);
+    const image = prepareImage(imageSource(program), sharedImageCache,
+        defaultCompiler, null, null, null, ["-w"]);
+    alias Rebindable = int[] function(int[]);
+    // The mangle is that of `rebindable!(int[])` with its inferred attributes.
+    const rebindable = cast(Rebindable) image.registryAnswer(
+        "_D3std8typecons__T10rebindableTAiZQqFNaNbNiNfQoZQr");
+    rebindable.should.not == null;
+    auto values = [17];
+    rebindable(values).should == [17];
+}
+
+// The image exports its registry under `DependencyImage.registrySymbol`.
+// `resolve` reaches it only after `dlsym` misses, and a DMD image keeps every
+// instance in its symbol table, so a direct call is the way to see its answer.
+private void* registryAnswer(in DependencyImage image, in char[] name) {
+    import core.sys.posix.dlfcn: RTLD_NOW, dlopen, dlsym;
+    import std.string: toStringz;
+
+    // The image stays loaded, so this returns the handle that it already holds.
+    auto handle = dlopen(image.path.toStringz, RTLD_NOW);
+    handle.should.not == null;
+    alias Registry = extern(C) void* function(const(char)[]);
+    const registry = cast(Registry) dlsym(handle, DependencyImage.registrySymbol.toStringz);
+    registry.should.not == null;
+    return registry(name);
+}
+
 
 static foreach (backend; Matrix!()) {
     @("image.templateAliasOverloads." ~ backend.stringof)
@@ -354,6 +441,38 @@ static foreach (backend; Matrix!()) {
             int result;
             instance.call(findFunction(module_, "answer"), &result, []);
             result.should == 17;
+        }
+    }
+}
+
+
+// `among` with a lambda predicate instantiates a template whose `.mangleof`
+// names the instance, not the callable. The lookup in the image must key on
+// the exact mangle of the function itself.
+static foreach (backend; Matrix!()) {
+    @("image.importedTemplateDelegate." ~ backend.stringof)
+    @Serial
+    unittest {
+        enum code = q{
+            import std.algorithm.comparison: among;
+
+            int answer() {
+                return among!((a, b) => a == b)("a", "x", "a");
+            }
+        };
+        static if (is(backend == Native)) {
+            mixin(code);
+            answer.should == 2;
+        } else {
+            auto module_ = parseSnippet(code);
+            auto program = Program([module_]);
+            auto image = prepareImage(imageSource(program), sharedImageCache,
+                defaultCompiler, null, null, null, ["-w"]);
+            program.dependencyImage = &image;
+            scope instance = new backend(program);
+            int result;
+            instance.call(findFunction(module_, "answer"), &result, []);
+            result.should == 2;
         }
     }
 }
@@ -843,6 +962,60 @@ unittest {
         export extern(C) int answer() { return 42; }
     }, sharedImageCache, defaultCompiler, null, null, null,
         ["-debug", "-version=ImageSetting"]);
+    alias Answer = extern(C) int function();
+    (cast(Answer) image.resolve("answer"))().should == 42;
+}
+
+// D checks a member function of a template instance only when something uses
+// it, so a dependency can hold an unused member that a strict project flag
+// such as `-preview=dip1000` would reject. `-allinst` forces the compiler to
+// check every member of every instance, including the ones no call reaches,
+// so an LDC image built with it fails on such a dependency even though the
+// dependency's own build passes. The image must build with the flag that
+// emits only the referenced bodies. A DMD image keeps `-allinst`, which its
+// symbol table needs, so this runs on LDC only.
+version (LDC)
+@("image.unusedTemplateMemberIsNotAnalysed")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    const dependency = sandbox.inSandboxPath("deps/image_unused_member.d");
+    sandbox.writeFile("deps/image_unused_member.d", q{
+        module image_unused_member;
+
+        int* stored;
+
+        struct Colored(T) {
+            T value;
+
+            T get() @safe { return value; }
+
+            // Never called. Only `-preview=dip1000` rejects this store.
+            void leak(scope int* pointer) @safe { stored = pointer; }
+        }
+
+        Colored!T paint(T)(T value) { return Colored!T(value); }
+
+        // A dependency's own function has its machine code in the dependency's
+        // object, not in the image. Its return type instantiates `Colored!int`
+        // outside every module that the image compiles as a root.
+        Colored!int paintInt(int value) @safe pure nothrow @nogc {
+            return value.paint;
+        }
+    });
+    const objectPath = sandbox.inSandboxPath("image_unused_member.o");
+    const compiled = execute([defaultCompiler, "-c", "-relocation-model=pic",
+        dependency, "-of=" ~ objectPath]);
+    compiled.status.shouldEqual(0, compiled.output);
+
+    auto image = prepareImage(q{
+        module image;
+        import image_unused_member;
+
+        export extern(C) int answer() { return paintInt(42).get; }
+    }, sharedImageCache, defaultCompiler, [dependency],
+        [sandbox.inSandboxPath("deps")], null, ["-preview=dip1000"],
+        [objectPath]);
     alias Answer = extern(C) int function();
     (cast(Answer) image.resolve("answer"))().should == 42;
 }
