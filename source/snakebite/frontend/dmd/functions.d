@@ -35,6 +35,27 @@ public imported!"dmd.dstruct".StructDeclaration findStruct(
     return null;
 }
 
+// Whether `declaration` belongs to one of the modules in `rootModules`,
+// rather than a module dmd only reached through an `import`.
+// `Dsymbol.getModule` gives back the module that owns a declaration
+// regardless of which template instance or mixin walked into it, so this
+// is the one question every backend and frontend walk asks to tell
+// root-owned guest code apart from a called dependency (docs/adr/0009).
+//
+// `rootModules` is a set the caller builds once, not the root module list
+// itself: `Program.isInterpreted` asks this question again for every
+// guest call the interpreter dispatches, so an `O(1)` lookup keyed by
+// module beats a linear scan repeated that often. A one-time frontend
+// walk, such as the inline-asm load check, pays the same small cost to
+// build its own set once and gets the same shape, instead of a second,
+// differently shaped predicate that can drift from this one.
+public bool isRootOwned(
+    imported!"dmd.dsymbol".Dsymbol declaration,
+    in bool[imported!"dmd.dmodule".Module] rootModules,
+) {
+    return (declaration.getModule in rootModules) !is null;
+}
+
 // `function_`'s type as the function type it must be. A `FuncDeclaration`
 // whose type is not a `TypeFunction` would be a malformed AST, not a guest
 // construct a backend has chosen not to support, so this halts on it as

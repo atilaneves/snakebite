@@ -88,8 +88,14 @@ private extern(C++) class InlineAsmCollector
             _rootModules[module_] = true;
     }
 
+    // The same question `Program.isRootOwned` (backend.d) answers, so the
+    // predicate itself lives once, in `snakebite.frontend.dmd.functions`;
+    // both forward to it (docs/adr/0009: one root-owned predicate).
     private extern(D) bool isRootOwned(FuncDeclaration function_) {
-        return (function_.getModule in _rootModules) !is null;
+        import snakebite.frontend.dmd.functions:
+            frontendIsRootOwned = isRootOwned;
+
+        return frontendIsRootOwned(function_, _rootModules);
     }
 
     // `mixin WithAsm;` instantiates a `mixin template` as a
