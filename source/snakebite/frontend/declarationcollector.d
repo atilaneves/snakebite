@@ -43,18 +43,16 @@ package extern(C++) class DeclarationCollector
                 member.accept(this);
     }
 
-    // `.decl` is the syntactic "then" branch even when the condition
-    // resolved otherwise; `include` gives the branch a real build compiles
-    // in. This override reaches most `AttribDeclaration` subtypes
-    // (`LinkDeclaration`, `VisibilityDeclaration`, ...): each one's own
-    // `accept` dispatches by its exact static type, and
-    // `SemanticTimeTransitiveVisitor` (whose traversal this class
-    // otherwise reuses) has no more specific `visit` overload for those,
-    // so dmd's own per-type forwarding stubs (`dmd.visitor.parsetime`)
-    // fall through to this one. `ConditionalDeclaration` does have its
-    // own more specific overload there, so it never reaches this one at
-    // all and needs the override just below for the same `include`-based
-    // reason.
+    // `SemanticTimeTransitiveVisitor` gives most `AttribDeclaration`
+    // subtypes their own `visit` overload (dmd 2.113.0
+    // `dmd/visitor/transitive.d:526-602`); those walk `.decl` directly
+    // and never reach this override. Three subtypes have no such
+    // overload: `StaticForeachDeclaration`, `CPPNamespaceDeclaration`,
+    // and `ForwardingAttribDeclaration`. `ParseTimeVisitor`'s default
+    // forwarder (`dmd/visitor/parsetime.d`) routes each of them here
+    // instead. `StaticForeachDeclaration` is the one that matters:
+    // `include` picks the branch a real build expands, so only that
+    // branch is walked.
     override void visit(AttribDeclaration declaration) {
         if (auto members = include(declaration, null))
             foreach (member; *members)
