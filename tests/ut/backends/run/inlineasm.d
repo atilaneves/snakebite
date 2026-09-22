@@ -100,6 +100,35 @@ static foreach (backend; Backends) {
     }
 }
 
+// A root-owned function template's `TemplateInstance` is reached twice by
+// `InlineAsmCollector`: once through the module's own `members` (dmd's
+// `appendToModuleMember` puts every instantiated template there), and
+// again through the `ScopeExp` the call site builds inside the calling
+// function's body (`SemanticTimeTransitiveVisitor.visit(ScopeExp)` walks
+// into the `TemplateInstance` it holds). Calling `asmFunction!int()` from
+// inside a `unittest` block's body takes both paths at once. Without the
+// `_visited` guard keyed by `FuncDeclaration`, that would report the same
+// `asm` block twice, joined by a newline (`diagnosticMessage`). The exact
+// equality below pins a single line.
+static foreach (backend; Backends) {
+    @("inlineasm.loadDiagnostic.templateInstanceReachedTwiceReportsOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        parseSnippet(q{
+            void asmFunction(T)() {
+                asm { nop; }
+            }
+            unittest {
+                asmFunction!int();
+            }
+        }).shouldThrow.msg.withoutSnippetCounter.should ==
+            "inline assembler is not supported in "
+            ~ "`snippet_N.asmFunction!int.asmFunction`: guard it with "
+            ~ "`version (D_InlineAsm_X86_64)`, which snakebite does not "
+            ~ "define";
+    }
+}
+
 // `parseSnippet` names each root module `snippet_<N>`. One counter gives
 // out `N` for every `parseSnippet` call in the whole `bin/ut` process,
 // not only this file, and backend variants of these tests run in
