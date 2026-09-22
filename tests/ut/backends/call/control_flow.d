@@ -8,20 +8,28 @@ import snakebite.frontend.dmd.functions: findFunction;
 
 
 // Compiled D needs a callee to compile, not to run. A call that the program
-// never executes must not reject the program, even when the callee contains
-// inline assembly that a backend cannot execute.
+// never executes must not reject the program, even when the callee holds a
+// native call the FFI call barrier cannot classify (an aggregate return
+// that carries a `real`).
 static foreach (backend; Matrix!()) {
-    @("unexecutedAssemblyCallee." ~ backend.stringof)
+    @("unexecutedUnclassifiableNativeCallCallee." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            void assemblyBody() {
-                asm { nop; }
+            struct Wide {
+                real value;
+            }
+
+            pragma(mangle, "labs")
+            extern(C) Wide labs(long);
+
+            void nativeBody() {
+                labs(-1);
             }
 
             void choose(bool execute) {
                 if (execute)
-                    assemblyBody();
+                    nativeBody();
             }
 
             void main() {

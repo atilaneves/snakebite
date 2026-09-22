@@ -21,6 +21,9 @@ public struct Program {
     }
 
     imported!"dmd.dmodule".Module[] rootModules;
+    // Built once from `rootModules`, for `isRootOwned`'s `O(1)` lookup; see
+    // `snakebite.frontend.dmd.functions.isRootOwned`.
+    private bool[imported!"dmd.dmodule".Module] _rootModuleSet;
     imported!"dmd.func".FuncDeclaration[] moduleConstructors;
     Main main;
     string name;
@@ -45,8 +48,10 @@ public struct Program {
 
         this.rootModules = rootModules;
         this.name = name;
-        foreach (module_; rootModules)
+        foreach (module_; rootModules) {
+            _rootModuleSet[module_] = true;
             moduleConstructors ~= findModuleConstructors(module_);
+        }
 
         foreach (module_; rootModules) {
             auto found = findFunction(module_, "main");
@@ -68,15 +73,16 @@ public struct Program {
     // a callee (`isInterpreted`) and a type's own runtime metadata
     // (`RuntimeTypes`) need this same answer for the same reason: guest
     // source gets no linked machine code or linked `TypeInfo` of its own.
+    // The frontend's own load-time walks (e.g. the inline-asm check) ask
+    // the identical question, so the predicate itself lives once in
+    // `snakebite.frontend.dmd.functions` and this forwards to it.
     public bool isRootOwned(
         imported!"dmd.dsymbol".Dsymbol declaration,
     ) const {
-        const module_ = declaration.getModule;
-        foreach (rootModule; rootModules)
-            if (module_ is rootModule)
-                return true;
+        import snakebite.frontend.dmd.functions:
+            frontendIsRootOwned = isRootOwned;
 
-        return false;
+        return frontendIsRootOwned(declaration, _rootModuleSet);
     }
 }
 

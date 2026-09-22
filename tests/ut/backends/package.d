@@ -50,10 +50,16 @@ public struct Omit(B, Because why, string note = "") {
     // The oracle states what the snippet means; a backend is only ever
     // right or wrong relative to it. A test that omitted it would assert
     // an expectation nothing independently checks, so every snippet a
-    // test writes must run natively.
-    static assert(!is(B == Native),
-        "Omit!(Native, ...): the native oracle is never omitted - every " ~
-        "test snippet must run as compiled D");
+    // test writes must run natively - unless `Because.diverges` already
+    // requires a note naming the sibling `Native` unittest that checks it
+    // instead. That sibling is the independent native check, just written
+    // outside this `Matrix!(...)`, so `Native` itself is still never
+    // silently unchecked.
+    static assert(!is(B == Native) || why == Because.diverges,
+        "Omit!(Native, ...): the native oracle is never omitted, unless " ~
+        "`Because.diverges` pins a sibling `Native` unittest stating " ~
+        "what compiled D actually gives - every test snippet must " ~
+        "still run natively, just not inside this `Matrix!(...)`");
     static assert(note.length > 0 || why == Because.unconfirmed,
         "Omit!(" ~ B.stringof ~ ", Because." ~ text(why) ~
         ", ...): a non-empty `note` is required for this reason");
