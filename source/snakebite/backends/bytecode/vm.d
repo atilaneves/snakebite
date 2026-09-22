@@ -44,10 +44,8 @@ public struct Arg {
 // This is the whole interface the bytecode compiler and this VM agree on
 // for a call: the compiler picks a `Kind` and builds the site through
 // that kind's own factory below, and `opCall`'s `final switch` reads back
-// only the fields its `Kind` names. `guest` alone can still read a
-// delegate that compiles and caches its callee on first execution
-// instead of an already-prepared value; every other `Kind` is always
-// resolved by the time the compiler emits its call site.
+// only the fields its `Kind` names: `guest` and `native` each read either
+// the prepared value or the delegate that prepares it on first execution.
 public struct CallSite {
     public enum Kind {
         // `callee` names a compiled function, or `prepareGuest` compiles
@@ -59,6 +57,7 @@ public struct CallSite {
         // compiler resolved by linker symbol (an allocation, a `~=`
         // dchar append, a bounds check): the same shape either way, so
         // this VM hardcodes no druntime signature for any of them.
+        // An unresolved target uses `prepareNativePlan` on first execution.
         native,
         // `calleeSlotOffset` is the caller's own frame offset holding a
         // `const(Function)*` value read back at run time in place of a
@@ -108,6 +107,14 @@ public struct CallSite {
         return site;
     }
 
+    public static CallSite native(
+        const(void)* delegate() prepare, Arg[] args, size_t returnWidth,
+    ) {
+        auto site = native(cast(const(void)*) null, args, returnWidth);
+        site.prepareNativePlan = prepare;
+        return site;
+    }
+
     // `calleeSlotOffset` names the caller frame slot `opCall` reads the
     // callee's own address back out of at run time.
     public static CallSite indirect(
@@ -145,6 +152,7 @@ public struct CallSite {
     package const(Function)* callee;
     package const(Function)* delegate() prepareGuest;
     package const(void)* nativePlan;
+    package const(void)* delegate() prepareNativePlan;
     package BuiltinCall builtinEntry;
     package size_t calleeSlotOffset;
     package bool hasContext;
@@ -944,8 +952,10 @@ private const(Instruction)* runCall(Decoded)(
         auto values = arguments.values;
         foreach (i, arg; site.args)
             values[i] = execution.storage(arg.callerOffset);
+        auto result = execution.destination;
         executeCallPlan(
-            site.nativePlan, execution.destination, values.ptr, values.length,
+            site.nativePlan !is null ? site.nativePlan : site.prepareNativePlan(),
+            result, values.ptr, values.length,
         );
         return execution.next;
     case builtin:

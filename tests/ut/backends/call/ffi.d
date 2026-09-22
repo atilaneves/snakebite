@@ -135,6 +135,35 @@ static foreach (backend; Matrix!(
 }
 
 
+// `rndtol` never takes the builtin route (`dmd.builtin.isBuiltin` has no
+// member for it, above), so an unexecuted call to it stays on the plain
+// native route with no host symbol - the same shape
+// `ffi.unexecutedIntrinsicCall` above pins for `fabs`, which now takes
+// the builtin route instead and so no longer exercises this. A call
+// site that never runs must not need a symbol lookup that would only
+// fail, on every backend, including the ones that treat `rndtol` as an
+// ordinary bodiless native call.
+static foreach (backend; Matrix!()) {
+    @("ffi.unexecutedIntrinsicCall.rndtol." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: rndtol;
+
+            long roundIfAsked(bool ask, double value) {
+                if (ask)
+                    return rndtol(value);
+                return 0;
+            }
+
+            void main() {
+                assert(roundIfAsked(false, 2.7) == 0);
+            }
+        });
+    }
+}
+
+
 public extern(C) typeof(null) snakebite_ut_null_value(typeof(null) value) {
     assert(value is null);
     return value;

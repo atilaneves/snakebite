@@ -5562,7 +5562,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             compileNativeCall(
                 callee, type, arguments, loc, exprText, initialArgs,
-                destOffset);
+                destOffset, hasNativeSymbol);
             return;
         case builtin:
             compileBuiltinCall(callee, type, arguments, loc, exprText,
@@ -5691,6 +5691,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         string exprText,
         Arg[] initialArgs,
         in size_t destOffset,
+        in bool hasNativeSymbol,
     ) {
         import snakebite.backends.calls: arityMismatches;
         import snakebite.ffi.call: CallAdapter;
@@ -5707,19 +5708,32 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         preparation.each((value) {
             args ~= compileBarrierArgument(value);
         });
-        // A `core.math` compiler intrinsic with no host symbol (`fabs`
-        // and the like) used to reach here too, which is why this call's
-        // plan used to stay unresolved until the call's first execution.
-        // `CallSelection` now routes every builtin dmd classifies to
-        // `compileBuiltinCall` instead, before this is ever reached, so
-        // the only native calls left here either have a symbol or fail
-        // to resolve one loudly right now - never lazily, and never
-        // merely because a branch calling them was not taken.
+        // `CallSelection` routes every builtin dmd classifies to
+        // `compileBuiltinCall` instead, before this is ever reached. But
+        // dmd's own `BUILTIN` enum does not cover every bodiless
+        // function with no host symbol - `core.math.rndtol`/`rint`, and
+        // any declared-but-unlinked `extern(C)` function, still reach
+        // here. An unused branch can refer to one of those. Resolve it
+        // only if execution reaches the call. Known native targets stay
+        // prepared for callbacks that first run during GC. A target
+        // with no symbol has no plan to prepare early: the lookup
+        // misses again, so the call fails whenever it executes.
         const returnWidth = returnShape.returnFacts.size;
-        const plan = preparation.prepare(_bytecode._plans, callee);
-        _callSites ~= CallSite.native(
-            cast(const(void)*) plan, args, returnWidth,
-        );
+        if (hasNativeSymbol) {
+            const plan = preparation.prepare(_bytecode._plans, callee);
+            _callSites ~= CallSite.native(
+                cast(const(void)*) plan, args, returnWidth,
+            );
+        } else {
+            // The delegate outlives this compiler, so it captures the
+            // backend and not `this`; `PlanCache` is a struct.
+            auto bytecode = _bytecode;
+            _callSites ~= CallSite.native(
+                deferred(() => cast(const(void)*)
+                    preparation.prepare(bytecode._plans, callee)),
+                args, returnWidth,
+            );
+        }
         emit(&opCall,
             nativeResultPlace(destOffset, returnShape.isVoid,
                 returnShape.returnFacts),
