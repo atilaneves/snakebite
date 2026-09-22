@@ -12,7 +12,8 @@ private:
 // exactly that shape, so routing a call here needs no separate
 // marshalling step in either backend.
 public alias BuiltinCall = extern(C) void function(
-    void* returnPlace, scope const(void*)* arguments, size_t argumentCount);
+    void* returnPlace, scope const(void*)* arguments, size_t argumentCount,
+) nothrow @nogc;
 
 
 // The concrete type a call's own first parameter declares - the other
