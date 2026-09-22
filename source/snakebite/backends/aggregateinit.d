@@ -18,6 +18,11 @@ import snakebite.nativelayout: TypeFacts;
 // "store bitfield at address" for the field steps, plus its own way of
 // reading a function's context for the `vthis` step.
 public struct InitStep {
+    import dmd.mtype: Type;
+    import dmd.expression: Expression;
+    import dmd.declaration: VarDeclaration;
+    import dmd.func: FuncDeclaration;
+
     public enum Kind {
         vthis,
         value,
@@ -29,18 +34,18 @@ public struct InitStep {
     public size_t offset;
     // Meaningful for `value`, `bitfield` and `broadcast`.
     public TypeFacts facts;
-    public imported!"dmd.mtype".Type type;
+    public Type type;
     // The element count `broadcast` copies `source` into.
     public size_t count;
     // The expression to evaluate for `value`, `bitfield` and `broadcast`.
-    public imported!"dmd.expression".Expression source;
+    public Expression source;
     // The field being written, for a `bitfield` step's masked store.
-    public imported!"dmd.declaration".VarDeclaration field;
+    public VarDeclaration field;
     // The enclosing function whose context a `vthis` step stores - `null`
     // when the struct's own lexical parent is not a function, which is
     // dmd fact and not itself an error: `sd.toParent2()` only ever names
     // a class parent for a class nested in a class, never for a struct.
-    public imported!"dmd.func".FuncDeclaration parentFunction;
+    public FuncDeclaration parentFunction;
 }
 
 public struct AggregateInitPlan {

@@ -4,6 +4,7 @@ module ut.ffi.plan;
 import ut;
 import dmd.func: FuncDeclaration;
 import dmd.mtype: Type;
+import dmd.statement: ReturnStatement, Statement;
 import dmd.typesem: nextOf;
 import snakebite.ffi: CallAdapter, PlanCache;
 import snakebite.ffi.abi: ArgumentPlan, needsHiddenReturnPointer;
@@ -2343,8 +2344,8 @@ private struct VariadicCallSite {
 // more nesting level, unlike `atomicOperation`'s single-statement
 // callee above, whose body is already flat), so finding the `return`
 // that answers a variadic call site needs a walk, not a fixed index.
-private imported!"dmd.statement".ReturnStatement returnStatementIn(
-    imported!"dmd.statement".Statement statement,
+private ReturnStatement returnStatementIn(
+    Statement statement,
 ) {
     if (auto compound = statement.isCompoundStatement) {
         foreach (inner; *compound.statements)

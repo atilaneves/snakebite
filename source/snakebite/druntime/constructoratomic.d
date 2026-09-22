@@ -18,8 +18,10 @@ public extern(C) int snakebite_constructor_atomic_add_int(
 
 
 public struct NativeTarget {
+    import dmd.astenums: LINK;
+
     public void* address;
-    public imported!"dmd.astenums".LINK linkage;
+    public LINK linkage;
 }
 
 

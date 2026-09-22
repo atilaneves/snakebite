@@ -5,22 +5,28 @@ private:
 
 
 public struct ExecutionReport {
+    import core.time: Duration;
+    import snakebite.backends: CompilationStatistics;
+
     public int status;
-    public imported!"core.time".Duration runTime;
-    public imported!"core.time".Duration constructorDuration;
-    public imported!"core.time".Duration activationDuration;
-    public imported!"snakebite.backends".CompilationStatistics compilation;
+    public Duration runTime;
+    public Duration constructorDuration;
+    public Duration activationDuration;
+    public CompilationStatistics compilation;
 }
 
 
 public struct PreparationReport {
-    public imported!"snakebite.project".Project project;
+    import core.time: Duration;
+    import snakebite.project: Project;
+
+    public Project project;
     // Finding out what to run the frontend on: `dub describe` for a dub
     // project, a directory scan otherwise.
-    public imported!"core.time".Duration discovery;
+    public Duration discovery;
     // The frontend itself: initialisation, parsing, semantic analysis.
-    public imported!"core.time".Duration duration;
-    public imported!"core.time".Duration imageDuration;
+    public Duration duration;
+    public Duration imageDuration;
 }
 
 
@@ -89,6 +95,7 @@ public ExecutionReport executeBackend(
     import snakebite.backends.backend: run;
     import snakebite.teststartup: TestStartupReport, runTestsAndMain;
     import std.datetime.stopwatch: AutoStart, StopWatch;
+    import core.memory: GC;
 
     import std.stdio: stdin, stdout, stderr;
 
@@ -118,7 +125,7 @@ public ExecutionReport executeBackend(
     // their finalizers while the backend and the frontend declarations that
     // those entries name are still alive.
     if (collectGarbage)
-        imported!"core.memory".GC.collect;
+        GC.collect;
     return ExecutionReport(
         status,
         stopWatch.peek,

@@ -125,7 +125,9 @@ public imported!"dmd.func".FuncDeclaration unresolvedCalleeOf(
 public imported!"dmd.func".FuncDeclaration[] findUnittests(
     imported!"dmd.dmodule".Module module_,
 ) {
-    imported!"dmd.func".FuncDeclaration[] unittests;
+    import dmd.func: FuncDeclaration;
+
+    FuncDeclaration[] unittests;
     appendUnittests(module_.members, unittests);
     return unittests;
 }
@@ -138,8 +140,10 @@ public imported!"dmd.func".FuncDeclaration[] findUnittests(
 public imported!"dmd.func".FuncDeclaration[] findModuleConstructors(
     imported!"dmd.dmodule".Module module_,
 ) {
-    imported!"dmd.func".FuncDeclaration[] sharedCtors;
-    imported!"dmd.func".FuncDeclaration[] ordinary;
+    import dmd.func: FuncDeclaration;
+
+    FuncDeclaration[] sharedCtors;
+    FuncDeclaration[] ordinary;
     appendModuleConstructors(module_.members, sharedCtors, ordinary);
     return sharedCtors ~ ordinary;
 }

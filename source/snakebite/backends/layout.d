@@ -110,7 +110,7 @@ package struct FrameLayout {
             // it only ever has to be a non-null marker here - the same
             // one every other reader of `hiddenThis.variable` already
             // treats as "this layout reserved a slot for `this`".
-            imported!"dmd.declaration".VarDeclaration context;
+            VarDeclaration context;
             bool isRefThis;
             if (function_.vthis !is null) {
                 isRefThis = (function_.vthis.storage_class & STC.ref_) != 0;

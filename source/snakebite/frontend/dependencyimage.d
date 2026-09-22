@@ -53,10 +53,11 @@ private extern(C++) class Collector
     import dmd.func: FuncDeclaration;
     import dmd.dmodule: Module;
     import dmd.expression: CallExp, VarExp, DelegateExp;
+    import snakebite.backends.backend: Program;
     import std.string: fromStringz;
     import std.conv: text;
 
-    private imported!"snakebite.backends.backend".Program _program;
+    private Program _program;
     private bool[FuncDeclaration] _visited;
     private FuncDeclaration _current;
     private FuncDeclaration[][FuncDeclaration] _callees;
@@ -68,7 +69,7 @@ private extern(C++) class Collector
     }
     private Reference[string] _references;
 
-    this(imported!"snakebite.backends.backend".Program program) {
+    this(Program program) {
         _program = program;
         foreach (module_; program.rootModules)
             collectModules(module_);

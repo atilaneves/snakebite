@@ -5,7 +5,9 @@ private:
 
 
 public struct Options {
-    public imported!"snakebite.backends".BackendName backend;
+    import snakebite.backends: BackendName;
+
+    public BackendName backend;
     public string[] importPaths;
     public string[] stringImportPaths;
     public string[] versions;

@@ -222,8 +222,10 @@ private int runOneShotCommand(
 
 
 private struct SubmitOutcome {
+    import std.datetime.stopwatch: Duration;
+
     public bool keepGoing;
-    public imported!"std.datetime.stopwatch".Duration elapsed;
+    public Duration elapsed;
 }
 
 

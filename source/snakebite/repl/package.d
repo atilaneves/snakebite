@@ -22,17 +22,20 @@ private alias DependencyImage =
 // not survive a cell boundary. Tracked in
 // https://github.com/atilaneves/snakebite/issues/154.
 public struct Repl {
-    private imported!"snakebite.backends".BackendName _backendName;
+    import dmd.dmodule: Module;
+    import snakebite.backends: Backend, BackendName;
+
+    private BackendName _backendName;
     private string[] _importPaths;
     private const(DependencyImage)* _dependencyImage;
     private string _accumulatedSource;
     private string _pendingInput;
     private uint _cellCount = 1;
-    private imported!"dmd.dmodule".Module _module;
-    private imported!"snakebite.backends".Backend _backend;
+    private Module _module;
+    private Backend _backend;
 
     public this(
-        imported!"snakebite.backends".BackendName backendName,
+        BackendName backendName,
         in string[] importPaths = [],
         in string[] stringImportPaths = [],
         const(DependencyImage)* dependencyImage = null,
@@ -125,7 +128,7 @@ public struct Repl {
             ~ "}\n";
         const fullSource = _accumulatedSource ~ cellSource;
 
-        imported!"dmd.dmodule".Module module_;
+        Module module_;
         try
             module_ = parseSnippet(fullSource, _importPaths);
         catch (Exception exception) {
@@ -180,7 +183,7 @@ public struct Repl {
         const cellSource = replCellLineDirective(_cellCount) ~ source ~ "\n";
         const fullSource = _accumulatedSource ~ cellSource;
 
-        imported!"dmd.dmodule".Module module_;
+        Module module_;
         try
             module_ = parseSnippet(fullSource, _importPaths);
         catch (Exception exception) {
@@ -218,8 +221,8 @@ public struct Repl {
 
     private void accept(
         in string fullSource,
-        imported!"dmd.dmodule".Module module_,
-        imported!"snakebite.backends".Backend backend,
+        Module module_,
+        Backend backend,
     ) {
         _accumulatedSource = fullSource;
         _module = module_;

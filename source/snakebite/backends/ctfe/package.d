@@ -65,7 +65,9 @@ private void writeResult(
 // failure. A guest failure is data, not a host exception, because `run` maps
 // it to an exit status while `eval` maps it to a thrown `Exception`.
 private struct InterpretResult {
-    imported!"dmd.expression".Expression value;
+    import dmd.expression: Expression;
+
+    Expression value;
     string error;
 }
 

@@ -13,11 +13,11 @@ public int main(string[] args) {
     import snakebite.dub: fetchProject;
     import snakebite.execution: executeBackend, prepareProject;
     import std.file: exists, isDir;
-    import std.stdio: stderr, write;
+    import std.stdio: stderr, stdout, write;
 
     const parsed = parseArgs(args);
     if (parsed.diagnostic.length)
-        (parsed.status == 0 ? imported!"std.stdio".stdout : stderr)
+        (parsed.status == 0 ? stdout : stderr)
             .write(parsed.diagnostic);
     if (parsed.status != 0 || parsed.options.showHelp)
         return parsed.status;

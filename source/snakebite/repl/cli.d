@@ -5,7 +5,9 @@ private:
 
 
 public struct ReplOptions {
-    public imported!"snakebite.backends".BackendName backend;
+    import snakebite.backends: BackendName;
+
+    public BackendName backend;
     public bool hasCommand;
     public string command;
     public string[] importPaths;

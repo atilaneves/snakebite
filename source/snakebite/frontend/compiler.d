@@ -90,11 +90,14 @@ public void withCompilerLock(scope void delegate() action) {
 }
 
 final class Compiler {
+    import core.sync.mutex: Mutex;
+    import dmd.dmodule: Module;
+
     private bool initialized;
-    private imported!"core.sync.mutex".Mutex mutex;
+    private Mutex mutex;
     // Keyed by source content; prevents re-registering the same root module
     // in DMD's process-global table.
-    private imported!"dmd.dmodule".Module[string] sourceCache;
+    private Module[string] sourceCache;
 
     private this() {
         import core.sync.mutex: Mutex;
@@ -284,7 +287,7 @@ final class Compiler {
         action();
     }
 
-    imported!"dmd.dmodule".Module[] parseRootModules(
+    Module[] parseRootModules(
         in string[] filePaths,
         in string[] importPaths,
         in FrontendFlags flags,
@@ -304,7 +307,7 @@ final class Compiler {
         );
     }
 
-    private imported!"dmd.dmodule".Module[] parseRootModulesLocked(
+    private Module[] parseRootModulesLocked(
         in string[] filePaths,
         in string[] importPaths,
         in FrontendFlags flags,
@@ -375,7 +378,7 @@ final class Compiler {
         return modules;
     }
 
-    imported!"dmd.dmodule".Module parseSnippet(
+    Module parseSnippet(
         in string source,
         in string[] rootImportPaths,
     ) {
@@ -386,7 +389,7 @@ final class Compiler {
         return parseSourceLocked(source, rootImportPaths);
     }
 
-    imported!"dmd.dmodule".Module[] parseSnippets(in string[] sources) {
+    Module[] parseSnippets(in string[] sources) {
         mutex.lock;
         scope(exit) mutex.unlock;
         requireInitialized;
@@ -394,7 +397,7 @@ final class Compiler {
         return parseSnippetsLocked(sources);
     }
 
-    private imported!"dmd.dmodule".Module parseSourceLocked(
+    private Module parseSourceLocked(
         in string source,
         in string[] rootImportPaths,
     ) {
@@ -452,7 +455,7 @@ final class Compiler {
     }
 
     private void fullSemantic(
-        imported!"dmd.dmodule".Module module_,
+        Module module_,
         in string[] rootImportPaths = null,
     ) {
         module_.importedFrom = module_;
@@ -464,7 +467,7 @@ final class Compiler {
     // together, so dmd's per-batch setup cost (deferred semantic queues, etc.)
     // is paid once for the whole batch instead of once per source. Already
     // cached modules are returned as-is, in the same position as their source.
-    private imported!"dmd.dmodule".Module[] parseSnippetsLocked(
+    private Module[] parseSnippetsLocked(
         in string[] sources,
     ) {
         import dmd.dmodule: Module;
@@ -514,7 +517,7 @@ final class Compiler {
         return modules;
     }
 
-    private imported!"dmd.dmodule".Module parsedModuleForFile(
+    private Module parsedModuleForFile(
         in string filePath,
         in string[] importPaths,
         in string rootDirectory,
@@ -533,7 +536,7 @@ final class Compiler {
     // to an import path, so a relative name is resolved against each of
     // those the way it was made.
     private bool moduleSourceMatches(
-        imported!"dmd.dmodule".Module module_,
+        Module module_,
         in string filePath,
         in string[] importPaths,
         in string rootDirectory,
@@ -793,27 +796,29 @@ private string[] moduleQualifiedName(
 }
 
 private struct SavedFrontendFlags {
+    import dmd.globals: FeatureState;
+
     bool previewIn;
     bool transitionIn;
     bool ddocOutput;
     size_t versionIdentifierLength;
     size_t debugIdentifierLength;
     size_t stringImportPathLength;
-    imported!"dmd.globals".FeatureState useDIP25;
-    imported!"dmd.globals".FeatureState useDIP1000;
+    FeatureState useDIP25;
+    FeatureState useDIP1000;
     bool ehnogc;
     bool useDIP1021;
-    imported!"dmd.globals".FeatureState fieldwise;
+    FeatureState fieldwise;
     bool fixAliasThis;
-    imported!"dmd.globals".FeatureState rvalueRefParam;
-    imported!"dmd.globals".FeatureState safer;
-    imported!"dmd.globals".FeatureState noSharedAccess;
+    FeatureState rvalueRefParam;
+    FeatureState safer;
+    FeatureState noSharedAccess;
     bool inclusiveInContracts;
     bool shortenedMethods;
     bool fixImmutableConv;
     bool fix16997;
-    imported!"dmd.globals".FeatureState dtorFields;
-    imported!"dmd.globals".FeatureState systemVariables;
+    FeatureState dtorFields;
+    FeatureState systemVariables;
     bool bitfields;
     bool debugEnabled;
 }
