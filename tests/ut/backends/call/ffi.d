@@ -33,20 +33,102 @@ static foreach (backend; Matrix!()) {
 }
 
 
-// The same intrinsic reached by a call that does execute. Compiled D
-// emits the instruction inline, so no symbol for `core.math.fabs` exists
-// anywhere in the process: a backend has to evaluate the bodiless
-// intrinsic itself instead of binding it through FFI.
+// The same intrinsics reached by calls that do execute. Compiled D emits
+// every one of them inline, so no symbol exists anywhere in the process
+// for any of them: a backend has to evaluate the bodiless intrinsic
+// itself instead of binding it through FFI. dmd's own `BUILTIN`
+// classification (`dmd.builtin.isBuiltin`) does not distinguish a
+// `float`/`double`/`real` overload - it goes by name alone - so one
+// assertion per type below is what actually exercises a backend's own
+// per-type wrapper, not dmd's classification. `ldexp` is a two-argument
+// intrinsic (its second argument, `int`, is never the same type as the
+// first); the rest take one argument of the overload's own type.
 static foreach (backend; Matrix!()) {
     @("ffi.executedIntrinsicCall." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            import core.math: fabs;
+            import core.math:
+                fabs, sqrt, sin, cos, ldexp, yl2x, yl2xp1;
 
             void main() {
-                float value = -1.0f;
-                assert(fabs(value) == 1.0f);
+                float fValue = -1.0f;
+                double dValue = -1.0;
+                real rValue = -1.0L;
+                assert(fabs(fValue) == 1.0f);
+                assert(fabs(dValue) == 1.0);
+                assert(fabs(rValue) == 1.0L);
+
+                assert(sqrt(4.0f) == 2.0f);
+                assert(sqrt(4.0) == 2.0);
+                assert(sqrt(4.0L) == 2.0L);
+
+                assert(sin(0.0f) == 0.0f);
+                assert(sin(0.0) == 0.0);
+                assert(sin(0.0L) == 0.0L);
+
+                assert(cos(0.0f) == 1.0f);
+                assert(cos(0.0) == 1.0);
+                assert(cos(0.0L) == 1.0L);
+
+                assert(ldexp(1.0f, 3) == 8.0f);
+                assert(ldexp(1.0, 3) == 8.0);
+                assert(ldexp(1.0L, 3) == 8.0L);
+
+                // yl2x(x, y) computes y * log2(x); yl2xp1 computes
+                // y * log2(x + 1).
+                assert(yl2x(8.0f, 1.0f) == 3.0f);
+                assert(yl2x(8.0, 1.0) == 3.0);
+                assert(yl2x(8.0L, 1.0L) == 3.0L);
+
+                assert(yl2xp1(7.0f, 1.0f) == 3.0f);
+                assert(yl2xp1(7.0, 1.0) == 3.0);
+                assert(yl2xp1(7.0L, 1.0L) == 3.0L);
+            }
+        });
+    }
+}
+
+
+// `core.math.rndtol` is a bodiless intrinsic like the ones above, but
+// dmd's own `BUILTIN` enum (`dmd.func`) has no member for it - unlike
+// `fabs`/`sqrt`/`sin`/`cos`/`ldexp`/`yl2x`/`yl2xp1` above, `dmd.builtin.
+// isBuiltin(fd)` always answers `BUILTIN.unimp` for `rndtol`, the same
+// answer it gives a function that is not a compiler intrinsic at all.
+// dmd's own CTFE engine (`dmd.dinterpret.evaluateIfBuiltin`) gates on
+// that exact same `isBuiltin` check, so `rndtol` is uncomputable at
+// compile time in plain dmd too, not only here - `Ctfe` fails for the
+// same reason a real `static assert(rndtol(2.7f) == 3)` would. A
+// snakebite backend that routes a builtin call by asking dmd for this
+// classification (the design every other intrinsic above now uses)
+// inherits the same gap: it never reaches this call in the first place,
+// so it still needs a host symbol FFI cannot find. Only `Native` - which
+// runs real compiled D, unaffected by dmd's own classification - can
+// run this today.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's own BUILTIN enum has no member for `rndtol`, so dmd's " ~
+        "CTFE (dmd.dinterpret.evaluateIfBuiltin) cannot evaluate it " ~
+        "either, the same as this backend"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "dmd's own BUILTIN enum has no member for `rndtol`, so " ~
+        "`dmd.builtin.isBuiltin` never classifies it as a builtin; " ~
+        "the call still reaches FFI, which has no host symbol for it"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "dmd's own BUILTIN enum has no member for `rndtol`, so " ~
+        "`dmd.builtin.isBuiltin` never classifies it as a builtin; " ~
+        "the call still reaches FFI, which has no host symbol for it"),
+)) {
+    @("ffi.executedIntrinsicCall.rndtol." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.math: rndtol;
+
+            void main() {
+                assert(rndtol(2.7f) == 3L);
+                assert(rndtol(2.7) == 3L);
+                assert(rndtol(2.7L) == 3L);
             }
         });
     }
