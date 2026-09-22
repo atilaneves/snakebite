@@ -38,20 +38,21 @@ public string[] imageInputs(imported!"snakebite.backends.backend".Program progra
 }
 
 
-private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransitiveVisitor {
-    import dmd.visitor: SemanticTimeTransitiveVisitor;
-    alias visit = SemanticTimeTransitiveVisitor.visit;
+// Named distinctly from `inlineasm.d`'s `InlineAsmCollector` and
+// `InlineAsmVersionGate`, and from `DeclarationCollector`
+// (`declarationcollector.d`), the shared base this class extends: all are
+// plain `extern(C++) class`es with no explicit C++ namespace, so identical
+// class names mangle to the identical C++ symbol and the linker keeps only
+// one definition - silently routing calls meant for this class into
+// another one's vtable instead of a link error.
+private extern(C++) class Collector
+        : imported!"snakebite.frontend.declarationcollector".DeclarationCollector {
+    import snakebite.frontend.declarationcollector: DeclarationCollector;
+    alias visit = DeclarationCollector.visit;
 
-    import dmd.func: CtorDeclaration, DtorDeclaration,
-        FuncDeclaration, FuncLiteralDeclaration, InvariantDeclaration,
-        NewDeclaration, PostBlitDeclaration, SharedStaticCtorDeclaration,
-        SharedStaticDtorDeclaration, StaticCtorDeclaration,
-        StaticDtorDeclaration, UnitTestDeclaration;
+    import dmd.func: FuncDeclaration;
     import dmd.dmodule: Module;
-    import dmd.expression: CallExp, VarExp, DelegateExp, FuncExp;
-    import dmd.dtemplate: TemplateDeclaration, TemplateInstance;
-    import dmd.attrib: AttribDeclaration, ConditionalDeclaration;
-    import dmd.dsymbolsem: include;
+    import dmd.expression: CallExp, VarExp, DelegateExp;
     import std.string: fromStringz;
     import std.conv: text;
 
@@ -261,24 +262,6 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
             key, "(", arguments, "); }");
     }
 
-    override void visit(TemplateDeclaration declaration) {}
-
-    override void visit(TemplateInstance instance) {
-        if (instance.members !is null)
-            foreach (member; *instance.members)
-                member.accept(this);
-    }
-
-    override void visit(AttribDeclaration declaration) {
-        if (auto members = include(declaration, null))
-            foreach (member; *members)
-                member.accept(this);
-    }
-
-    override void visit(ConditionalDeclaration declaration) {
-        visit(cast(AttribDeclaration) declaration);
-    }
-
     override void visit(FuncDeclaration function_) {
         if (_current !is null)
             _callees[_current] ~= function_;
@@ -324,50 +307,6 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
         function_.fbody.accept(this);
     }
 
-    override void visit(FuncLiteralDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(PostBlitDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(CtorDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(DtorDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(InvariantDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(UnitTestDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(NewDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(StaticCtorDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(StaticDtorDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(SharedStaticCtorDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(SharedStaticDtorDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
     override void visit(CallExp expression) {
         if (expression.f !is null)
             expression.f.accept(this);
@@ -384,10 +323,6 @@ private extern(C++) class Collector : imported!"dmd.visitor".SemanticTimeTransit
     override void visit(DelegateExp expression) {
         expression.func.accept(this);
         super.visit(expression);
-    }
-
-    override void visit(FuncExp expression) {
-        expression.fd.accept(this);
     }
 }
 

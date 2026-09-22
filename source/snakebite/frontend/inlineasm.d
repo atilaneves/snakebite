@@ -62,29 +62,23 @@ public void disableInlineAsmVersion(
 }
 
 
-// Named distinctly from `dependencyimage.d`'s own `Collector`: both are
-// plain `extern(C++) class`es with no explicit C++ namespace, so identical
-// class names mangle to the identical C++ symbol and the linker keeps only
-// one definition - silently routing calls meant for this class into the
-// other one's vtable instead of a link error.
+// Named distinctly from `dependencyimage.d`'s own `Collector` and from
+// `DeclarationCollector` (`declarationcollector.d`), the shared base both
+// extend: all three are plain `extern(C++) class`es with no explicit C++
+// namespace, so identical class names mangle to the identical C++ symbol
+// and the linker keeps only one definition - silently routing calls meant
+// for this class into another one's vtable instead of a link error.
 private extern(C++) class InlineAsmCollector
-        : imported!"dmd.visitor".SemanticTimeTransitiveVisitor {
-    import dmd.visitor: SemanticTimeTransitiveVisitor;
-    alias visit = SemanticTimeTransitiveVisitor.visit;
+        : imported!"snakebite.frontend.declarationcollector".DeclarationCollector {
+    import snakebite.frontend.declarationcollector: DeclarationCollector;
+    alias visit = DeclarationCollector.visit;
 
-    import dmd.attrib: AttribDeclaration, ConditionalDeclaration,
-        MixinDeclaration;
+    import dmd.attrib: MixinDeclaration;
     import dmd.dmodule: Module;
     import dmd.dsymbolsem: include;
-    import dmd.dtemplate: TemplateDeclaration, TemplateInstance,
-        TemplateMixin;
+    import dmd.dtemplate: TemplateMixin;
     import dmd.errors: error;
-    import dmd.expression: FuncExp;
-    import dmd.func: CtorDeclaration, DtorDeclaration,
-        FuncDeclaration, FuncLiteralDeclaration, InvariantDeclaration,
-        NewDeclaration, PostBlitDeclaration, SharedStaticCtorDeclaration,
-        SharedStaticDtorDeclaration, StaticCtorDeclaration,
-        StaticDtorDeclaration, UnitTestDeclaration;
+    import dmd.func: FuncDeclaration;
 
     private bool[Module] _rootModules;
     private bool[FuncDeclaration] _visited;
@@ -98,23 +92,10 @@ private extern(C++) class InlineAsmCollector
         return (function_.getModule in _rootModules) !is null;
     }
 
-    // An uninstantiated template contributes no code to the build, so its
-    // body is never walked; a used template's own instance is reached
-    // through `TemplateInstance` below, and dmd sets `hasInlineAsm` on
-    // each instance's own `FuncDeclaration`, so no extra template logic is
-    // needed here.
-    override void visit(TemplateDeclaration declaration) {}
-
-    override void visit(TemplateInstance instance) {
-        if (instance.members !is null)
-            foreach (member; *instance.members)
-                member.accept(this);
-    }
-
     // `mixin WithAsm;` instantiates a `mixin template` as a
     // `TemplateMixin`. `TemplateMixin : TemplateInstance`, but it overrides
     // `accept` with its own `v.visit(this)`, so it dispatches to this
-    // overload rather than `visit(TemplateInstance)` above;
+    // overload rather than `DeclarationCollector`'s `visit(TemplateInstance)`;
     // `SemanticTimeTransitiveVisitor`'s own default `visit(TemplateMixin)`
     // walks only the mixin's type and template arguments, never its
     // instantiated members, so without this override a root-owned function
@@ -125,45 +106,13 @@ private extern(C++) class InlineAsmCollector
                 member.accept(this);
     }
 
-    // `.decl` is the syntactic "then" branch even when the condition
-    // resolved otherwise; `include` gives the branch a real build compiles
-    // in, mirroring `Collector` in `dependencyimage.d`. This override
-    // reaches most `AttribDeclaration` subtypes (`LinkDeclaration`,
-    // `VisibilityDeclaration`, ...): each one's own `accept` dispatches by
-    // its exact static type, and `SemanticTimeTransitiveVisitor` (whose
-    // traversal this class otherwise reuses) has no more specific `visit`
-    // overload for those, so dmd's own per-type forwarding stubs
-    // (`dmd.visitor.parsetime`) fall through to this one. Two subtypes do
-    // have their own more specific overload there and so never reach this
-    // one at all - each needs its own override below for the same
-    // `include`-based reason.
-    override void visit(AttribDeclaration declaration) {
-        if (auto members = include(declaration, null))
-            foreach (member; *members)
-                member.accept(this);
-    }
-
-    // `version (D_InlineAsm_X86_64) { ... } else { ... }` is a
-    // `ConditionalDeclaration`; `SemanticTimeTransitiveVisitor`'s own
-    // traversal (`dmd.visitor.transitive`'s `ParseVisitMethods`) walks
-    // both `.decl` and `.elsedecl` unconditionally for this exact type,
-    // shadowing the generic `AttribDeclaration` override above, so an
-    // `asm` block in the branch that did not compile in would be reported
-    // as if it had. Route through `include` instead, the same as above,
-    // so only the branch a real build actually compiles in is walked.
-    override void visit(ConditionalDeclaration declaration) {
-        if (auto members = include(declaration, null))
-            foreach (member; *members)
-                member.accept(this);
-    }
-
     // `mixin("...")` at declaration scope is a `MixinDeclaration`;
     // `SemanticTimeTransitiveVisitor`'s own traversal walks only its
     // string argument expression for this exact type (parse-time shape,
-    // before expansion), shadowing the generic `AttribDeclaration`
-    // override above, so a mixin's own expanded declarations - including
-    // any `asm` block they compile in - are never reached at all
-    // (docs/adr/0012's known mixin gap: the version gate cannot see
+    // before expansion), shadowing `DeclarationCollector`'s generic
+    // `AttribDeclaration` override, so a mixin's own expanded declarations
+    // - including any `asm` block they compile in - are never reached at
+    // all (docs/adr/0012's known mixin gap: the version gate cannot see
     // inside the mixin's source text either, so its `asm` compiles in
     // rather than out). `include` returns `.decl`, the declarations the
     // mixin expanded into once semantic analysis has run.
@@ -200,58 +149,6 @@ private extern(C++) class InlineAsmCollector
             );
         if (function_.fbody !is null)
             function_.fbody.accept(this);
-    }
-
-    override void visit(FuncExp expression) {
-        expression.fd.accept(this);
-    }
-
-    // dmd's semantic pass never forwards these function kinds to the plain
-    // `FuncDeclaration` overload by default; `dependencyimage.d`'s
-    // `Collector` guards the same list for the same reason (see "Guard all
-    // function kinds during dependency image collection").
-    override void visit(FuncLiteralDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(PostBlitDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(CtorDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(DtorDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(InvariantDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(UnitTestDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(NewDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(StaticCtorDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(StaticDtorDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(SharedStaticCtorDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
-    }
-
-    override void visit(SharedStaticDtorDeclaration function_) {
-        visit(cast(FuncDeclaration) function_);
     }
 }
 
