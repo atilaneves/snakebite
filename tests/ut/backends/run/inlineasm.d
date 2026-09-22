@@ -13,9 +13,13 @@ import std.process: thisProcessID;
 // undefined (see docs/adr/0012). A real x86-64 build of `bin/ut` defines
 // it unconditionally (dmd's `Target._init`), so `Native` diverges by
 // design. The sibling test below pins that divergence instead of
-// joining this Matrix. There is no native oracle here for these three
-// backends to agree with, so `Omit!(Native, ...)` is not allowed.
-static foreach (backend; Backends) {
+// joining this Matrix.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "a real x86-64 build of `bin/ut` defines `D_InlineAsm_X86_64` "
+        ~ "unconditionally; the sibling `Native` unittest below pins "
+        ~ "the value it actually gives"),
+)) {
     @("inlineasm.versionIdentifier.notDefinedForGuestCode." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -45,8 +49,16 @@ unittest {
 // function body, not only at module scope: dmd represents it there as a
 // `ConditionalStatement`, reached by walking into `FuncDeclaration.fbody`,
 // which is a different code path in `InlineAsmVersionGate` than the
-// `ConditionalDeclaration` a module-scope `version` block builds.
-static foreach (backend; Backends) {
+// `ConditionalDeclaration` a module-scope `version` block builds. `Native`
+// takes the `return 1` branch (see the sibling below); the gate makes
+// every backend take the `else` branch instead, so `Native` diverges by
+// design.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "a real x86-64 build of `bin/ut` sees `D_InlineAsm_X86_64` "
+        ~ "defined and takes the `return 1` branch; the sibling "
+        ~ "`Native` unittest below pins that value"),
+)) {
     @("inlineasm.versionIdentifier.functionBody." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -59,11 +71,32 @@ static foreach (backend; Backends) {
     }
 }
 
+// Sibling pinning the divergence above: compiled natively, the same
+// snippet sees `D_InlineAsm_X86_64` defined and takes the `return 1`
+// branch, unlike every backend above.
+@("inlineasm.versionIdentifier.functionBody.Native")
+@Tags(Native.stringof)
+unittest {
+    1.shouldBeRetOf!(Native, q{
+        int f() {
+            version (D_InlineAsm_X86_64) return 1;
+            else return 2;
+        }
+    }, "f");
+}
+
 // The gate must also reach a `version (D_InlineAsm_X86_64)` inside a
 // template's body, instantiated or not: `TemplateDeclaration.members`
 // holds the syntax tree directly, and the gate walks it right after
-// parsing, before any instantiation exists to walk instead.
-static foreach (backend; Backends) {
+// parsing, before any instantiation exists to walk instead. `Native`
+// takes the `return 1` branch (see the sibling below), so it diverges by
+// design the same way the function-body pair above does.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "a real x86-64 build of `bin/ut` sees `D_InlineAsm_X86_64` "
+        ~ "defined and takes the `return 1` branch; the sibling "
+        ~ "`Native` unittest below pins that value"),
+)) {
     @("inlineasm.versionIdentifier.templateBody." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -75,6 +108,21 @@ static foreach (backend; Backends) {
             int g() { return f!int(); }
         }, "g");
     }
+}
+
+// Sibling pinning the divergence above: compiled natively, the template
+// body sees `D_InlineAsm_X86_64` defined and takes the `return 1` branch,
+// unlike every backend above.
+@("inlineasm.versionIdentifier.templateBody.Native")
+@Tags(Native.stringof)
+unittest {
+    1.shouldBeRetOf!(Native, q{
+        int f(T)() {
+            version (D_InlineAsm_X86_64) return 1;
+            else return 2;
+        }
+        int g() { return f!int(); }
+    }, "g");
 }
 
 // A root-owned function with an unguarded `asm` block must not reach any
@@ -203,7 +251,7 @@ unittest {
 // the stack during load, well before any backend ran the guest code. This
 // snippet has no `asm` block anywhere and must load and run like any other
 // valid D program, on every backend and natively.
-static foreach (backend; TestBackends) {
+static foreach (backend; Matrix!()) {
     @("inlineasm.loadDiagnostic.selfAliasDoesNotOverflowTheStack." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
