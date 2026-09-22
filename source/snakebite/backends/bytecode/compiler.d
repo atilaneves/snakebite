@@ -3653,10 +3653,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
 
         case broadcast:
-            // Only reached for a value destination: a `NewExp`'s
-            // positional arguments are never padded by dmd's own `fill`
-            // (`expressionsem.d`, issue 12509), so `planPositionalFields`
-            // never emits this step for `isPointer`.
+            // Reached alike for a `StructLiteralExp`'s `elements` and a
+            // `NewExp`'s positional `arguments`: both are narrowed by
+            // dmd's own `fit` (`expressionsem.d`) ahead of `fill`, which
+            // walks a static-array field's nested array levels until a
+            // single given value matches one, leaving that value's own
+            // (narrower) type on the source expression instead of
+            // widening it to the full field type.
             const tempOffset = reserveTemp(step.facts);
             evalInto(step.source, tempOffset, step.facts.size);
 

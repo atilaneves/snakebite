@@ -93,12 +93,16 @@ public AggregateInitPlan planStructLiteral(
 }
 
 // The single decision both backends' `NewExp` positional-field adapters
-// read: `arguments` pairs positionally with `sd.fields`, one entry per
-// field actually given - unlike a `StructLiteralExp`, dmd never pads this
-// list, so a field left out keeps whatever the allocation's own `.init`
-// blit already wrote there. More arguments than fields is a shape dmd's
-// own semantic pass already rejected, so it is asserted rather than
-// checked again by each backend.
+// read: `arguments` pairs positionally with `sd.fields`. For a struct
+// with no user-defined constructor, dmd's own `fill` (`expressionsem.d`)
+// pads this list out to `sd.nonHiddenFields()`, one entry per field,
+// using each omitted field's default-initializer expression - except a
+// zero-size field (e.g. `void[0]`), where `fill` stores `null` instead:
+// there is nothing to evaluate, so the allocation's own `.init` blit,
+// already a no-op for a zero-size field, is left as-is. A `null` entry
+// is skipped here the same way `planStructLiteral` skips one. More
+// arguments than fields is a shape dmd's own semantic pass already
+// rejected, so it is asserted rather than checked again by each backend.
 public AggregateInitPlan planPositionalFields(
     imported!"dmd.dstruct".StructDeclaration sd,
     imported!"dmd.expression".Expressions* arguments,
@@ -112,8 +116,12 @@ in (arguments is null || arguments.length <= sd.fields.length)
         steps ~= vthisStep;
 
     if (arguments !is null)
-        foreach (i, argument; *arguments)
+        foreach (i, argument; *arguments) {
+            if (argument is null)
+                continue;
+
             steps ~= fieldStep(sd.fields[i], argument);
+        }
 
     return AggregateInitPlan(false, steps);
 }
