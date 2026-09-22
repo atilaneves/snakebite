@@ -143,6 +143,7 @@ public struct CallSelection {
     private static Decision builtinDecision(FuncDeclaration function_) {
         import dmd.builtin: isBuiltin;
         import snakebite.backends.builtins: entryOf;
+        import snakebite.exception: SnakebiteException;
         import std.conv: text;
 
         const kind = isBuiltin(function_);
@@ -151,7 +152,7 @@ public struct CallSelection {
 
         auto entry = entryOf(text(kind), floatWidthOf(function_));
         if (entry is null)
-            throw new Exception(text(
+            throw new SnakebiteException(text(
                 "snakebite has no builtin wrapper for `",
                 function_.toString, "`, which dmd classifies as `",
                 kind, "`"));
@@ -168,6 +169,7 @@ public struct CallSelection {
     // second argument, an unrelated `int`) shares.
     private static FloatWidth floatWidthOf(FuncDeclaration function_) {
         import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
+        import snakebite.exception: SnakebiteException;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import std.conv: text;
 
@@ -177,7 +179,7 @@ public struct CallSelection {
             case Tfloat64: return FloatWidth.double_;
             case Tfloat80: return FloatWidth.real_;
             default:
-                throw new Exception(text(
+                throw new SnakebiteException(text(
                     "snakebite's builtin table has no floating point ",
                     "width for `", function_.toString, "`'s first ",
                     "parameter type `", parameterType.toString, "`"));

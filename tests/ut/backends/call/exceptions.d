@@ -595,3 +595,33 @@ static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
         ).shouldThrow!SnakebiteException;
     }
 }
+
+// `core.bitop.bswap` is a bodiless function dmd's own compiler-intrinsic
+// classification (`dmd.builtin.isBuiltin`) recognises (`BUILTIN.bswap`),
+// but its first parameter is `uint`, not a floating point type, so
+// `CallSelection.floatWidthOf` (`snakebite.backends.calls`) - which every
+// builtin dmd classifies must pass through to find its wrapper - has no
+// width for it. Both backends that route a call through `CallSelection`
+// must fail with snakebite's own exception type here, the same as every
+// other backend refusal, so a host catching `SnakebiteException` sees
+// this one too.
+static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
+    @("builtinDecision.noFloatingPointWidth.throwsSnakebiteException." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        auto module_ = parseSnippet(q{
+            import core.bitop: bswap;
+
+            uint swapped(uint value) {
+                return bswap(value);
+            }
+        });
+        auto instance = new backend(Program([module_]));
+        uint result;
+        uint argument = 1;
+
+        instance.call(
+            findFunction(module_, "swapped"), &result, [cast(void*) &argument],
+        ).shouldThrow!SnakebiteException;
+    }
+}
