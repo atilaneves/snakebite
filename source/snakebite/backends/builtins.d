@@ -34,7 +34,8 @@ public enum ParameterType { float_, double_, real_, ushort_, uint_, ulong_ }
 // "Code organisation"). `CallSelection.buildDecision`
 // (`snakebite.backends.calls`) turns a `null` here into a refusal at
 // decision time, never at first execution.
-public BuiltinCall entryOf(in string name, in ParameterType type) {
+public BuiltinCall entryOf(in string name, in ParameterType type)
+@safe pure nothrow @nogc {
     final switch (type) with (ParameterType) {
         case float_: return widthEntryOf!float(name);
         case double_: return widthEntryOf!double(name);
@@ -46,7 +47,8 @@ public BuiltinCall entryOf(in string name, in ParameterType type) {
 }
 
 
-private BuiltinCall widthEntryOf(T)(in string name) {
+private BuiltinCall widthEntryOf(T)(in string name)
+@safe pure nothrow @nogc {
     switch (name) {
         static foreach (oneArgumentName; oneArgumentNames)
             case oneArgumentName:
@@ -80,7 +82,8 @@ private enum oneArgumentNames = ["fabs", "sqrt", "sin", "cos"];
 private enum sameTypeTwoArgumentNames = ["yl2x", "yl2xp1"];
 
 
-private BuiltinCall integerEntryOf(T)(in string name) {
+private BuiltinCall integerEntryOf(T)(in string name)
+@safe pure nothrow @nogc {
     import core.bitop;
 
     switch (name) {
