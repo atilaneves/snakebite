@@ -258,6 +258,83 @@ public struct TypeFacts {
         if (auto arrayType = type.isTypeSArray)
             forceResolved(arrayType.next);
     }
+
+    // Which native bytes of a value of `type` decide whether it is true
+    // as a condition (`if`, `assert`, `!`, `&&`, `||`, `?:`) - dmd's own
+    // `toBoolean` (`dmd.expressionsem`) leaves such a condition's type
+    // unchanged for every case here, so the real test is the one native
+    // codegen makes of the value's bytes, not any `bool` conversion:
+    //
+    // * A floating value is true when nonzero, compared as a float, at
+    //   `size` bytes from the value's own start.
+    // * A dynamic array is true by its pointer word alone (`ptr !is
+    //   null`) - a zero-length array over real storage is still true -
+    //   so only `arrayPointerOffset` is tested, never the length word.
+    //   (A length with a null pointer is not pinned either way: dmd
+    //   2.112 and ldc2 1.42 disagree on it, and no guest program either
+    //   backend can run builds that value.)
+    // * A delegate is true when either of its two words (`ptr`,
+    //   `funcptr`) is nonzero - the one shape here with a second word
+    //   to test, at `secondOffset`.
+    // * A pointer, a class reference, an associative array's one
+    //   pointer-sized handle, and every integral (`bool`, `char`, an
+    //   enum with an integral base, ...) are already exactly one native
+    //   word: `offset` alone, `size` bytes, decides it.
+    //
+    // One rule shared by every backend that compiles or interprets a
+    // condition, so neither special-cases an associative array or a
+    // delegate on its own.
+    public struct Truth {
+        // `false` when `type` cannot be used as a condition at all (for
+        // instance an integral width with no native layout); every
+        // other field is meaningless then, and the caller reports its
+        // own rejection.
+        public bool supported;
+        public bool isFloat;
+        // Offset, from the value's own start, and width, of the bytes
+        // that decide truth on their own (the only bytes there are,
+        // unless `secondOffset` names a second word).
+        public size_t offset;
+        public size_t size;
+        // Offset of a second, `size_t.sizeof`-wide word to test as well
+        // (true if either word is nonzero) - `noSecondWord` when the
+        // first word already decides it alone.
+        public size_t secondOffset = noSecondWord;
+
+        public enum noSecondWord = size_t.max;
+
+        public static Truth of(Type type) {
+            import dmd.astenums:
+                Taarray, Tarray, Tclass, Tdelegate, Tfloat32, Tfloat64,
+                Tfloat80, Tpointer;
+            import dmd.typesem: isIntegral, size, toBasetype;
+
+            type = type.toBasetype;
+
+            if (type.ty == Tfloat32 || type.ty == Tfloat64
+                    || type.ty == Tfloat80)
+                return Truth(true, true, 0, type.size);
+
+            if (type.ty == Tarray)
+                return Truth(
+                    true, false, arrayPointerOffset, size_t.sizeof);
+
+            if (type.ty == Tdelegate)
+                return Truth(
+                    true, false, delegateContextOffset, size_t.sizeof,
+                    delegateFunctionOffset,
+                );
+
+            if (type.ty == Tpointer || type.ty == Tclass
+                    || type.ty == Taarray)
+                return Truth(true, false, 0, type.size);
+
+            if (type.isIntegral && isIntegralSize(type.size))
+                return Truth(true, false, 0, type.size);
+
+            return Truth(false);
+        }
+    }
 }
 
 // Rounds `offset` up to the next multiple of `alignment`, by way of dmd's

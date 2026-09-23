@@ -1696,47 +1696,36 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // the same test `opBranchFalse`/`opBranchTrue` already make of
     // whatever width they are handed.
     //
-    // A dynamic array has no such single width of its own to test: its
-    // truthiness is D's `ptr !is null` rule, not "any of its sixteen bytes
-    // is nonzero" (a zero-length array over real storage is still `true`),
-    // so this evaluates the array once and hands back its pointer word
-    // alone - `conditionWidth` below reports that same narrower width for
-    // it, not the array's own full size.
+    // `TypeFacts.Truth` decides which bytes of the compiled-in value
+    // those are - the whole value for a pointer, a class reference, an
+    // associative array's handle, or an integral; only the pointer word
+    // for a dynamic array (a zero-length array over real storage is
+    // still `true`); both words, combined here with one `opBitOr`, for a
+    // delegate (`ptr !is null || funcptr !is null`) - so this backend
+    // carries no case of its own for any of them; `conditionWidth` below
+    // reports that same shared width back to this method's callers.
     private size_t compileCondition(Expression condition) {
-        import snakebite.nativelayout: arrayPointerOffset;
-        import dmd.astenums: Tclass, Tpointer;
+        import snakebite.nativelayout: TypeFacts;
 
-        const facts = TypeFacts.of(condition.type);
-        if (facts.isDynamicArray) {
-            const arrayOffset = reserveTemp(facts);
-            compileValue(condition, arrayOffset, facts.size);
-            return arrayOffset + arrayPointerOffset;
-        }
-
-        if (condition.type.ty == Tpointer || condition.type.ty == Tclass)
-            return compilePointerCondition(condition, facts);
-
-        if (isFloatingType(condition.type)) {
-            const offset = reserveTemp(facts);
-            compileValue(condition, offset, facts.size);
-            emit(&opFloatToBool, offset, offset, facts.size);
-            return offset;
-        }
-
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
+        const truth = TypeFacts.Truth.of(condition.type);
+        if (!truth.supported)
             throw rejection(_function, condition.loc,
                 expressionText(condition));
 
-        const offset = reserveTemp(facts);
-        compileValue(condition, offset, facts.size);
-        return offset;
-    }
+        const facts = TypeFacts.of(condition.type);
+        const valueOffset = reserveTemp(facts);
+        compileValue(condition, valueOffset, facts.size);
+        const offset = valueOffset + truth.offset;
 
-    private size_t compilePointerCondition(
-        Expression condition, in TypeFacts facts,
-    ) {
-        const offset = reserveTemp(facts);
-        compileValue(condition, offset, facts.size);
+        if (truth.isFloat) {
+            emit(&opFloatToBool, offset, offset, truth.size);
+            return offset;
+        }
+
+        if (truth.secondOffset != TypeFacts.Truth.noSecondWord)
+            emit(&opBitOr, offset, valueOffset + truth.secondOffset,
+                truth.size);
+
         return offset;
     }
 
@@ -1809,10 +1798,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t conditionWidth(Expression condition) {
-        const facts = TypeFacts.of(condition.type);
-        return facts.isDynamicArray
-            ? size_t.sizeof
-            : isFloatingType(condition.type) ? bool.sizeof : facts.size;
+        import snakebite.nativelayout: TypeFacts;
+
+        const truth = TypeFacts.Truth.of(condition.type);
+        // `opFloatToBool` (in `compileCondition`) always writes a 1-byte
+        // `bool` at its destination, whatever the floating source's own
+        // width was.
+        return truth.isFloat ? bool.sizeof : truth.size;
     }
 
     // `assert(cond)`: evaluated the same way an `if`'s own condition is,

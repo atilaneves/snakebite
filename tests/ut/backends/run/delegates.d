@@ -37,6 +37,35 @@ static foreach (backend; Matrix!(
 }
 
 
+// A delegate is true when either of its two words (`ptr`, `funcptr`) is
+// nonzero: `null` leaves both zero, and assigning a method delegate sets
+// both, so the assignment alone flips the condition.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot evaluate a method delegate as a compile-time "
+            ~ "boolean condition"),
+)) {
+    @("delegateTruthyAfterAssignment." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Counter {
+                int value;
+                int read() { return value; }
+            }
+            void main() {
+                int delegate() callback;
+                assert(!callback);
+
+                Counter counter = Counter(42);
+                callback = &counter.read;
+                assert(callback);
+            }
+        });
+    }
+}
+
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read callable TypeInfo fields"),

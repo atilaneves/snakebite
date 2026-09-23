@@ -1956,38 +1956,42 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _controlFlow.continueTo(statement.ident);
     }
 
+    // `TypeFacts.Truth` decides which native bytes of `expression`'s
+    // value make it true - the whole value for a pointer, a class
+    // reference, an associative array's handle, or an integral; only the
+    // pointer word for a dynamic array; either of a delegate's two words
+    // (`ptr`, `funcptr`) - so this method carries no case of its own for
+    // any of them, and reads the same shared rule the bytecode compiler
+    // does.
     private bool truthOf(Expression expression) {
+        import snakebite.nativelayout:
+            TypeFacts, delegateValueSize, loadIntegral;
         import std.conv: text;
 
         auto type = expression.type;
-        const facts = factsOf(type);
+        const truth = TypeFacts.Truth.of(type);
+        if (!truth.supported)
+            throw new SnakebiteException(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "` as a condition: its type is `", type.toString, "`"),
+            );
 
-        // DMD classifies pointers as integral for some type queries, but
-        // their value must be read as an address, not as a signed integer.
-        if (type.ty == Tpointer || type.ty == Tclass)
-            return asPointer(expression) !is null;
-
-        if (facts.isIntegral)
-            return asIntegral(expression, facts) != 0;
-
-        const baseType = type.toBasetype;
-        if (baseType.ty == Tfloat32 || baseType.ty == Tfloat64
-                || baseType.ty == Tfloat80)
+        if (truth.isFloat)
             return asFloating(expression) != 0;
 
-        // The pointer alone decides. dmd 2.112 and ldc2 1.42 disagree on
-        // an array with a length but a null pointer - dmd calls it true,
-        // ldc2 false - so that half is not something to assert as a
-        // language rule. No guest program this interpreter can run builds
-        // that value, so no test pins it either way; when one can, the
-        // oracle the suite compares against settles it.
-        if (type.ty == Tarray)
-            return evaluateArray(expression, facts).elements !is null;
+        const facts = factsOf(type);
+        align(size_t.sizeof) ubyte[delegateValueSize] buffer = void;
+        assert(facts.size <= buffer.sizeof,
+            "a condition value wider than a delegate reached the scratch"
+                ~ " buffer");
+        evaluate(expression, type, facts, buffer.ptr);
 
-        throw new SnakebiteException(
-            text("interpreter cannot evaluate `", expression.toString,
-                "` as a condition: its type is `", type.toString, "`"),
-        );
+        if (loadIntegral(buffer.ptr + truth.offset, truth.size, false) != 0)
+            return true;
+        if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
+            return false;
+        return loadIntegral(
+            buffer.ptr + truth.secondOffset, size_t.sizeof, false) != 0;
     }
 
     // A dynamic array's two fields, for a caller that reads them rather

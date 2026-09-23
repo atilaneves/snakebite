@@ -34,6 +34,27 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// An associative array is one pointer-sized handle to its storage, true
+// exactly when that handle is non-null - not by `.length`, the same
+// `ptr !is null` rule a dynamic array's own condition follows for its
+// own pointer word.
+static foreach (backend; Matrix!()) {
+    @("assocArrayTruthyAfterInsertion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[int] empty;
+                assert(!empty);
+
+                int[int] values;
+                values[1] = 10;
+                assert(values);
+            }
+        });
+    }
+}
+
 // Duplicating an associative array preserves its type, including when a
 // struct is the key type and the parameter is `const`: `object.d`'s own
 // `dup` casts its internal `_aaDup` result from a `const`-qualified AA
