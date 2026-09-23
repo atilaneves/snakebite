@@ -138,6 +138,28 @@ private string constructorLabel(FuncDeclaration constructor) {
 }
 
 
+@("findModuleConstructors.insideNamespace")
+unittest {
+    auto module_ = parseSnippets([
+        q{
+            module constructorsInsideNamespace;
+            __gshared int trace;
+
+            extern(C++, ns) {
+                shared static this() { trace = trace * 10 + 1; }
+                static this() { trace = trace * 10 + 2; }
+            }
+        },
+    ])[0];
+
+    auto constructors = findModuleConstructors(module_);
+    constructors.map!(constructorLabel).should == [
+        "ns.shared static this",
+        "ns.static this",
+    ];
+}
+
+
 @("isInterpreted.nonRootModule")
 unittest {
     auto modules = parseSnippets([

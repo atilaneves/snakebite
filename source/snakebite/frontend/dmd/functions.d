@@ -215,7 +215,10 @@ private void appendUnittests(
 //     layer runs before it descends into an instance
 //     (glue/toobj.d, `visit(TemplateInstance)`). A `TemplateMixin` also
 //     matches `isTemplateInstance`, so this check comes after the mixin
-//     check above, not instead of it.
+//     check above, not instead of it;
+//   - an `Nspace`'s (`extern(C++, ns) { ... }`) members. dmd's glue layer
+//     visits its members for the same reason: it looks for static ctors
+//     too (glue/toobj.d, `visit(Nspace ns)`).
 private void appendFromScope(
     imported!"dmd.arraytypes".Dsymbols* symbols,
     scope bool delegate(imported!"dmd.dsymbol".Dsymbol member) action,
@@ -252,6 +255,9 @@ private void appendFromScope(
                 appendFromScope(instance.members, action);
             continue;
         }
+
+        if (auto namespace = member.isNspace())
+            appendFromScope(namespace.members, action);
     }
 }
 

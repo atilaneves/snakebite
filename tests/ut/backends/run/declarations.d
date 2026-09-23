@@ -294,6 +294,38 @@ static foreach (backend; Matrix!(
     }
 }
 
+// dmd's glue layer also visits an `Nspace` (`extern(C++, ns) { ... }`) for
+// exactly the same reason as an aggregate: a `static this()` / `shared
+// static this()` declared inside one is still a module constructor. dmd
+// deprecates giving a static constructor non-D linkage this way, but still
+// runs it, so this must too.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "static variable cannot be read at compile time"),
+)) {
+    @("staticCtorInsideNamespaceRuns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int trace;
+
+            extern(C++, ns) {
+                shared static this() {
+                    trace = trace * 10 + 1;
+                }
+
+                static this() {
+                    trace = trace * 10 + 2;
+                }
+            }
+
+            void main() {
+                assert(trace == 12);
+            }
+        });
+    }
+}
+
 // unit-threaded's `Gen!T` shape: a `shared static this()` inside a struct
 // template, initialising a `static const` field the template's own members
 // read. `main` instantiates `Gen!dchar` only inside a nested function, but
