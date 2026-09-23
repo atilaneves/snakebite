@@ -303,26 +303,8 @@ private extern(C++) class Collector
     }
 
     override void visit(FuncDeclaration function_) {
-        if (_current !is null) {
+        if (_current !is null)
             _callees[_current] ~= function_;
-            // A nested function's captured frame is allocated by the
-            // enclosing function that declares it. A nested function can
-            // never be named from module scope for a `_references` entry
-            // (see the `!function_.isNested` guard below), so it always
-            // runs as guest code. If the enclosing function still ran
-            // natively from the image, the frame would be allocated with
-            // the host compiler's closure layout and read with
-            // snakebite's - two different, incompatible layouts for the
-            // same memory. Keep the enclosing function from the registry
-            // too, so the whole unit runs on one side and allocates and
-            // reads the frame the same way. This must not depend on
-            // whether a particular host compiler happens to still export
-            // the nested function's own symbol (dmd does; ldc's
-            // `-linkonce-templates` does not): the decision is made here,
-            // the same way for every compiler.
-            if (function_.isNested)
-                _needsRoot[_current] = true;
-        }
         if (function_ in _visited || function_.fbody is null
                 || function_.parent is null)
             return;

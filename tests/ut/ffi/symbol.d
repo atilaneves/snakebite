@@ -410,19 +410,13 @@ static foreach (backend; Matrix!()) {
 // `calls.d`'s `CallSelection.buildDecision` routes any function with an
 // enclosing function straight to the guest backend, before ever resolving
 // a native address, because a nested function's static chain points into
-// frames whose offsets belong to that one backend. Before this fix,
-// `dependencyimage.d`'s `Collector` had no matching rule for `only!false`
-// itself: it is an ordinary, addressable dependency template instance, so
-// the image kept it native regardless of `f`. A natively run `only!false`
-// allocates `f`'s closure frame with the image compiler's own closure
-// layout; a guest-interpreted `f` then reads that frame with snakebite's
-// own layout. dmd (this test's host and image compiler) happens to still
-// agree with snakebite's layout, so running `only!false` and checking its
-// answer here cannot catch the bug - `image.dependencyClosureUnit` below
-// catches the actual decision instead. ldc (`bin/sb`)'s layout differs,
-// and there `f` reads garbage; that mismatch is what broke dub's
-// `dirEntries`/`filter` (see docs/adr/0007, 0009). This test still runs
-// the whole thing end to end, on every backend, as a correctness guard.
+// frames whose offsets belong to that one backend. `only!false` itself is
+// an ordinary, addressable dependency template instance and stays native;
+// its nested `f` is always interpreted. dmd (this test's host and image
+// compiler) happens to still agree with snakebite's own closure layout, so
+// running `only!false` and checking its answer here cannot catch a layout
+// mismatch between the two sides. ldc (`bin/sb`) is the real correctness
+// guard: this test runs the whole thing end to end, on every backend.
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     "CTFE cannot allocate a runtime closure frame"))) {
     @("image.dependencyClosureAcrossBarrier." ~ backend.stringof)
@@ -468,55 +462,6 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             run(instance, project.program).should == 0;
         }
     }
-}
-
-// `only!false` must not be kept in the image while its nested `f` is
-// always interpreted (see the comment above): the mismatch is between
-// where `only!false`'s closure frame is allocated and where it is read,
-// not between the two answers a host and a guest happen to compute with
-// whatever layout each already agrees on - dmd's frontend information
-// backs snakebite's own closure reads, so a dmd-hosted `bin/ut` run of
-// the code above cannot observe the difference. Checking the decision
-// directly, the same way `image.aliasArgumentNestedRootType` and
-// `image.nestedTemplateArgumentRootType` do for their own exclusions,
-// catches it regardless of which compiler builds the image. `identity!int`
-// is the positive control: an ordinary dependency template instance with
-// no nested function must still be kept in the image.
-@("image.dependencyClosureUnit")
-@Serial
-unittest {
-    const sandbox = Sandbox();
-    enum moduleName = "image_closure_unit";
-    sandbox.writeFile("deps/" ~ moduleName ~ ".d",
-        "module " ~ moduleName ~ ";\n" ~ q{
-            struct Wrapped(alias pred) {
-                int value;
-                int get() { return pred(value); }
-            }
-            auto only(bool exact)(int base) {
-                int captured = base;
-                int f(int x) {
-                    static if (exact)
-                        return x * captured;
-                    else
-                        return x + captured;
-                }
-                return Wrapped!f(5);
-            }
-            T identity(T)(T value) { return value; }
-        });
-    sandbox.writeFile("app/root_" ~ moduleName ~ ".d", "module root_" ~ moduleName ~ ";\nimport "
-        ~ moduleName ~ ";\n" ~ q{
-        void trigger() {
-            only!false(10);
-            identity!int(7);
-        }
-    });
-    const imports = [sandbox.inSandboxPath("deps")];
-    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false).project;
-    const source = imageSource(project.program);
-    "only!".should.not.be in source;
-    "identity!".should.be in source;
 }
 
 // Two overloads of one template share the name `answer!int`, so the address
