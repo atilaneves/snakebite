@@ -68,9 +68,15 @@ unittest {
 unittest {
     auto stack = FrameStack(16);
 
-    // A parameterless guest function has no frame bytes to reserve.
+    // A parameterless guest function has no frame bytes to reserve, but
+    // it still has a frame: compiled D always has a context address for
+    // a nested function to point at, even an empty one. A push after it
+    // must not be moved by bytes that were never reserved.
     auto frame = stack.push(0, 1);
-    (frame.base is null).should == true;
+    (frame.base is null).should == false;
+
+    auto next = stack.push(1, 1);
+    (next.base == frame.base).should == true;
 }
 
 

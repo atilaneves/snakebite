@@ -361,6 +361,83 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A function literal passed as a template alias argument makes the
+// instance nested in the function that names it. The constructor has no
+// locals, so its frame is empty. Its address must still be a real
+// context, as it is in compiled D.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed),
+)) {
+    @("staticCtorWithFunctionLiteralRuns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wrapper(alias f) {
+                int value;
+                int get() { return f(value); }
+            }
+            auto wrap(alias f)(int value) { return Wrapper!f(value); }
+            __gshared int trace;
+            shared static this() {
+                trace = wrap!(a => a + 1)(2).get;
+            }
+            void main() {
+                assert(trace == 3);
+            }
+        });
+    }
+}
+
+// unit-threaded's `Gen!string` shape: the same literal in a
+// `shared static this()` inside a struct template.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "static variable cannot be read at compile time"),
+)) {
+    @("staticCtorInsideStructTemplateWithFunctionLiteralRuns."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wrapper(alias f) {
+                int value;
+                int get() { return f(value); }
+            }
+            auto wrap(alias f)(int value) { return Wrapper!f(value); }
+            struct Gen(T) {
+                static const int answer;
+                shared static this() {
+                    answer = wrap!(a => a + 1)(2).get;
+                }
+            }
+            void main() {
+                Gen!int g;
+                assert(Gen!int.answer == 3);
+            }
+        });
+    }
+}
+
+// The same nested instance from an ordinary function with an empty
+// frame. Nothing here is specific to module constructors.
+static foreach (backend; Matrix!()) {
+    @("nestedInstanceFromEmptyFrameRuns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wrapper(alias f) {
+                int value;
+                int get() { return f(value); }
+            }
+            auto wrap(alias f)(int value) { return Wrapper!f(value); }
+            int compute() { return wrap!(a => a + 1)(2).get; }
+            void main() {
+                assert(compute() == 3);
+            }
+        });
+    }
+}
+
 // dmd appends every template instance to the root module's members, even
 // one it will not emit, so that `needsCodegen()` can make that call later
 // (templatesem.d, `appendToModuleMember`). dmd's glue layer checks

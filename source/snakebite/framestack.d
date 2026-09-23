@@ -155,11 +155,12 @@ public struct FrameStack {
         });
     }
 
-    // One `push` reservation: `base` is where its bytes start, `null` for
-    // a zero-size reservation nothing will dereference. Pops itself, back
-    // to the mark it was pushed at, the moment it goes out of scope -
-    // copying it would let two handles pop the same bytes, so it can only
-    // be moved.
+    // One `push` reservation: `base` is where its bytes start, a real
+    // address even for a zero-size reservation - an empty native frame
+    // still has one, for a nested function's context to point at. Pops
+    // itself, back to the mark it was pushed at, the moment it goes out
+    // of scope - copying it would let two handles pop the same bytes, so
+    // it can only be moved.
     public struct Frame {
         private FrameStack* _stack;
         private Mark _mark;
@@ -180,16 +181,12 @@ public struct FrameStack {
         return Frame(&this, mark, reserve(size, alignment));
     }
 
-    // Bump-allocates like `push`, but hands back only the bytes (`null`
-    // for a zero-size reservation): the caller owns giving them back with
-    // `release`, in LIFO order. See the struct's own comment for who this
-    // is for.
+    // Bump-allocates like `push`, but hands back only the bytes: the
+    // caller owns giving them back with `release`, in LIFO order. See the
+    // struct's own comment for who this is for.
     public ubyte* reserve(in size_t size, in uint alignment) @system {
         import core.memory: pageSize;
         import std.conv: text;
-
-        if (size == 0)
-            return null;
 
         // mmap returns a page-aligned address. A larger alignment would
         // need a separate alignment guarantee and could return a pointer
@@ -207,6 +204,13 @@ public struct FrameStack {
                     " byte(s) at offset ", alignedUsed, " of ",
                     _limit),
             );
+
+        // A zero-size reservation still has an address, as every native
+        // activation does: a nested function's context word points at
+        // its parent's frame even when that frame is empty. Nothing
+        // needs committing or bumping for bytes nothing will dereference.
+        if (size == 0)
+            return _base + alignedUsed;
 
         const end = alignedUsed + size;
         commit(end);
