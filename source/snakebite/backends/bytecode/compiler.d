@@ -618,7 +618,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
     import snakebite.exception: SnakebiteException;
     import snakebite.nativelayout:
-        alignUp, initializerValueOf, isIntegralSize, TypeFacts;
+        alignUp, initializerConstructsThroughSlice, initializerValueOf,
+        isIntegralSize, TypeFacts;
 
     alias visit = LoweringVisitor.visit;
 
@@ -2286,6 +2287,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto expInitializer = variable._init.isExpInitializer;
         if (expInitializer is null)
             throw rejection(_function, loc, operation);
+
+        if (initializerConstructsThroughSlice(expInitializer, variable))
+            return compileEffect(expInitializer.exp);
 
         const facts = TypeFacts.of(variable.type);
         auto initializer = initializerValueOf(expInitializer);

@@ -374,7 +374,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.ffi.abi: Register;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
-        initializerValueOf, isIntegralSize, TypeFacts;
+        initializerConstructsThroughSlice, initializerValueOf,
+        isIntegralSize, TypeFacts;
     import object:
         Error, Exception, Throwable, TypeInfo, TypeInfo_Class,
         TypeInfo_Tuple;
@@ -2558,8 +2559,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "initializer is supported"),
             );
 
-        auto value = initializerValueOf(expInitializer);
         auto slot = storageOf(variable);
+
+        if (initializerConstructsThroughSlice(expInitializer, variable)) {
+            _temporaries.initialize(variable, expression, slot, {
+                runForEffect(expInitializer.exp);
+            });
+            return;
+        }
+
+        auto value = initializerValueOf(expInitializer);
         _temporaries.initialize(variable, expression, slot, {
             if (isRefStorage(variable)) {
                 import snakebite.nativelayout: storeIntegral;

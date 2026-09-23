@@ -434,6 +434,64 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// `int[2] buf = ints;` constructs `buf` from a slice, not an array
+// literal: dmd rewrites the construction to `buf[] = ints` - a
+// `ConstructExp` whose `e1` is `buf[]`, a `SliceExp` of `buf`, not `buf`
+// itself. That node's own value is the slice it assigns, not `buf`'s own
+// type, so reading it back as `buf`'s own type must not store the slice
+// header in place of the copied elements.
+static foreach (backend; Matrix!()) {
+    @("staticArray.constructedFromDynamicArraySlice." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[] ints = [314, -101];
+                int[2] buf = ints;
+                assert(buf[0] == 314);
+                assert(buf[1] == -101);
+            }
+        });
+    }
+}
+
+// `char[1] val = c;` constructs a one-element static array from a scalar
+// the same way, through `val[] = c`: the exact shape `std.format`'s
+// `formatValueImpl` builds for `CharTypeOf!T[1] val = obj;` when
+// formatting a lone `char`.
+static foreach (backend; Matrix!()) {
+    @("staticArray.constructedFromScalarChar." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                char c = 'z';
+                char[1] val = c;
+                assert(val[0] == 'z');
+            }
+        });
+    }
+}
+
+// `int[3] a = 7;` fills every element of `a` from one scalar at
+// construction - the same `a[] = 7` shape `sliceScalarFill` above pins
+// for a later assignment, reached here through dmd's `ConstructExp`
+// instead.
+static foreach (backend; Matrix!()) {
+    @("staticArray.constructedFromScalar." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3] a = 7;
+                assert(a[0] == 7);
+                assert(a[1] == 7);
+                assert(a[2] == 7);
+            }
+        });
+    }
+}
+
 // A static-array local initialized from an `ArrayLiteralExp` whose elements
 // are runtime values (not folded at compile time, since they come from a
 // function's parameters): the literal is typed `int[3]`, not `int[]`, so

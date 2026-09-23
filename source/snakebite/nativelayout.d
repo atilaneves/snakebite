@@ -376,6 +376,30 @@ public imported!"dmd.expression".Expression initializerValueOf(
     return value;
 }
 
+// `T[n] v = source;` (a static array constructed from a slice or a
+// scalar, never an array literal) is not a plain value initializer: dmd
+// rewrites the construction to `v[] = source` (expressionsem.d, around
+// line 12776), a `ConstructExp`/`BlitExp` whose `e1` is a `SliceExp` of
+// `v`, not `v` itself. That node's own value is the slice `e1` evaluates
+// to - storing it as `v`'s own type stores the slice header, not the
+// elements. A declaration initializer shaped this way must run as an
+// effect, through the normal assignment path that resolves `e1`'s
+// address and writes through it, rather than have `initializerValueOf`'s
+// `e2` evaluated into `v`'s slot as if it were `v`'s own value.
+public bool initializerConstructsThroughSlice(
+    imported!"dmd.init".ExpInitializer initializer,
+    imported!"dmd.declaration".VarDeclaration variable,
+) {
+    auto value = initializer.exp;
+    auto e1 = value.isConstructExp ? value.isConstructExp.e1
+        : value.isBlitExp ? value.isBlitExp.e1 : null;
+    if (e1 is null)
+        return false;
+
+    auto target = e1.isVarExp;
+    return target is null || target.var !is variable;
+}
+
 // These literals require neither execution nor a fresh runtime allocation.
 public bool isStoredLiteral(imported!"dmd.expression".Expression value) {
     if (auto variable = value.isVarExp) {
