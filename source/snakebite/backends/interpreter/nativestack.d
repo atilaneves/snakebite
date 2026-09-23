@@ -31,9 +31,7 @@ private:
 // "give the walker the stack a normal compiled-D thread has", which
 // comfortably covers the walker's larger per-frame cost for the same
 // call depth compiled D could reach in that same budget.
-package struct InterpreterStack {
-    import core.memory: GC;
-
+public struct InterpreterStack {
     // Set from the first host-to-guest entry that switches onto this
     // stack until the whole call - yield/resume included - completes
     // (`Evaluator.runOnInterpreterStack`). A nested host-to-guest entry
@@ -42,6 +40,9 @@ package struct InterpreterStack {
     // stack) runs in place: it already has the full budget, and yield()
     // suspending mid-recursion must not have this popped out from under
     // it by an unrelated switch-back.
+    //
+    // Also the destructor's own guard against unmapping this stack out
+    // from under a still-registered guest context - see `~this` below.
     public bool active;
 
     private ubyte* _guard;
@@ -79,22 +80,49 @@ package struct InterpreterStack {
             );
         }
 
-        // A transient D value the walker leaves only in a native local -
-        // never stored into a guest frame or the frame stack - must still
-        // stay visible to the collector for as long as it is live
-        // (ADR-0005's own rule for guest state the GC does not otherwise
-        // scan; `source/snakebite/framestack.d` registers the frame stack
-        // itself the same way).
-        GC.addRange(_base, _size);
+        // No `GC.addRange` here, unlike `source/snakebite/framestack.d`'s
+        // own committed region: this stack holds only the walker's native
+        // locals while a call is switched onto it, never a guest pointer
+        // with no other root, and druntime's own conservative stack scan
+        // already covers every live byte on it for that whole time.
+        // `Evaluator.runOnInterpreterStack` (walker.d) re-points the
+        // switched-to guest `Fiber`'s `StackContext.bstack` at this
+        // stack's own `top` before running `action`, so the scan druntime
+        // already performs on `[tstack, bstack)` - the same one that
+        // finds any other live native local on any other stack - reads
+        // this stack too, for as long as anything on it is live,
+        // suspended mid-recursion included (`fiberContextOf`, below). A
+        // second, `addRange`'d registration of the same bytes would never
+        // find a pointer that scan does not, and would keep scanning them
+        // long after: this struct outlives any one call (`Evaluator` owns
+        // one per (thread, fiber) context, ADR-0006), so a range
+        // registered once would be scanned, in full, on every later
+        // collection for the rest of the thread's life.
     }
 
+    // Ordinarily unmaps this stack's mapping: nothing needs it once no
+    // call is switched onto it. `active`, though, means a switch never
+    // unwound back through `runOnInterpreterStack`'s own `scope(exit)` -
+    // a guest `Fiber` left suspended mid-call here, abandoned rather than
+    // resumed to completion, or one `Fiber.reset` the way `core.thread`
+    // documents: `tstack` set to this stack's own `top` and a fresh entry
+    // frame written onto it, so the fiber goes on running here for good.
+    // Either way that `Fiber`'s own `StackContext` still names this
+    // mapping, and it stays in druntime's scan list for as long as the
+    // `Fiber` object does - unmapping out from under it would leave the
+    // next collection on any thread reading unmapped memory the moment it
+    // reaches that context. Leaking the mapping instead, for exactly
+    // those (rare, abandoned-fiber) cases, costs address space that is
+    // never touched again; unmapping it could instead cost a segfault on
+    // a thread that did nothing wrong.
     ~this() @system {
         import core.memory: pageSize;
         import core.sys.posix.sys.mman: munmap;
 
         if (_guard is null)
             return;
-        GC.removeRange(_base);
+        if (active)
+            return;
         assert(
             munmap(_guard, _size + pageSize) == 0,
             "could not release the interpreter's native stack",
