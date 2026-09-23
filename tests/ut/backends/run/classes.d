@@ -115,47 +115,69 @@ static foreach (backend; Matrix!(
 }
 
 
-// The same shape, but the branch executes. Compiled D would call `labs`
-// and get back a real ABI answer for it. The bytecode compiler's native
-// call barrier still cannot classify the wide return, so a call that
-// does execute a rejected callee must fail there, and must not run an
-// empty body left over from an earlier attempt to compile it.
-@("destructorExecutedBranchWithUnclassifiableNativeCallIsRejected.Bytecode")
-@Tags(Bytecode.stringof)
-unittest {
-    1.shouldBeStatusOf!(Bytecode, q{
-        struct Wide {
-            real value;
-        }
+// The same shape as the sibling test above, but the branch executes.
+// `Wide`'s only field is `real`, which the SysV ABI classifies as nothing
+// but the X87/X87UP eightbyte pair a bare `real` return already crosses
+// in `%st0` (`ffi.abi.classify`'s `Tfloat80` case, `ffi.abi.
+// isX87OnlyAggregate`), so the native call barrier plans it like any
+// other call now, and compiled D's own answer for it is the real ABI
+// result, not a rejection. A destructor reaches that native call through
+// another function, behind a branch it does take, and must read back the
+// same value compiled D would.
+private struct Wide {
+    real value;
+}
 
-        pragma(mangle, "labs")
-        extern(C) Wide labs(long);
+private extern(C) Wide snakebite_ut_destructor_real_only_return() {
+    return Wide(2.5L);
+}
 
-        void nativeBody() {
-            labs(-1);
-        }
-
-        void helper(bool execute) {
-            if (execute)
-                nativeBody();
-        }
-
-        class Resource {
-            int* count;
-            this(int* count) { this.count = count; }
-            ~this() {
-                helper(true);
-                ++*count;
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot convert a class reference to void** in `destroy`"),
+)) {
+    @("destructorExecutedBranchWithRealAggregateNativeCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide {
+                real value;
             }
-        }
 
-        void main() {
-            int count;
-            auto resource = new Resource(&count);
-            destroy(resource);
-            assert(count == 1);
-        }
-    });
+            pragma(mangle, "snakebite_ut_destructor_real_only_return")
+            extern(C) Wide nativeCall();
+
+            real nativeBody() {
+                return nativeCall().value;
+            }
+
+            real helper(bool execute) {
+                return execute ? nativeBody() : 0.0L;
+            }
+
+            class Resource {
+                int* count;
+                real* result;
+                this(int* count, real* result) {
+                    this.count = count;
+                    this.result = result;
+                }
+                ~this() {
+                    *result = helper(true);
+                    ++*count;
+                }
+            }
+
+            void main() {
+                int count;
+                real result;
+                auto resource = new Resource(&count, &result);
+                destroy(resource);
+                assert(count == 1);
+                assert(result == 2.5L);
+            }
+        });
+    }
 }
 
 
