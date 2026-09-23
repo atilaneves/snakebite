@@ -738,6 +738,62 @@ unittest {
     resolver.lookups.should == 1;
 }
 
+
+// `bin/ut` (`--export-dynamic`) exports this under the same linker name a
+// separately loaded shared object below also defines. A guest-declared
+// symbol must resolve to the loaded shared object's copy, not to this one:
+// snakebite itself can hold a native instantiation of a template a guest
+// program also calls (`dirEntries` in `snakebite.project`, see
+// docs/adr/0008), built with the host compiler's own closure layout, and a
+// guest backend reading that layout back would see garbage.
+export extern(C) int snakebite_symbol_dual_definition_test() { return 999; }
+
+@("symbolAddress.loadedSharedObjectAnswersBeforeExecutable")
+@Serial
+unittest {
+    import core.sys.posix.dlfcn: dlclose, dlopen, RTLD_GLOBAL, RTLD_NOW;
+    import std.string: toStringz;
+
+    enum name = "snakebite_symbol_dual_definition_test";
+    auto image = prepareImage(
+        "export extern(C) int " ~ name ~ "() { return 511; }",
+        sharedImageCache);
+
+    // `RTLD_GLOBAL` is what puts a shared object's symbols into the
+    // process-wide scope the fix searches (`RTLD_NEXT` in `symbolAddress`);
+    // `prepareImage`'s own load keeps the image `RTLD_LOCAL` so it never
+    // answers a lookup this way, only through the `DependencyImage` it
+    // returns (a separate, already-tested tier). This second `dlopen` on
+    // the same path does not load a second copy: it promotes the same
+    // already-loaded object into the global scope.
+    auto handle = dlopen(image.path.toStringz, RTLD_NOW | RTLD_GLOBAL);
+    handle.should.not == null;
+    scope(exit) dlclose(handle);
+
+    Resolver resolver;
+    alias Answer = extern(C) int function();
+    const answer = cast(Answer) resolver.resolve(name);
+    answer.should.not == null;
+    answer().should == 511;
+}
+
+
+// Nothing but `bin/ut` itself defines this symbol: the executable is still
+// the answer when no dependency image and no other loaded shared object
+// has it, the same as any native fixture `bin/ut`/`bin/at` build straight
+// into the test binary.
+export extern(C) int snakebite_symbol_executable_only_test() { return 733; }
+
+@("symbolAddress.fallsBackToExecutableWhenNothingElseHasIt")
+unittest {
+    Resolver resolver;
+    alias Answer = extern(C) int function();
+    const answer = cast(Answer)
+        resolver.resolve("snakebite_symbol_executable_only_test");
+    answer.should.not == null;
+    answer().should == 733;
+}
+
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     "atomicFetchAdd casts a runtime pointer to an integer"))) {
     @("image.discoveredAtomicFetchAdd." ~ backend.stringof)

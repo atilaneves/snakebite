@@ -41,3 +41,81 @@ configuration "unittest" {
         }
     }
 }
+
+// `snakebite.project.bareSourceSet` calls `dirEntries!false(string, string,
+// SpanMode, bool)` on the host, to find this very project's own `*.d`
+// files, before any guest code runs. That instantiates the same mangled
+// symbol inside `bin/sb` (an LDC build) that a guest program's own call to
+// `dirEntries(dir, "*.d", SpanMode.depth)` needs. A resolver that reaches
+// the main executable before the dependency image or an already-loaded
+// shared object binds the guest call to `bin/sb`'s own copy: `dirEntries`'s
+// nested closure `f` was allocated with LDC's frame layout by that native
+// call, but a guest backend reads captured variables out of it with
+// snakebite's own layout, so the guest sees garbage instead of the
+// project's one matching file. `scanDirectory` sits outside the scanned
+// project directory so this project's own `*.d` file never confuses the
+// count the test asserts on.
+//
+// `symbolAddress` (source/snakebite/ffi/symbol.d) now searches every
+// already-loaded shared object before the executable, so a guest call
+// prefers a genuine independent native copy - the dependency image, or a
+// project's own C/C++ library - over `bin/sb`'s own instantiation. This
+// project has no dependency, so no such independent copy exists anywhere:
+// the *only* native code for this exact `dirEntries` instantiation is the
+// one inside `bin/sb` itself, and the resolver's own last-resort executable
+// fallback still finds it there. `CallSelection.buildDecision`
+// (source/snakebite/backends/calls.d) then reuses it, by design, for any
+// root-owned template instantiation a native symbol answers for - `f`'s
+// layout mismatch happens regardless of which resolver tier supplied that
+// answer. Closing this needs `CallSelection` (or the dependency image) to
+// tell an executable-only answer apart from a genuinely independent native
+// copy for a root-instantiated template, which is unrelated to symbol
+// resolution order and out of this fix's scope; `Bytecode` and
+// `Interpreter` are omitted below, verified still failing for that reason.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot run file IO"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "resolver order alone does not fix this: dirEntries has no "
+        ~ "native copy anywhere but bin/sb itself for a dependency-less "
+        ~ "project, so CallSelection.buildDecision still reuses that "
+        ~ "host instantiation's mismatched closure layout for the "
+        ~ "root-owned call - a separate, unfixed gap in call routing"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "resolver order alone does not fix this: dirEntries has no "
+        ~ "native copy anywhere but bin/sb itself for a dependency-less "
+        ~ "project, so CallSelection.buildDecision still reuses that "
+        ~ "host instantiation's mismatched closure layout for the "
+        ~ "root-owned call - a separate, unfixed gap in call routing"),
+)) {
+    @("guestDirEntriesFindsGuestFilesNotHostTemplateInstance." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        const sandbox = Sandbox();
+        const scanDirectory = sandbox.inSandboxPath("scanned");
+        sandbox.writeFile("app/source/app.d", text(`
+            module app;
+            import std.file: dirEntries, mkdirRecurse, rmdirRecurse, write, SpanMode;
+            void main() {
+                mkdirRecurse("`, scanDirectory, `");
+                scope(exit) rmdirRecurse("`, scanDirectory, `");
+                write("`, scanDirectory, `/foo.d", "");
+                size_t count;
+                foreach (entry; dirEntries("`, scanDirectory, `", "*.d", SpanMode.depth))
+                    ++count;
+                assert(count == 1, "expected exactly one *.d entry");
+            }
+        `));
+        const appSource = sandbox.inSandboxPath("app/source/app.d");
+        const directory = sandbox.inSandboxPath("app");
+        static if (is(backend == Native))
+            // DMD writes object files in its working directory, even with -run.
+            const result = execute(["dmd", "-run", appSource],
+                null, Config.none, size_t.max, directory);
+        else
+            const result = execute(["bin/sb".absolutePath, "-b",
+                backend.stringof.toLower, directory,
+            ]);
+        if (result.status != 0)
+            fail(result.output, __FILE__, __LINE__);
+    }
+}

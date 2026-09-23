@@ -51,31 +51,71 @@ public struct Resolver {
 }
 
 
-// The address of an already-loaded symbol, by its linker name.
+// The address of an already-loaded symbol, by its linker name, searched
+// after the dependency image (ADR-0007) has already had its turn and come
+// up empty.
 //
-// Nothing is loaded to find it: the search covers the running process and
-// every library it already links, which is where druntime and the C runtime
-// both live. A guest program calling `malloc` therefore reaches the very
-// same `malloc` the host itself calls, so memory a guest allocates is
-// ordinary process memory, not a separate emulated heap.
+// Nothing is loaded to find it: the search covers every shared object the
+// process already links - which is where druntime, the C runtime, and a
+// project's own C/C++ dependencies all live - and only then, as a last
+// resort, the main executable itself. A guest program calling `malloc`
+// therefore reaches the very same `malloc` the host itself calls, so memory
+// a guest allocates is ordinary process memory, not a separate emulated
+// heap.
+//
+// The executable goes last because snakebite itself instantiates plenty of
+// the same templates a guest program calls, `dirEntries` in
+// `snakebite.project` among them (ADR-0008, ADR-0009): `--export-dynamic`
+// exports that instance's symbol from `bin/sb` too, with whichever closure
+// layout the host compiler happened to give its nested functions. A guest
+// backend that bound to it would read that closure with its own layout
+// instead. Searching every already-loaded library first, before the
+// executable, keeps a guest call away from a host-side instantiation
+// whenever a genuine native copy - in the image, in druntime, in phobos, in
+// a dependency's own C library - already answers the same name.
 //
 // `null` means the symbol is not there to call.
 private void* symbolAddress(in char[] name) {
     version (Posix) {
-        import core.sys.posix.dlfcn: dlerror, dlsym;
+        import core.sys.posix.dlfcn:
+            dlerror, dlopen, dlsym, RTLD_LAZY, RTLD_NOLOAD;
         import std.string: toStringz;
 
         version (linux)
-            import core.sys.linux.dlfcn: RTLD_DEFAULT;
+            import core.sys.linux.dlfcn: RTLD_NEXT;
         else
-            import core.sys.posix.dlfcn: RTLD_DEFAULT;
+            import core.sys.posix.dlfcn: RTLD_NEXT;
+
+        const nameZ = name.toStringz;
 
         // A symbol can legitimately live at a null address, so `dlsym`
         // returning null is not itself the failure. `dlerror` is what
         // distinguishes the two, and it reports the *previous* call's
         // error, so it is cleared first.
+        //
+        // `RTLD_NEXT` searches the objects loaded *after* the caller's own
+        // object in the process's search order. `symbolAddress` is compiled
+        // straight into the executable (`bin/sb`, `bin/ut`, `bin/at`), never
+        // into a shared object, so "after the caller" here means every
+        // already-loaded shared object and nothing in the executable
+        // itself - exactly the tier between the dependency image and the
+        // executable fallback below.
         dlerror;
-        auto address = dlsym(RTLD_DEFAULT, name.toStringz);
+        auto address = dlsym(RTLD_NEXT, nameZ);
+        if (dlerror is null)
+            return address;
+
+        // Last resort: the executable itself. `bin/ut` and `bin/at` build
+        // their native fixtures straight into the test binary, with no
+        // `.so` of their own, so a symbol only found here is still a
+        // legitimate host answer - just never preferred over a real
+        // library's own copy of the same name.
+        dlerror;
+        auto executable = dlopen(null, RTLD_LAZY | RTLD_NOLOAD);
+        if (executable is null)
+            return null;
+        dlerror;
+        address = dlsym(executable, nameZ);
         return dlerror is null ? address : null;
     } else
         return null;

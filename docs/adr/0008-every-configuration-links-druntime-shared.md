@@ -34,6 +34,37 @@ globals duplicate.
 
 ## Consequences
 
-`--export-dynamic` stays. Root-owned template instantiations may
-still resolve host symbols this way. CI, and any packaging step, must
-ship or locate the `libdruntime` and `libphobos2` shared objects.
+`--export-dynamic` stays: it is what lets `dlsym` reach a symbol
+`bin/sb`/`bin/ut`/`bin/at` itself defines, the executable-only tier
+below. CI, and any packaging step, must ship or locate the
+`libdruntime` and `libphobos2` shared objects.
+
+A guest-declared symbol resolves in this order: the dependency
+image (ADR-0007), then every shared object the process already has
+loaded (`dlsym(RTLD_NEXT, ...)` - valid because the resolver itself
+is linked into the executable, never into a shared object, so
+"next" means every already-loaded library and nothing in the
+executable), and only as a last resort the executable itself
+(`dlsym` on the handle from `dlopen(null, RTLD_NOLOAD)`). The
+executable goes last because snakebite instantiates plenty of the
+same templates a guest program also calls - `dirEntries` in
+`snakebite.project` among them - and `--export-dynamic` exports that
+instance's symbol from `bin/sb` too, with whichever closure layout
+the host compiler happened to give its nested functions; a guest
+backend that bound to it would read that closure with its own layout
+instead. Searching every already-loaded library before the
+executable keeps a guest call away from a host-side instantiation
+whenever a genuine, independent native copy - the image, druntime,
+phobos, a dependency's own C library - already answers the same
+name.
+
+That order does not, by itself, save a root-owned template
+instantiation that has no independent native copy anywhere: a
+dependency-less project's own call to `dirEntries` instantiates it
+only inside `bin/sb`, so the executable-only tier still answers for
+it, and `CallSelection.buildDecision`
+(`source/snakebite/backends/calls.d`) still reuses that answer for
+the root-owned call, by design, for any template a native symbol
+resolves for. Telling that answer apart from a genuine independent
+copy is a call-routing question, not a symbol-resolution order
+one, and is not solved here.
