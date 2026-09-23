@@ -611,6 +611,90 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A `return` in a non-last element of an unrolled `foreach` ends every
+// path: the remaining elements are dead code, so the function does return
+// on every path. `pick!"bar"` matches the last element, so it already
+// compiled before this rule existed; it stays here to check that skipping
+// dead elements never skips a live last element too.
+static foreach (backend; Matrix!()) {
+    @("returnInNonLastUnrolledForeachElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+            int pick(string name)() {
+                foreach (candidate; AliasSeq!("foo", "bar")) {
+                    static if (candidate == name)
+                        return cast(int) candidate.length + 10;
+                }
+            }
+            void main() { assert(pick!"foo" == 13); assert(pick!"bar" == 13); }
+        });
+    }
+}
+
+// A `case` label in a later element of an unrolled `foreach` is still a
+// live target: the enclosing `switch`'s own dispatch code can jump to it
+// directly, skipping every earlier element. An earlier element that
+// returns on every path must not hide it. `std.conv.toImpl` for enums
+// has this exact shape: a `switch` whose cases come from a `foreach`
+// over the enum's members.
+static foreach (backend; Matrix!()) {
+    @("caseInUnrolledForeachElementAfterReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+            string name(int v) {
+                switch (v) {
+                    foreach (m; AliasSeq!(0, 1)) {
+                        case m: return m == 0 ? "zero" : "one";
+                    }
+                    default:
+                }
+                return "other";
+            }
+            void main() {
+                assert(name(0) == "zero");
+                assert(name(1) == "one");
+                assert(name(2) == "other");
+            }
+        });
+    }
+}
+
+// As above, but the earlier element ends every path with a `break`
+// instead of a `return`: the same reachability rule applies regardless
+// of which statement ends the element's paths. The `break` names the
+// `switch`'s own label: an unlabelled `break` inside the `foreach`
+// targets the `foreach` itself (the nearest enclosing loop), not the
+// `switch`, since the loop is still the lexically enclosing breakable
+// construct even though dmd unrolls it away at compile time.
+static foreach (backend; Matrix!()) {
+    @("caseInUnrolledForeachElementAfterBreak." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+            string name(int v) {
+                string r;
+                sw: switch (v) {
+                    foreach (m; AliasSeq!(0, 1)) {
+                        case m: r = m == 0 ? "zero" : "one"; break sw;
+                    }
+                    default: r = "other"; break sw;
+                }
+                return r;
+            }
+            void main() {
+                assert(name(0) == "zero");
+                assert(name(1) == "one");
+                assert(name(2) == "other");
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("reviewGotoForward." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -618,6 +702,26 @@ static foreach (backend; Matrix!()) {
         0.shouldBeStatusOf!(backend, q{
             int run() { int x; goto done; x = 9; done: return x + 1; }
             void main() { assert(run() == 1); }
+        });
+    }
+}
+
+// A label after a `return` that ends every earlier path is still a live
+// target: a `goto` from outside can land on it, the same as a `case` from
+// an enclosing `switch` can land inside a later element of an unrolled
+// `foreach`. The block rule (`compileStatements`) must keep this label
+// live for the same reason the unrolled `foreach` rule does.
+static foreach (backend; Matrix!()) {
+    @("gotoPastEarlyReturnToLaterLabel." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int v) {
+                if (v == 0) goto skip;
+                return 2;
+                skip: return 3;
+            }
+            void main() { assert(f(0) == 3); assert(f(1) == 2); }
         });
     }
 }
@@ -855,6 +959,40 @@ static foreach (backend; Matrix!(
             }
 
             void main() { assert(run() == 1); }
+        });
+    }
+}
+
+// `static foreach` at statement scope - unlike a runtime `foreach` over a
+// tuple - flattens its elements directly into the enclosing block instead
+// of keeping its own `UnrolledLoopStatement`: a `static if` with no
+// `else` that resolves false leaves a `null` entry in the block's own
+// statement list, not an empty one. `reachable` must not call `comeFrom`
+// on that `null` entry; the shape below is unit-threaded's own
+// `mockStruct.opDispatch`, the function commit 99ebb75f's own fix was
+// written for.
+static foreach (backend; Matrix!()) {
+    @("staticForeachElidedBranchLeavesNullStatement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.meta: AliasSeq;
+            struct Mock {
+                auto opDispatch(string funcName)() {
+                    static foreach (name; AliasSeq!("length", "greet", "list")) {
+                        static if (name == funcName) {
+                            return name;
+                        }
+                    }
+                    assert(0);
+                }
+            }
+            void main() {
+                Mock m;
+                assert(m.opDispatch!"length" == "length");
+                assert(m.opDispatch!"greet" == "greet");
+                assert(m.opDispatch!"list" == "list");
+            }
         });
     }
 }

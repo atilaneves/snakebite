@@ -835,6 +835,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opReturnVoid, 0, 0, 0);
         }
 
+        // A `goto case`, or the `switch` itself, jumping to a
+        // `CaseStatement` this compiler never reached leaves that jump's
+        // target at 0, a valid instruction index - `resolveBranches`
+        // below would not catch it. Unpatched, the jump runs at 0 every
+        // time, an infinite loop instead of a compile error. A skipped
+        // `CaseStatement` is the bug this guards; `reachable` exists to
+        // stop it happening in the first place.
+        if (_pendingCaseJumps.length > 0)
+            throw rejection(_function, _function.loc,
+                "a `case` this compiler never reached");
+
         resolveBranches();
 
         ExceptionHandler[] exceptionHandlers;
@@ -1019,14 +1030,39 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         statement.accept(this);
     }
 
+    // A statement is live in two cases. The one before it fell through.
+    // Or a jump from somewhere else can land on it. `_finished` answers
+    // the first question. `comeFrom` answers the second: it is true for
+    // a `case`, a `default`, a label, or an `asm` block, since each of
+    // those is a target dmd itself may jump to from outside this
+    // sequence. A `continue` queued from an earlier point of the
+    // innermost active loop is the same kind of jump, queued rather than
+    // already resolved, so it counts too. dmd's own `blockexit` applies
+    // this same rule (`Statement.comeFrom`) to decide what code after an
+    // unconditional jump is still reachable. A null `statement` - a
+    // `static if` branch with no `else`, elided at semantic time - holds
+    // no code and is never a jump target itself, so `comeFrom` is not
+    // called on it; `compileStatement` already treats a null statement
+    // as a no-op.
+    private bool reachable(Statement statement) {
+        return !_finished
+            || (_loops.length > 0 && _loops[$ - 1].pendingContinueJumps.length > 0)
+            || (statement !is null && statement.comeFrom());
+    }
+
+    // Skip only the statements this block's own dead code makes
+    // unreachable. See `reachable` for the rule; `visit(UnrolledLoopStatement)`
+    // uses the same one for the elements of an unrolled `foreach`.
     private void compileStatements(Statements)(Statements* statements) {
         if (statements is null)
             return;
 
         foreach (child; *statements) {
+            if (!reachable(child))
+                continue;
+
+            _finished = false;
             compileStatement(child);
-            if (_finished)
-                return;
         }
     }
 
@@ -1051,6 +1087,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // statement) rather than falling into whatever the current element
     // was itself about to skip (an `else`, a `catch` handler, the next
     // `case`).
+    //
+    // The elements run in sequence, like the statements of a block. Once
+    // one element ends every path, every element after it is dead code
+    // (see `reachable`). Two things keep a later element live anyway. A
+    // `continue` from an earlier element can land on it. A jump from
+    // outside the whole sequence can land inside it: a `case` of the
+    // enclosing `switch`, or a `goto`. dmd's `blockexit` applies the same
+    // rule to this statement.
     override void visit(UnrolledLoopStatement statement) {
         auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
         if (statement.statements is null) {
@@ -1061,12 +1105,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _loops ~= LoopContext(label, size_t.max, null, activeScopePath);
         _breakables ~= Breakable(label, null, activeScopePath);
 
-        bool lastFinished;
+        _finished = false;
         foreach (child; *statement.statements) {
+            // A dead element is skipped, not stopped at: a later
+            // element can still be live (see `reachable`) even when
+            // this one is not.
+            if (!reachable(child))
+                continue;
+
             resolveContinues(_instructions.length);
             _finished = false;
             compileStatement(child);
-            lastFinished = _finished;
         }
         const hadContinue = _loops[$ - 1].pendingContinueJumps.length > 0;
         resolveContinues(_instructions.length);
@@ -1079,7 +1128,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         foreach (index; breakable.pendingBreakJumps)
             patchTarget(index, afterLoop);
 
-        _finished = lastFinished && !hadContinue
+        _finished = _finished && !hadContinue
             && breakable.pendingBreakJumps.length == 0;
     }
 
