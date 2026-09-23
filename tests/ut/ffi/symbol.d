@@ -357,6 +357,52 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `pick(S)(S value)` and `pick(S : C[], C)(S[] values)` are two distinct
+// module-scope function templates, not two members of one eponymous
+// template (that shape is `image.overloadRegistryAnswersEachOverload`,
+// below). `&pick!(string)` is not a hard ambiguity error here: dmd's
+// template partial ordering silently binds the explicit-argument address to
+// the more specialized array overload, the same shape as `std.regex.regex`,
+// which has a single-pattern overload and an array-of-patterns overload.
+// `source()`'s untyped fast path took that address into an `auto` variable
+// and never checked which declaration it landed on, so it registered the
+// array overload's address under the scalar overload's mangled name too.
+// `pick("hello")` from guest code is a normal call, resolved by argument
+// type the ordinary way, so it must still reach the scalar overload's body.
+static foreach (backend; Matrix!()) {
+    @("image.overloadPartialOrderingMismatch." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        enum moduleName = "image_partial_ordering_" ~ backend.stringof;
+        sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+            "module " ~ moduleName ~ ";\n" ~ q{
+                size_t pick(S)(S value) { return 1; }
+                size_t pick(S : C[], C)(S[] values) { return 2; }
+            });
+        sandbox.writeFile("app/root_" ~ moduleName ~ ".d", "module root_" ~ moduleName ~ ";\nimport "
+            ~ moduleName ~ ";\n" ~ q{
+                int main() {
+                    assert(pick("hello") == 1);
+                    return 0;
+                }
+            });
+        const directory = sandbox.inSandboxPath("app");
+        const imports = [sandbox.inSandboxPath("deps")];
+        static if (is(backend == Native)) {
+            const executable = sandbox.inSandboxPath("test");
+            const result = execute([defaultCompiler, "-I" ~ imports[0],
+                sandbox.inSandboxPath("app/root_" ~ moduleName ~ ".d"), "-of=" ~ executable]);
+            result.status.shouldEqual(0, result.output);
+            execute([executable]).status.should == 0;
+        } else {
+            auto project = prepareProject(directory, imports).project;
+            scope instance = new backend(project.program);
+            run(instance, project.program).should == 0;
+        }
+    }
+}
+
 // Two overloads of one template share the name `answer!int`, so the address
 // expression `&answer!int` is ambiguous without a target type. Each overload
 // still has its own mangled name, and the registry must answer a lookup by
