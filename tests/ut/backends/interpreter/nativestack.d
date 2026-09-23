@@ -3,6 +3,10 @@ module ut.backends.interpreter.nativestack;
 
 import ut;
 import snakebite.backends.interpreter.nativestack: InterpreterStack;
+import snakebite.backends.backend: Program;
+import snakebite.backends.interpreter: Interpreter;
+import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.dmd.functions: findFunction;
 
 
 // `InterpreterStack.active` tracks whether a host-to-guest call is
@@ -47,6 +51,77 @@ unittest {
     destroy(stack);
 
     mappingIsPresent(probe).should == false;
+}
+
+
+// Regression test for review comment
+// https://github.com/atilaneves/snakebite/pull/426#discussion_r4082454024
+// point (a). `Evaluator.runOnInterpreterStack` (walker.d) repoints the
+// active guest `Fiber`'s own `StackContext.bstack` at the dedicated
+// `InterpreterStack` for as long as the switch lasts, which correctly
+// extends druntime's scan to that dedicated stack - but for the same
+// duration it also drops the guest `Fiber`'s *own* small stack from the
+// scan. Every frame between the `Fiber`'s entry point and the switch
+// itself sits below `savedBstack`, on a stack no `StackContext` names
+// while the switch is active.
+//
+// When a *host* owns the `Fiber` and calls guest code from inside it (a
+// vibe.d-style task, say - ADR-0005's own scenario; here, a bare
+// `core.thread.fiber.Fiber` this unittest creates directly), a value the
+// host keeps live only in one of those abandoned frames is exactly the
+// kind of root the conservative scan is supposed to find on its own.
+// `box` is a plain local in the `Fiber`'s own entry delegate - never
+// stored in a global, `__gshared`, or the frame stack, so nothing but
+// that stack slot roots it - and `forceCollection` (guest code) forces a
+// collection while the switch onto `InterpreterStack` is active, mid
+// `backend.call`. `box.value` is read back in that same host frame right
+// after: unless the abandoned span is separately registered with the GC
+// (`GC.addRange`, `Evaluator.callOnInterpreterStack`), nothing roots
+// `box` during that collection.
+@("nativeStack.hostFiberOwnStackSurvivesCollectionDuringSwitch")
+unittest {
+    import core.thread.fiber: Fiber;
+
+    auto guestModule = parseSnippet(q{
+        void forceCollection() {
+            import core.memory: GC;
+
+            GC.collect();
+        }
+    });
+    auto function_ = findFunction(guestModule, "forceCollection");
+    assert(
+        function_ !is null,
+        "No function `forceCollection` in the guest program");
+    auto backend = new Interpreter(Program([guestModule]));
+
+    static class Box {
+        int value;
+    }
+
+    int survivorValue = -1;
+    auto fiber = new Fiber({
+        auto box = new Box;
+        box.value = 42;
+
+        backend.call(function_, null, []);
+
+        // `GC.collect()` above never overwrites freed bytes on its own -
+        // it only decides whether `box`'s block is reachable. If the
+        // switch left it unscanned, the block is now on the free list,
+        // and D's GC hands a same-size-class allocation the most
+        // recently freed block first - so whichever slot the collection
+        // just freed (if `box` went unscanned) is what these get back.
+        // With the fix, `box` was found live, never freed, and these
+        // land on wholly different memory.
+        foreach (_; 0 .. 64)
+            cast(void) new Box;
+
+        survivorValue = box.value;
+    });
+    fiber.call();
+
+    survivorValue.should == 42;
 }
 
 

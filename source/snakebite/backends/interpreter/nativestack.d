@@ -31,6 +31,15 @@ private:
 // "give the walker the stack a normal compiled-D thread has", which
 // comfortably covers the walker's larger per-frame cost for the same
 // call depth compiled D could reach in that same budget.
+//
+// Known limitation: the switch itself has two narrow windows, at its own
+// entry and exit, where `StackContext.bstack` and the live `%rsp` name
+// two different stacks, with no equivalent of druntime's own
+// `ThreadBase.m_lock` (`package(core.thread)`, unreachable from here)
+// guarding that inconsistency against a collection triggered by another
+// thread (`Evaluator.runOnInterpreterStack`'s own documentation,
+// walker.d, has the full detail). Not fixed - see
+// https://github.com/atilaneves/snakebite/issues/427.
 public struct InterpreterStack {
     // Set from the first host-to-guest entry that switches onto this
     // stack until the whole call - yield/resume included - completes
