@@ -4541,10 +4541,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private NewDestination[] _newDestinations;
 
     protected override void prepareNew(NewExp expression) {
-        if (expression.placement !is null || expression.thisexp !is null)
+        if (expression.placement !is null)
             throw new SnakebiteException(
                 text("interpreter cannot allocate `", expression.toString,
-                    "` with placement or an explicit outer context"),
+                    "` with placement"),
             );
 
         // Keeps pointed-to storage mutable during destination restoration.
@@ -4612,15 +4612,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private void finishNew(NewExp expression, ubyte* object) {
+        import snakebite.backends.aggregateinit:
+            InitStep, planClassContext, planPositionalFields;
+
         auto classType = expression.newtype.isTypeClass;
         if (classType !is null) {
+            // A nested class's `vthis` sits inside the allocation at the
+            // same native offset a value of that class type would use -
+            // filled here, once, ahead of the constructor call, the same
+            // order the struct branch below fills its own `vthis`.
+            foreach (step; planClassContext(expression).steps)
+                applyStep(step, object);
+
             if (expression.member !is null)
                 constructAggregate(expression, object);
             return;
         }
-
-        import snakebite.backends.aggregateinit:
-            InitStep, planPositionalFields;
 
         auto declaration = expression.newtype.isTypeStruct.sym;
         auto plan = planPositionalFields(declaration,
@@ -4819,6 +4826,24 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         final switch (step.kind) with (InitStep.Kind) {
         case vthis:
+            // A nested class's `vthis` reads `NewExp.thisexp` directly
+            // (`step.source`), then adds `sourceAdjustment` if `thisexp`'s
+            // static type is a base-class view narrower than the nested
+            // class's actual lexical parent - see `classVthisStep`'s own
+            // doc (`aggregateinit.d`).
+            if (step.source !is null) {
+                evaluate(step.source, step.type, step.facts,
+                    base + step.offset);
+                if (step.sourceAdjustment != 0)
+                    storeIntegral(
+                        base + step.offset,
+                        cast(ulong) (loadIntegral(base + step.offset,
+                            step.facts.size, false) + step.sourceAdjustment),
+                        step.facts.size,
+                    );
+                return;
+            }
+
             // `parentFunction` is `null` when the struct's lexical parent
             // is not a function - dmd fact, not itself an error: leaving
             // `vthis` at its `.init` zero here matches the language's own

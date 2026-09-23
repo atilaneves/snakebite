@@ -3689,12 +3689,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // or a static-array broadcast, and whether `vthis` needs filling; this
     // is the only place that turns a step into bytecode.
     //
-    // A `vthis` step whose `parentFunction` is `null` means the struct's
-    // lexical parent is not a function - dmd fact, not itself an error for
-    // `planStructLiteral`/`planPositionalFields` to detect, but every
-    // construction route that can build a nested struct must reject it
-    // here: leaving `vthis` at its `.init` zero instead reads back a null
-    // context the first time a method on that instance uses it.
+    // A `vthis` step with `source` set (a nested class's `NewExp.thisexp`)
+    // evaluates that expression directly, then adds `sourceAdjustment` if
+    // it is non-zero. Otherwise it is a nested struct reading its own
+    // enclosing function's context, and a `null` `parentFunction` means
+    // the struct's lexical parent is not a function - dmd fact, not itself
+    // an error for `planStructLiteral`/`planPositionalFields` to detect,
+    // but every construction route that can build a nested struct must
+    // reject it here: leaving `vthis` at its `.init` zero instead reads
+    // back a null context the first time a method on that instance uses
+    // it.
     private void applyStep(
         InitStep step,
         Loc loc,
@@ -3702,6 +3706,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         final switch (step.kind) with (InitStep.Kind) {
         case vthis:
+            if (step.source !is null) {
+                evalInto(step.source, base + step.offset, step.facts.size,
+                    step.type);
+                if (step.sourceAdjustment != 0) {
+                    const adjustment = reserveTemp(pointerFacts);
+                    emit(&opConstant, adjustment,
+                        addConstant(cast(long) step.sourceAdjustment),
+                        size_t.sizeof);
+                    emit(&opAdd, base + step.offset, adjustment,
+                        size_t.sizeof);
+                }
+                return;
+            }
+
             if (step.parentFunction is null)
                 throw rejection(_function, loc, "a nested struct's static chain");
 
@@ -4090,13 +4108,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // `LoweringVisitor.visit(NewExp)` routes `onstack` and `placement` to
     // `visitUnloweredNew` before ever calling this, matching dmd's own glue
-    // layer (`glue/e2ir.d`, `if (ne.onstack || ne.placement)`); only
-    // `thisexp` remains this compiler's own rejection here.
+    // layer (`glue/e2ir.d`, `if (ne.onstack || ne.placement)`); a heap
+    // `NewExp` with `thisexp` set (a nested class's own construction)
+    // reaches here like any other and its context is filled in
+    // `compileNew`, via `planClassContext`.
     protected override void prepareNew(NewExp expression) {
-        if (expression.thisexp !is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
         prepareNewDestination(expression);
     }
 
@@ -4167,18 +4183,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto structType = expression.newtype.isTypeStruct;
         const objectOffset = _destination;
 
-        // A nested struct's `vthis` sits inside the allocation the
-        // lowering just returned, at the same native offset a value of
-        // that struct type would use - filled here, once, ahead of
-        // either the constructor call below or the positional field
-        // stores further down, so both a `new Adder(2)` with a
+        // A nested struct's or nested class's `vthis` sits inside the
+        // allocation the lowering just returned, at the same native offset
+        // a value of that aggregate type would use - filled here, once,
+        // ahead of either the constructor call below or the positional
+        // field stores further down, so both a `new Adder(2)` with a
         // constructor and a bare `new Reader` (no arguments at all) get
         // a real context rather than `.init`'s zero.
         import snakebite.backends.aggregateinit:
-            AggregateInitPlan, planPositionalFields;
+            planClassContext, planPositionalFields;
 
         auto plan = structType is null
-            ? AggregateInitPlan.init
+            ? planClassContext(expression)
             : planPositionalFields(structType.sym,
                 expression.member is null ? expression.arguments : null);
 

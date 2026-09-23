@@ -842,6 +842,72 @@ static foreach (backend; Matrix!(
     }
 }
 
+// An implicit `new Inner()` written inside an `Outer` method has dmd
+// synthesize `NewExp.thisexp` as `this` (`expressionsem.d`, `NewExp`
+// semantic) - the guest never writes `this.new Inner()` itself, but the
+// allocation still needs `Inner`'s hidden `vthis` field filled with that
+// `Outer` instance for `value` to resolve inside `Inner`'s own methods.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "dmd's own CTFE engine reports `class `this.this` is `null` and " ~
+        "cannot be dereferenced` for this snippet, independently of " ~
+        "either LoweringVisitor backend - not yet investigated"),
+)) {
+    @("nestedClassImplicitContextReadsAndWritesOuterField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Outer {
+                int value = 7;
+                final class Inner {
+                    int get() { return value; }
+                    void set(int v) { value = v; }
+                }
+                int make() {
+                    auto inner = new Inner();
+                    inner.set(inner.get() + 1);
+                    return value;
+                }
+            }
+            void main() {
+                assert(new Outer().make() == 8);
+            }
+        });
+    }
+}
+
+// `outer.new Inner()`, the explicit form of the same allocation: dmd sets
+// `NewExp.thisexp` to `outer` directly instead of synthesizing it from
+// `this`, so `Inner`'s `vthis` must resolve to that same expression's
+// value from outside `Outer` entirely, with no enclosing `Outer` method on
+// the call stack to read a context from.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "dmd's own CTFE engine reports `class `this.this` is `null` and " ~
+        "cannot be dereferenced` for this snippet, independently of " ~
+        "either LoweringVisitor backend - not yet investigated"),
+)) {
+    @("nestedClassExplicitOuterContextReadsAndWritesOuterField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Outer {
+                int value = 7;
+                final class Inner {
+                    int get() { return value; }
+                    void set(int v) { value = v; }
+                }
+            }
+            void main() {
+                auto outer = new Outer();
+                auto inner = outer.new Inner();
+                inner.set(inner.get() + 1);
+                assert(outer.value == 8);
+            }
+        });
+    }
+}
+
 // `Exception.classinfo` on a native class is the real linked
 // `TypeInfo_Class`: the one a native instance's vtable names, the one
 // `typeid(Exception)` yields, and the one whose `base` is `Throwable`'s.
