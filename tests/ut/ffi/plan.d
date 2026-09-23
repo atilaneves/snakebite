@@ -141,6 +141,10 @@ private struct MixedPair {
     double floating;
 }
 
+private struct RealPair {
+    real value;
+}
+
 private extern(C) ThreeWords snakebite_ut_three_words() {
     return ThreeWords(17, 31, 47);
 }
@@ -167,6 +171,19 @@ private extern(C) FloatingPair snakebite_ut_floating_pair(
     FloatingPair value,
 ) {
     return FloatingPair(value.first * 2, value.second * 3);
+}
+
+// `RealPair` classifies as nothing but the X87/X87UP eightbyte pair a
+// bare `real` spans (`abi.isX87OnlyAggregate`'s own doc) - gcc -O0
+// compiles a struct shaped exactly like this to `fld`/`fstp`/`fld`/`ret`
+// for a return, ending with the value already sitting in `%st0`, and to
+// reading its parameter straight off the stack, never a register.
+private extern(C) RealPair snakebite_ut_real_pair_returned() {
+    return RealPair(1.0L + real.epsilon);
+}
+
+private extern(C) real snakebite_ut_real_pair_param(RealPair value) {
+    return value.value;
 }
 
 private extern(C) MixedPair snakebite_ut_mixed_pair(MixedPair value) {
@@ -587,6 +604,173 @@ unittest {
 }
 
 
+// `classify` has no eightbyte case for `real`/`long double`: the
+// SysV X87/X87UP classes it would need only mean anything for a bare
+// scalar `real` return through `st0` (`ofReturn`'s own `Tfloat80` case),
+// never for a struct field. An aggregate over two eightbytes never
+// reaches `classify` at all - `aggregatePlan`'s own `count > 2` branch
+// already routes it to MEMORY on size alone, the same hidden-pointer
+// route a `real` field would need anyway - so a `real` field must not
+// throw once the aggregate holding it is already big enough to be
+// MEMORY-class regardless of what its fields are (the bug this pins
+// against a regression: `needsHiddenReturnPointer` used to reject any
+// `real`-containing return before ever reaching this size check).
+@("abi.oversizedStructWithRealFieldNeedsHiddenPointer")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct Big { real r; int i; }
+        extern(C) Big snakebite_ut_oversized_real_return();
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_oversized_real_return");
+    assert(function_ !is null,
+        "No `snakebite_ut_oversized_real_return` in the guest program");
+
+    auto returnType = typeFunctionOf(function_).nextOf;
+    needsHiddenReturnPointer(returnType).should == true;
+}
+
+
+// A struct whose only field is `real` classifies as nothing but the
+// X87/X87UP eightbyte pair `classify`'s own `Tfloat80` case gives that
+// field - the one shape small enough to return through a register
+// instead of a hidden pointer (verified against gcc -O0: `struct
+// { long double r; } make(void)` ends in `fld`/`ret`, the value already
+// in `%st0`, never a hidden-pointer write).
+@("abi.structRealOnlyDoesNotNeedHiddenPointer")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct RealOnly { real value; }
+        extern(C) RealOnly snakebite_ut_real_only_return();
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_real_only_return");
+    assert(function_ !is null,
+        "No `snakebite_ut_real_only_return` in the guest program");
+
+    auto returnType = typeFunctionOf(function_).nextOf;
+    needsHiddenReturnPointer(returnType).should == false;
+}
+
+
+// The same struct, as a *parameter* rather than a return: there is no
+// argument-passing register for an X87/X87UP eightbyte (`%st0` only ever
+// carries a *return* value on this ABI), so it takes the MEMORY route
+// instead (verified against gcc -O0: `void take(struct { long double r; }
+// s)` reads `s` straight off the stack, at `[rbp+0x10]`, never a
+// register) - the same route `ArgumentPlan.of`'s caller already checks
+// for any other MEMORY-class parameter.
+@("abi.structRealOnlyParameterIsMemoryClass")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct RealOnly { real value; }
+        extern(C) void snakebite_ut_real_only_param(RealOnly value);
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_real_only_param");
+    assert(function_ !is null,
+        "No `snakebite_ut_real_only_param` in the guest program");
+
+    auto parameterType = typeFunctionOf(function_).parameterList[0].type;
+    const plan = ArgumentPlan.of(parameterType);
+
+    plan.memory.should == true;
+    plan.memoryBytes.should == 16;
+}
+
+
+// A union redeclares the same bytes under two names rather than laying
+// them out sequentially, so `union { real value; }` - the field itself
+// still the only one `classify` ever sees at either eightbyte - classifies
+// exactly like the non-union struct above: `classify` does not
+// distinguish a union from a struct, only `dmd`'s own per-field `offset`
+// (here, `0`, the same offset a lone struct field already gets) decides
+// whether two fields ever share an eightbyte.
+@("abi.unionRealOnlyDoesNotNeedHiddenPointer")
+unittest {
+    auto guestModule = parseSnippet(q{
+        union RealOnly { real value; }
+        extern(C) RealOnly snakebite_ut_union_real_only_return();
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_union_real_only_return");
+    assert(function_ !is null,
+        "No `snakebite_ut_union_real_only_return` in the guest program");
+
+    auto returnType = typeFunctionOf(function_).nextOf;
+    needsHiddenReturnPointer(returnType).should == false;
+}
+
+
+// A union field that actually overlaps the `real` - `long`, at the same
+// offset `0` as `value` - merges INTEGER onto eightbyte 0 (`merge`'s own
+// doc: INTEGER always wins a conflict), leaving eightbyte 1's X87UP
+// without the eightbyte 0 X87 its own post-merge check requires, so the
+// whole value becomes MEMORY instead (verified against gcc -O0: `union
+// { long double r; long a; } make(void)` returns through a hidden
+// pointer, not `%st0`, and `void take(union U u)` reads `u` straight off
+// the stack).
+@("abi.unionRealWithIntegerFieldNeedsHiddenPointer")
+unittest {
+    auto guestModule = parseSnippet(q{
+        union Conflict { real value; long word; }
+        extern(C) Conflict snakebite_ut_union_conflict_return();
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_union_conflict_return");
+    assert(function_ !is null,
+        "No `snakebite_ut_union_conflict_return` in the guest program");
+
+    auto returnType = typeFunctionOf(function_).nextOf;
+    needsHiddenReturnPointer(returnType).should == true;
+}
+
+
+@("abi.unionRealWithIntegerFieldParameterIsMemoryClass")
+unittest {
+    auto guestModule = parseSnippet(q{
+        union Conflict { real value; long word; }
+        extern(C) void snakebite_ut_union_conflict_param(Conflict value);
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_union_conflict_param");
+    assert(function_ !is null,
+        "No `snakebite_ut_union_conflict_param` in the guest program");
+
+    auto parameterType = typeFunctionOf(function_).parameterList[0].type;
+    const plan = ArgumentPlan.of(parameterType);
+
+    plan.memory.should == true;
+    plan.memoryBytes.should == 16;
+}
+
+
+// D still accepts `creal` (`_Complex long double`, deprecation warning
+// only, still not an error) - unlike a bare `real` field, it can never
+// reach `classify`'s own `Tfloat80` case at all: `creal.sizeof` is 32
+// bytes on its own, one eightbyte pair per component, so a struct
+// holding one is always past `aggregatePlan`'s own `count > 2` size
+// check before `classify` ever runs, the same MEMORY/hidden-pointer
+// route an oversized `real` field already takes
+// (`abi.oversizedStructWithRealFieldNeedsHiddenPointer`, above). This
+// pins that the `real`-only classification added here left that
+// pre-existing route untouched.
+@("abi.structWithComplexRealFieldNeedsHiddenPointer")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct ComplexPair { creal value; }
+        extern(C) ComplexPair snakebite_ut_complex_pair_return();
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_complex_pair_return");
+    assert(function_ !is null,
+        "No `snakebite_ut_complex_pair_return` in the guest program");
+
+    auto returnType = typeFunctionOf(function_).nextOf;
+    needsHiddenReturnPointer(returnType).should == true;
+}
+
+
 @("called.double")
 unittest {
     auto guestModule = parseSnippet(q{
@@ -772,20 +956,51 @@ unittest {
 }
 
 
-@("called.scalarReal.aggregateReturnRejected")
+// `RealPair` classifies as nothing but the X87/X87UP eightbyte pair a
+// bare `real` spans (`abi.structRealOnlyDoesNotNeedHiddenPointer` pins
+// the classifier itself) - it returns through `%st0`, the same register
+// `called.scalarReal.roundTrip`'s own bare `real` already crosses in,
+// not a hidden pointer.
+@("called.scalarReal.aggregateReturn")
 unittest {
     auto guestModule = parseSnippet(q{
         struct RealPair { real value; }
-        extern(C) RealPair snakebite_ut_real_pair();
+        extern(C) RealPair snakebite_ut_real_pair_returned();
     });
-    auto function_ = findFunction(guestModule, "snakebite_ut_real_pair");
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_real_pair_returned");
     assert(function_ !is null,
-        "No `snakebite_ut_real_pair` in the guest program");
+        "No `snakebite_ut_real_pair_returned` in the guest program");
 
     PlanCache cache;
-    cache.of(function_).shouldThrowWithMessage(
-        "ffi cannot return an aggregate containing `real`",
-    );
+    RealPair result;
+    cache.of(function_).call(&result, []);
+
+    result.value.should == 1.0L + real.epsilon;
+}
+
+
+// The same `RealPair` shape as a *parameter*: `abi.
+// structRealOnlyParameterIsMemoryClass` pins the classifier giving it
+// the MEMORY route instead - there is no argument register for an X87
+// eightbyte - so this checks the whole call, not just the classifier,
+// still reads the right bytes back out of that stack slot.
+@("called.scalarReal.aggregateParameter")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct RealPair { real value; }
+        extern(C) real snakebite_ut_real_pair_param(RealPair value);
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_real_pair_param");
+    assert(function_ !is null,
+        "No `snakebite_ut_real_pair_param` in the guest program");
+
+    PlanCache cache;
+    RealPair value = RealPair(1.0L + real.epsilon);
+    real result;
+    cache.of(function_).call(&result, [cast(const(void)*) &value]);
+
+    result.should == value.value;
 }
 
 
