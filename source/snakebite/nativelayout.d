@@ -133,22 +133,34 @@ public struct TypeFacts {
     public alias lazyArgument = delegateValue;
 
     // The facts for `type`, read from dmd exactly once by the caller
-    // that builds this.
+    // that builds this. `resolved`/`forceResolved` force any forward
+    // reference `size`/`alignsize`/`toBasetype` below could still
+    // resolve, under the frontend lock, before this asks dmd anything -
+    // see their own doc for why a call that finds nothing to force
+    // needs no lock.
     public static TypeFacts of(Type type) {
         import dmd.astenums: Tarray;
         import dmd.typesem:
             alignsize, isIntegral, isUnsigned, nextOf, size, toBasetype;
+        import snakebite.frontend.compiler: forceIfNeeded;
+
+        forceIfNeeded(() => resolved(type), () { forceResolved(type); });
 
         // An enum value has the representation of its base type. Keeping
         // that representation here lets every byte-storage caller use the
         // same facts for enum values with floating or string bases.
         type = type.toBasetype;
 
-        if (type.ty == Tarray)
+        if (type.ty == Tarray) {
+            forceIfNeeded(
+                () => resolved(type.nextOf),
+                () { forceResolved(type.nextOf); },
+            );
             return TypeFacts(
                 arrayValueSize, size_t.alignof, false, false, true,
                 type.nextOf.size,
             );
+        }
 
         return TypeFacts(
             type.size,
@@ -156,6 +168,66 @@ public struct TypeFacts {
             type.isIntegral,
             type.isUnsigned,
         );
+    }
+
+    // Whether every forward reference `toBasetype`/`size`/`alignsize`
+    // could still resolve for `type` is already resolved - an enum's own
+    // base type (`EnumDeclaration.getMemtype`, reached through
+    // `toBasetype`), or a struct's own size
+    // (`AggregateDeclaration.determineSize`, reached through `size`/
+    // `alignsize` directly, or through `Type.baseElemOf`'s
+    // `toBasetype`-then-descend walk for a static array). Each branch
+    // reads the exact field the matching dmd function gates itself on
+    // (`EnumDeclaration._scope`, `AggregateDeclaration.sizeok`), so
+    // `false` here is the same answer dmd's own call would reach first
+    // anyway - never a guess at it. A pointer, a class handle, a
+    // dynamic array's own two words, and every basic type answer `size`/
+    // `alignsize` from a fixed table with no dsymbol to force at all
+    // (`dmd.typesem.size`'s own switch), so this defaults to `true` for
+    // any `Type` kind not named below.
+    private static bool resolved(Type type) {
+        import dmd.astenums: Sizeok;
+
+        if (auto enumType = type.isTypeEnum)
+            return enumType.sym._scope is null
+                && enumType.sym.memtype !is null
+                && resolved(enumType.sym.memtype);
+
+        if (auto structType = type.isTypeStruct)
+            return structType.sym.sizeok == Sizeok.done;
+
+        if (auto arrayType = type.isTypeSArray)
+            return resolved(arrayType.next);
+
+        return true;
+    }
+
+    // The forcing half of `resolved`: runs, under the frontend lock
+    // (`forceIfNeeded`'s own doc explains why only there), exactly the
+    // dmd call whose own idempotent gate `resolved` mirrors. Each dmd
+    // function re-checks that same gate itself, so calling it again for
+    // a branch another thread resolved first, between `resolved`'s read
+    // and this thread taking the lock, is itself a no-op - never a
+    // second write.
+    private static void forceResolved(Type type) {
+        import dmd.location: Loc;
+
+        if (auto enumType = type.isTypeEnum) {
+            import dmd.enumsem: getMemtype;
+
+            forceResolved(getMemtype(enumType.sym, Loc.initial));
+            return;
+        }
+
+        if (auto structType = type.isTypeStruct) {
+            import dmd.dsymbolsem: size;
+
+            structType.sym.size(Loc.initial);
+            return;
+        }
+
+        if (auto arrayType = type.isTypeSArray)
+            forceResolved(arrayType.next);
     }
 }
 

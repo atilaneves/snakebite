@@ -89,6 +89,37 @@ public void withCompilerLock(scope void delegate() action) {
     compiler.withLock(action);
 }
 
+// Runs `force` under the frontend lock, but only when `ready` - a cheap,
+// lock-free read of the one dmd field a forward-reference forcing call
+// itself gates on (`FuncDeclaration.semanticRun`, `AggregateDeclaration.
+// sizeok`, a `Dsymbol._scope`...) - says dmd has not already finished
+// the work `force` would do. dmd's own forcing functions
+// (`functionSemantic3`, `AggregateDeclaration.determineSize`,
+// `EnumDeclaration.getMemtype`) all check that same field themselves,
+// first, and return at once - before any write - when it already says
+// "done" (verified against dmd 2.113.0's own source: each checks its
+// field, e.g. `semanticRun < PASS.semantic3`, before touching anything
+// else). So `ready` reads exactly the condition `force` would find
+// false anyway; skipping the lock when `ready` holds runs no dmd call
+// at all, rather than one that would immediately return, and is exactly
+// as safe as dmd's own check, not a guess at it.
+//
+// A stale `ready() == false` - another thread's write has not yet
+// become visible on this core - costs one redundant lock/unlock, never
+// a wrong answer: `force` runs under the lock regardless, and every
+// other reach into dmd's frontend state already serializes through
+// this same lock, so whichever thread gets there first does the one
+// real forcing and every later thread's `force` call is itself a no-op
+// once inside.
+public void forceIfNeeded(
+    scope bool delegate() ready,
+    scope void delegate() force,
+) {
+    if (ready())
+        return;
+    withCompilerLock(force);
+}
+
 final class Compiler {
     import core.sync.mutex: Mutex;
     import dmd.dmodule: Module;

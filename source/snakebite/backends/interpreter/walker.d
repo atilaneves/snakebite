@@ -143,9 +143,12 @@ import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.backends.fullexpression: FullExpressionKind;
 
 // The state one program's evaluators share, whichever thread they run
-// on (ADR-0006). Every table here is filled once per key under the
-// compiler lock and read without a lock after that, so the only thing an
-// evaluator keeps for itself is its own execution state.
+// on (ADR-0006). Every table here is filled once per key - under its
+// own `SharedTable` lock, and under the frontend compiler lock too only
+// while a dmd forward reference still needs resolving
+// (`snakebite.frontend.compiler.forceIfNeeded`) - and read without any
+// lock after that, so the only thing an evaluator keeps for itself is
+// its own execution state.
 private struct Shared {
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
@@ -542,8 +545,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // that linkage.
     //
     // The compiler lock is not held across the call (ADR-0006): every
-    // answer that needs dmd's own analysis is worked out on its own slow
-    // path, under that lock, and read back without it after
+    // answer that still needs dmd's own analysis is worked out on its
+    // own slow path, under that lock only while the analysis is not
+    // already done (`forceIfNeeded`), and read back without it after
     // (`Cache.build`). A thread that held the lock while it waited for
     // another thread's callback would otherwise never see that callback
     // return, since the callback's own slow paths need the same lock.
@@ -870,13 +874,27 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // programs share the very same `FuncDeclaration` for - dmd's
         // frontend is one process-global mutable structure, not one
         // instance per snippet. Mutating its semantic state this way is
-        // safe only because `Cache.build` holds the frontend-wide
-        // compiler lock while this runs, the same lock every other reach
-        // into that structure already goes through - without it, a
-        // second thread forcing the same forward reference would race
-        // this one.
+        // safe only under the frontend-wide compiler lock, the same lock
+        // every other reach into that structure already goes through -
+        // without it, a second thread forcing the same forward reference
+        // would race this one. `forceIfNeeded` takes that lock only when
+        // `function_` is not already past `semantic3` - the common case
+        // once some other program's evaluator has already reached this
+        // same shared declaration - so a repeat build for a druntime
+        // hook already forced by an earlier program never queues on the
+        // lock at all; `FrameLayout.of` below forces the same pass again
+        // through `hasHiddenThis`, its own independent reason to (used,
+        // unlike this cache, by native FFI call sites this interpreter
+        // never walks a body for), guarded the same way, so it is always
+        // a no-op by the time it runs here.
+        import dmd.dsymbol: PASS;
         import dmd.funcsem: functionSemantic3;
-        functionSemantic3(function_);
+        import snakebite.frontend.compiler: forceIfNeeded;
+
+        forceIfNeeded(
+            () => function_.semanticRun >= PASS.semantic3done,
+            () { functionSemantic3(function_); },
+        );
 
         return FrameLayout.of(function_);
     }
@@ -898,6 +916,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return CallShape(CallAdapter.of(function_), arguments);
     }
 
+    // `ClosureLayout.of` reads `function_.closureVars`, which semantic3
+    // (body semantic) populates - safe unlocked here because every
+    // caller of `closureLayoutOf` (`allocateClosure`, only ever reached
+    // after `functionNeedsClosure(function_)` answered `true`) already
+    // forced that pass, under the frontend lock where it still needed
+    // one, to get that very answer.
     private const(ClosureLayout)* closureLayoutOf(
         FuncDeclaration function_,
     ) {
@@ -2329,7 +2353,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     // The hops from `_function`'s own frame to `owner`'s context, as
     // `staticChainPath` decides them; `null` when `owner` is not on the
-    // chain at all.
+    // chain at all. `staticChainPath` walks every function between the
+    // two with `FrameLayout.of`/`functionNeedsClosure`, and both already
+    // force semantic3 themselves, guarded, wherever they are called from
+    // - so nothing extra is forced here.
     extern(D) private const(Hop)[] staticChainOf(FuncDeclaration owner) {
         import snakebite.backends.staticchain: staticChainPath;
 
@@ -5610,18 +5637,27 @@ private struct Cache(Key, Value) {
         return key in *_table;
     }
 
-    // The slow path: runs `make` under the compiler lock, unless another
-    // thread stored the answer first, and returns the stored answer.
+    // The slow path: runs `make` and stores its answer, unless another
+    // thread's own `build` for the same key already stored one first -
+    // `_table.insert` (`SharedTable`, ADR-0006) keeps the first value
+    // and hands every caller that same one back, under its own table
+    // lock, so two threads racing the same miss cannot corrupt this
+    // cache or disagree about the answer.
+    //
+    // `make` is never wrapped in the frontend compiler lock here: this
+    // cache's own data is a `SharedTable`, which brings its own lock, so
+    // nothing about *this* table needs the frontend one. The dmd forward
+    // references a particular `make` (`buildLayout`, `buildCallShape`,
+    // ...) can still need to resolve are its own concern, taken only
+    // where they happen and only while dmd has not already resolved
+    // them (`snakebite.frontend.compiler.forceIfNeeded`), not a blanket
+    // lock around every `build` regardless of whether this key's own
+    // `make` still needs one. A `make` that races another thread's
+    // `make` for the same key redoes the same (by then always safe,
+    // read-only) work twice; `insert` below throws the loser's answer
+    // away, never both.
     public Value* build(Key key, scope Value delegate() make) {
-        import snakebite.frontend.compiler: withCompilerLock;
-
-        Value* stored;
-        withCompilerLock({
-            stored = key in *_table;
-            if (stored is null)
-                stored = _table.insert(key, make());
-        });
-        return stored;
+        return _table.insert(key, make());
     }
 
     version(unittest)
