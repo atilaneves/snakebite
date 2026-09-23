@@ -307,7 +307,11 @@ private string dmdFlagsForOption(in string option) {
 }
 
 
-public void prepareDependencies(ref Project project) {
+public void prepareDependencies(
+    ref Project project,
+    in imported!"snakebite.dependencyimage".Optimise optimise
+        = imported!"snakebite.dependencyimage".Optimise.yes,
+) {
     import snakebite.frontend.dependencyimage: imageSource, imageInputs;
     import snakebite.dependencyimage:
         DependencyImage, ProjectImageCache, prepareImage, defaultCompiler;
@@ -323,7 +327,7 @@ public void prepareDependencies(ref Project project) {
         project.sources.stringImportPaths, project.sources.linkerFlags,
         project.sources.linkerFiles, JSONValue(project.sources.sourceOverrides),
         project.sources.dubDescription.value, environment.get("DFLAGS", ""),
-        environment.get("LFLAGS", ""));
+        environment.get("LFLAGS", ""), "\noptimise:", optimise);
     auto cache = ProjectImageCache(buildPath(directory, "project.json"),
         settings, project.sources.files);
     auto image = new DependencyImage;
@@ -342,7 +346,8 @@ public void prepareDependencies(ref Project project) {
             imageInputs(project.program), project.sources.importPaths,
             project.sources.stringImportPaths,
             project.sources.flags.compilerArguments,
-            project.sources.linkerFiles, project.sources.linkerFlags),
+            project.sources.linkerFiles, project.sources.linkerFlags,
+            optimise: optimise),
         project.sources.linkerFiles.length != 0,
         () {
             import snakebite.dub: dubInputs;

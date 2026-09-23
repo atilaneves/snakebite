@@ -54,9 +54,13 @@ static foreach (backend; Matrix!(
         else {
             import snakebite.backends: backendIdentity;
 
+            // The image built here is thrown away once the test ends: only
+            // the guest run's behaviour (a clean exit, never a segfault)
+            // is checked, never its speed. Skipping optimisation keeps
+            // this test's own build fast without weakening what it proves.
             const result = execute([
                 buildPath(getcwd, "bin", "sb"), "-b",
-                backendIdentity!backend.text, directory,
+                backendIdentity!backend.text, "--no-optimise-image", directory,
             ]);
         }
         // A backend may still disagree with `dub test` on a few of
