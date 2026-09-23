@@ -70,12 +70,18 @@ public struct CallSelection {
         FuncDeclaration function_,
         scope bool delegate(FuncDeclaration) isGuest,
         lazy bool hasNativeSymbol,
+        lazy bool hasIndependentNativeSymbol,
     ) {
         if (auto cached = function_ in _decisions)
             return *cached;
 
         return *_decisions.insert(
-            function_, buildDecision(function_, hasNativeSymbol, isGuest));
+            function_,
+            buildDecision(
+                function_, hasNativeSymbol, hasIndependentNativeSymbol,
+                isGuest,
+            ),
+        );
     }
 
     // Whether `function_`'s own body should interpret/compile - the one
@@ -88,9 +94,11 @@ public struct CallSelection {
         FuncDeclaration function_,
         scope bool delegate(FuncDeclaration) isGuest,
         lazy bool hasNativeSymbol,
+        lazy bool hasIndependentNativeSymbol,
     ) {
-        return decisionOf(function_, isGuest, hasNativeSymbol).route
-            == Route.guest;
+        return decisionOf(
+            function_, isGuest, hasNativeSymbol, hasIndependentNativeSymbol,
+        ).route == Route.guest;
     }
 
     // Every dmd query a function's decision needs, resolved once and
@@ -99,6 +107,7 @@ public struct CallSelection {
     private static Decision buildDecision(
         FuncDeclaration function_,
         lazy bool hasNativeSymbol,
+        lazy bool hasIndependentNativeSymbol,
         scope bool delegate(FuncDeclaration) isGuest,
     ) {
         import dmd.astenums: VarArg;
@@ -130,10 +139,18 @@ public struct CallSelection {
             return Decision(Route.guest);
 
         // A root-owned body must run as guest even when its linker name
-        // is in the host (notably _Dmain). A template can reuse the host
-        // instantiation; a missing template symbol leaves its guest body.
+        // is in the host (notably _Dmain). A template instance can reuse
+        // a native copy only when that copy is independent of the running
+        // executable - the dependency image or an already-loaded shared
+        // object (ADR-0008, ADR-0009). The executable's own copy is never
+        // preferred: snakebite instantiates plenty of the same templates a
+        // guest program also instantiates (`dirEntries` in
+        // `snakebite.project` among them), and that copy's nested closures
+        // carry the host compiler's frame layout, not this backend's -
+        // reusing it for a guest call reads that closure with the wrong
+        // layout. A missing independent symbol leaves the guest body.
         const prefers = function_.isInstantiated() !is null
-            ? !hasNativeSymbol : isGuest(function_);
+            ? !hasIndependentNativeSymbol : isGuest(function_);
         return Decision(prefers ? Route.guest : Route.native);
     }
 

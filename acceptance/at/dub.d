@@ -56,36 +56,20 @@ configuration "unittest" {
 // project directory so this project's own `*.d` file never confuses the
 // count the test asserts on.
 //
-// `symbolAddress` (source/snakebite/ffi/symbol.d) now searches every
+// `symbolAddress` (source/snakebite/ffi/symbol.d) searches every
 // already-loaded shared object before the executable, so a guest call
 // prefers a genuine independent native copy - the dependency image, or a
 // project's own C/C++ library - over `bin/sb`'s own instantiation. This
 // project has no dependency, so no such independent copy exists anywhere:
 // the *only* native code for this exact `dirEntries` instantiation is the
-// one inside `bin/sb` itself, and the resolver's own last-resort executable
-// fallback still finds it there. `CallSelection.buildDecision`
-// (source/snakebite/backends/calls.d) then reuses it, by design, for any
-// root-owned template instantiation a native symbol answers for - `f`'s
-// layout mismatch happens regardless of which resolver tier supplied that
-// answer. Closing this needs `CallSelection` (or the dependency image) to
-// tell an executable-only answer apart from a genuinely independent native
-// copy for a root-instantiated template, which is unrelated to symbol
-// resolution order and out of this fix's scope; `Bytecode` and
-// `Interpreter` are omitted below, verified still failing for that reason.
+// one inside `bin/sb` itself. `CallSelection.buildDecision`
+// (source/snakebite/backends/calls.d) never reuses that executable-only
+// answer for a template instance a guest call reaches: it asks the
+// resolver whether an independent copy answers - the dependency image or
+// an already-loaded shared object - and keeps the guest body otherwise, so
+// `f`'s closure is always read with the layout that allocated it.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot run file IO"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "resolver order alone does not fix this: dirEntries has no "
-        ~ "native copy anywhere but bin/sb itself for a dependency-less "
-        ~ "project, so CallSelection.buildDecision still reuses that "
-        ~ "host instantiation's mismatched closure layout for the "
-        ~ "root-owned call - a separate, unfixed gap in call routing"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "resolver order alone does not fix this: dirEntries has no "
-        ~ "native copy anywhere but bin/sb itself for a dependency-less "
-        ~ "project, so CallSelection.buildDecision still reuses that "
-        ~ "host instantiation's mismatched closure layout for the "
-        ~ "root-owned call - a separate, unfixed gap in call routing"),
 )) {
     @("guestDirEntriesFindsGuestFilesNotHostTemplateInstance." ~ backend.stringof)
     @Tags(backend.stringof)

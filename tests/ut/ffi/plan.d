@@ -107,6 +107,32 @@ unittest {
 }
 
 
+// Nothing but `bin/ut` itself defines this symbol: no dependency image, no
+// separately loaded shared object. `CallSelection.buildDecision`
+// (`snakebite.backends.calls`) asks `hasIndependentNativeSymbol`, never
+// `hasNativeSymbol`, for a template instance, precisely so a guest call
+// through one never reuses this process's own copy - the mismatch that
+// broke a guest program's own `dirEntries` call against `bin/sb`'s
+// instantiation of the same template (docs/adr/0008, docs/adr/0009).
+private extern(C) int snakebite_ut_plan_executable_only_target() {
+    return 91;
+}
+
+@("hasIndependentNativeSymbol.excludesExecutableOnlyAnswer")
+unittest {
+    auto guestModule = parseSnippet(q{
+        pragma(mangle, "snakebite_ut_plan_executable_only_target")
+        extern(C) int target();
+    });
+    auto function_ = findFunction(guestModule, "target");
+    assert(function_ !is null, "No function `target` in the guest program");
+
+    PlanCache cache;
+    cache.hasNativeSymbol(function_).should == true;
+    cache.hasIndependentNativeSymbol(function_).should == false;
+}
+
+
 // The native side of the `ref` tests below: compiled functions in this
 // very test binary, reachable through the dynamic linker because the
 // binary exports its own symbols.

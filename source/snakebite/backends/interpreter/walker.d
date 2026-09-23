@@ -319,7 +319,8 @@ private struct Shared {
         const(void)* word;
         if (callSelection.usesGuestBody(method,
                 (callee) => program.isInterpreted(callee),
-                plans.hasNativeSymbol(method))) {
+                plans.hasNativeSymbol(method),
+                plans.hasIndependentNativeSymbol(method))) {
             plans.registerGuestFunction(cast(void*) method, method);
             word = cast(void*) method;
         }
@@ -842,6 +843,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return _plans.hasNativeSymbol(function_);
     }
 
+    private bool hasIndependentNativeSymbol(FuncDeclaration function_) {
+        return _plans.hasIndependentNativeSymbol(function_);
+    }
+
     // `function_`'s frame layout, from the shared table; computed on its
     // first call on any thread. The returned pointer stays valid and is
     // the same on every thread.
@@ -1078,6 +1083,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             function_,
             (callee) => _program.isInterpreted(callee),
             hasNativeSymbol(function_),
+            hasIndependentNativeSymbol(function_),
         );
         final switch (decision.route) with (CallSelection.Route) {
         case native:

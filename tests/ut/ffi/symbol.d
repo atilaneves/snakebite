@@ -777,6 +777,31 @@ unittest {
     answer().should == 511;
 }
 
+// A name of its own, never defined in `bin/ut` itself: nothing here masks
+// the answer with a symbol the executable-only test above (or any other
+// test's promoted shared object) already put in the process-wide scope.
+@("resolveIndependent.stillAnswersFromALoadedSharedObject")
+@Serial
+unittest {
+    import core.sys.posix.dlfcn: dlclose, dlopen, RTLD_GLOBAL, RTLD_NOW;
+    import std.string: toStringz;
+
+    enum name = "snakebite_symbol_independent_only_test";
+    auto image = prepareImage(
+        "export extern(C) int " ~ name ~ "() { return 522; }",
+        sharedImageCache);
+
+    auto handle = dlopen(image.path.toStringz, RTLD_NOW | RTLD_GLOBAL);
+    handle.should.not == null;
+    scope(exit) dlclose(handle);
+
+    Resolver resolver;
+    alias Answer = extern(C) int function();
+    const answer = cast(Answer) resolver.resolveIndependent(name);
+    answer.should.not == null;
+    answer().should == 522;
+}
+
 
 // Nothing but `bin/ut` itself defines this symbol: the executable is still
 // the answer when no dependency image and no other loaded shared object
@@ -792,6 +817,20 @@ unittest {
         resolver.resolve("snakebite_symbol_executable_only_test");
     answer.should.not == null;
     answer().should == 733;
+}
+
+// `resolveIndependent` answers the question `CallSelection.buildDecision`
+// (`snakebite.backends.calls`) asks for a template instance: `resolve`
+// still finds this executable-only symbol (the test right above), but
+// `resolveIndependent` must never reach that last-resort tier - a guest
+// call through a template instance must not bind to `bin/ut`'s own copy
+// just because nothing else answers the name.
+@("resolveIndependent.neverFallsBackToExecutable")
+unittest {
+    Resolver resolver;
+    resolver.resolveIndependent(
+        "snakebite_symbol_executable_only_test",
+    ).should == null;
 }
 
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,

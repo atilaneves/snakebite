@@ -247,6 +247,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _plans.hasNativeSymbol(function_);
     }
 
+    package bool hasIndependentNativeSymbol(FuncDeclaration function_) {
+        return _plans.hasIndependentNativeSymbol(function_);
+    }
+
     package bool isGuestFunction(FuncDeclaration function_) const {
         return _program.isInterpreted(function_);
     }
@@ -366,7 +370,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
         const(void)* word;
         if (_callSelection.usesGuestBody(method, &isGuestFunction,
-                hasNativeSymbol(method))) {
+                hasNativeSymbol(method), hasIndependentNativeSymbol(method))) {
             word = compileFunction(method);
             registerGuestWord(method, cast(const(Function)*) word);
             _callbackRoots ~= cast(const(Function)*) word;
@@ -5712,6 +5716,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const hasNativeSymbol = _bytecode.hasNativeSymbol(callee);
         const decision = _bytecode._callSelection.decisionOf(
             callee, &_bytecode.isGuestFunction, hasNativeSymbol,
+            _bytecode.hasIndependentNativeSymbol(callee),
         );
         final switch (decision.route) with (CallSelection.Route) {
         case native:
