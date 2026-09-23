@@ -3863,7 +3863,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativevalue:
             floatingToBool, floatingToIntegral, integralToFloating;
         import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset, storeIntegral;
+            arrayLengthOffset, arrayPointerOffset, loadIntegral, storeIntegral;
         import std.conv: text;
 
         auto sourceType = expression.e1.type;
@@ -3960,9 +3960,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // this has to be its own kind rather than an ordinary
         // integral-to-integral narrowing: D specifies `cast(bool) x` as
         // `x != 0`, not "keep the low byte" - `cast(bool) 256` is `true`
-        // in D, not the `false` a truncation would store.
+        // in D, not the `false` a truncation would store. `classify` also
+        // reaches this kind for a pointer operand (`cast(bool) somePtr`),
+        // which `asIntegral` itself refuses (`Type.isIntegral` is false
+        // for `Tpointer`), so this reads the operand's raw bytes directly
+        // instead - the same bytes `asPointer` would read for a pointer,
+        // or `asIntegral` for an integral, just without either one's own
+        // gate on the operand's type.
         case toBool: {
-            const value = asIntegral(expression.e1, plan.sourceFacts);
+            align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
+            evaluate(expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            const value = loadIntegral(buffer.ptr, plan.sourceFacts.size, false);
             storeIntegral(_place, value != 0, _facts.size);
             return;
         }

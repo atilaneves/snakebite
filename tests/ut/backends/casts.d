@@ -112,6 +112,72 @@ unittest {
 }
 
 
+// The reverse of `kind.pointerToIntegral`: `size_t` and a pointer are both
+// `size_t.sizeof` bytes wide, so preserving the value's own bits across the
+// cast is the same plain move `copy` already covers for two equal-width
+// integrals - `alignUp`'s own `return cast(T) b;`, `core.stdc.stdarg`'s
+// only cast from a `size_t` to its own type parameter (issue: `core/stdc/
+// stdarg.d(69)`).
+@("kind.copy.sizeTToPointer")
+unittest {
+    auto function_ = castFunctionOf(q{
+        void* cast_(size_t value) { return cast(void*) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.copy;
+}
+
+
+// A narrower integral cast to a pointer has to sign- or zero-extend into
+// the pointer's own width first, exactly as widening that same operand to
+// a wider integral would - the same `widenSigned`/`widenUnsigned` kinds an
+// integral destination already uses.
+@("kind.widenSigned.intToPointer")
+unittest {
+    auto function_ = castFunctionOf(q{
+        void* cast_(int value) { return cast(void*) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.widenSigned;
+}
+
+
+@("kind.widenUnsigned.uintToPointer")
+unittest {
+    auto function_ = castFunctionOf(q{
+        void* cast_(uint value) { return cast(void*) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.widenUnsigned;
+}
+
+
+// `cast(bool)` on a pointer is a dmd frontend-legal cast (unlike a class
+// reference or a delegate, both of which dmd itself refuses to cast to
+// `bool`), and tests the same nonzero bytes `kind.toBool`'s integral
+// operand already does.
+@("kind.toBool.pointer")
+unittest {
+    auto function_ = castFunctionOf(q{
+        bool cast_(int* value) { return cast(bool) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.toBool;
+}
+
+
 // `xs.ptr` on a static array collapses to a plain address in dmd's own
 // AST whenever it can compute one directly (a local, a global, a field
 // reached through a pointer), leaving no `CastExp` for `classify` to see

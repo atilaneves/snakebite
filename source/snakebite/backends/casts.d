@@ -134,6 +134,16 @@ public CastPlan classify(
     if (sourceType.ty == Tpointer && destFacts.isDynamicArray)
         return CastPlan(CastPlan.Kind.pointerToArray, sourceFacts, destFacts);
 
+    // `cast(bool)` on a pointer (a plain pointer or a function pointer,
+    // both `Tpointer`) tests the same nonzero bytes an integral `toBool`
+    // cast does. A class reference or a delegate cast to `bool` is a dmd
+    // frontend error (`Error: cannot cast expression ... to bool`), so
+    // this is reached only for `Tpointer` - `bool`'s truth-conversion
+    // semantics have to be checked before `pointerToIntegral` below,
+    // which is why it stays out of that byte-preserving kind.
+    if (sourceType.ty == Tpointer && destType.ty == Tbool)
+        return CastPlan(CastPlan.Kind.toBool, sourceFacts, destFacts);
+
     // An explicit pointer-to-integral cast preserves the native address
     // bits; `bool` has truth-conversion semantics instead, so it stays
     // out of this byte-preserving kind.
@@ -141,6 +151,30 @@ public CastPlan classify(
             && destType.ty != Tbool)
         return CastPlan(
             CastPlan.Kind.pointerToIntegral, sourceFacts, destFacts);
+
+    // The reverse of `pointerToIntegral`: an explicit integral-to-pointer
+    // cast (`cast(void*) someInt`, `core.stdc.stdarg.alignUp`'s own
+    // `return cast(T) b;`) preserves the operand's own bits, sign- or
+    // zero-extended to the pointer's width exactly as widening that same
+    // operand to a wider integral would - `bool`'s 0/1 values included,
+    // since dmd classifies it as an unsigned integral. `size_t` is
+    // already the pointer's own width, so that particular round trip is
+    // the same plain move an equal-width integral cast already uses.
+    // Sharing `copy`/`widenSigned`/`widenUnsigned` here, rather than a
+    // kind of its own, is the same reuse `pointerToIntegral` above gets
+    // for free from the ordinary integral-to-integral kinds below - a
+    // pointer's destination facts differ from an integral's only in
+    // `isIntegral` itself, never in the size or signedness arithmetic
+    // that picks between them.
+    if (destType.ty == Tpointer && sourceFacts.isIntegral
+            && isIntegralSize(sourceFacts.size))
+        return CastPlan(
+            destFacts.size == sourceFacts.size
+                ? CastPlan.Kind.copy
+                : sourceFacts.isUnsigned
+                    ? CastPlan.Kind.widenUnsigned : CastPlan.Kind.widenSigned,
+            sourceFacts, destFacts,
+        );
 
     if (sourceType.ty == Tsarray && destFacts.isDynamicArray
             && destType.nextOf !is null

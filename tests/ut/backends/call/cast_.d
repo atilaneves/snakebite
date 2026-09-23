@@ -360,6 +360,138 @@ static foreach (backend; Matrix!(
     }
 }
 
+// The reverse of `cast.pointerToUlong.preservesAddressOffset`: an
+// integral-to-pointer cast preserves the same native bits, so converting a
+// `ulong` to `void*` and back gives the original value unchanged. This is
+// the exact shape `core.stdc.stdarg.alignUp` runs as guest code (`return
+// cast(T) b;` where `T` is `void*` and `b` is a `size_t`), which both the
+// bytecode compiler and the interpreter used to reject outright.
+static foreach (backend; Matrix!()) {
+    @("cast.ulongToVoidPointer.roundTrips." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool roundTrips() {
+                    ulong original = 0x1234_5678;
+                    void* pointer = cast(void*) original;
+                    return cast(ulong) pointer == original;
+                }
+            },
+            "roundTrips",
+        );
+    }
+}
+
+// `alignUp`'s own shape: round an address up to a `size_t` boundary through
+// an integral, then cast it back to a real pointer that is then
+// dereferenced. Isolates the arithmetic `cast(int*) (cast(size_t) p + 4)`
+// performs from `alignUp`'s masking, showing the resulting pointer really
+// does address the array's next element rather than only carrying the
+// right bit pattern.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast a pointer to an integral type"),
+)) {
+    @("cast.sizeTToPointer.pointsToNextElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        99.shouldBeRetOf!(
+            backend,
+            q{
+                int next() {
+                    int[2] values = [1, 99];
+                    int* first = &values[0];
+                    size_t address = cast(size_t) first;
+                    int* second = cast(int*) (address + int.sizeof);
+                    return *second;
+                }
+            },
+            "next",
+        );
+    }
+}
+
+// A pointer-to-integral cast to a narrower destination keeps only the low
+// bytes, the same truncation an ordinary narrowing integral cast performs -
+// `pointerToIntegral` is not itself new, but nothing previously exercised
+// it at a width narrower than the pointer's own. The address itself is a
+// runtime value nothing here can predict, so the check compares the direct
+// `ubyte` truncation against the already-proven `ulong` round trip
+// (`cast.pointerToUlong.preservesAddressOffset`) narrowed the same way an
+// ordinary integral cast narrows, rather than asserting a specific byte.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast a pointer to an integral type"),
+)) {
+    @("cast.pointerToUbyte.truncates." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool truncatesLowByte() {
+                    int[2] values;
+                    int* p = &values[0];
+                    ubyte direct = cast(ubyte) p;
+                    ulong full = cast(ulong) p;
+                    return direct == cast(ubyte) full;
+                }
+            },
+            "truncatesLowByte",
+        );
+    }
+}
+
+// Converting a narrower signed integral to a pointer sign-extends exactly
+// as widening that same value to a wider integral would - `cast(void*)
+// someNegativeInt` fills the pointer's high bits with the sign bit, not
+// with zero. An implementation that zero-extends instead loses the
+// negative int's high bits and answers a different, wrong address.
+static foreach (backend; Matrix!()) {
+    @("cast.intToPointer.signExtendsNegative." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool matchesWidenedValue() {
+                    int negative = -5;
+                    void* pointer = cast(void*) negative;
+                    long widened = cast(long) negative;
+                    return cast(long) pointer == widened;
+                }
+            },
+            "matchesWidenedValue",
+        );
+    }
+}
+
+// `cast(bool)` on a pointer tests it for non-null, the same nonzero test
+// `cast(bool)` on an integral already runs - dmd allows this cast directly
+// on a pointer (including a function pointer, the same `Tpointer` shape),
+// unlike a class reference or a delegate, which dmd's own frontend refuses
+// to cast to `bool` at all.
+static foreach (backend; Matrix!()) {
+    @("cast.pointerToBool.nonNullIsTrue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool bothDirections() {
+                    int value;
+                    int* present = &value;
+                    int* absent;
+                    return cast(bool) present && !cast(bool) absent;
+                }
+            },
+            "bothDirections",
+        );
+    }
+}
+
 // `cast(void[])` of a `T[]` scales the length by `T.sizeof`, the same
 // conversion `core.internal.array.appending` applies before calling
 // `gc_expandArrayUsed`/`gc_shrinkArrayUsed`, both of which take `void[]`.
