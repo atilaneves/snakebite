@@ -249,3 +249,29 @@ public bool arityMismatches(
         ? count < parameterList.length
         : count != parameterList.length;
 }
+
+// An indirect call - one whose callee `expression.e1` is a bare value,
+// not a resolved `FuncDeclaration` - is a delegate call whenever that
+// value's own type is `Tdelegate`, never mind whether dmd's parser put a
+// `PtrExp` there. `key in aa` on an associative array of delegates, and
+// `&someDelegateVariable`, both give a *pointer to a delegate*; calling
+// through either dereferences with the same `(*p)(args)` syntax dmd
+// itself lowers a bare function-pointer call to (`fn(args)` becomes
+// `(*fn)(args)`, see `snakebite.backends.layout.FrameLayout.
+// ofParameters`'s own callers). Reading the syntax instead of `e1.type`
+// mistakes that delegate-pointer dereference for the function-pointer
+// shape it merely resembles: `deref.e1`, the pointer's own pointee, is a
+// `Tdelegate`, not the `Tfunction` a function pointer's pointee always
+// is, so a function-pointer read off it is nonsense. Either shape leaves
+// `e1` itself as the one expression to evaluate for the callee's value -
+// the delegate's own two words when `e1.type` is `Tdelegate` (dereferenced
+// already, whatever the syntax), or, when it is a `PtrExp` and dmd's
+// lowering leaves `e1.type` the pointed-to `Tfunction`, that `PtrExp`'s
+// own `e1` for the function pointer's single word.
+public bool isIndirectDelegateCall(
+    imported!"dmd.mtype".Type calleeType,
+) {
+    import dmd.astenums: Tdelegate;
+
+    return calleeType !is null && calleeType.ty == Tdelegate;
+}

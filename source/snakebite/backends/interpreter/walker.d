@@ -5330,14 +5330,30 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // pointed-to `Tfunction`, not `Tpointer` - `deref.e1` is the pointer
     // expression itself, read with `asPointer` the same way any other
     // dereference reads what it points at.
+    //
+    // The callee kind comes from `callee.type`, not from whether `callee`
+    // is a `PtrExp` (`isIndirectDelegateCall`'s own doc): a pointer to a
+    // delegate (`key in aa` on a delegate-valued associative array, or
+    // `&someDelegateVariable`) dereferences with the same `(*p)(args)`
+    // syntax dmd's own function-pointer-call lowering produces, but
+    // `callee.type` there is `Tdelegate`, not the `Tfunction` a
+    // dereferenced function pointer's type always is.
     private Callee calleeOf(CallExp expression) {
+        import snakebite.backends.calls: isIndirectDelegateCall;
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize,
             loadIntegral;
         import std.conv: text;
 
         auto callee = expression.e1;
-        if (auto deref = callee.isPtrExp) {
+        if (!isIndirectDelegateCall(callee.type)) {
+            auto deref = callee.isPtrExp;
+            if (deref is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot call an unresolved function: `",
+                        expression.toString, "`"),
+                );
+
             auto function_ = cast(FuncDeclaration) asPointer(deref.e1);
             if (function_ is null)
                 throw new SnakebiteException(
@@ -5353,12 +5369,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     deref.type.isTypeFunction);
             return Callee(function_, null, false);
         }
-
-        if (callee.type.ty != Tdelegate)
-            throw new SnakebiteException(
-                text("interpreter cannot call an unresolved function: `",
-                    expression.toString, "`"),
-            );
 
         const facts = factsOf(callee.type);
         assert(facts.size == delegateValueSize

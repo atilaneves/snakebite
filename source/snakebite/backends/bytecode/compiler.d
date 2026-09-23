@@ -6031,8 +6031,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `this` before its declared parameters (see `ofParameters`'s own
     // `hasContext` doc).
     private void compileIndirectCall(CallExp expression, in size_t destOffset) {
-        import dmd.astenums: STC, Tdelegate;
-        import snakebite.backends.calls: arityMismatches;
+        import dmd.astenums: STC;
+        import snakebite.backends.calls: arityMismatches, isIndirectDelegateCall;
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize;
 
@@ -6043,9 +6043,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // `compileCall` already found no `FuncDeclaration` to call
         // directly, so it falls through to the `functionType is null`
         // rejection below instead of dereferencing a null `.type`.
+        //
+        // The callee kind comes from `e1.type`, not from whether `e1` is
+        // a `PtrExp` (`isIndirectDelegateCall`'s own doc): a pointer to a
+        // delegate (from `key in aa` on a delegate-valued associative
+        // array, or `&someDelegateVariable`) dereferences with the same
+        // `(*p)(args)` syntax dmd's own function-pointer-call lowering
+        // produces, but `e1.type` there is `Tdelegate`, not the
+        // `Tfunction` a dereferenced function pointer's type always is.
         auto deref = expression.e1.isPtrExp;
-        const isDelegateCall = deref is null
-            && expression.e1.type !is null && expression.e1.type.ty == Tdelegate;
+        const isDelegateCall = isIndirectDelegateCall(expression.e1.type);
 
         TypeFunction functionType;
         size_t calleeOffset;
