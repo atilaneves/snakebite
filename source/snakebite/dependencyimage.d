@@ -520,20 +520,24 @@ private void require(in bool condition, in string message) {
 }
 
 
-// An unchanged image needs only metadata checks and a loader reference:
-// file stamps for the compiler and every input stand in for their contents.
-// A root edit can reuse the same image if it requests the same templates.
+// An image is a function of the generator that built it (this running
+// executable) and its inputs. An unchanged image needs only metadata
+// checks and a loader reference: file stamps for the compiler, the
+// generator, and every input stand in for their contents. A root edit
+// can reuse the same image if it requests the same templates.
 public struct ProjectImageCache {
     private string _path;
     private string _settings;
     private string[] _roots;
     private string _compiler;
+    private string _generator;
 
     public this(
         in string recordPath,
         in string settings,
         in string[] roots,
         in string compiler = defaultCompiler,
+        in string generator = imported!"std.file".thisExePath(),
     ) {
         import std.conv: text;
 
@@ -541,6 +545,7 @@ public struct ProjectImageCache {
         _settings = sourceDigest(text("snakebite-project-image-v2", __VERSION__, settings));
         _roots = roots.dup;
         _compiler = compilerPath(compiler);
+        _generator = generator;
     }
 
     public bool prepare(
@@ -617,7 +622,7 @@ public struct ProjectImageCache {
         record["settings"] = _settings;
         record["compiler"] = _compiler;
         record["roots"] = fileStamps(_roots);
-        record["inputs"] = fileStamps(inputs ~ [_compiler, path]);
+        record["inputs"] = fileStamps(inputs ~ [_compiler, _generator, path]);
         record["source"] = sourceDigest(source);
         record["image"] = path;
         publish(record.toString);

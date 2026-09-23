@@ -1617,3 +1617,60 @@ unittest {
     empty.prepare(hit, () => "", () {}, &failImage, false,
         &dependencyInputs).should == false;
 }
+
+
+// The recorded image is a function of the generator that built it, not
+// only of its inputs: a new snakebite binary must not reuse an image an
+// older binary produced, even when nothing about the project changed.
+@("image.projectCacheDetectsChangedGenerator")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("root.d", "root");
+    const root = sandbox.inSandboxPath("root.d");
+    const directory = sandbox.sandboxPath;
+    const record = buildPath(directory, "project.json");
+    sandbox.writeFile("generator-stand-in", "generator v1");
+    const generator = sandbox.inSandboxPath("generator-stand-in");
+    string[] noInputs() { return []; }
+    DependencyImage makeImage(in string source) {
+        return prepareImage(source, directory);
+    }
+
+    auto cache = ProjectImageCache(record, "settings", [root], defaultCompiler, generator);
+    auto image = new DependencyImage;
+    cache.prepare(*image, () => atomicSource, () {}, &makeImage, true,
+        &noInputs).should == true;
+
+    // Same generator, unchanged: the recorded image is restored.
+    auto unchanged = ProjectImageCache(record, "settings", [root], defaultCompiler, generator);
+    DependencyImage hit;
+    size_t sourceCalls;
+    unchanged.prepare(hit, () {
+            ++sourceCalls;
+            return atomicSource;
+        },
+        () {
+            throw new Exception("An unchanged generator must skip preparation");
+        },
+        &makeImage, true, &noInputs).should == true;
+    hit.path.should == image.path;
+    sourceCalls.should == 0;
+
+    // A rebuilt generator at the same path must be treated as a cache
+    // miss: the recorded image was produced by a binary that no longer
+    // exists in that form.
+    sandbox.writeFile("generator-stand-in", "generator v2, rebuilt");
+    auto rebuilt = ProjectImageCache(record, "settings", [root], defaultCompiler, generator);
+    DependencyImage regenerated;
+    size_t regeneratedSourceCalls;
+    size_t builds;
+    rebuilt.prepare(regenerated, () {
+            ++regeneratedSourceCalls;
+            return atomicSource;
+        },
+        () { ++builds; },
+        &makeImage, true, &noInputs).should == true;
+    regeneratedSourceCalls.should == 1;
+    builds.should == 1;
+}
