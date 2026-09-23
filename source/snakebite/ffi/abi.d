@@ -363,8 +363,8 @@ private void classify(
     ref bool memory,
 ) {
     import dmd.astenums:
-        Tarray, Tclass, Tcomplex32, Tcomplex64, Tdelegate, Tfloat32,
-        Tfloat64, Tnull, Tpointer, Tsarray;
+        Taarray, Tarray, Tclass, Tcomplex32, Tcomplex64, Tdelegate,
+        Tfloat32, Tfloat64, Tnull, Tpointer, Tsarray;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: alignsize, isIntegral, nextOf, size;
 
@@ -392,7 +392,7 @@ private void classify(
     }
 
     if (type.ty == Tpointer || type.ty == Tclass || type.ty == Tdelegate
-            || type.ty == Tnull) {
+            || type.ty == Taarray || type.ty == Tnull) {
         foreach (i; 0 .. (bytes + 7) / 8)
             merge(classes, offset + i * 8, 8,
                 ArgumentPlan.ValueClass.integer, memory);

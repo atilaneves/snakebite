@@ -3370,3 +3370,34 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+
+// A guest delegate literal assigned to a delegate-typed variable compiles
+// through `compileDelegateValue` -> `callableAddress` -> `prepareCallback`
+// (`snakebite.backends.bytecode.compiler`), which classifies the
+// delegate's own signature through the same `abi.classify` walk a native
+// call site's arguments and return value go through - a callback still
+// needs an ABI-shaped trampoline even when nothing outside the guest
+// program ever calls it. `classify`'s reference-type case list
+// (`Tpointer`/`Tclass`/`Tdelegate`/`Tnull`) left out `Taarray`, so a
+// struct returned by such a delegate, with an associative-array field,
+// threw instead of classifying INTEGER, even though a bare associative
+// array already classified correctly (`aggregatePlan`'s own top-level
+// check).
+static foreach (backend; Matrix!()) {
+    @("struct.associativeArrayFieldCrossesDelegateReturn."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Settings {
+                int[string] table;
+            }
+
+            void main() {
+                Settings delegate() make = () => Settings(["a": 1]);
+                assert(make().table["a"] == 1);
+            }
+        });
+    }
+}

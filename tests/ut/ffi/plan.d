@@ -504,6 +504,36 @@ unittest {
 }
 
 
+// An associative array is one pointer-sized handle - the same INTEGER
+// class `classify` already gives a pointer, a class reference or a
+// delegate (its own `Tpointer`/`Tclass`/`Tdelegate`/`Tnull` case,
+// `abi.d`) and `aggregatePlan`'s own top-level check already gives a
+// bare associative-array value (its `Tpointer`/`Tclass`/`Taarray`/
+// `Tnull` case). `classify`'s case list left `Taarray` out, so walking
+// into a struct field of that type - the only way `aggregatePlan`
+// reaches `classify` at all, since a bare aggregate never does - threw
+// instead of classifying it.
+@("abi.structWithAssociativeArrayFieldIsIntegerClass")
+unittest {
+    auto guestModule = parseSnippet(q{
+        struct Settings {
+            int[string] table;
+        }
+        extern(C) void snakebite_ut_aa_field_param(Settings value);
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_aa_field_param");
+    assert(function_ !is null,
+        "No `snakebite_ut_aa_field_param` in the guest program");
+
+    auto parameterType = typeFunctionOf(function_).parameterList[0].type;
+    const plan = ArgumentPlan.of(parameterType);
+
+    plan.memory.should == false;
+    plan.count.should == 1;
+}
+
+
 @("called.double")
 unittest {
     auto guestModule = parseSnippet(q{
