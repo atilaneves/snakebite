@@ -201,8 +201,15 @@ private void validateMemoryParameter(
 // explicit parameter, it never becomes an `ArgumentPlan` `buildMoves`
 // places on the stack, so `ArgumentPlan.of`'s alignment limit does not
 // apply to it.
-public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type type) {
+public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type unbasedType) {
     import dmd.astenums: Tfloat80;
+    import dmd.typesem: toBasetype;
+
+    // An enum has its base type's native layout and classification -
+    // `type.ty` below only ever matches a base-type case, never `Tenum`
+    // itself, so an enum return has to be unwrapped once here, the same
+    // way `classify`'s own entry unwraps it for a parameter or a field.
+    auto type = unbasedType.toBasetype;
 
     if (type.ty == Tfloat80)
         return false;
@@ -214,9 +221,11 @@ public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type type) {
     return plan.memory || plan.indirect;
 }
 
-private bool containsReal(imported!"dmd.mtype".Type type) {
+private bool containsReal(imported!"dmd.mtype".Type unbasedType) {
     import dmd.astenums: Tfloat80;
-    import dmd.typesem: nextOf;
+    import dmd.typesem: nextOf, toBasetype;
+
+    auto type = unbasedType.toBasetype;
 
     if (type.ty == Tfloat80)
         return true;
@@ -251,12 +260,19 @@ private bool isNonTriviallyCopyable(imported!"dmd.mtype".Type type) {
     return aggregate !is null && !aggregate.sym.isPOD();
 }
 
-private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
+private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     import dmd.astenums:
         Taarray, Tclass, Tfloat32, Tfloat64, Tfloat80, Tnull, Tpointer,
         Tvoid;
-    import dmd.typesem: alignsize, isIntegral, isUnsigned, size;
+    import dmd.typesem: alignsize, isIntegral, isUnsigned, size, toBasetype;
     import std.algorithm: min;
+
+    // An enum has its base type's native layout and classification - the
+    // one rule this whole module follows (`classify`'s own doc). Every
+    // `type.ty` check below only matches a base-type case, so an enum
+    // argument or return has to be unwrapped once here, before any of
+    // them run.
+    auto type = unbasedType.toBasetype;
 
     ArgumentPlan plan;
     if (type.ty == Tvoid)
@@ -357,7 +373,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
 }
 
 private void classify(
-    imported!"dmd.mtype".Type type,
+    imported!"dmd.mtype".Type unbasedType,
     in size_t offset,
     ref ArgumentPlan.ValueClass[2] classes,
     ref bool memory,
@@ -366,10 +382,20 @@ private void classify(
         Taarray, Tarray, Tclass, Tcomplex32, Tcomplex64, Tdelegate,
         Tfloat32, Tfloat64, Tnull, Tpointer, Tsarray;
     import dmd.expressionsem: toInteger;
-    import dmd.typesem: alignsize, isIntegral, nextOf, size;
+    import dmd.typesem: alignsize, isIntegral, nextOf, size, toBasetype;
 
     if (memory)
         return;
+
+    // An enum has its base type's native layout and classification, the
+    // same "native layout" rule every backend already follows for every
+    // other type (`ai/CODING.md`'s runtime-semantics section). `type.ty`
+    // below never matches `Tenum` itself, only a base-type case, so an
+    // unclassified enum has to be unwrapped exactly once, here at this
+    // function's own entry - the only place every path into `classify` (a
+    // parameter, a return, a struct field walked recursively from
+    // `aggregatePlan` below) passes through.
+    auto type = unbasedType.toBasetype;
 
     const bytes = type.size;
     if (bytes == 0)

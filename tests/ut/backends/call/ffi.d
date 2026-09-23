@@ -3401,3 +3401,48 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// An enum has its base type's native layout and classification - the same
+// rule `abi.classify`'s own doc states. A `string`-based enum crossing a
+// delegate return - the same `compileDelegateValue` -> `callableAddress` ->
+// `prepareCallback` path the sibling test above exercises - used to throw
+// `ffi cannot classify a value of type \`E\`` instead of classifying as
+// the two-eightbyte INTEGER pair a bare `string` return already does.
+static foreach (backend; Matrix!()) {
+    @("enum.stringBaseCrossesDelegateReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum E : string { a = "a" }
+
+            void main() {
+                E delegate() make = () => E.a;
+                assert(make() == E.a);
+            }
+        });
+    }
+}
+
+
+// The same enum-return fix (sibling test above) also has to hold for a
+// `string`-based enum reached as a struct field, the only way `classify`
+// itself - not `aggregatePlan`'s own top-level checks - ever sees an
+// enum's type (`abi.d`'s own doc on `classify`'s entry).
+static foreach (backend; Matrix!()) {
+    @("struct.enumStringFieldCrossesDelegateReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum E : string { a = "a" }
+            struct Settings {
+                E e;
+            }
+
+            void main() {
+                Settings delegate() make = () => Settings(E.a);
+                assert(make().e == E.a);
+            }
+        });
+    }
+}

@@ -534,6 +534,59 @@ unittest {
 }
 
 
+// An enum has its base type's native layout and classification - one rule,
+// applied whether the enum value is a bare return, a parameter, or a struct
+// field (this test's own sibling below). `classify`, `containsReal` and
+// `aggregatePlan` all switched on `type.ty`, which is `Tenum` for an enum
+// value and never matches any of their cases - `type.ty` only matches a
+// base-type case once `toBasetype` has unwrapped it. A `string`-based enum
+// return therefore threw instead of classifying as the two-eightbyte
+// INTEGER pair a bare `string` already classifies as (`abi.d`'s own
+// `Tarray` case).
+@("abi.enumWithStringBaseReturnClassifiesAsIntegerPair")
+unittest {
+    auto guestModule = parseSnippet(q{
+        enum E : string { a = "a" }
+        extern(C) E snakebite_ut_enum_return();
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_enum_return");
+    assert(function_ !is null,
+        "No `snakebite_ut_enum_return` in the guest program");
+
+    auto returnType = typeFunctionOf(function_).nextOf;
+    needsHiddenReturnPointer(returnType).should == false;
+}
+
+
+// The same unwrapping `classify` needs at its own entry point (this test's
+// sibling above) also has to hold for a struct field's type: `aggregatePlan`
+// only ever reaches `classify` by walking `aggregate.sym.fields`, so a
+// `string`-based enum field never gets `toBasetype` from the top-level
+// checks `aggregatePlan` runs on its own argument - only `classify`'s own
+// entry sees it.
+@("abi.structWithEnumStringFieldIsIntegerPairClass")
+unittest {
+    auto guestModule = parseSnippet(q{
+        enum E : string { a = "a" }
+        struct Settings {
+            E e;
+        }
+        extern(C) void snakebite_ut_enum_field_param(Settings value);
+    });
+    auto function_ =
+        findFunction(guestModule, "snakebite_ut_enum_field_param");
+    assert(function_ !is null,
+        "No `snakebite_ut_enum_field_param` in the guest program");
+
+    auto parameterType = typeFunctionOf(function_).parameterList[0].type;
+    const plan = ArgumentPlan.of(parameterType);
+
+    plan.memory.should == false;
+    plan.count.should == 2;
+}
+
+
 @("called.double")
 unittest {
     auto guestModule = parseSnippet(q{
