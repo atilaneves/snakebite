@@ -293,3 +293,168 @@ static foreach (backend; Matrix!(
         }, "result");
     }
 }
+
+// `assert(structPtr)`/`assert(classRef)` run the pointed-to aggregate's own
+// invariant too, not only a member function's entry/exit call proven above:
+// dmd's own glue layer (`e2ir.d`'s `visitAssert`, gated on
+// `useInvariants == CHECKENABLE.on`) evaluates the assert's condition once
+// into a compiler temporary, and - only once that condition itself already
+// held - calls the struct's own `inv` function on that same pointer before
+// falling through. A struct whose invariant fails only when read through a
+// bare `assert(&cell)`, with no member call anywhere in the snippet, proves
+// this second call site runs on its own.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a failing assertion into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("invariant_.structPointerAssert.violationThrowsAssertError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            import core.exception: AssertError;
+
+            struct Cell {
+                int value;
+                invariant {
+                    assert(value >= 0);
+                }
+            }
+
+            int result() {
+                Cell cell;
+                cell.value = -1;
+                try {
+                    assert(&cell);
+                } catch (AssertError) {
+                    return 42;
+                }
+                return 0;
+            }
+        }, "result");
+    }
+}
+
+// Same call site, invariant holding: `assert(&cell)` must still just pass,
+// the same as a plain `assert` on a struct with no invariant at all would.
+static foreach (backend; Matrix!()) {
+    @("invariant_.structPointerAssert.passingInvariantDoesNotThrow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            struct Cell {
+                int value;
+                invariant {
+                    assert(value >= 0);
+                }
+            }
+
+            int result() {
+                Cell cell;
+                cell.value = 1;
+                assert(&cell);
+                return 42;
+            }
+        }, "result");
+    }
+}
+
+// The class equivalent: `t1.ty == Tclass` in `e2ir.d`'s `visitAssert` calls
+// druntime's own `_d_invariant` (`RTLSYM.DINVARIANT`) on the reference
+// instead of a directly-named `inv` function, since a class invariant must
+// walk every base class's own invariant too - druntime's own job, called
+// through the FFI barrier here rather than reimplemented (this project's
+// own druntime policy), exactly the way `_d_invariant`'s own druntime
+// source (`rt.invariant_`) does it for a real compiled build.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a failing assertion into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("invariant_.classRefAssert.violationThrowsAssertError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            import core.exception: AssertError;
+
+            class Box {
+                int value;
+                invariant {
+                    assert(value >= 0);
+                }
+            }
+
+            int result() {
+                auto box = new Box;
+                box.value = -1;
+                try {
+                    assert(box);
+                } catch (AssertError) {
+                    return 42;
+                }
+                return 0;
+            }
+        }, "result");
+    }
+}
+
+// Same call site, invariant holding: `assert(box)` must still just pass.
+static foreach (backend; Matrix!()) {
+    @("invariant_.classRefAssert.passingInvariantDoesNotThrow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            class Box {
+                int value;
+                invariant {
+                    assert(value >= 0);
+                }
+            }
+
+            int result() {
+                auto box = new Box;
+                box.value = 1;
+                assert(box);
+                return 42;
+            }
+        }, "result");
+    }
+}
+
+// A null class reference still fails the assert's own condition first: dmd
+// builds `(e1 || ModuleAssert(...))` ahead of `einv` in `visitAssert`, so a
+// null reference never reaches the invariant call at all. Reaching it
+// first would crash instead of throwing this guest-visible `AssertError`,
+// since druntime's own `_d_invariant` starts with its own
+// `assert(o !is null)`, at its own library source location rather than the
+// guest's.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns a failing assertion into a compile-time error, so " ~
+        "it cannot be expressed the same way as a runtime throw"),
+)) {
+    @("invariant_.classRefAssert.nullReferenceFailsAssertFirst." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            import core.exception: AssertError;
+
+            class Box {
+                int value;
+                invariant {
+                    assert(value >= 0);
+                }
+            }
+
+            int result() {
+                Box box;
+                try {
+                    assert(box);
+                } catch (AssertError) {
+                    return 42;
+                }
+                return 0;
+            }
+        }, "result");
+    }
+}

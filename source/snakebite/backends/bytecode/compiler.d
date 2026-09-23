@@ -1824,6 +1824,67 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _assertSites ~= AssertSite(failure.message, failure.file, failure.line);
         emit(&opAssert, conditionOffset, _assertSites.length - 1, width);
         _finished = expression.type.ty == Tnoreturn;
+
+        if (!_finished)
+            compileAssertInvariant(expression, conditionOffset);
+    }
+
+    // `assert(e1)`'s own invariant call, reached only once `opAssert` above
+    // already let the condition through: `objectOffset` already holds
+    // `e1`'s own value - the class reference or struct pointer itself, not
+    // merely its truthiness, since `compileCondition` reads a class
+    // reference's or a pointer's own whole width to decide that
+    // truthiness in the first place - so it is reused here rather than
+    // compiling `e1` a second time, the same "evaluate once, reuse the
+    // same compiler temporary for both the condition and the invariant"
+    // dmd's own glue layer (`e2ir.d`'s `visitAssert`) does. `assert(0)`
+    // (`_finished`, this method's one caller already having returned by
+    // then) never reaches here: its own condition is never one of the two
+    // shapes `assertInvariantPlanOf` recognises anyway.
+    private void compileAssertInvariant(
+        AssertExp expression, in size_t objectOffset,
+    ) {
+        import snakebite.backends.exceptions:
+            AssertInvariantPlan, assertInvariantPlanOf;
+
+        auto plan = assertInvariantPlanOf(expression);
+        final switch (plan.kind) with (AssertInvariantPlan.Kind) {
+            case none:
+                return;
+            case class_:
+                compileClassInvariantCall(expression, objectOffset);
+                return;
+            case struct_:
+                compileResolvedCall(plan.structInvariant, null,
+                    expression.loc, expressionText(expression), true,
+                    () => objectOffset, discardResult);
+                return;
+        }
+    }
+
+    // A class reference's own invariant is druntime's job, not this
+    // project's: `_d_invariant` (`rt.invariant_`) walks every base class's
+    // own invariant in turn, reached the same way `visit(DeleteExp)`
+    // already reaches `_d_callfinalizer` - a druntime hook with no
+    // `FuncDeclaration` of its own, resolved purely by its linker symbol
+    // through the FFI barrier - and called here with the object reference
+    // as its one argument.
+    private void compileClassInvariantCall(
+        AssertExp expression, in size_t objectOffset,
+    ) {
+        import snakebite.backends.exceptions: classInvariantSymbol;
+
+        auto plan = _bytecode._plans.rawPlanOf(
+            classInvariantSymbol,
+            [Register(Register.Kind.pointer, size_t.sizeof)],
+        );
+        if (plan is null)
+            throw rejection(
+                _function, expression.loc, expressionText(expression));
+
+        _callSites ~= CallSite.native(
+            plan, [Arg(objectOffset, 0, size_t.sizeof)], 0);
+        emit(&opCall, discardResult, _callSites.length - 1, 0);
     }
 
     // Only the branch taken at run time ever executes - the other one, if

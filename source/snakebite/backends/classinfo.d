@@ -185,6 +185,17 @@ public TypeInfo_Class classRuntimeInfo(
     if (!isInterface) {
         if (declaration.dtor !is null)
             info.destructor = hooks.methodAddress(declaration.dtor, 0);
+        // Real compiled D (`glue/toobj.d`'s `ClassInfoToDt`) sets this
+        // class's own `classInvariant` slot to `cd.inv`'s own compiled
+        // address directly - the merged invariant `funcsem.addInvariant`
+        // already builds for this class alone, called with `this` the
+        // same way any other member function is. `_d_invariant`
+        // (`rt.invariant_`) is what walks `.base` to reach every other
+        // class in the hierarchy's own slot in turn; this only fills the
+        // one level `declaration` itself owns.
+        if (declaration.inv !is null)
+            info.classInvariant = cast(void function(Object))
+                hooks.methodAddress(declaration.inv, 0);
         foreach (i; 1 .. declaration.vtbl.length) {
             auto method = declaration.vtbl[i].isFuncDeclaration;
             import dmd.dsymbolsem: isAbstract;

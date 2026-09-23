@@ -4236,6 +4236,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // which would be a different thing wearing the same words.
     override void visit(AssertExp expression) {
         import std.conv: text;
+        import snakebite.backends.exceptions:
+            AssertInvariantPlan, assertInvariantPlanOf;
 
         if (expression.type !is null && expression.type.ty == Tnoreturn)
             throw new SnakebiteException(
@@ -4243,9 +4245,47 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     expression.toString, "`"),
             );
 
-        if (truthOf(expression.e1))
+        // `assertInvariantPlanOf` answers the same question dmd's own
+        // glue layer (`e2ir.d`'s `visitAssert`) asks of `e1`'s type alone,
+        // gated the same way on `useInvariants`: every other assert - the
+        // overwhelming majority - takes the plain path unchanged below.
+        auto plan = assertInvariantPlanOf(expression);
+        if (plan.kind == AssertInvariantPlan.Kind.none) {
+            if (!truthOf(expression.e1))
+                throwAssertFailure(expression);
             return;
+        }
 
+        // `e1` is a class reference or a struct pointer here - a single
+        // pointer-sized value that is its own truth test
+        // (`TypeFacts.Truth.of`'s own answer for either shape) - evaluated
+        // once and reused for both the condition check and the invariant
+        // call below, the same "evaluate once, reuse the same compiler
+        // temporary for both" dmd's own glue layer does with its one
+        // temporary. A null reference fails the condition here, before
+        // ever reaching the invariant call - reaching it first would
+        // crash on druntime's own `_d_invariant`'s own null check instead
+        // of throwing this guest-visible `AssertError`.
+        import snakebite.nativelayout: loadIntegral;
+
+        align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
+        evaluate(expression.e1, expression.e1.type, buffer.ptr);
+        auto object =
+            cast(void*) loadIntegral(buffer.ptr, size_t.sizeof, false);
+        if (object is null) {
+            throwAssertFailure(expression);
+            return;
+        }
+
+        if (plan.kind == AssertInvariantPlan.Kind.class_)
+            callClassInvariant(object);
+        else
+            callStructInvariant(plan.structInvariant, object);
+    }
+
+    // What a failed `assert` throws to the guest, shared by every path
+    // through `visit(AssertExp)` above.
+    private void throwAssertFailure(AssertExp expression) {
         import core.exception: AssertError;
         import snakebite.backends.exceptions: assertFailureOf;
 
@@ -4255,6 +4295,56 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const failure = assertFailureOf(expression);
         throw new GuestException(
             new AssertError(failure.message, failure.file, failure.line));
+    }
+
+    // A class reference's own invariant is druntime's job, not this
+    // project's: `_d_invariant` (`rt.invariant_`) walks every base class's
+    // own invariant in turn, resolved purely by its linker symbol through
+    // the FFI barrier - the same `rawPlanOf`/`callPlan` shape
+    // `visitUnloweredCatDcharAssign` already uses for a druntime hook with
+    // no `FuncDeclaration` of its own - and called here with the object
+    // reference as its one argument.
+    private void callClassInvariant(void* objectPointer) {
+        import snakebite.backends.exceptions: classInvariantSymbol;
+        import std.conv: text;
+
+        countForeignNameLookup;
+        auto plan = _plans.rawPlanOf(
+            classInvariantSymbol,
+            [Register(Register.Kind.pointer, size_t.sizeof)],
+        );
+        if (plan is null)
+            throw new SnakebiteException(
+                text("interpreter cannot resolve the symbol ",
+                    "`", classInvariantSymbol, "`: it is not in this ",
+                    "process"),
+            );
+
+        const(void*)[1] arguments = [cast(const(void)*) &objectPointer];
+        callPlan(plan, null, arguments[]);
+    }
+
+    // A struct pointer's own invariant is a plain guest function call to
+    // its own merged `inv`, the same shape `dmd.func.FuncDeclaration.
+    // addInvariant` already builds for a member function's own entry/exit
+    // check (`CallExp(DotVarExp(ThisExp, inv))`, see `unresolvedCalleeOf`)
+    // - but `assert(&s)` never gives this backend that `CallExp` to walk,
+    // so this builds `inv`'s own frame directly instead, with
+    // `thisPointer` filling the one hidden `this` slot it declares.
+    private void callStructInvariant(
+        FuncDeclaration inv, void* thisPointer,
+    ) {
+        import snakebite.nativelayout: storeIntegral;
+
+        auto layout = layoutOf(inv);
+        auto frame = _frames.push(layout.size, layout.alignment);
+        storeIntegral(
+            frame.base + layout.hiddenThis.parameter.offset,
+            cast(size_t) thisPointer, size_t.sizeof,
+        );
+        _temporaries.withNestedCall({
+            executeRaw(inv, null, frame.base, layout, null, null, 0);
+        });
     }
 
     protected override void visitThrowExp(ThrowExp expression) {
