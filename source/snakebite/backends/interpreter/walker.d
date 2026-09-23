@@ -1971,8 +1971,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // any of them, and reads the same shared rule the bytecode compiler
     // does.
     private bool truthOf(Expression expression) {
-        import snakebite.nativelayout:
-            TypeFacts, delegateValueSize, loadIntegral;
+        import snakebite.nativelayout: TypeFacts, loadIntegral;
+        import snakebite.nativevalue: loadFloating;
         import std.conv: text;
 
         auto type = expression.type;
@@ -1983,15 +1983,24 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "` as a condition: its type is `", type.toString, "`"),
             );
 
-        if (truth.isFloat)
-            return asFloating(expression) != 0;
-
+        // Sized to `creal`, the widest condition value `Truth.of` ever
+        // answers `supported` for - a plain real, an imaginary, or one
+        // component of a complex all fit within it too.
         const facts = factsOf(type);
-        align(size_t.sizeof) ubyte[delegateValueSize] buffer = void;
+        align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
         assert(facts.size <= buffer.sizeof,
-            "a condition value wider than a delegate reached the scratch"
+            "a condition value wider than a `creal` reached the scratch"
                 ~ " buffer");
         evaluate(expression, type, facts, buffer.ptr);
+
+        if (truth.isFloat) {
+            if (loadFloating(buffer.ptr + truth.offset, truth.size) != 0)
+                return true;
+            if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
+                return false;
+            return loadFloating(
+                buffer.ptr + truth.secondOffset, truth.size) != 0;
+        }
 
         if (loadIntegral(buffer.ptr + truth.offset, truth.size, false) != 0)
             return true;
@@ -2116,8 +2125,56 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _nativeData.write(_type, _facts, expression, _place);
     }
 
+    // `1.0f + 0.0fi`: dmd's own constant folding already reduces
+    // `complex`-literal arithmetic to one `ComplexExp` (`EXP.complex80`
+    // regardless of the actual `cfloat`/`cdouble`/`creal` width - only
+    // `.type` differs), the same compile-time constant `RealExp` above
+    // is for a real one.
+    override void visit(ComplexExp expression) {
+        _nativeData.write(_type, _facts, expression, _place);
+    }
+
     override void visit(NullExp expression) {
         _nativeData.write(_type, _facts, expression, _place);
+    }
+
+    // `int4 v = 1;`/`cast(int4) 1`: dmd's own semantic pass (`dcast.d`)
+    // rewrites either shape to this node, `e1` already cast to the
+    // vector's own element type, and its meaning is "every lane gets
+    // this one value" - filling the first lane by evaluating `e1`
+    // straight into `_place` and then copying those same bytes to every
+    // remaining lane. `int4 v = cast(int4) someInt4Sarray;` reaches this
+    // node too, with `e1` a matching-size static array instead: dmd's
+    // own `dcast.d` (`T[n] <-- __vector(U[m])`... in reverse) wraps
+    // that shape here rather than the scalar element cast, and its
+    // meaning is a plain reinterpret of the array's own bytes, not a
+    // broadcast of a single "element".
+    override void visit(VectorExp expression) {
+        import core.stdc.string: memcpy;
+
+        if (expression.e1.type.toBasetype.ty == Tsarray) {
+            evaluate(expression.e1, expression.e1.type,
+                factsOf(expression.e1.type), _place);
+            return;
+        }
+
+        const elementFacts = factsOf(expression.e1.type);
+        evaluate(expression.e1, expression.e1.type, elementFacts, _place);
+        auto bytes = cast(ubyte*) _place;
+        foreach (i; 1 .. _facts.size / elementFacts.size)
+            memcpy(bytes + i * elementFacts.size, bytes, elementFacts.size);
+    }
+
+    // `someVector.array`: dmd's own semantic pass (`typesem.d`'s
+    // `TypeVector.dotExp`, `Id.array`) reinterprets the vector as its
+    // own `basetype` static array - the same bytes, so evaluating `e1`
+    // with its own (vector) type straight into `_place` already is the
+    // static array's own value.
+    override void visit(VectorArrayExp expression) {
+        evaluate(
+            expression.e1, expression.e1.type, factsOf(expression.e1.type),
+            _place,
+        );
     }
 
     override void visit(StringExp expression) {
@@ -3861,7 +3918,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     protected override void visitUnloweredCast(CastExp expression) {
         import snakebite.backends.casts: classify, CastPlan;
         import snakebite.nativevalue:
-            floatingToBool, floatingToIntegral, integralToFloating;
+            complexTruth, floatingToBool, floatingToIntegral,
+            integralToFloating, loadComplexIm, loadComplexRe, loadFloating,
+            storeComplex, storeFloating;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, delegateContextOffset,
             loadIntegral, storeIntegral;
@@ -3877,7 +3936,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        const plan = classify(expression.e1, _type);
+        // `.im` on a `complex` value is dmd's own `e.castTo(sc,
+        // timaginaryN)` (`typesem.d`'s `Id.im` case for `Tcomplex*`)
+        // with the resulting node's `.type` then overwritten straight to
+        // the matching `Tfloat*` - a same-size reinterpret with no
+        // `CastExp` of its own, done directly on the expression `castTo`
+        // already built. `.type` (`_type` here) is that overwritten
+        // field; `.to` still names the cast `castTo` actually performed,
+        // so it is the one `classify` has to see to tell that apart from
+        // `.re`, whose `.to` and `.type` agree.
+        auto destType = expression.to !is null ? expression.to : _type;
+        const plan = classify(expression.e1, destType);
 
         final switch (plan.kind) with (CastPlan.Kind) {
         case copy:
@@ -3898,6 +3967,121 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (expression.e1.isNullExp is null)
                 runForEffect(expression.e1);
             memset(_place, 0, _facts.size);
+            return;
+        }
+
+        // `cast(bool) someComplex`: true when either component is
+        // nonzero - the same rule `TypeFacts.Truth` gives `if
+        // (someComplex)`.
+        case complexToBool: {
+            align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            storeIntegral(
+                _place,
+                complexTruth(buffer.ptr, plan.sourceFacts.size),
+                _facts.size,
+            );
+            return;
+        }
+
+        // `cast(double) someComplex`/`someComplex.re`: the real
+        // component alone, converted to the destination's own width.
+        case complexToReal: {
+            align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            storeFloating(
+                _place,
+                loadComplexRe(buffer.ptr, plan.sourceFacts.size),
+                _facts.size,
+            );
+            return;
+        }
+
+        // `someComplex.im`: the imaginary component alone (`classify`'s
+        // own doc comment on `destType`/`.to` above is what routes this
+        // cast here instead of `complexToReal`).
+        case complexToImaginary: {
+            align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            storeFloating(
+                _place,
+                loadComplexIm(buffer.ptr, plan.sourceFacts.size),
+                _facts.size,
+            );
+            return;
+        }
+
+        // `cast(int) someComplex`: the real component, converted the
+        // same way `floatToIntegral` converts a plain real operand - the
+        // component's own bytes sit at `buffer`'s first half already, so
+        // `floatingToIntegral` reading `sourceFacts.size / 2` bytes from
+        // there needs nothing else.
+        case complexToIntegral: {
+            align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            floatingToIntegral(
+                _place, buffer.ptr, _facts.size, plan.sourceFacts.size / 2,
+                _facts.isUnsigned,
+            );
+            return;
+        }
+
+        // `cast(cfloat) someCreal`: both components, independently
+        // rounded to the destination's own width.
+        case complexWidth: {
+            align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            storeComplex(
+                _place,
+                loadComplexRe(buffer.ptr, plan.sourceFacts.size),
+                loadComplexIm(buffer.ptr, plan.sourceFacts.size),
+                _facts.size,
+            );
+            return;
+        }
+
+        // `cast(cdouble) someDouble`: the real axis carries the value,
+        // the imaginary one is zero.
+        case realToComplex: {
+            align(real.alignof) ubyte[real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            storeComplex(
+                _place, loadFloating(buffer.ptr, plan.sourceFacts.size),
+                0.0L, _facts.size,
+            );
+            return;
+        }
+
+        // `cast(cdouble) someInt`: as `realToComplex`, from an integral
+        // operand.
+        case integralToComplex: {
+            align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            const value = loadIntegral(
+                buffer.ptr, plan.sourceFacts.size, !plan.sourceFacts.isUnsigned);
+            const re = plan.sourceFacts.isUnsigned
+                ? cast(real) cast(ulong) value : cast(real) value;
+            storeComplex(_place, re, 0.0L, _facts.size);
+            return;
+        }
+
+        // `cast(cdouble) someIdouble`: the reverse of `complexToImaginary`
+        // - the imaginary axis carries the value, the real one is zero.
+        case imaginaryToComplex: {
+            align(real.alignof) ubyte[real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            storeComplex(
+                _place, 0.0L, loadFloating(buffer.ptr, plan.sourceFacts.size),
+                _facts.size,
+            );
             return;
         }
 
@@ -4019,14 +4203,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // any of the three to `real` without loss, so narrowing that back
         // to the destination's width is the one rounding the host's own
         // `cast(float)`/`cast(double)`/`cast(real)` performs.
+        // Sized rather than dispatched on `_type.ty`/`sourceType.ty`, so
+        // the one kind also carries an imaginary-to-imaginary width
+        // change: an imaginary value's native layout is a single
+        // `float`/`double`/`real`, the same shape a plain real one is,
+        // just at a different offset than `sourceType.ty`'s own family
+        // would suggest were this dispatched by type instead of size.
         case floatWidth: {
-            const value = asFloating(expression.e1);
-            if (_type.ty == Tfloat32)
-                *cast(float*) _place = cast(float) value;
-            else if (_type.ty == Tfloat64)
-                *cast(double*) _place = cast(double) value;
-            else
-                *cast(real*) _place = value;
+            align(real.alignof) ubyte[real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            storeFloating(
+                _place, loadFloating(buffer.ptr, plan.sourceFacts.size),
+                _facts.size,
+            );
             return;
         }
 

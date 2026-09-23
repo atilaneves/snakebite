@@ -1724,6 +1724,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (truth.isFloat) {
             emit(&opFloatToBool, offset, offset, truth.size);
+            // A complex condition's second word is its own component,
+            // not an integral one `opBitOr` alone could combine
+            // straight - `re != 0 || im != 0`, each tested the same way
+            // `truth.offset`'s own word just was, before the two 1-byte
+            // answers are combined.
+            if (truth.secondOffset != TypeFacts.Truth.noSecondWord) {
+                const secondOffset = valueOffset + truth.secondOffset;
+                emit(&opFloatToBool, secondOffset, secondOffset, truth.size);
+                emit(&opBitOr, offset, secondOffset, bool.sizeof);
+            }
             return offset;
         }
 
@@ -3426,8 +3436,55 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileConstant(expression);
     }
 
+    // `1.0f + 0.0fi`: dmd's own constant folding already reduces
+    // `complex`-literal arithmetic to one `ComplexExp` (`EXP.complex80`
+    // regardless of the actual `cfloat`/`cdouble`/`creal` width - only
+    // `.type` differs), the same compile-time constant `RealExp` above
+    // is for a real one; `compileConstant` embeds either the same way.
+    override void visit(ComplexExp expression) {
+        compileConstant(expression);
+    }
+
     override void visit(StringExp expression) {
         compileConstant(expression);
+    }
+
+    // `int4 v = 1;`/`cast(int4) 1`: dmd's own semantic pass (`dcast.d`)
+    // rewrites either shape to this node, `e1` already cast to the
+    // vector's own element type, and its meaning is "every lane gets
+    // this one value" - filling the first lane and then copying those
+    // same bytes to every remaining one. `int4 v = cast(int4)
+    // someInt4Sarray;` reaches this node too, with `e1` a matching-size
+    // static array instead (`dcast.d`'s `T[n] <-- __vector(U[m])`, in
+    // reverse): a plain reinterpret of the array's own bytes, not a
+    // broadcast of a single "element".
+    override void visit(VectorExp expression) {
+        import dmd.astenums: Tsarray;
+        import dmd.typesem: toBasetype;
+        import snakebite.nativelayout: TypeFacts;
+
+        requireDestination(expression);
+
+        if (expression.e1.type.toBasetype.ty == Tsarray) {
+            evalInto(expression.e1, _destination, _width);
+            return;
+        }
+
+        const elementFacts = TypeFacts.of(expression.e1.type);
+        evalInto(expression.e1, _destination, elementFacts.size);
+        foreach (i; 1 .. _width / elementFacts.size)
+            emit(&opCopy, _destination + i * elementFacts.size,
+                _destination, elementFacts.size);
+    }
+
+    // `someVector.array`: dmd's own semantic pass (`typesem.d`'s
+    // `TypeVector.dotExp`, `Id.array`) reinterprets the vector as its
+    // own `basetype` static array - the same bytes, so evaluating `e1`
+    // with its own (vector) type straight into the destination already
+    // is the static array's own value.
+    override void visit(VectorArrayExp expression) {
+        requireDestination(expression);
+        evalInto(expression.e1, _destination, _width);
     }
 
     override void visit(VarExp expression) {
@@ -5259,7 +5316,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import std.conv: text;
 
         auto sourceType = expression.e1.type;
-        auto destType = expression.type;
+        // `.im` on a `complex` value is dmd's own `e.castTo(sc,
+        // timaginaryN)` (`typesem.d`'s `Id.im` case for `Tcomplex*`)
+        // with the resulting node's `.type` then overwritten straight
+        // to the matching `Tfloat*` - a same-size reinterpret with no
+        // `CastExp` of its own, done directly on the expression
+        // `castTo` already built. `.type` is that overwritten field;
+        // `.to` still names the cast `castTo` actually performed, so
+        // it is the one `classify` has to see to tell that apart from
+        // `.re`, whose `.to` and `.type` agree.
+        auto destType =
+            expression.to !is null ? expression.to : expression.type;
 
         const plan = classify(expression.e1, destType);
 
@@ -5286,6 +5353,104 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 compileEffect(expression.e1);
             emit(&opZero, destOffset, 0, width);
             return;
+
+        // A complex value's native layout is its two components, `re`
+        // then `im`, each exactly half the whole value's size
+        // (`nativevalue.loadComplexRe`/`loadComplexIm`'s own doc
+        // comment) - every complex kind below reaches its `im` half by
+        // adding that same offset to a temporary already holding the
+        // whole value, rather than a primitive of its own for reading
+        // or writing one component, the same way `delegateToPointer`
+        // above reaches a delegate's own second word.
+        case complexToBool: {
+            const componentSize = plan.sourceFacts.size / 2;
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(&opFloatToBool, destOffset, sourceOffset, componentSize);
+            const imaginaryBool = reserveTemp(plan.destFacts);
+            emit(&opFloatToBool, imaginaryBool,
+                sourceOffset + componentSize, componentSize);
+            emit(&opBitOr, destOffset, imaginaryBool, width);
+            return;
+        }
+
+        case complexToReal: {
+            const componentSize = plan.sourceFacts.size / 2;
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(&opFloatWidthCast, destOffset, sourceOffset,
+                plan.destFacts.size, componentSize);
+            return;
+        }
+
+        case complexToImaginary: {
+            const componentSize = plan.sourceFacts.size / 2;
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(&opFloatWidthCast, destOffset,
+                sourceOffset + componentSize,
+                plan.destFacts.size, componentSize);
+            return;
+        }
+
+        case complexToIntegral: {
+            const componentSize = plan.sourceFacts.size / 2;
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(
+                plan.destFacts.isUnsigned
+                    ? &opFloatToIntegralUnsigned : &opFloatToIntegralSigned,
+                destOffset, sourceOffset, plan.destFacts.size, componentSize,
+            );
+            return;
+        }
+
+        case complexWidth: {
+            const sourceComponentSize = plan.sourceFacts.size / 2;
+            const destComponentSize = plan.destFacts.size / 2;
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(&opFloatWidthCast, destOffset, sourceOffset,
+                destComponentSize, sourceComponentSize);
+            emit(&opFloatWidthCast, destOffset + destComponentSize,
+                sourceOffset + sourceComponentSize,
+                destComponentSize, sourceComponentSize);
+            return;
+        }
+
+        case realToComplex: {
+            const componentSize = plan.destFacts.size / 2;
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(&opFloatWidthCast, destOffset, sourceOffset,
+                componentSize, plan.sourceFacts.size);
+            emit(&opZero, destOffset + componentSize, 0, componentSize);
+            return;
+        }
+
+        case integralToComplex: {
+            const componentSize = plan.destFacts.size / 2;
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(
+                plan.sourceFacts.isUnsigned
+                    ? &opIntegralToFloatUnsigned : &opIntegralToFloatSigned,
+                destOffset, sourceOffset, componentSize,
+                plan.sourceFacts.size,
+            );
+            emit(&opZero, destOffset + componentSize, 0, componentSize);
+            return;
+        }
+
+        case imaginaryToComplex: {
+            const componentSize = plan.destFacts.size / 2;
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(&opZero, destOffset, 0, componentSize);
+            emit(&opFloatWidthCast, destOffset + componentSize, sourceOffset,
+                componentSize, plan.sourceFacts.size);
+            return;
+        }
 
         case floatWidth: {
             const sourceOffset = plan.sourceFacts.size > plan.destFacts.size

@@ -340,3 +340,263 @@ unittest {
 
     plan.kind.should == CastPlan.Kind.delegateToPointer;
 }
+
+
+// `complex`/`imaginary` are deprecated but still full members of the
+// language `classify` has to answer for (coordinator probe items 1-5, 8).
+@("kind.complexToBool")
+unittest {
+    auto function_ = castFunctionOf(q{
+        bool cast_(cdouble value) { return cast(bool) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.complexToBool;
+}
+
+
+@("kind.complexToReal")
+unittest {
+    auto function_ = castFunctionOf(q{
+        double cast_(cdouble value) { return cast(double) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.complexToReal;
+}
+
+
+// `someComplex.im`: dmd's own semantic pass (`typesem.d`'s `Id.im` case
+// for `Tcomplex64`) builds `e.castTo(sc, idouble)` and then overwrites
+// the resulting node's own `.type` straight to `double` - `.to` still
+// names the cast actually performed, which is what `classify` has to
+// see here (both backends' `compileCast`/`visitUnloweredCast` prefer
+// `.to` over `.type` for exactly this reason).
+@("kind.complexToImaginary")
+unittest {
+    auto function_ = castFunctionOf(q{
+        idouble cast_(cdouble value) { return cast(idouble) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.complexToImaginary;
+}
+
+
+@("kind.complexToIntegral")
+unittest {
+    auto function_ = castFunctionOf(q{
+        int cast_(cdouble value) { return cast(int) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.complexToIntegral;
+}
+
+
+@("kind.complexWidth")
+unittest {
+    auto function_ = castFunctionOf(q{
+        cfloat cast_(creal value) { return cast(cfloat) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.complexWidth;
+}
+
+
+@("kind.realToComplex")
+unittest {
+    auto function_ = castFunctionOf(q{
+        cdouble cast_(double value) { return cast(cdouble) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.realToComplex;
+}
+
+
+@("kind.integralToComplex")
+unittest {
+    auto function_ = castFunctionOf(q{
+        cdouble cast_(int value) { return cast(cdouble) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.integralToComplex;
+}
+
+
+@("kind.imaginaryToComplex")
+unittest {
+    auto function_ = castFunctionOf(q{
+        cdouble cast_(idouble value) { return cast(cdouble) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.imaginaryToComplex;
+}
+
+
+// A real value has no imaginary axis to carry over - dmd's own constant
+// folding (`toImaginary`) answers `0` regardless of the real value, the
+// same answer a side-effect-preserving zero fill gives at run time.
+@("kind.zero.realToImaginary")
+unittest {
+    auto function_ = castFunctionOf(q{
+        idouble cast_(double value) { return cast(idouble) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.zero;
+}
+
+
+// The reverse of `kind.zero.realToImaginary`: an imaginary value has no
+// real axis either.
+@("kind.zero.imaginaryToReal")
+unittest {
+    auto function_ = castFunctionOf(q{
+        double cast_(idouble value) { return cast(double) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.zero;
+}
+
+
+@("kind.zero.integralToImaginary")
+unittest {
+    auto function_ = castFunctionOf(q{
+        idouble cast_(int value) { return cast(idouble) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.zero;
+}
+
+
+@("kind.zero.imaginaryToIntegral")
+unittest {
+    auto function_ = castFunctionOf(q{
+        int cast_(idouble value) { return cast(int) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.zero;
+}
+
+
+// An imaginary-to-imaginary width change is the identical byte operation
+// a `float`-to-`double` one is - just the imaginary operand's own size.
+@("kind.floatWidth.imaginaryToImaginary")
+unittest {
+    auto function_ = castFunctionOf(q{
+        idouble cast_(ifloat value) { return cast(idouble) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.floatWidth;
+}
+
+
+// An imaginary value's own nonzero test is the identical byte operation
+// a real operand's `cast(bool)` already is.
+@("kind.floatToBool.imaginaryToBool")
+unittest {
+    auto function_ = castFunctionOf(q{
+        bool cast_(idouble value) { return cast(bool) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.floatToBool;
+}
+
+
+// dmd's own `dcast.d` (bugzilla 3133) reinterprets two equal-size "fat
+// values" - a `struct`, a static array, a vector - into one another once
+// no constructor rewrite claims a `struct` destination first (coordinator
+// probe item 7): `cast(ubyte[S.sizeof]) someS` has no matching
+// constructor to rewrite to, so it is a genuine bit reinterpret by the
+// time it reaches `classify`.
+@("kind.copy.structToSarray")
+unittest {
+    auto function_ = castFunctionOf(q{
+        struct S { int x; int y; }
+        long[1] cast_(S value) { return cast(long[1]) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.copy;
+}
+
+
+@("kind.copy.sarrayToStruct")
+unittest {
+    auto function_ = castFunctionOf(q{
+        struct S { int x; int y; }
+        S cast_(int[2] value) { return cast(S) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.copy;
+}
+
+
+@("kind.copy.sarrayToSarray")
+unittest {
+    auto function_ = castFunctionOf(q{
+        ubyte[8] cast_(int[2] value) { return cast(ubyte[8]) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.copy;
+}
+
+
+@("kind.copy.vectorToSarray")
+unittest {
+    auto function_ = castFunctionOf(q{
+        import core.simd;
+        int[4] cast_(int4 value) { return cast(int[4]) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.copy;
+}

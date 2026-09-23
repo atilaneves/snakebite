@@ -977,3 +977,381 @@ static foreach (backend; Matrix!(
         );
     }
 }
+
+
+// `complex`/`imaginary` are deprecated but still full members of the
+// language: `cast(bool)` is true when either component is nonzero -
+// either alone is enough, unlike an integral or plain real operand,
+// which have only the one word to test.
+static foreach (backend; Matrix!()) {
+    @("cast.complexToBool.trueOnRealComponent." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                cfloat c = 1.0f + 0.0fi;
+                assert(cast(bool) c);
+            }
+        });
+    }
+
+    @("cast.complexToBool.trueOnImaginaryComponent." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                cfloat c = 0.0f + 2.0fi;
+                assert(cast(bool) c);
+            }
+        });
+    }
+
+    @("cast.complexToBool.falseOnZero." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                cdouble c = 0.0 + 0.0i;
+                assert(!cast(bool) c);
+            }
+        });
+    }
+
+    // `if (someComplex)` shares `Truth` with `cast(bool)` above, so it
+    // gets the same either-component rule.
+    @("cast.complexToBool.conditionSharesRule." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                cdouble c = 0.0 + 3.0i;
+                if (c) {} else assert(false);
+            }
+        });
+    }
+}
+
+
+// `cast(double) someComplex`/`someComplex.re`: the real component alone.
+static foreach (backend; Matrix!()) {
+    @("cast.complexToReal.takesRealComponent." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                cdouble c = 3.0 + 4.0i;
+                double d = cast(double) c;
+                assert(d == 3.0);
+            }
+        });
+    }
+
+    @("cast.complexToReal.field." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                cdouble c = 3.0 + 4.0i;
+                assert(c.re == 3.0);
+            }
+        });
+    }
+}
+
+
+// `cast(cdouble) someDouble`: the real axis carries the value, the
+// imaginary one is zero.
+static foreach (backend; Matrix!()) {
+    @("cast.realToComplex.zeroesImaginary." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                double d = 2.5;
+                cdouble c = cast(cdouble) d;
+                assert(c.re == 2.5 && c.im == 0);
+            }
+        });
+    }
+
+    // As `realToComplex`, from an integral operand.
+    @("cast.integralToComplex.zeroesImaginary." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int i = 7;
+                cdouble c = cast(cdouble) i;
+                assert(c.re == 7.0 && c.im == 0);
+            }
+        });
+    }
+}
+
+
+// An imaginary value has no real axis: `cast(T)` to a real or an
+// integral both answer `0`, whatever the imaginary magnitude was.
+static foreach (backend; Matrix!()) {
+    @("cast.imaginaryToReal.isZero." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                idouble i = 5.0i;
+                double d = cast(double) i;
+                assert(d == 0);
+            }
+        });
+    }
+
+    @("cast.imaginaryToIntegral.isZero." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                idouble i = 5.0i;
+                int x = cast(int) i;
+                assert(x == 0);
+            }
+        });
+    }
+
+    // The imaginary magnitude's own nonzero test - not always `false`
+    // the way the real/integral projections above are.
+    @("cast.imaginaryToBool.testsMagnitude." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                idouble zero = 0.0i;
+                idouble nonzero = 5.0i;
+                assert(!cast(bool) zero);
+                assert(cast(bool) nonzero);
+            }
+        });
+    }
+}
+
+
+// The reverse of `imaginaryToReal.isZero`/`imaginaryToIntegral.isZero`
+// above (a real/integral cast to imaginary answers `0` the same way),
+// and an imaginary-to-imaginary width change (the identical byte
+// operation a `float`-to-`double` one is). Each reads back through `&i`
+// rather than `cast(double) i`: an imaginary-to-real cast is `zero`
+// regardless of the operand (the very rule the first two exercise), so
+// it cannot also be the readback - a raw reinterpret of the same
+// storage sidesteps that. dmd's own CTFE refuses `cast(double*) &i`
+// (`Error: cannot convert '&idouble' to 'double*' at compile time`,
+// independently confirmed with `dmd -o-`), so `Ctfe` has no read-back
+// this way to run at all.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's own CTFE refuses `cast(double*) &someImaginary`"),
+)) {
+    @("cast.realToImaginary.isZero." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                double d = 5.0;
+                idouble i = cast(idouble) d;
+                assert(*cast(double*) &i == 0);
+            }
+        });
+    }
+
+    @("cast.integralToImaginary.isZero." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int value = 5;
+                idouble i = cast(idouble) value;
+                assert(*cast(double*) &i == 0);
+            }
+        });
+    }
+
+    @("cast.imaginaryWidth.preservesMagnitude." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ifloat f = 2.5fi;
+                idouble d = cast(idouble) f;
+                assert(*cast(double*) &d == 2.5);
+            }
+        });
+    }
+}
+
+
+// `cast(cfloat) someCreal`: both components, independently rounded to
+// the destination's own width - and the reverse, `imaginary` <-> `complex`.
+static foreach (backend; Matrix!()) {
+    @("cast.complexWidth.roundsBothComponents." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                creal c = 1.0L + 2.0Li;
+                cfloat f = cast(cfloat) c;
+                assert(f.im == 2.0f);
+                assert(f.re == 1.0f);
+            }
+        });
+    }
+
+    @("cast.complexToImaginary.takesImaginaryComponent." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                cdouble c = 3.0 + 4.0i;
+                assert(c.im == 4.0);
+            }
+        });
+    }
+
+    @("cast.imaginaryToComplex.zeroesReal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                idouble im = 6.0i;
+                cdouble c = cast(cdouble) im;
+                assert(c.re == 0 && c.im == 6.0);
+            }
+        });
+    }
+}
+
+
+// dmd's own `dcast.d` (bugzilla 3133) reinterprets the bytes of two
+// equal-size "fat values" - a `struct`, a static array, a vector - into
+// one another once no constructor rewrite claims a `struct` destination
+// first: `cast(ubyte[S.sizeof]) someS` has no matching constructor, so
+// it is a genuine bit reinterpret. dmd's own CTFE refuses every one of
+// these at compile time (`Error: cannot cast ... at compile time` /
+// `array cast from ... is not supported at compile time`), independently
+// confirmed with `dmd -o-`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's own CTFE refuses a struct/static-array reinterpret cast"),
+)) {
+    @("cast.structToSarray.reinterprets." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                struct S { int x; }
+                S s = S(3);
+                ubyte[S.sizeof] raw = cast(ubyte[S.sizeof]) s;
+                assert(raw[0] == 3);
+            }
+        });
+    }
+
+    @("cast.sarrayToStruct.reinterprets." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                struct S { int x; int y; }
+                int[2] a = [7, 8];
+                S s = cast(S) a;
+                assert(s.x == 7 && s.y == 8);
+            }
+        });
+    }
+
+    @("cast.structToStruct.reinterprets." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                struct S { int x; int y; }
+                struct T { int a; int b; }
+                S s = S(1, 2);
+                T t = cast(T) s;
+                assert(t.a == 1 && t.b == 2);
+            }
+        });
+    }
+
+    @("cast.sarrayToSarray.reinterpretsDifferentElementType." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[2] a = [1, 2];
+                ubyte[8] raw = cast(ubyte[8]) a;
+                assert(raw[0] == 1 && raw[4] == 2);
+            }
+        });
+    }
+}
+
+
+// `int4 v = 1;`/`cast(int4) 1`: every lane gets the same value - dmd's
+// own semantic pass spells the declaration's own initializer this way
+// (`dcast.d`'s scalar-to-vector rewrite). `cast(int4) someInt4Sarray`
+// reinterprets the array's own bytes instead of broadcasting a single
+// "element". Both round trip through `.array`, itself a reinterpret
+// (`typesem.d`'s `TypeVector.dotExp`, `Id.array`).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's own CTFE refuses a vector-to-vector element-type reinterpret"
+            ~ " cast"),
+)) {
+    @("cast.vectorBroadcast.everyLaneGetsTheSameValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd;
+
+            void main() {
+                int4 v = 1;
+                float4 f = cast(float4) v;
+                assert(f.array[0] != 0);
+                assert(f.array[1] != 0);
+                assert(f.array[2] != 0);
+                assert(f.array[3] != 0);
+            }
+        });
+    }
+}
+
+
+// `cast(int4) someInt4Sarray`/`someVector.array`: a plain reinterpret,
+// dmd's own CTFE allows both (unlike the vector-to-vector element-type
+// change above).
+static foreach (backend; Matrix!()) {
+    @("cast.sarrayToVector.reinterprets." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd;
+
+            void main() {
+                int[4] a = [10, 20, 30, 40];
+                int4 v = cast(int4) a;
+                assert(v.array[1] == 20);
+            }
+        });
+    }
+
+    @("cast.vectorToSarray.viaArrayProperty." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd;
+
+            void main() {
+                int4 v = [10, 20, 30, 40];
+                int[4] a = v.array;
+                assert(a[2] == 30);
+            }
+        });
+    }
+}
