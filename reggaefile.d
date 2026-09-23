@@ -61,6 +61,19 @@ Target interpreterStackAmd64Object() {
     );
 }
 
+// The weak fallback for `dmd.astenums.Edition.init`
+// (`source/dmd/iasm/edition_init_amd64.S`), assembled and linked the
+// same way, and for the same reasons, as `sysvAmd64Object` above - see
+// that file's own comment for why a `.weak` symbol needs assembling
+// rather than declaring in D.
+Target editionInitAmd64Object() {
+    return Target(
+        "$project/edition_init_amd64.o",
+        "cc -c $in -o $out",
+        Target("source/dmd/iasm/edition_init_amd64.S"),
+    );
+}
+
 Target dubTarget(string compiler, string config, string objectSet,
                  string output, CompilerFlags flags = CompilerFlags()) {
     auto buildOptions = options.dup;
@@ -136,6 +149,7 @@ Target dubTarget(string compiler, string config, string objectSet,
     // into the same link line as the D-compiled ones.
     info.packages[0].files ~= "$project/sysv_amd64.o";
     info.packages[0].files ~= "$project/interpreter_stack_amd64.o";
+    info.packages[0].files ~= "$project/edition_init_amd64.o";
 
     auto target = dubBuild(buildOptions, info, CompilationMode.options, flags);
     target.rawOutputs[0] = "bin/" ~ output;
@@ -146,6 +160,7 @@ Build reggaeBuild() {
     auto build = Build(
         sysvAmd64Object(),
         interpreterStackAmd64Object(),
+        editionInitAmd64Object(),
         dubTarget("dmd", "unittest", "unittest", "ut"),
         dubTarget("ldc2", "acceptance-test", "release", "at", CompilerFlags("-release", "-O", "-flto=thin")),
         dubTarget("ldc2", "sb", "release", "sb", CompilerFlags("-release", "-O", "-flto=thin")),

@@ -40,6 +40,6 @@ public void asmSemantic(
     );
 }
 
-// dmd:lexer 2.112.x references Edition.init without emitting it.
-pragma(mangle, "_D3dmd8astenums7Edition6__initZ")
-public __gshared ushort editionInit = 2023;
+// dmd:lexer 2.112.x references Edition.init without always emitting
+// it: `edition_init_amd64.S` (this package) supplies it as a weak
+// fallback so it never collides with the real one, when linked.
