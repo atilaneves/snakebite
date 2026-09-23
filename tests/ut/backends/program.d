@@ -1,6 +1,7 @@
 module ut.backends.program;
 
 
+import dmd.func: FuncDeclaration;
 import snakebite.backends.backend: Program;
 import snakebite.backends.bytecode: Bytecode;
 import snakebite.backends.ctfe: Ctfe;
@@ -8,6 +9,7 @@ import snakebite.frontend.compiler: parseSnippets;
 import snakebite.frontend.dmd.functions:
     findFunction,
     findModuleConstructors;
+import std.algorithm: map;
 import ut;
 
 
@@ -90,6 +92,49 @@ unittest {
 
     auto constructors = findModuleConstructors(module_);
     assert(constructors.length == 3);
+}
+
+
+@("findModuleConstructors.insideAggregate")
+unittest {
+    auto module_ = parseSnippets([
+        q{
+            module constructorsInsideAggregate;
+            __gshared int trace;
+
+            struct StructWithCtor {
+                shared static this() { trace = trace * 10 + 1; }
+                static this() { trace = trace * 10 + 2; }
+            }
+
+            class ClassWithCtor {
+                static this() { trace = trace * 10 + 3; }
+            }
+        },
+    ])[0];
+
+    auto constructors = findModuleConstructors(module_);
+    constructors.map!(constructorLabel).should == [
+        "StructWithCtor.shared static this",
+        "StructWithCtor.static this",
+        "ClassWithCtor.static this",
+    ];
+}
+
+// `constructor`'s enclosing scope and kind, such as
+// "StructWithCtor.shared static this". A count alone does not tell apart a
+// collector that found the right constructors from one that found any
+// three; this pins both, without pinning the location-derived identifier
+// dmd gives every static and shared static constructor.
+private string constructorLabel(FuncDeclaration constructor) {
+    import std.conv: text;
+
+    return text(
+        constructor.parent.ident.toString,
+        ".",
+        constructor.isSharedStaticCtorDeclaration
+            ? "shared static this" : "static this",
+    );
 }
 
 

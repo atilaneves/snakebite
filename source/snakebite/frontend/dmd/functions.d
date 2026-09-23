@@ -120,8 +120,8 @@ public imported!"dmd.func".FuncDeclaration unresolvedCalleeOf(
 }
 
 // Every unittest in `module_`, in declaration order, as druntime's
-// `__modtest` runs them: the ones nested in a struct or a class count too,
-// so the search descends into aggregates as well as attributes.
+// `__modtest` runs them. See `appendFromScope` for the scopes the search
+// descends into.
 public imported!"dmd.func".FuncDeclaration[] findUnittests(
     imported!"dmd.dmodule".Module module_,
 ) {
@@ -133,10 +133,8 @@ public imported!"dmd.func".FuncDeclaration[] findUnittests(
 }
 
 // Every module constructor in `module_` that belongs to the root package.
-// Constructors in instantiated templates are members of the template
-// instance, not the module, so the search descends into those instances. An
-// uninstantiated template is not part of the build and is not visited.
-// Shared constructors run before ordinary constructors, as druntime does.
+// See `appendFromScope` for the scopes the search descends into. Shared
+// constructors run before ordinary constructors, as druntime does.
 public imported!"dmd.func".FuncDeclaration[] findModuleConstructors(
     imported!"dmd.dmodule".Module module_,
 ) {
@@ -153,47 +151,26 @@ private void appendModuleConstructors(
     ref imported!"dmd.func".FuncDeclaration[] sharedCtors,
     ref imported!"dmd.func".FuncDeclaration[] ordinary,
 ) {
-    if (symbols is null)
-        return;
-
-    foreach (member; *symbols) {
+    appendFromScope(symbols, (member) {
         if (auto constructor = member.isSharedStaticCtorDeclaration()) {
             sharedCtors ~= constructor;
-            continue;
+            return true;
         }
 
         if (auto constructor = member.isStaticCtorDeclaration()) {
             ordinary ~= constructor;
-            continue;
+            return true;
         }
 
-        // `.decl` is the syntactic "then" branch even when the condition
-        // resolved otherwise; `include` gives the branch a real build
-        // compiles in.
-        if (auto attributes = member.isAttribDeclaration()) {
-            import dmd.dsymbolsem: include;
-
-            appendModuleConstructors(
-                include(attributes, null), sharedCtors, ordinary);
-            continue;
-        }
-
-        // Only instantiated templates contribute declarations to this root
-        // package. Aggregate constructors are type constructors, not module
-        // constructors, so do not descend into arbitrary scope symbols.
-        if (auto instance = member.isTemplateInstance())
-            appendModuleConstructors(instance.members, sharedCtors, ordinary);
-    }
+        return false;
+    });
 }
 
 private void appendUnittests(
     imported!"dmd.arraytypes".Dsymbols* symbols,
     ref imported!"dmd.func".FuncDeclaration[] unittests,
 ) {
-    if (symbols is null)
-        return;
-
-    foreach (member; *symbols) {
+    appendFromScope(symbols, (member) {
         if (auto unittest_ = member.isUnitTestDeclaration) {
             // DMD's parser skips the unittest blocks of a non-root module
             // but still declares an empty placeholder for each one, so a
@@ -203,23 +180,78 @@ private void appendUnittests(
             // body, so `__modtest` never calls one; neither does this.
             if (unittest_.fbody !is null)
                 unittests ~= unittest_;
+            return true;
+        }
+
+        return false;
+    });
+}
+
+// This is the traversal every walk over a module's symbol tree needs. It
+// finds the nested scopes that contribute compiled-in declarations.
+// `action` runs on each member first. It returns true when it consumed the
+// member as a leaf. A member `action` did not consume can still be a
+// scope. Every walk descends into these scopes:
+//   - an `AttribDeclaration` (`static:`, `version(...)`, ...). Its `.decl`
+//     is the syntactic "then" branch. This holds even when the condition
+//     resolved otherwise. `include` gives the branch a real build compiles
+//     in;
+//   - an aggregate's members. A `static this()`, `shared static this()` or
+//     `unittest` declared inside a struct or class still belongs to the
+//     enclosing module, not the aggregate. dmd's glue layer visits struct
+//     and class members for the same reason (glue/toobj.d: "There might be
+//     static ctors in the members"). The aggregate's own `this()` is a
+//     distinct kind, `CtorDeclaration`. `action` never matches it by
+//     descending here;
+//   - a template mixin's members. `mixin decl!(...)` inlines `decl`'s body
+//     into its own scope, so dmd's glue layer never gates it: it descends
+//     into a `TemplateMixin` the same way it descends into any other scope
+//     (glue/toobj.d, `visit(TemplateMixin)`), with no `needsCodegen()`
+//     check;
+//   - an instantiated template's members, when dmd would emit that
+//     instance. These belong to the instance, not the uninstantiated
+//     template. `needsCodegen()` tells apart an instance the build uses
+//     from one dmd only checked speculatively, the same test dmd's glue
+//     layer runs before it descends into an instance
+//     (glue/toobj.d, `visit(TemplateInstance)`). A `TemplateMixin` also
+//     matches `isTemplateInstance`, so this check comes after the mixin
+//     check above, not instead of it.
+private void appendFromScope(
+    imported!"dmd.arraytypes".Dsymbols* symbols,
+    scope bool delegate(imported!"dmd.dsymbol".Dsymbol member) action,
+) {
+    if (symbols is null)
+        return;
+
+    foreach (member; *symbols) {
+        if (action(member))
+            continue;
+
+        if (auto attributes = member.isAttribDeclaration()) {
+            import dmd.dsymbolsem: include;
+
+            appendFromScope(include(attributes, null), action);
             continue;
         }
 
-        // `.decl` is the syntactic "then" branch even when the condition
-        // resolved otherwise; `include` gives the branch a real build
-        // compiles in. See `findFunction` below.
-        if (auto attributes = member.isAttribDeclaration) {
-            import dmd.dsymbolsem: include;
-
-            appendUnittests(include(attributes, null), unittests);
+        if (auto aggregate = member.isAggregateDeclaration()) {
+            appendFromScope(aggregate.members, action);
+            continue;
         }
 
-        if (auto aggregate = member.isAggregateDeclaration)
-            appendUnittests(aggregate.members, unittests);
+        if (auto mixin_ = member.isTemplateMixin()) {
+            appendFromScope(mixin_.members, action);
+            continue;
+        }
 
-        if (auto instance = member.isTemplateInstance)
-            appendUnittests(instance.members, unittests);
+        if (auto instance = member.isTemplateInstance()) {
+            import dmd.templatesem: needsCodegen;
+
+            // See `appendFromScope` above for why this check is here.
+            if (instance.needsCodegen())
+                appendFromScope(instance.members, action);
+            continue;
+        }
     }
 }
 

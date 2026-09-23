@@ -256,6 +256,115 @@ static foreach (backend; Matrix!(
     }
 }
 
+// dmd's glue layer visits struct and class members looking for static
+// constructors ("There might be static ctors in the members"), because a
+// `static this()` / `shared static this()` declared inside an aggregate is
+// still a module constructor, run by druntime before `main`, not a per-type
+// constructor like the aggregate's own `this()`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "static variable cannot be read at compile time"),
+)) {
+    @("staticCtorInsideAggregateRuns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int trace;
+
+            struct StructWithCtor {
+                shared static this() {
+                    trace = trace * 10 + 1;
+                }
+
+                static this() {
+                    trace = trace * 10 + 2;
+                }
+            }
+
+            class ClassWithCtor {
+                static this() {
+                    trace = trace * 10 + 3;
+                }
+            }
+
+            void main() {
+                assert(trace == 123);
+            }
+        });
+    }
+}
+
+// unit-threaded's `Gen!T` shape: a `shared static this()` inside a struct
+// template, initialising a `static const` field the template's own members
+// read. `main` instantiates `Gen!dchar` only inside a nested function, but
+// dmd still appends the instance to the module's own members, not to
+// `main`'s body (templatesem.d, `appendToModuleMember`). The instance's
+// `StructDeclaration` is only reachable through `TemplateInstance.members`.
+// The test above, for a plain struct, never crosses a template instance to
+// reach its aggregate; this one pins the instance-then-aggregate descent
+// that the plain struct test cannot.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "static variable cannot be read at compile time"),
+)) {
+    @("staticCtorInsideStructTemplateRuns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Gen(T) {
+                static const dchar[] charset;
+                shared static this() {
+                    charset = [cast(dchar) 'a', 'b', 'c'];
+                }
+            }
+
+            void main() {
+                auto use() {
+                    Gen!dchar g;
+                    return Gen!dchar.charset.length;
+                }
+                assert(use() == 3);
+            }
+        });
+    }
+}
+
+// dmd appends every template instance to the root module's members, even
+// one it will not emit, so that `needsCodegen()` can make that call later
+// (templatesem.d, `appendToModuleMember`). dmd's glue layer checks
+// `needsCodegen()` before it descends into an instance (glue/toobj.d,
+// `visit(TemplateInstance)`), and skips this one: `__traits(compiles)`
+// instantiates `NeverInstantiated!int` only to check that it compiles, so
+// dmd never emits it or runs its `static this()`. The walk here must make
+// the same check, or it runs a static ctor dmd never does.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "static variable cannot be read at compile time"),
+)) {
+    @("staticCtorInsideSpeculativeTemplateDoesNotRun." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int trace;
+
+            struct NeverInstantiated(T) {
+                static if (is(T == int)) {
+                    static this() { trace = 999; }
+                }
+                int dummy;
+            }
+
+            enum bool compiles = __traits(compiles, {
+                NeverInstantiated!int x;
+            });
+
+            void main() {
+                assert(trace == 0);
+            }
+        });
+    }
+}
+
 // `pragma(mangle)` binds a declaration to a symbol by name, so the guest
 // links against druntime's `gc_getArrayUsed` even though nothing in it
 // declares that symbol directly; without `pragma(mangle)` the link fails
