@@ -908,6 +908,62 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A class nested in a *function* rather than in another class never gets
+// `NewExp.thisexp` (dmd only synthesizes or accepts `thisexp` for a class
+// nested in a class) - `Inner`'s `vthis` must instead resolve to `main`'s
+// own frame, the same way a nested *struct* already reads its enclosing
+// function's context.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "dmd's own CTFE engine reports `class `this.this` is `null` and " ~
+        "cannot be dereferenced` for this snippet, independently of " ~
+        "either LoweringVisitor backend - not yet investigated"),
+)) {
+    @("functionLocalNestedClassReadsAndWritesOuterLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int value = 7;
+                final class Inner {
+                    int get() { return value; }
+                    void set(int v) { value = v; }
+                }
+                auto inner = new Inner();
+                inner.set(inner.get() + 1);
+                assert(value == 8);
+            }
+        });
+    }
+}
+
+// As above, but allocated on the stack with `scope`: the on-stack `NewExp`
+// path (`visitUnloweredNew`) must fill the same `vthis` the heap path
+// does, not just skip straight to the constructor call.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "dmd's own CTFE engine reports `class `this.this` is `null` and " ~
+        "cannot be dereferenced` for this snippet, independently of " ~
+        "either LoweringVisitor backend - not yet investigated"),
+)) {
+    @("functionLocalNestedScopeClassReadsAndWritesOuterLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int value = 7;
+                final class Inner {
+                    int get() { return value; }
+                    void set(int v) { value = v; }
+                }
+                scope inner = new Inner();
+                inner.set(inner.get() + 1);
+                assert(value == 8);
+            }
+        });
+    }
+}
+
 // `Exception.classinfo` on a native class is the real linked
 // `TypeInfo_Class`: the one a native instance's vtable names, the one
 // `typeid(Exception)` yields, and the one whose `base` is `Throwable`'s.

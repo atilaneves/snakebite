@@ -147,31 +147,43 @@ in (arguments is null || arguments.length <= sd.fields.length)
 // the implicit `new Inner()` written inside a method the same way it
 // resolves the explicit `outer.new Inner()`/`this.new Inner()` forms -
 // walking `.outer` once per further nesting level - so both surface forms
-// reach this plan identically; only a `NewExp` with no `thisexp` at all
-// (a plain, non-nested `new`, or a class nested in a *function* rather
-// than a class, which never gets a `thisexp`) yields no step here.
+// reach this plan identically through `classVthisStep`. A class nested in
+// a *function* rather than a class never gets a `thisexp` at all - there
+// is no outer object to name - so that case falls to the same
+// `tryVthisStep` the struct paths above use, reading the enclosing
+// function's own frame instead.
 public AggregateInitPlan planClassContext(
     imported!"dmd.expression".NewExp expression,
 ) {
     auto classType = expression.newtype.isTypeClass;
-    if (classType is null || expression.thisexp is null)
+    if (classType is null)
         return AggregateInitPlan.init;
 
-    return AggregateInitPlan(
-        false, [classVthisStep(classType.sym, expression.thisexp)]);
+    if (expression.thisexp !is null)
+        return AggregateInitPlan(
+            false, [classVthisStep(classType.sym, expression.thisexp)]);
+
+    InitStep step;
+    if (!tryVthisStep(classType.sym, step))
+        return AggregateInitPlan.init;
+
+    return AggregateInitPlan(false, [step]);
 }
 
-// `sd.isNested()` is true only when dmd gave the struct a hidden `vthis`
-// field; a `static struct` declared inside a function is lexically nested
-// but has no such field.
+// `ad.isNested()` is true only when dmd gave the aggregate a hidden
+// `vthis` field; a `static struct`/`static class` declared inside a
+// function is lexically nested but has no such field. Shared by a nested
+// struct's own construction and a nested *class*'s construction when it
+// has no `thisexp` (nested in a function, not in another class) - both
+// read the same enclosing function's frame the same way.
 private bool tryVthisStep(
-    imported!"dmd.dstruct".StructDeclaration sd, out InitStep step,
+    imported!"dmd.aggregate".AggregateDeclaration ad, out InitStep step,
 ) {
-    if (!sd.isNested() || sd.vthis is null)
+    if (!ad.isNested() || ad.vthis is null)
         return false;
 
-    auto parent = sd.toParent2();
-    step = InitStep(InitStep.Kind.vthis, sd.vthis.offset);
+    auto parent = ad.toParent2();
+    step = InitStep(InitStep.Kind.vthis, ad.vthis.offset);
     step.parentFunction = parent is null ? null : parent.isFuncDeclaration;
     return true;
 }
