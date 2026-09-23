@@ -5349,6 +5349,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
+        // `cast(void*) someDelegate`: the same context word `dg.ptr`
+        // itself reads (`compileDelegateWord` below), out of a temporary
+        // holding the delegate's own two words.
+        case delegateToPointer: {
+            import snakebite.nativelayout: delegateContextOffset;
+
+            const delegateOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, delegateOffset, plan.sourceFacts.size);
+            emit(&opCopy, destOffset, delegateOffset + delegateContextOffset,
+                plan.destFacts.size);
+            return;
+        }
+
         case sarrayToSlice: {
             import snakebite.nativelayout:
                 arrayLengthOffset, arrayPointerOffset;

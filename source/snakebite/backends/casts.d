@@ -17,8 +17,8 @@ public struct CastPlan {
     public enum Kind {
         // Bit-identical representations: a plain move of `destFacts.size`
         // bytes. Covers class<->class upcasts, class<->pointer, AA<->AA,
-        // pointer<->pointer, equal-width float<->float, equal-width
-        // integral<->integral, delegate<->delegate and
+        // AA<->pointer, pointer<->pointer, equal-width float<->float,
+        // equal-width integral<->integral, delegate<->delegate and
         // equal-element-width array<->array.
         copy,
         // DMD leaves proven upcasts unlowered so code generation can apply
@@ -33,6 +33,11 @@ public struct CastPlan {
         sliceToPointer,
         pointerToArray,
         pointerToIntegral,
+        // `cast(void*) someDelegate`: dmd keeps only the context word
+        // (deprecated in favour of `.ptr`, still accepted). The reverse
+        // direction, and a delegate to `bool`/an integral, are dmd
+        // frontend errors, so this is one-directional.
+        delegateToPointer,
         // Dynamic array to dynamic array with a different element width:
         // the byte length stays the same, so the element count scales by
         // the ratio of the two element sizes.
@@ -97,8 +102,25 @@ public CastPlan classify(
     if (sourceType.ty == Tdelegate && destType.ty == Tdelegate)
         return CastPlan(CastPlan.Kind.copy, sourceFacts, destFacts);
 
+    // `cast(void*) someDelegate` (deprecated, still accepted): the
+    // reverse (`cast(SomeDelegate) somePointer`) and `cast(bool)`/an
+    // integral destination are dmd frontend errors, so only this one
+    // direction is reached.
+    if (sourceType.ty == Tdelegate && destType.ty == Tpointer)
+        return CastPlan(
+            CastPlan.Kind.delegateToPointer, sourceFacts, destFacts);
+
     if ((sourceType.ty == Tclass && destType.ty == Tpointer)
             || (sourceType.ty == Tpointer && destType.ty == Tclass))
+        return CastPlan(CastPlan.Kind.copy, sourceFacts, destFacts);
+
+    // An associative array is one pointer-sized handle natively, the same
+    // shape `Tclass`-`Tpointer` already gets `copy` for above.
+    // `cast(bool)`/an integral destination other than a pointer are dmd
+    // frontend errors for an AA, so this is only ever `Tpointer` on the
+    // other side.
+    if ((sourceType.ty == Taarray && destType.ty == Tpointer)
+            || (sourceType.ty == Tpointer && destType.ty == Taarray))
         return CastPlan(CastPlan.Kind.copy, sourceFacts, destFacts);
 
     if (isFloatingType(destType)) {

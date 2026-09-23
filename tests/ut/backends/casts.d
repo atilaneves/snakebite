@@ -286,3 +286,57 @@ unittest {
 
     plan.kind.should == CastPlan.Kind.classReference;
 }
+
+
+// An associative array is one pointer-sized handle natively, the same
+// shape a class reference already gets `copy` for at the equivalent
+// `Tclass`-`Tpointer` pair above - `source/dub/internal/undead/xml.d`'s
+// `Tag.opCmp` casts a `const(string[string])` field to `void*` to compare
+// two AAs by handle identity (issue: bytecode compiler rejected this cast
+// outright).
+@("kind.copy.aaToPointer")
+unittest {
+    auto function_ = castFunctionOf(q{
+        void* cast_(int[int] value) { return cast(void*) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.copy;
+}
+
+
+// The reverse of `kind.copy.aaToPointer`: dmd accepts `cast(int[int])
+// somePointer` the same way it accepts `cast(void*) someAA` - both sides
+// of the pointer-sized handle are `Tpointer`/`Taarray`, so the same
+// bit-preserving `copy` applies.
+@("kind.copy.pointerToAA")
+unittest {
+    auto function_ = castFunctionOf(q{
+        int[int] cast_(void* value) { return cast(int[int]) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.copy;
+}
+
+
+// `cast(void*) someDelegate` is deprecated (superseded by `.ptr`) but
+// still accepted by dmd's frontend, which keeps only the delegate's
+// context word - unlike `cast(bool)`/`cast(size_t)` on a delegate, both
+// of which dmd's frontend refuses outright, or the reverse direction
+// (`cast(SomeDelegate) somePointer`), which dmd also refuses.
+@("kind.delegateToPointer")
+unittest {
+    auto function_ = castFunctionOf(q{
+        void* cast_(void delegate() value) { return cast(void*) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastPlan.Kind.delegateToPointer;
+}

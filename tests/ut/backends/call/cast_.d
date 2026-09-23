@@ -843,3 +843,137 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+// An associative array is one pointer-sized handle natively - `cast(void*)`
+// of an empty AA (no backing store allocated yet) is the null handle, and
+// inserting a key gives it a real, non-null one. `source/dub/internal/
+// undead/xml.d`'s `Tag.opCmp` relies on exactly this to compare two AAs by
+// handle identity (issue: the bytecode compiler rejected the cast
+// outright, `cast a from const(string[string]) to void* in opCmp`).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE refuses `pointer cast from int[int] to void* is not " ~
+        "supported at compile time` for a non-empty AA"),
+)) {
+    @("cast.aaToPointer.matchesHandle." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                bool matchesHandle() {
+                    int[int] empty;
+                    if (cast(void*) empty !is null)
+                        return false;
+
+                    int[int] filled;
+                    filled[1] = 2;
+                    if (cast(void*) filled is null)
+                        return false;
+
+                    return cast(void*) filled is cast(void*) filled;
+                }
+            },
+            "matchesHandle",
+        );
+    }
+}
+
+// The exact shape `source/dub/internal/undead/xml.d`'s `Tag.opCmp` runs: a
+// `const` associative-array field, read through a `const` method, compared
+// by casting both sides to `void*` - `attr != tag.attr` (AA equality) picks
+// the branch, `cast(void*) attr < cast(void*) tag.attr` (pointer identity)
+// only orders the tie. `T.init`'s AA field is empty, so `left`'s handle is
+// null and `right`'s is not; a working cast makes them compare unequal by
+// pointer, giving a deterministic ordering.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE refuses `pointer cast from int[int] to void* is not " ~
+        "supported at compile time` for a non-empty AA"),
+)) {
+    @("cast.aaToPointer.opCmpShape." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                struct Tag {
+                    const int[int] attr;
+
+                    const int opCmp(Tag other) {
+                        return attr != other.attr
+                            ? (cast(void*) attr < cast(void*) other.attr
+                                ? -1 : 1)
+                            : 0;
+                    }
+                }
+
+                bool comparesByHandle() {
+                    Tag left;
+                    int[int] filled;
+                    filled[1] = 2;
+                    Tag right = Tag(filled);
+                    return left.opCmp(right) != 0;
+                }
+            },
+            "comparesByHandle",
+        );
+    }
+}
+
+// The reverse of `cast.aaToPointer.matchesHandle`: `cast(int[int])
+// somePointer` is the same bit-preserving cast in the other direction, so
+// round-tripping a real AA's handle through `void*` and back gives an AA
+// that still holds the same key.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE refuses `pointer cast from int[int] to void* is not " ~
+        "supported at compile time` for a non-empty AA"),
+)) {
+    @("cast.pointerToAA.roundTrips." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(
+            backend,
+            q{
+                int roundTrips() {
+                    int[int] original;
+                    original[1] = 2;
+                    void* handle = cast(void*) original;
+                    int[int] restored = cast(int[int]) handle;
+                    return restored[1];
+                }
+            },
+            "roundTrips",
+        );
+    }
+}
+
+// `cast(void*) someDelegate` is deprecated (superseded by `.ptr`) but still
+// accepted by dmd's frontend, which keeps only the delegate's context word
+// - the same word `dg.ptr` itself reads.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read `dg.ptr`"),
+)) {
+    @("cast.delegateToPointer.matchesContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                struct Counter {
+                    int value;
+                    void bump() { value++; }
+                }
+
+                bool matchesContext() {
+                    Counter counter;
+                    void delegate() dg = &counter.bump;
+                    void* p = cast(void*) dg;
+                    return p is dg.ptr;
+                }
+            },
+            "matchesContext",
+        );
+    }
+}

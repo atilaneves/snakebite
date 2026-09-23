@@ -3863,7 +3863,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativevalue:
             floatingToBool, floatingToIntegral, integralToFloating;
         import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset, loadIntegral, storeIntegral;
+            arrayLengthOffset, arrayPointerOffset, delegateContextOffset,
+            loadIntegral, storeIntegral;
         import std.conv: text;
 
         auto sourceType = expression.e1.type;
@@ -3905,6 +3906,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         case pointerToIntegral:
             storeIntegral(
                 _place, cast(size_t) asPointer(expression.e1), _facts.size);
+            return;
+
+        // `cast(void*) someDelegate`: the same context word `dg.ptr`
+        // itself reads (`visitDelegateWord` below).
+        case delegateToPointer:
+            visitDelegateWord(expression.e1, delegateContextOffset);
             return;
 
         case sarrayToSlice: {
