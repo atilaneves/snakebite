@@ -144,13 +144,13 @@ public struct InterpreterStack {
     // (`snakebite_interpreter_call_on_stack`, interpreter_stack_amd64.S).
     // `_size` is a whole number of pages, already 16-byte aligned, so
     // this needs no further rounding.
-    public void* top() const {
+    public void* top() @nogc nothrow pure const {
         return cast(void*) (_base + _size);
     }
 }
 
 
-private size_t roundUpToPage(in size_t bytes) {
+private size_t roundUpToPage(in size_t bytes) @safe @nogc nothrow pure {
     import core.memory: pageSize;
 
     return (bytes + pageSize - 1) / pageSize * pageSize;
@@ -161,7 +161,7 @@ private size_t roundUpToPage(in size_t bytes) {
 // nothing overrides it, on this platform - see `InterpreterStack`'s own
 // documentation for why this, and not a number picked for one guest
 // program, is the right default.
-package size_t defaultInterpreterStackBytes() {
+package size_t defaultInterpreterStackBytes() @trusted @nogc nothrow {
     import core.sys.posix.sys.resource:
         getrlimit, rlimit, RLIMIT_STACK, RLIM_INFINITY;
 
@@ -213,8 +213,9 @@ package extern(C) void snakebite_interpreter_call_on_stack(
 // `Fiber`'s `StackContext` while `Evaluator.runOnInterpreterStack` is
 // switched onto its dedicated stack, then restore it - see that method
 // for why this is safe across `Fiber.yield()`/resume too.
-private abstract class FiberContextAccess : imported!"core.thread.fiber".Fiber {
-    import core.thread.fiber: Fiber;
+import core.thread.fiber: Fiber;
+
+private abstract class FiberContextAccess : Fiber {
     import core.thread.context: StackContext;
 
     private this() {
@@ -224,13 +225,13 @@ private abstract class FiberContextAccess : imported!"core.thread.fiber".Fiber {
         super(unused);
     }
 
-    static StackContext* contextOf(Fiber fiber) {
+    static StackContext* contextOf(Fiber fiber) @nogc nothrow pure {
         return fiber.m_ctxt;
     }
 }
 
 package imported!"core.thread.context".StackContext* fiberContextOf(
     imported!"core.thread.fiber".Fiber fiber,
-) {
+) @nogc nothrow pure {
     return FiberContextAccess.contextOf(fiber);
 }

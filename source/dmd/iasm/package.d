@@ -40,6 +40,13 @@ public void asmSemantic(
     );
 }
 
-// dmd:lexer 2.112.x references Edition.init without always emitting
+// dmd:lexer 2.113.0 references Edition.init without always emitting
 // it: `edition_init_amd64.S` (this package) supplies it as a weak
 // fallback so it never collides with the real one, when linked.
+// Pinned here so a `dmd:frontend` bump that moves `Edition.init` off
+// 2023 fails the build instead of silently depending on link order
+// for which definition wins.
+static assert(
+    cast(ushort) imported!"dmd.astenums".Edition.init == 2023,
+    "edition_init_amd64.S must match Edition.init",
+);

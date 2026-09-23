@@ -1,6 +1,6 @@
 /* Fallback definition of `dmd.astenums.Edition.init` - see
  * `source/dmd/iasm/package.d`'s own comment for why one is needed at
- * all: dmd:lexer 2.112.x references `Edition.init` without always
+ * all: dmd:lexer 2.113.0 references `Edition.init` without always
  * emitting it.
  *
  * Whether `dmd:frontend`'s own `astenums.d` ends up linked - and so
