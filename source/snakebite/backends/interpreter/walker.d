@@ -363,6 +363,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
     import snakebite.framestack: FrameStack, defaultFrameCapacity;
+    import snakebite.backends.interpreter.nativestack:
+        InterpreterStack, defaultInterpreterStackBytes, fiberContextOf,
+        snakebite_interpreter_call_on_stack;
     import snakebite.ffi:
         CallAdapter, CallbackCall, CallPlan, CallResult, PlanCache;
     import snakebite.ffi.abi: Register;
@@ -407,6 +410,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // bump-allocated on call and popped on return. Frames never move;
     // overflow throws loudly.
     private FrameStack _frames;
+    // The native stack every host-to-guest entry runs its recursive walk
+    // on, regardless of which stack it was reached on - see
+    // `InterpreterStack`'s own documentation (nativestack.d).
+    private InterpreterStack _interpreterStack;
     private NativeData* _nativeData;
     // This thread's reads of the shared tables, counted.
     private Cache!(FuncDeclaration, FrameLayout) _layouts;
@@ -522,6 +529,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _catchTypes = Cache!(Catch, TypeInfo_Class)(&shared_.catchTypes);
         _typeFacts = Cache!(Type, TypeFacts)(&shared_.typeFacts);
         _frames = FrameStack(defaultFrameCapacity);
+        _interpreterStack = InterpreterStack(defaultInterpreterStackBytes);
         _temporaries = new TemporaryLifetime(&destroyTemporary);
     }
 
@@ -578,6 +586,148 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // pending temporaries; a top-level call owns none, so the nesting
     // costs it nothing.
     extern(D) private void runHostToGuest(
+        FuncDeclaration function_,
+        void* returnPlace,
+        scope const(void*)[] args,
+    ) {
+        runOnInterpreterStack({
+            runHostToGuestOnDedicatedStack(function_, returnPlace, args);
+        });
+    }
+
+    // Runs `action` with this thread's own `_interpreterStack` active,
+    // switching onto it first if needed. Two cases need no switch: a
+    // nested host-to-guest entry reached while already running there (a
+    // guest delegate passed to a host algorithm, itself called from guest
+    // code already on this stack: it already has the full budget, and
+    // switching twice would only cost time), and a plain OS thread with
+    // no guest `Fiber` active (`Fiber.getThis`) - its own stack is
+    // already sized like compiled D's (`InterpreterStack`'s own
+    // documentation, nativestack.d), so only a `Fiber`'s own
+    // (druntime-default-sized) stack ever needs the switch.
+    //
+    // Switching `%rsp` alone would leave the *active guest `Fiber`'s*
+    // `StackContext.bstack` naming its own small stack while a live
+    // `%rsp` reads point into this one, and druntime's conservative GC
+    // scans exactly that mismatched range on every collection
+    // (`nativestack.d`'s own documentation on `fiberContextOf`) - so
+    // `ctxt.bstack` is pointed at this stack too, for as long as the
+    // switch lasts. `active` is per-`Evaluator`, so per (thread, fiber)
+    // context (ADR-0006): a `Fiber.yield()` inside `action` suspends by
+    // switching `%rsp` on its own, through druntime's own unmodified
+    // `Fiber` machinery, to whatever called `Fiber.call()` - not through
+    // here - so neither `active` nor `ctxt.bstack` is restored while a
+    // guest fiber is suspended mid-recursion: both stay set until this
+    // same call truly completes (`scope(exit)`, below), never popped by
+    // an unrelated switch-back in between. A later resume lands back on
+    // this same dedicated stack, at the exact point `Fiber.yield()` left
+    // it (`Fiber`'s own `StackContext.tstack`, which the switch away
+    // never touches), so it needs no switch of its own either.
+    //
+    // Repointing `ctxt.bstack` fixes the scan for this stack, but for the
+    // same duration it also drops the guest `Fiber`'s *own* small stack
+    // from that scan: every frame between the `Fiber`'s entry point and
+    // here sits below `savedBstack`, on a stack no `StackContext` names
+    // any more. When that `Fiber` is guest code calling guest code (this
+    // module's own recursion, dlib), those frames are the walker's own
+    // and hold nothing the GC needs. When a *host* owns the `Fiber` and
+    // calls guest code from inside it (a vibe.d-style task, say -
+    // ADR-0005's own scenario), the host's frames down there can hold
+    // the only reference to a guest object. `callOnInterpreterStack`
+    // registers that abandoned span with `GC.addRange` for as long as
+    // the switch lasts, so a collection during the switch still finds
+    // it - see its own documentation for exactly which span.
+    //
+    // What that does not close: `ctxt.bstack` and the live `%rsp` briefly
+    // name two different stacks at the switch's own entry and exit
+    // (after `ctxt.bstack` moves here but before `%rsp` follows it, and
+    // the mirror image coming back) - the same inconsistency druntime's
+    // own `Fiber.switchIn`/`switchOut` hold `ThreadBase.m_lock` around,
+    // precisely so a concurrent collection never observes it
+    // (`thread_suspendHandler` only writes a suspended thread's `tstack`
+    // when `!m_lock`). `m_lock` is `package(core.thread)`, unreachable
+    // from here, so a collection landing on another thread inside either
+    // window can still scan a mismatched pair - the same class of crash
+    // this whole mechanism exists to prevent, now at a lower
+    // probability, worse under many concurrent callbacks. Not fixed
+    // here: closing it needs druntime's own locked machinery (a private
+    // worker `Fiber` relaying `yield`s outward), which is a redesign,
+    // not a bounds fix - see the known-limitation issue linked from
+    // nativestack.d's module documentation.
+    extern(D) private void runOnInterpreterStack(scope void delegate() action) {
+        import core.thread.fiber: Fiber;
+
+        if (_interpreterStack.active) {
+            action();
+            return;
+        }
+        auto guestFiber = Fiber.getThis;
+        if (guestFiber is null) {
+            action();
+            return;
+        }
+
+        _interpreterStack.active = true;
+        scope (exit) _interpreterStack.active = false;
+
+        auto ctxt = fiberContextOf(guestFiber);
+        auto savedBstack = ctxt.bstack;
+        ctxt.bstack = _interpreterStack.top;
+        scope (exit) ctxt.bstack = savedBstack;
+
+        callOnInterpreterStack(_interpreterStack.top, savedBstack, action);
+    }
+
+    // `snakebite_interpreter_call_on_stack` (interpreter_stack_amd64.S)
+    // only knows plain C pointers, so `action`'s closure - itself a
+    // local on the caller's own stack, and so still valid throughout,
+    // wherever `%rsp` points while it runs - is passed across by address
+    // rather than as a D delegate value.
+    //
+    // `abandonedStackBase` is the guest `Fiber`'s own `StackContext.bstack`
+    // from before `runOnInterpreterStack` repointed it - the base of the
+    // small stack this call is about to leave unscanned (see that
+    // function's own documentation for why). `mark`'s address, taken
+    // here rather than higher up the call chain, approximates how deep
+    // the switch reaches; everything between it and `abandonedStackBase`
+    // - every frame from the guest `Fiber`'s entry point down through
+    // `runHostToGuest` and `runOnInterpreterStack` - is registered with
+    // `GC.addRange` for as long as the switch lasts, so a collection
+    // during that window still finds whatever those frames hold. The
+    // sliver between `&mark` and the true `%rsp` at the switch - this
+    // function's own remaining prologue and
+    // `snakebite_interpreter_call_on_stack`'s few instructions before it
+    // moves `%rsp` - holds only plain C pointers already passed by
+    // value, no GC reference of its own, so leaving it unregistered
+    // costs nothing.
+    extern(D) private void callOnInterpreterStack(
+        void* top,
+        void* abandonedStackBase,
+        scope void delegate() action,
+    ) @system {
+        import core.memory: GC;
+
+        void* mark;
+        assert(
+            cast(ubyte*) &mark < cast(ubyte*) abandonedStackBase,
+            "the guest fiber's stack does not grow the way this switch assumes",
+        );
+        GC.addRange(
+            &mark, cast(ubyte*) abandonedStackBase - cast(ubyte*) &mark);
+        scope (exit) GC.removeRange(&mark);
+
+        auto closure = action;
+        snakebite_interpreter_call_on_stack(top, &runClosure, &closure);
+    }
+
+    // The plain C function pointer `snakebite_interpreter_call_on_stack`
+    // actually calls: `context` is `&closure` above, still readable no
+    // matter which stack is current (see `callOnInterpreterStack`).
+    extern(C) private static void runClosure(void* context) {
+        (*cast(void delegate()*) context)();
+    }
+
+    extern(D) private void runHostToGuestOnDedicatedStack(
         FuncDeclaration function_,
         void* returnPlace,
         scope const(void*)[] args,
