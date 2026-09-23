@@ -61,11 +61,29 @@ static import ut.backends.run.main,
     ut.repl.cell,
     ut.repl.session;
 
+// Fewer GC collections during `bin/ut`'s frontend-heavy startup: the
+// default heap-to-used ratio (2.0) triggers a collection on almost
+// every pool growth while DMD's AST accumulates. Measured (3 runs each,
+// default -j, `--DRT-gcopt=profile:1`): the default does 88 collections
+// for 19.6 s of total GC time; `heapSizeFactor:4` does 76 for 17.3 s, a
+// repeated wall-time win (paired runs, same load: -4 s to -9 s) over
+// the default with only a modest heap increase (287 MB -> 376 MB).
+extern(C) __gshared string[] rt_options = ["gcopt=heapSizeFactor:4"];
+
 int main(string[] args) {
     import unit_threaded;
     import snakebite.frontend.compiler: Snippets, initialize;
+    import ut.backends: prewarmFrontend;
+    import unit_threaded.runner.options: Options;
 
     initialize(Snippets.yes);
+
+    // Parse every snippet/program the selected tests need in one serial
+    // pass, before unit-threaded's own worker threads start. `args.dup`
+    // keeps `args` itself untouched: `Options`'s constructor strips
+    // recognised flags in place (getopt), and `runTests!(...)` below
+    // still needs the full, unstripped `args`.
+    prewarmFrontend(Options(args.dup).testsToRun);
 
     return args.runTests!(
         "ut.backends.run.main",
