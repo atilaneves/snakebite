@@ -604,6 +604,49 @@ static foreach (backend; Matrix!(
     }
 }
 
+// `scope` on the variable, not the class, still runs the destructor at
+// scope exit and allocates off the GC heap. `resource`'s type is inferred
+// (dmd's dsymbolsem.d runs a full expressionSemantic on the initialiser
+// early to work out the type, which attaches `NewExp.lowering` - the
+// `_d_newclassT` GC allocation call - while `NewExp.onstack` is still
+// unset); only afterwards does dsymbolsem set `NewExp.onstack` for the
+// `scope` variable's initialiser, on that same already-lowered node,
+// without clearing `lowering`. The ordinary (non-`scope`) class here ends
+// up with a `NewExp` that has both a non-null `lowering` and `onstack`
+// set, unlike `scope class Resource` above where the class declaration
+// itself, not just the variable, drives allocation. A backend that
+// dispatches on `lowering !is null` alone runs the heap-allocating
+// lowering and never takes the on-stack path.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the mutable static destruction counter"),
+)) {
+    @("scopeVariableOfOrdinaryClassRunsDestructorAtScopeExit." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int destructions;
+
+            class Resource {
+                int value;
+                this(int value) { this.value = value; }
+                ~this() {
+                    ++destructions;
+                }
+            }
+
+            void main() {
+                {
+                    scope resource = new Resource(42);
+                    assert(resource.value == 42);
+                }
+                assert(destructions == 1);
+            }
+        });
+    }
+}
+
 // A call through an interface reference finds the class's override, which
 // needs the interface's own offset rather than the class vtable.
 static foreach (backend; Matrix!()) {

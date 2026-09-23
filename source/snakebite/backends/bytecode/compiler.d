@@ -4088,9 +4088,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private NewDestination[] _newDestinations;
 
+    // `LoweringVisitor.visit(NewExp)` routes `onstack` and `placement` to
+    // `visitUnloweredNew` before ever calling this, matching dmd's own glue
+    // layer (`glue/e2ir.d`, `if (ne.onstack || ne.placement)`); only
+    // `thisexp` remains this compiler's own rejection here.
     protected override void prepareNew(NewExp expression) {
-        if (expression.placement !is null || expression.thisexp !is null
-                || expression.onstack)
+        if (expression.thisexp !is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 

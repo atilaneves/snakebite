@@ -162,7 +162,21 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
 
     protected abstract void visitUnloweredConstruct(ConstructExp expression);
 
+    // dmd's expressionSemantic (`expressionsem.d`) attaches `lowering` - a
+    // call to `_d_newclassT` and friends - to every heap `NewExp` before
+    // dsymbolsem (`dsymbolsem.d`) decides a `scope` variable's initialiser
+    // can live on the stack and sets `onstack` on that same node, without
+    // clearing `lowering`. dmd's own glue layer (`glue/e2ir.d`) checks
+    // `onstack` (and `placement`) first and ignores `lowering` when either
+    // is set; a backend that dispatches on `lowering !is null` alone would
+    // run the heap-allocating lowering for a `scope` variable of an
+    // ordinary (non-`scope`) class instead of taking the on-stack path.
     final override void visit(NewExp expression) {
+        if (expression.onstack || expression.placement !is null) {
+            visitUnloweredNew(expression);
+            return;
+        }
+
         if (expression.lowering is null) {
             visitUnloweredNew(expression);
             return;
