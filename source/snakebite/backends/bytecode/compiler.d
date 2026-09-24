@@ -36,6 +36,8 @@ private imported!"snakebite.nativelayout".TypeFacts pointerFactsOf() {
 }
 
 public final class Bytecode: imported!"snakebite.backends.backend".Backend {
+    import core.sync.mutex: Mutex;
+    import core.time: Duration;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
@@ -59,19 +61,17 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     private NativeData _nativeData;
     private PlanCache _plans;
     private CallSelection _callSelection;
-    // Read without a lock by every thread that runs guest code
-    // (ADR-0006): a function's compiled form is prepared once, on its
-    // first call, and never mutated again once `compileFunction`
-    // publishes it here. Keyed by declaration, holding a `Function*`
-    // rather than a `Function`, for the same reason as before this became
-    // a `SharedTable`: a call site compiled while `function_` itself is
-    // still mid-compile - direct or mutual recursion - embeds this
-    // pointer in its `CallSite` before the body it points at has been
-    // filled in, so the pointee's address must never move once handed
-    // out. `compileFunction`'s own doc says how a still-filling
-    // placeholder reaches a recursive call without ever being published
-    // here early.
-    private SharedTable!(FuncDeclaration, Function*) _compiled;
+    // Keyed by pointer, not by value: a call site compiled while
+    // `function_` itself is still mid-compile - direct or mutual
+    // recursion - embeds this pointer in its `CallSite` before the body
+    // this AA slot points at has been filled in. The slot's address must
+    // therefore never move once handed out, which is why this holds a
+    // `Function*` rather than a `Function` - a heap block `new` allocates
+    // once and never relocates, unlike an associative array's own
+    // storage, which can rehash as more entries go in.
+    private Function*[FuncDeclaration] _compiled;
+    private const(Function)*[] _callbackRoots;
+    private bool _preparingCallbacks;
     // The prepared FFI plan for druntime's own allocator, built once and
     // reused by every `new T[](n)`/array literal any function compiles -
     // the same `rawPlanOf` a bounds hook already goes through, so this
@@ -84,11 +84,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // per `ClassDeclaration`, and every later `new`/virtual call/`typeid`
     // reuses the one already built.
     private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
-    // Compile-time statistics: every thread that misses `_compiled`
-    // increments/adds to these, so they are `shared` and touched only
-    // through `core.atomic` (`compilationStatistics`'s own doc).
-    private shared size_t _cacheMisses;
-    private shared long _compilationHnsecs;
+    private size_t _compilationDepth;
+    private size_t _cacheMisses;
+    private Duration _compilationTime;
     // The frame layout of every guest function reached through
     // `runHostToGuest`, built once per declaration and shared by the
     // program runner's top-level call and a callback's re-entry.
@@ -96,31 +94,19 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // through the same object, one thread's call and another thread's
     // callback among them (ADR-0006).
     private SharedTable!(FuncDeclaration, FrameLayout) _hostLayouts;
-    // One thread's own bookkeeping for whichever `compileFunction` call
-    // that thread is currently inside - never read by another thread, so
-    // it needs no lock of its own (ADR-0006's usual PerThread shape).
-    // `compiling` is what makes same-thread recursion (direct or mutual)
-    // safe without a global lock: `compileFunction`'s own doc says how.
-    // `depth`/`callbackRoots`/`preparingCallbacks` are this thread's own
-    // view of "am I the outermost `compileFunction`/`callableAddress`
-    // call on my own stack" and the callback roots discovered along the
-    // way - moved here from instance fields for the same reason
-    // `compiling` is thread-local: two threads compiling two different
-    // functions on this same backend must not serialize on one shared
-    // depth counter or callback queue that has nothing to do with each
-    // other's call chain.
-    private struct ThreadCompileState {
-        Function*[FuncDeclaration] compiling;
-        size_t depth;
-        bool preparingCallbacks;
-        const(Function)*[] callbackRoots;
-    }
-    private PerThread!(ThreadCompileState*) _compileState;
+    // `compileFunction`'s own lock, not the frontend one: it guards
+    // `_compiled`'s bookkeeping (a plain AA, and the placeholder
+    // recursion needs - see `compileFunction`'s own doc), which several
+    // host threads calling back into this one guest program can reach
+    // at once (ADR-0006). Recursive (`core.sync.mutex.Mutex`'s default):
+    // `compileFunction` can re-enter itself on the same thread through
+    // `callableAddress`'s own recursive call for a variadic function
+    // that takes its own address inside its own body.
+    private Mutex _compileLock;
 
     public this(const Program program) {
         super(program);
-        _compileState = PerThread!(ThreadCompileState*)(
-            () => new ThreadCompileState);
+        _compileLock = new Mutex;
         _plans = PlanCache(program.dependencyImage);
         _nativeData = NativeData(&_program.isRootOwned,
             &constantSymbolAddress,
@@ -145,13 +131,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     }
 
     public override CompilationStatistics compilationStatistics() const {
-        import core.atomic: atomicLoad;
-        import core.time: hnsecs;
-
         return CompilationStatistics(
             true,
-            atomicLoad(_cacheMisses),
-            hnsecs(atomicLoad(_compilationHnsecs)),
+            _cacheMisses,
+            _compilationTime,
         );
     }
 
@@ -161,16 +144,16 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         void*[] args,
     ) {
         // No frontend lock here (measured: 1,211 acquisitions, 58.6s
-        // wait, in a parallel `bin/ut` run before this fix), and no
-        // instance-wide lock either: `compileFunction` publishes each
-        // function's compiled form independently, so two threads calling
-        // two different functions on this same backend for the first
-        // time compile them at the same time, not one after the other.
-        // The dmd frontend helpers it calls while walking a body
-        // (`TypeFacts.of`, `FrameLayout.of`, `functionNeedsClosure`,
-        // ...) each take the frontend lock themselves, only while a dmd
-        // forward reference is still unresolved (`forceIfNeeded`). See
-        // `compileFunction`'s own doc.
+        // wait, in a parallel `bin/ut` run before this fix) -
+        // `compileFunction` now takes its own, backend-local lock only
+        // around its own bookkeeping (`_compileLock`, held for one
+        // function's whole compile, not the frontend-wide one every
+        // other backend and cache also went through); the dmd frontend
+        // helpers it calls while walking a body (`TypeFacts.of`,
+        // `FrameLayout.of`, `functionNeedsClosure`, ...) each take the
+        // frontend lock themselves, only while a dmd forward reference
+        // is still unresolved (`forceIfNeeded`). See `compileFunction`'s
+        // own doc.
         const(Function)* compiled = compileFunction(function_);
         runHostToGuest(compiled, function_, returnPlace, args);
     }
@@ -382,10 +365,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 hasNativeSymbol(method), hasIndependentNativeSymbol(method))) {
             word = compileFunction(method);
             registerGuestWord(method, cast(const(Function)*) word);
-            auto state = _compileState.current;
-            state.callbackRoots ~= cast(const(Function)*) word;
-            if (state.depth == 0)
-                prepareCallbackBodies(state);
+            _callbackRoots ~= cast(const(Function)*) word;
+            if (_compilationDepth == 0)
+                prepareCallbackBodies;
         }
         return _plans.callableAddress(word, method, adjustment);
     }
@@ -396,18 +378,13 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // placeholders to have complete bodies. A callee whose body this
     // compiler rejects stays deferred: compiled D compiles a callee it
     // never runs, so only a call that executes may fail on it.
-    //
-    // `state` is the calling thread's own `ThreadCompileState`
-    // (`_compileState`'s own doc): the roots it drains here are only the
-    // ones this same thread's own call chain discovered, never another
-    // thread's, so no lock is needed to read or clear them.
-    private void prepareCallbackBodies(ThreadCompileState* state) {
+    private void prepareCallbackBodies() {
         import snakebite.backends.bytecode.vm: CallSite;
 
-        if (state.preparingCallbacks || !state.callbackRoots.length)
+        if (_preparingCallbacks || !_callbackRoots.length)
             return;
-        state.preparingCallbacks = true;
-        scope(exit) state.preparingCallbacks = false;
+        _preparingCallbacks = true;
+        scope(exit) _preparingCallbacks = false;
         bool[const(Function)*] visited;
         void prepare(const(Function)* function_) {
             if (function_ in visited)
@@ -441,9 +418,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 prepare(prepared);
             }
         }
-        while (state.callbackRoots.length) {
-            const roots = state.callbackRoots;
-            state.callbackRoots = null;
+        while (_callbackRoots.length) {
+            const roots = _callbackRoots;
+            _callbackRoots = null;
             foreach (root; roots)
                 prepare(root);
         }
@@ -455,51 +432,30 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         _nativeData.fillFields(declaration, base);
     }
     // `function_`'s compiled form, compiling its body on first use.
-    // Reused on every later call to the same function, the way compiled
-    // code only ever compiles a function once. Returns a stable pointer
-    // (see `_compiled`) so a call site reached while this very function
-    // is still being compiled can point at it too.
+    // Reused on every later call to the
+    // same function, the way compiled code only ever compiles a function
+    // once. Returns a stable pointer (see `_compiled`) so a call site
+    // reached while this very function is still being compiled can point
+    // at it too.
     //
-    // No lock of this instance's own any more (measured together with
-    // `call`'s own doc: 5,231 acquisitions, 15-28s wait, *and* 80-92s
-    // hold - every unrelated function this backend ever compiled, on
-    // every thread, serialized behind that one hold): `_compiled` is a
-    // `SharedTable` (ADR-0006), published only once a function's body
-    // has *fully* compiled, so two threads compiling two different
-    // functions for the first time now genuinely run at the same time
-    // instead of one waiting out the other's whole compile.
-    //
-    // Same-thread recursion (direct or mutual - a call inside this very
-    // body to `function_` itself, or to a function still further up this
-    // thread's own call chain) cannot wait for `_compiled` to publish a
-    // placeholder that this very stack frame is what would complete, so
-    // it is handled without ever publishing one: `state.compiling`
-    // (`_compileState`'s own doc) is this thread's own record of which
-    // functions its own call chain is still inside, checked before
-    // `_compiled` and populated for the duration of this call, below.
-    // The pointer it hands back is the same stable `Function*` a
-    // `CallSite` bakes in, still filling in - safe to embed because
-    // nothing dereferences a `CallSite.callee` before the VM actually
-    // runs that call, which cannot happen before the whole top-level
-    // compile that reached here, on this same thread, returns.
-    //
-    // Two different threads racing to compile the very same function for
-    // the first time do not wait for one another either: each builds its
-    // own placeholder (neither sees the other's - it lives only in the
-    // other thread's own `state.compiling`), and `_compiled.insert`
-    // keeps whichever completes and publishes first, handing the other
-    // thread back that same, already-finished pointer instead of its own
-    // (`SharedTable`'s own doc - "two threads that build the same answer
-    // ... end up with the one answer"; `Deferred.get`, below, depends on
-    // this same guarantee for a call site's own first execution). The
-    // loser's own placeholder, and anything it alone compiled while
-    // building it, is simply unreachable garbage once this call returns.
-    //
-    // The frontend lock itself is reached, only when still needed, by
-    // each dmd-touching call this makes while walking the body
-    // (`TypeFacts.of`, `FrameLayout.of`, `functionNeedsClosure`, ... -
-    // each guarded by their own `forceIfNeeded`), never wrapped around
-    // this whole function.
+    // Locked on `_compileLock`, this instance's own mutex, not the dmd
+    // frontend one (measured together with `call`'s own doc: `Bytecode.
+    // call`'s 1,211/58.6s, and this same lock reached again through
+    // `Deferred.get` below, 1,884 acquisitions/19.7s wait). `_compiled`
+    // is a plain AA, not a `SharedTable`: it needs the placeholder
+    // registered below to keep one fixed address for as long as a
+    // recursive or concurrent reach of the same function might already
+    // be holding a `CallSite` that points at it (this function's own
+    // first doc paragraph), which a `SharedTable`'s "first write wins,
+    // never overwritten" insert does not provide - so both the miss
+    // check and the whole compile stay under one lock, held for this
+    // one function's own duration, the same shape `withCompilerLock`
+    // used to give it, just no longer shared with every other backend's
+    // and cache's own dmd-touching lock. The frontend lock itself is
+    // reached again, only when still needed, by each dmd-touching call
+    // this makes while walking the body (`TypeFacts.of`, `FrameLayout.
+    // of`, `functionNeedsClosure`, ... - each guarded by their own
+    // `forceIfNeeded`), never wrapped around this whole function.
     package const(Function)* compileFunction(FuncDeclaration function_) {
         import dmd.astenums: STC, Tvoid;
         import dmd.funcsem: needsClosure;
@@ -514,24 +470,22 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 "bytecode compiler cannot compile a null function",
             );
 
+        _compileLock.lock;
+        scope(exit) _compileLock.unlock;
+
         if (auto found = function_ in _compiled)
             return *found;
 
-        auto state = _compileState.current;
-        if (auto inProgress = function_ in state.compiling)
-            return *inProgress;
-
-        import core.atomic: atomicOp;
         import std.datetime.stopwatch: AutoStart, StopWatch;
 
-        const outermost = state.depth == 0;
-        ++state.depth;
-        atomicOp!"+="(_cacheMisses, 1);
+        const outermost = _compilationDepth == 0;
+        ++_compilationDepth;
+        ++_cacheMisses;
         auto stopWatch = StopWatch(AutoStart.yes);
         scope (exit) {
-            --state.depth;
+            --_compilationDepth;
             if (outermost)
-                atomicOp!"+="(_compilationHnsecs, stopWatch.peek.total!"hnsecs");
+                _compilationTime += stopWatch.peek;
         }
 
         // A struct method's hidden `this` is a pointer to the receiver, and
@@ -561,29 +515,28 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
         auto layout = FrameLayout.of(function_);
 
-        // Registered on this thread's own `state.compiling`, not on
-        // `_compiled`, before the body is walked, not after: a call
-        // inside this very body to `function_` itself finds this
-        // placeholder there instead of recompiling forever (this
-        // function's own doc). Its fields are filled in below, once
-        // `build` returns.
+        // Registered before the body is walked, not after: a call inside
+        // this very body to `function_` itself finds this placeholder
+        // through `_compiled` above instead of recompiling forever. Its
+        // fields are filled in below, once `build` returns; nothing reads
+        // them before then, since a `CallSite`'s callee is only ever
+        // dereferenced when the VM actually runs the call, which cannot
+        // happen before `compile`/`call` returns from the top-level
+        // compile that reached here.
         auto placeholder = new Function;
-        state.compiling[function_] = placeholder;
-        scope(exit) state.compiling.remove(function_);
+        _compiled[function_] = placeholder;
+        // A rejected body must not stay cached as an empty function that a
+        // later call would run.
+        scope(failure) _compiled.remove(function_);
+        registerGuestWord(function_, placeholder);
 
         scope compiler = new FunctionCompiler(
             this, function_, layout, returnFacts, isVoidReturn, isRefReturn);
         *placeholder = compiler.build(body_);
-
-        // Published only now that `placeholder` is completely filled in -
-        // never while a recursive reach of `function_` could still find
-        // it half-built (this function's own doc).
-        auto published = *_compiled.insert(function_, placeholder);
-        registerGuestWord(function_, published);
         if (outermost)
-            prepareCallbackBodies(state);
+            prepareCallbackBodies;
 
-        return published;
+        return placeholder;
     }
 }
 
@@ -5995,11 +5948,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // No lock of its own any more (measured: 1,884 acquisitions, 19.7s
     // wait, against the frontend lock this used to take): two threads
     // racing this same call site's first execution now simply both call
-    // `compute` - `compileFunction`'s own `_compiled` `SharedTable` (its
-    // own doc) is what makes that safe and gives both of them the same
-    // finished pointer back, not an extra lock here, so there is nothing
-    // left for a second one to protect beyond publishing the result,
-    // which the atomic store below already does.
+    // `compute` - `compileFunction`'s own lock (`Bytecode._compileLock`,
+    // its own doc) is what makes that safe and gives both of them the
+    // same finished pointer back, not an extra lock here, so there is
+    // nothing left for a second one to protect beyond publishing the
+    // result, which the atomic store below already does.
     private static T delegate() deferred(T)(T delegate() compute)
     if (is(T: const(void)*)) {
         return &(new Deferred!T(compute)).get;
