@@ -36,6 +36,7 @@ private imported!"snakebite.nativelayout".TypeFacts pointerFactsOf() {
 }
 
 public final class Bytecode: imported!"snakebite.backends.backend".Backend {
+    import core.sync.mutex: Mutex;
     import core.time: Duration;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
@@ -93,9 +94,19 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // through the same object, one thread's call and another thread's
     // callback among them (ADR-0006).
     private SharedTable!(FuncDeclaration, FrameLayout) _hostLayouts;
+    // `compileFunction`'s own lock, not the frontend one: it guards
+    // `_compiled`'s bookkeeping (a plain AA, and the placeholder
+    // recursion needs - see `compileFunction`'s own doc), which several
+    // host threads calling back into this one guest program can reach
+    // at once (ADR-0006). Recursive (`core.sync.mutex.Mutex`'s default):
+    // `compileFunction` can re-enter itself on the same thread through
+    // `callableAddress`'s own recursive call for a variadic function
+    // that takes its own address inside its own body.
+    private Mutex _compileLock;
 
     public this(const Program program) {
         super(program);
+        _compileLock = new Mutex;
         _plans = PlanCache(program.dependencyImage);
         _nativeData = NativeData(&_program.isRootOwned,
             &constantSymbolAddress,
@@ -132,18 +143,18 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         void* returnPlace,
         void*[] args,
     ) {
-        import snakebite.frontend.compiler: withCompilerLock;
-
-        // `compileFunction` walks dmd's AST and calls dmd frontend semantic
-        // helpers (`Type.size`, `toInteger`, `defaultInit`, ...) that
-        // memoise onto process-global, dmd-owned objects (e.g. `Type`
-        // singletons shared across every module). Two `bin/ut` threads
-        // compiling unrelated guest functions at once can race on that
-        // shared state, corrupting it for both - the same reason the CTFE
-        // and interpreter backends serialise their own dmd-touching entry
-        // points on this lock.
-        const(Function)* compiled;
-        withCompilerLock({ compiled = compileFunction(function_); });
+        // No frontend lock here (measured: 1,211 acquisitions, 58.6s
+        // wait, in a parallel `bin/ut` run before this fix) -
+        // `compileFunction` now takes its own, backend-local lock only
+        // around its own bookkeeping (`_compileLock`, held for one
+        // function's whole compile, not the frontend-wide one every
+        // other backend and cache also went through); the dmd frontend
+        // helpers it calls while walking a body (`TypeFacts.of`,
+        // `FrameLayout.of`, `functionNeedsClosure`, ...) each take the
+        // frontend lock themselves, only while a dmd forward reference
+        // is still unresolved (`forceIfNeeded`). See `compileFunction`'s
+        // own doc.
+        const(Function)* compiled = compileFunction(function_);
         runHostToGuest(compiled, function_, returnPlace, args);
     }
 
@@ -210,22 +221,20 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // `function_`'s frame layout, read without a lock once built
     // (ADR-0006): both host-to-guest entries share this cache instead of
     // each keeping its own, and its value is a pure function of the
-    // declaration, worked out under the compiler lock the first time any
-    // thread needs it.
+    // declaration, worked out - no frontend lock needed, see below - the
+    // first time any thread needs it.
     private const(FrameLayout)* hostLayoutOf(FuncDeclaration function_) {
-        import snakebite.frontend.compiler: withCompilerLock;
-
         if (auto found = function_ in _hostLayouts)
             return found;
 
-        const(FrameLayout)* layout;
-        withCompilerLock({
-            layout = function_ in _hostLayouts;
-            if (layout is null)
-                layout = _hostLayouts.insert(
-                    function_, FrameLayout.of(function_));
-        });
-        return layout;
+        // No frontend lock: `FrameLayout.of` forces whatever dmd forward
+        // reference it still needs itself, only while it is still
+        // unresolved (`hasHiddenThis`'s own `forceIfNeeded` guard), and
+        // `_hostLayouts` is a `SharedTable`, which brings its own insert
+        // lock (ADR-0006) - the same reasoning `snakebite.backends.
+        // interpreter.walker`'s `Cache.build` already applies to its own
+        // `FrameLayout` cache.
+        return _hostLayouts.insert(function_, FrameLayout.of(function_));
     }
 
     public override string eval(FuncDeclaration function_) {
@@ -432,6 +441,25 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // once. Returns a stable pointer (see `_compiled`) so a call site
     // reached while this very function is still being compiled can point
     // at it too.
+    //
+    // Locked on `_compileLock`, this instance's own mutex, not the dmd
+    // frontend one (measured together with `call`'s own doc: `Bytecode.
+    // call`'s 1,211/58.6s, and this same lock reached again through
+    // `Deferred.get` below, 1,884 acquisitions/19.7s wait). `_compiled`
+    // is a plain AA, not a `SharedTable`: it needs the placeholder
+    // registered below to keep one fixed address for as long as a
+    // recursive or concurrent reach of the same function might already
+    // be holding a `CallSite` that points at it (this function's own
+    // first doc paragraph), which a `SharedTable`'s "first write wins,
+    // never overwritten" insert does not provide - so both the miss
+    // check and the whole compile stay under one lock, held for this
+    // one function's own duration, the same shape `withCompilerLock`
+    // used to give it, just no longer shared with every other backend's
+    // and cache's own dmd-touching lock. The frontend lock itself is
+    // reached again, only when still needed, by each dmd-touching call
+    // this makes while walking the body (`TypeFacts.of`, `FrameLayout.
+    // of`, `functionNeedsClosure`, ... - each guarded by their own
+    // `forceIfNeeded`), never wrapped around this whole function.
     package const(Function)* compileFunction(FuncDeclaration function_) {
         import dmd.astenums: STC, Tvoid;
         import dmd.funcsem: needsClosure;
@@ -445,6 +473,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             throw new SnakebiteException(
                 "bytecode compiler cannot compile a null function",
             );
+
+        _compileLock.lock;
+        scope(exit) _compileLock.unlock;
 
         if (auto found = function_ in _compiled)
             return *found;
@@ -5678,13 +5709,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCall, destOffset, siteIndex, 0);
     }
 
-    // Runs `compute` at most once, on the first call of the returned
-    // delegate, under the compiler lock: the site that holds it can execute
-    // on any thread's VM, and the lock keeps two threads from both
-    // preparing the same callee. Later calls read the cached result
-    // without the lock. The state lives in a heap struct, not in captured
-    // locals, so that `compute` is seen to escape and its closure is not
-    // placed on the caller's stack.
+    // Runs `compute` (always `bytecode.compileFunction(callee)`, the one
+    // instantiation this is constrained to) at most once, on the first
+    // call of the returned delegate: the site that holds it can execute
+    // on any thread's VM. Later calls read the cached result without
+    // taking any lock at all. The state lives in a heap struct, not in
+    // captured locals, so that `compute` is seen to escape and its
+    // closure is not placed on the caller's stack.
+    //
+    // No lock of its own any more (measured: 1,884 acquisitions, 19.7s
+    // wait, against the frontend lock this used to take): two threads
+    // racing this same call site's first execution now simply both call
+    // `compute` - `compileFunction`'s own lock (`Bytecode._compileLock`,
+    // its own doc) is what makes that safe and gives both of them the
+    // same finished pointer back, not an extra lock here, so there is
+    // nothing left for a second one to protect beyond publishing the
+    // result, which the atomic store below already does.
     private static T delegate() deferred(T)(T delegate() compute)
     if (is(T: const(void)*)) {
         return &(new Deferred!T(compute)).get;
@@ -5696,14 +5736,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         private T get() {
             import core.atomic: atomicLoad, atomicStore, MemoryOrder;
-            import snakebite.frontend.compiler: withCompilerLock;
 
             if (auto found = atomicLoad!(MemoryOrder.acq)(_cached))
                 return found;
-            withCompilerLock({
-                if (atomicLoad!(MemoryOrder.acq)(_cached) is null)
-                    atomicStore!(MemoryOrder.rel)(_cached, _compute());
-            });
+            atomicStore!(MemoryOrder.rel)(_cached, _compute());
             return atomicLoad!(MemoryOrder.acq)(_cached);
         }
     }

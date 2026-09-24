@@ -638,10 +638,10 @@ static foreach (backend; Matrix!(
         static if (is(backend == Native))
             95.shouldBeRetOf!(backend, boolCallbackCode, "answer");
         else {
-            auto modules = parseSnippets([
+            auto modules = registeredSnippets!([
                 "module bool_callback_root;\n" ~ boolCallbackCode,
                 hostCallbackDeclarations,
-            ]);
+            ])();
             auto function_ = findFunction(modules[0], "answer");
             auto backend_ = new backend(Program([modules[0]]));
 
@@ -673,11 +673,11 @@ static foreach (backend; Matrix!(
             catch (AssertError error)
                 caught = error;
         } else {
-            auto modules = parseSnippets([
+            auto modules = registeredSnippets!([
                 "module bool_callback_exception_root;\n"
                     ~ boolCallbackExceptionCode,
                 hostCallbackDeclarations,
-            ]);
+            ])();
             auto function_ = findFunction(modules[0], "answer");
             auto backend_ = new backend(Program([modules[0]]));
 
@@ -719,10 +719,10 @@ static foreach (backend; Matrix!(
             mixin(otherThreadCode);
             answer().should == true;
         } else {
-            auto modules = parseSnippets([
+            auto modules = registeredSnippets!([
                 "module bool_callback_thread_root;\n" ~ otherThreadCode,
                 hostCallbackDeclarations,
-            ]);
+            ])();
             auto function_ = findFunction(modules[0], "answer");
             auto backend_ = new backend(Program([modules[0]]));
 
@@ -777,10 +777,10 @@ static foreach (backend; Matrix!(
         }
 
         static if (!is(backend == Native)) {
-            auto modules = parseSnippets([
+            auto modules = registeredSnippets!([
                 "module concurrent_threads_root;\n" ~ concurrentThreadsCode,
                 hostCallbackDeclarations,
-            ]);
+            ])();
             auto function_ = findFunction(modules[0], "answer");
             auto backend_ = new backend(Program([modules[0]]));
 
@@ -818,10 +818,10 @@ static foreach (backend; Matrix!(
             mixin(throwOnThreadCode);
             answer().should == "thrown on the worker";
         } else {
-            auto modules = parseSnippets([
+            auto modules = registeredSnippets!([
                 "module throw_on_thread_root;\n" ~ throwOnThreadCode,
                 hostCallbackDeclarations,
-            ]);
+            ])();
             auto function_ = findFunction(modules[0], "answer");
             auto backend_ = new backend(Program([modules[0]]));
 
@@ -868,11 +868,11 @@ static foreach (backend; Matrix!(
             mixin(throwThenCallSameThreadCode);
             answer().should == 42;
         } else {
-            auto modules = parseSnippets([
+            auto modules = registeredSnippets!([
                 "module throw_then_call_same_thread_root;\n"
                     ~ throwThenCallSameThreadCode,
                 hostCallbackDeclarations,
-            ]);
+            ])();
             auto function_ = findFunction(modules[0], "answer");
             auto backend_ = new backend(Program([modules[0]]));
 
@@ -914,10 +914,10 @@ static foreach (backend; Matrix!(
             mixin(joinRethrowsCode);
             answer().should == "caught: thrown on the worker";
         } else {
-            auto modules = parseSnippets([
+            auto modules = registeredSnippets!([
                 "module join_rethrows_root;\n" ~ joinRethrowsCode,
                 hostCallbackDeclarations,
-            ]);
+            ])();
             auto function_ = findFunction(modules[0], "answer");
             auto backend_ = new backend(Program([modules[0]]));
 
@@ -965,11 +965,11 @@ static foreach (backend; Matrix!(
             mixin(collectOnOtherThreadCode);
             answer().should == 42;
         } else {
-            auto modules = parseSnippets([
+            auto modules = registeredSnippets!([
                 "module collect_on_other_thread_root;\n"
                     ~ collectOnOtherThreadCode,
                 hostCallbackDeclarations,
-            ]);
+            ])();
             auto function_ = findFunction(modules[0], "answer");
             auto backend_ = new backend(Program([modules[0]]));
 
@@ -1063,11 +1063,11 @@ static foreach (backend; Matrix!(
             mixin(collectOnForeignThreadNativeCode);
             answer().should == 42;
         } else {
-            auto modules = parseSnippets([
+            auto modules = registeredSnippets!([
                 "module collect_on_foreign_thread_root;\n"
                     ~ collectOnForeignThreadCode,
                 hostCallbackDeclarations,
-            ]);
+            ])();
             auto function_ = findFunction(modules[0], "answer");
             auto backend_ = new backend(Program([modules[0]]));
 
@@ -1116,10 +1116,10 @@ static foreach (backend; Matrix!(
             mixin(tlsVariableCode);
             answer().should == 30;
         } else {
-            auto modules = parseSnippets([
+            auto modules = registeredSnippets!([
                 "module tls_variable_root;\n" ~ tlsVariableCode,
                 hostCallbackDeclarations,
-            ]);
+            ])();
             auto function_ = findFunction(modules[0], "answer");
             auto backend_ = new backend(Program([modules[0]]));
 
@@ -1164,10 +1164,10 @@ static foreach (backend; Matrix!(
             mixin(gsharedVariableCode);
             answer().should == 3;
         } else {
-            auto modules = parseSnippets([
+            auto modules = registeredSnippets!([
                 "module gshared_variable_root;\n" ~ gsharedVariableCode,
                 hostCallbackDeclarations,
-            ]);
+            ])();
             auto function_ = findFunction(modules[0], "answer");
             auto backend_ = new backend(Program([modules[0]]));
 
@@ -1259,10 +1259,10 @@ static foreach (backend; Matrix!(
             auto results = taskPool.amap!callParallelismTestFunction(
                 parallelismFunctionCount.iota);
         } else {
-            auto modules = parseSnippets([
+            auto modules = registeredSnippets!([
                 "module ut.backends.call.parallelism_guest;\n"
                     ~ parallelismFunctionsSource,
-            ]);
+            ])();
             auto functions = new typeof(findFunction(modules[0], "test0"))[
                 parallelismFunctionCount];
             foreach (i; 0 .. parallelismFunctionCount) {

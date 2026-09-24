@@ -10,6 +10,7 @@ private:
 public int main(string[] args) {
     import snakebite.cli: parseArgs;
     import snakebite.backends: BackendName;
+    import snakebite.dependencyimage: Optimise;
     import snakebite.dub: fetchProject;
     import snakebite.execution: executeBackend, prepareProject;
     import std.file: exists, isDir;
@@ -32,6 +33,7 @@ public int main(string[] args) {
             parsed.options.stringImportPaths,
             parsed.options.backend != BackendName.ctfe,
             parsed.options.versions,
+            parsed.options.noOptimiseImage ? Optimise.no : Optimise.yes,
         );
         const report = executeBackend(
             parsed.options.backend,

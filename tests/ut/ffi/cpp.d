@@ -5,7 +5,7 @@ import ut;
 import ut.backends;
 import snakebite.backends.backend: Program;
 import snakebite.dependencyimage:
-    DependencyImage, defaultCompiler, prepareImage;
+    DependencyImage, Optimise, defaultCompiler, prepareImage;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.file: mkdirRecurse, tempDir;
@@ -304,7 +304,7 @@ private string cppImageCache() {
 private auto cppImage() {
     return prepareImage(
         "", cppImageCache, defaultCompiler, null, null, null, null,
-        null, null, cppSource,
+        null, null, cppSource, optimise: Optimise.no,
     );
 }
 

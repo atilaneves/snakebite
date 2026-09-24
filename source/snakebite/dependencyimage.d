@@ -4,6 +4,14 @@ module snakebite.dependencyimage;
 private:
 
 
+// Whether the image build spends time on compiler optimisation. Real
+// `bin/sb` use keeps it on: a guest run pays the image's run time, not
+// just its build time. A test that only checks behaviour pays build time
+// on every run and gets nothing back from optimisation, so it turns this
+// off. DMD and LDC each map the intent to their own flags below.
+public alias Optimise = imported!"std.typecons".Flag!"optimise";
+
+
 public struct TestHooks {
     import core.runtime: Runtime;
 
@@ -128,6 +136,7 @@ public DependencyImage prepareImage(
     in string cppSource = null,
     in string cxxCompiler = defaultCxxCompiler,
     in string[] cxxCompilerArguments = null,
+    in Optimise optimise = Optimise.yes,
 ) {
     import std.conv: text;
     import std.digest.sha: sha256Of;
@@ -153,17 +162,22 @@ public DependencyImage prepareImage(
         ~ stringImportPaths.map!(path => "-J" ~ path).array;
     const executable = compilerPath(compiler);
 
+    // The only image compile flag that exists solely for optimisation is
+    // `-O`: `-allinst`/`-linkonce-templates` below are for correctness
+    // (a guest object supplies no template bodies of its own), not speed.
+    const optimiseFlags = optimise ? ["-O"] : null;
+
     // The image must emit transitive template bodies too, including runtime
     // helpers introduced by assertion lowering. No guest object supplies them.
     version (DigitalMars) {
-        const compileFlags = ["-c", "-fPIC", "-O", "-allinst"];
+        const compileFlags = ["-c", "-fPIC", "-allinst"] ~ optimiseFlags;
         const linkFlags = ["-shared", "-defaultlib=libphobos2.so",
             "-L--no-undefined"];
     } else version (LDC) {
         // -allinst also analyzes unused template members, which can fail
         // under the project's compiler options. Emit referenced bodies instead.
-        const compileFlags = ["-c", "-relocation-model=pic", "-O",
-            "-linkonce-templates"];
+        const compileFlags = ["-c", "-relocation-model=pic",
+            "-linkonce-templates"] ~ optimiseFlags;
         const linkFlags = ["-shared", "-link-defaultlib-shared",
             "-L--no-undefined"];
     } else {

@@ -47,6 +47,8 @@ public PreparationReport prepareProject(
     in string[] stringImportPaths = null,
     in bool nativeDependencies = true,
     in string[] versions = null,
+    in imported!"snakebite.dependencyimage".Optimise optimise
+        = imported!"snakebite.dependencyimage".Optimise.yes,
 ) {
     import snakebite.frontend.compiler: Snippets, initialize;
     import snakebite.project:
@@ -73,7 +75,7 @@ public PreparationReport prepareProject(
     const frontendDuration = stopWatch.peek;
     stopWatch.reset;
     if (nativeDependencies)
-        prepareDependencies(project);
+        prepareDependencies(project, optimise);
     if (project.program.dependencyImage !is null)
         project.program.testHooks = project.program.dependencyImage.testHooks;
     auto startupImage = new DependencyImage;

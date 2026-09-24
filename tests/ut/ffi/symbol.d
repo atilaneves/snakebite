@@ -3,7 +3,8 @@ module ut.ffi.symbol;
 
 import ut;
 import snakebite.ffi: Resolver;
-import snakebite.dependencyimage: DependencyImage, ProjectImageCache, defaultCompiler, prepareImage;
+import snakebite.dependencyimage:
+    DependencyImage, Optimise, ProjectImageCache, defaultCompiler, prepareImage;
 import std.file: timeLastModified;
 import core.atomic: atomicStore, MemoryOrder;
 import core.internal.atomic: atomicLoad;
@@ -67,7 +68,7 @@ static foreach (backend; Matrix!()) {
                 import snakebite.execution: executeBackend;
                 import snakebite.backends: backendIdentity;
                 import snakebite.dependencyimage: TestHooks;
-                auto project = prepareProject(directory).project;
+                auto project = prepareProject(directory, optimise: Optimise.no).project;
                 // A missing hook would enter this host's default unittest
                 // runner recursively instead of giving a bounded failure.
                 project.program.testHooks.should.not == TestHooks.init;
@@ -125,9 +126,9 @@ private string sharedImageCache() {
 @Serial
 unittest {
     const directory = sharedImageCache;
-    auto image = prepareImage(atomicSource, directory);
+    auto image = prepareImage(atomicSource, directory, optimise: Optimise.no);
     const stamp = timeLastModified(image.path);
-    auto reused = prepareImage(atomicSource, directory);
+    auto reused = prepareImage(atomicSource, directory, optimise: Optimise.no);
     reused.path.should == image.path;
     timeLastModified(reused.path).should == stamp;
     auto resolver = Resolver(&reused);
@@ -143,12 +144,41 @@ unittest {
     resolver.resolve("image_missing_symbol").should == null;
 }
 
+// An optimised and an unoptimised image of the same source are different
+// build outputs (`-O` present or absent), so they must never share a cache
+// entry: a caller that asks for one setting must never load a build the
+// other setting produced.
+@("image.optimise.cache")
+@Serial
+unittest {
+    const directory = sharedImageCache;
+    auto optimised = prepareImage(atomicSource, directory, optimise: Optimise.yes);
+    auto unoptimised = prepareImage(atomicSource, directory, optimise: Optimise.no);
+    optimised.path.should.not == unoptimised.path;
+
+    // Each setting still hits its own cache entry on a repeat call.
+    auto reusedOptimised = prepareImage(atomicSource, directory, optimise: Optimise.yes);
+    reusedOptimised.path.should == optimised.path;
+    auto reusedUnoptimised = prepareImage(atomicSource, directory, optimise: Optimise.no);
+    reusedUnoptimised.path.should == unoptimised.path;
+
+    // Both builds still produce a working image.
+    alias Load = typeof(&atomicLoad!(MemoryOrder.seq, int));
+    foreach (image; [optimised, unoptimised]) {
+        auto resolver = Resolver(&image);
+        const load = cast(Load) resolver.resolve(atomicLoad!(MemoryOrder.seq, int).mangleof);
+        load.should.not == null;
+        shared int value = 17;
+        load(cast(int*) &value).should == 17;
+    }
+}
+
 @("image.sourceChange")
 @Serial
 unittest {
     const directory = sharedImageCache;
-    auto first = prepareImage("export extern(C) int answer() { return 1; }", directory);
-    auto second = prepareImage("export extern(C) int answer() { return 2; }", directory);
+    auto first = prepareImage("export extern(C) int answer() { return 1; }", directory, optimise: Optimise.no);
+    auto second = prepareImage("export extern(C) int answer() { return 2; }", directory, optimise: Optimise.no);
     first.path.should.not == second.path;
     alias Answer = extern(C) int function();
     (cast(Answer) first.resolve("answer"))().should == 1;
@@ -163,7 +193,7 @@ unittest {
     {
         auto image = prepareImage(
             "export extern(C) int retainedAnswer() { return 381; }",
-            sharedImageCache,
+            sharedImageCache, optimise: Optimise.no
         );
         answer = cast(Answer) image.resolve("retainedAnswer");
     }
@@ -180,7 +210,7 @@ unittest {
     auto thread = new Thread({
         auto image = prepareImage(
             "export extern(C) int threadRetainedAnswer() { return 381; }",
-            directory,
+            directory, optimise: Optimise.no
         );
         answer = cast(Answer) image.resolve("threadRetainedAnswer");
     });
@@ -199,7 +229,7 @@ unittest {
         try {
             auto image = prepareImage(q{
                 static assert(false, "image compile diagnostic");
-            }, directory);
+            }, directory, optimise: Optimise.no);
         } catch (SnakebiteException error) {
             "Dependency image compilation failed".shouldBeIn(error.msg);
             "Command: ".shouldBeIn(error.msg);
@@ -220,7 +250,7 @@ unittest {
             auto image = prepareImage(q{
                 extern(C) int image_missing_dependency();
                 export extern(C) int answer() { return image_missing_dependency(); }
-            }, directory);
+            }, directory, optimise: Optimise.no);
         } catch (SnakebiteException error) {
             "Dependency image linking failed".shouldBeIn(error.msg);
             "Command: ".shouldBeIn(error.msg);
@@ -244,7 +274,7 @@ unittest {
         const message = "Image compiler must be LDC";
     }
     (() {
-        auto image = prepareImage(atomicSource, directory, otherCompiler);
+        auto image = prepareImage(atomicSource, directory, otherCompiler, optimise: Optimise.no);
     })().shouldThrowWithMessage!SnakebiteException(message);
     dirEntries(directory, SpanMode.shallow).array.length.should == 0;
 }
@@ -262,10 +292,10 @@ unittest {
     sandbox.writeFile("compiler.sh", "#!/bin/sh\n[ -e '" ~ poison
         ~ "' ] && exit 1\nexec " ~ defaultCompiler ~ " \"$@\"\n");
     setAttributes(wrapper, octal!755);
-    auto image = prepareImage(atomicSource, directory, wrapper);
+    auto image = prepareImage(atomicSource, directory, wrapper, optimise: Optimise.no);
     sandbox.writeFile("poison", "");
     execute([wrapper, "--version"]).status.should.not == 0;
-    auto reused = prepareImage(atomicSource, directory, wrapper);
+    auto reused = prepareImage(atomicSource, directory, wrapper, optimise: Optimise.no);
     reused.path.should == image.path;
 }
 
@@ -277,10 +307,10 @@ unittest {
     const input = sandbox.inSandboxPath("settings");
     sandbox.writeFile("settings", "first");
     auto first = prepareImage(atomicSource, directory,
-        defaultCompiler, [input]);
+        defaultCompiler, [input], optimise: Optimise.no);
     sandbox.writeFile("settings", "second");
     auto second = prepareImage(atomicSource, directory,
-        defaultCompiler, [input]);
+        defaultCompiler, [input], optimise: Optimise.no);
     first.path.should.not == second.path;
 }
 
@@ -320,7 +350,7 @@ static foreach (backend; Matrix!()) {
             result.status.shouldEqual(0, result.output);
             execute([executable]).status.should == 0;
         } else {
-            auto project = prepareProject(directory, imports).project;
+            auto project = prepareProject(directory, imports, optimise: Optimise.no).project;
             scope instance = new backend(project.program);
             run(instance, project.program).should == 0;
         }
@@ -355,7 +385,7 @@ unittest {
             }
         });
     auto project = prepareProject(
-        sandbox.inSandboxPath("app"), [sandbox.inSandboxPath("deps")]).project;
+        sandbox.inSandboxPath("app"), [sandbox.inSandboxPath("deps")], optimise: Optimise.no).project;
     const image = project.program.dependencyImage;
     image.should.not == null;
 
@@ -388,7 +418,7 @@ unittest {
     });
     auto program = Program([module_]);
     const image = prepareImage(imageSource(program), sharedImageCache,
-        defaultCompiler, null, null, null, ["-w"]);
+        defaultCompiler, null, null, null, ["-w"], optimise: Optimise.no);
     alias Rebindable = int[] function(int[]);
     // The mangle is that of `rebindable!(int[])` with its inferred attributes.
     const rebindable = cast(Rebindable) image.registryAnswer(
@@ -435,7 +465,7 @@ static foreach (backend; Matrix!()) {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
             auto image = prepareImage(imageSource(program), sharedImageCache,
-                defaultCompiler, null, null, null, ["-w"]);
+                defaultCompiler, null, null, null, ["-w"], optimise: Optimise.no);
             program.dependencyImage = &image;
             scope instance = new backend(program);
             int result;
@@ -467,7 +497,7 @@ static foreach (backend; Matrix!()) {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
             auto image = prepareImage(imageSource(program), sharedImageCache,
-                defaultCompiler, null, null, null, ["-w"]);
+                defaultCompiler, null, null, null, ["-w"], optimise: Optimise.no);
             program.dependencyImage = &image;
             scope instance = new backend(program);
             int result;
@@ -484,7 +514,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
     @Serial
     unittest {
         const directory = sharedImageCache;
-        auto image = prepareImage(atomicSource, directory);
+        auto image = prepareImage(atomicSource, directory, optimise: Optimise.no);
         shared int value = 42;
         static if (is(backend == Native)) {
             alias Load = typeof(&atomicLoad!(MemoryOrder.seq, int));
@@ -517,7 +547,7 @@ unittest {
         __gshared int value;
         shared static this() { value = 73; }
         export extern(C) int answer() { return value; }
-    }, directory);
+    }, directory, optimise: Optimise.no);
     alias Answer = extern(C) int function();
     (cast(Answer) image.resolve("answer"))().should == 73;
 }
@@ -570,7 +600,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             auto program = Program([module_]);
             const source = imageSource(program);
             auto image = prepareImage(source, sharedImageCache,
-                defaultCompiler, null, null, null, ["-w", "-checkaction=context"]);
+                defaultCompiler, null, null, null, ["-w", "-checkaction=context"], optimise: Optimise.no);
             alias FetchAdd = __traits(getOverloads, core.atomic, "atomicFetchAdd", true)[0];
             image.resolve(FetchAdd!(MemoryOrder.seq, int).mangleof)
                 .should.not == null;
@@ -607,14 +637,14 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             const source = "module " ~ moduleName ~ ";\n" ~ code;
             sandbox.writeFile(moduleName ~ ".d", source);
             // A program can outlive the project that prepared its image.
-            auto program = prepareProject(sandbox.sandboxPath).project.program;
+            auto program = prepareProject(sandbox.sandboxPath, optimise: Optimise.no).project.program;
             program.dependencyImage.should.not == null;
             scope instance = new backend(program);
             run(instance, program).should == 0;
             const path = program.dependencyImage.path;
             const stamp = timeLastModified(path);
             sandbox.writeFile(moduleName ~ ".d", source ~ "\n");
-            auto reused = prepareProject(sandbox.sandboxPath).project;
+            auto reused = prepareProject(sandbox.sandboxPath, optimise: Optimise.no).project;
             reused.program.dependencyImage.path.should == path;
             timeLastModified(path).should == stamp;
             scope second = new backend(reused.program);
@@ -643,12 +673,12 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
             sandbox.writeFile(dependencyPath, prefix ~ "int answer(T)() { return 7; }");
             const directory = sandbox.inSandboxPath("app");
             const imports = [sandbox.inSandboxPath("deps")];
-            auto project = prepareProject(directory, imports).project;
+            auto project = prepareProject(directory, imports, optimise: Optimise.no).project;
             const firstPath = project.program.dependencyImage.path;
             scope first = new backend(project.program);
             run(first, project.program).should == 7;
             sandbox.writeFile(dependencyPath, prefix ~ "int answer(T)() { return 9; }");
-            auto changed = prepareProject(directory, imports).project;
+            auto changed = prepareProject(directory, imports, optimise: Optimise.no).project;
             changed.program.dependencyImage.path.should.not == firstPath;
             scope second = new backend(changed.program);
             run(second, changed.program).should == 9;
@@ -763,7 +793,7 @@ private string dependencyGlobalProject(
 }
 
 private int runDependencyGlobalProject(backend)(in string directory) {
-    auto project = prepareProject(directory).project;
+    auto project = prepareProject(directory, optimise: Optimise.no).project;
     static if (is(backend == Native)) {
         const description = project.sources.dubDescription.value;
         foreach (target; description["targets"].array)
@@ -810,7 +840,7 @@ static foreach (backend; Matrix!()) {
             result.status.shouldEqual(0, result.output);
             execute([executable]).status.should == 0;
         } else {
-            auto project = prepareProject(sandbox.inSandboxPath("app"), imports).project;
+            auto project = prepareProject(sandbox.inSandboxPath("app"), imports, optimise: Optimise.no).project;
             scope instance = new backend(project.program);
             run(instance, project.program).should == 0;
         }
@@ -841,7 +871,7 @@ static foreach (backend; Matrix!()) {
         } else {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache);
+            auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
             program.dependencyImage = &image;
             scope instance = new backend(program);
             int result;
@@ -871,7 +901,7 @@ static foreach (backend; Matrix!()) {
         } else {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache);
+            auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
             program.dependencyImage = &image;
             scope instance = new backend(program);
             int result;
@@ -896,7 +926,7 @@ static foreach (backend; Matrix!()) {
         } else {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache);
+            auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
             program.dependencyImage = &image;
             scope instance = new backend(program);
             int result;
@@ -925,7 +955,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
         } else {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache);
+            auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
             program.dependencyImage = &image;
             scope instance = new backend(program);
             int result;
@@ -947,7 +977,7 @@ unittest {
     });
     const source = imageSource(Program([module_]));
     auto image = prepareImage(source, sharedImageCache,
-        defaultCompiler, null, null, null, ["-de"]);
+        defaultCompiler, null, null, null, ["-de"], optimise: Optimise.no);
     image.resolve(_d_newclassT!Thread.mangleof).should.not == null;
 }
 
@@ -988,7 +1018,7 @@ unittest {
         }
     });
     const imports = [sandbox.inSandboxPath("deps")];
-    auto project = prepareProject(sandbox.inSandboxPath("app"), imports).project;
+    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, optimise: Optimise.no).project;
     const source = imageSource(project.program);
     "Thing".should.not.be in source;
     (moduleName ~ ".store!(" ~ moduleName ~ ".Bucket!(string, void delegate(int)))")
@@ -1022,7 +1052,7 @@ unittest {
     // `plain` is not itself part of a linkable dependency library in this
     // sandbox, so building the real dependency image would fail to link;
     // this test only checks what `imageSource` generates, not that it links.
-    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false).project;
+    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false, optimise: Optimise.no).project;
     const source = imageSource(project.program);
     "apply!".should.be in source;
 }
@@ -1063,7 +1093,7 @@ unittest {
         }
     });
     const imports = [sandbox.inSandboxPath("deps")];
-    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false).project;
+    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false, optimise: Optimise.no).project;
     const source = imageSource(project.program);
     "apply!".should.not.be in source;
 }
@@ -1103,7 +1133,7 @@ unittest {
         }
     });
     const imports = [sandbox.inSandboxPath("deps")];
-    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false).project;
+    auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false, optimise: Optimise.no).project;
     const source = imageSource(project.program);
     "Thing".should.not.be in source;
     "apply!".should.be in source;
@@ -1119,7 +1149,7 @@ unittest {
         debug {} else static assert(false, "missing debug");
         export extern(C) int answer() { return 42; }
     }, sharedImageCache, defaultCompiler, null, null, null,
-        ["-debug", "-version=ImageSetting"]);
+        ["-debug", "-version=ImageSetting"], optimise: Optimise.no);
     alias Answer = extern(C) int function();
     (cast(Answer) image.resolve("answer"))().should == 42;
 }
@@ -1173,7 +1203,7 @@ unittest {
         export extern(C) int answer() { return paintInt(42).get; }
     }, sharedImageCache, defaultCompiler, [dependency],
         [sandbox.inSandboxPath("deps")], null, ["-preview=dip1000"],
-        [objectPath]);
+        [objectPath], optimise: Optimise.no);
     alias Answer = extern(C) int function();
     (cast(Answer) image.resolve("answer"))().should == 42;
 }
@@ -1254,7 +1284,7 @@ static foreach (backend; Matrix!()) {
         const directory = sandbox.inSandboxPath("app");
         const archive = sandbox.inSandboxPath("leaf archives/libimage-leaf.a");
         archive.exists.should == false;
-        auto project = prepareProject(directory).project;
+        auto project = prepareProject(directory, optimise: Optimise.no).project;
         archive.exists.should == true;
         project.program.dependencyImage.should.not == null;
         alias Answer = extern(C) int function();
@@ -1279,7 +1309,7 @@ static foreach (backend; Matrix!()) {
         sandbox.writeFile("app/reject-build", "");
         sandbox.writeFile("app/source/app.d",
             sandbox.inSandboxPath("app/source/app.d").readText ~ "\n");
-        auto reused = prepareProject(directory).project;
+        auto reused = prepareProject(directory, optimise: Optimise.no).project;
         reused.program.dependencyImage.path.should == path;
         timeLastModified(archive).should == stamp;
         sandbox.inSandboxPath("app/reject-build").remove;
@@ -1287,7 +1317,7 @@ static foreach (backend; Matrix!()) {
             module image_unused;
             extern(C) int image_unused_answer() { return 179; }
         });
-        auto changed = prepareProject(directory).project;
+        auto changed = prepareProject(directory, optimise: Optimise.no).project;
         const changedPath = changed.program.dependencyImage.path;
         changedPath.should.not == path;
         const changedAnswer = cast(Answer)
@@ -1303,13 +1333,13 @@ static foreach (backend; Matrix!()) {
         linked.length.should == 1;
         linked[0].should.not == archive;
         sandbox.writeFile("leaf archives/libimage-leaf.a", "not an archive");
-        auto foreign = prepareProject(directory).project;
+        auto foreign = prepareProject(directory, optimise: Optimise.no).project;
         foreign.program.dependencyImage.path.should == changedPath;
         // A missing artifact is compiled again. The image is keyed on the
         // archive's bytes, which a fresh archive need not repeat, so what
         // must hold is that the image still serves the leaf's symbols.
         linked[0].remove;
-        auto rebuilt = prepareProject(directory).project;
+        auto rebuilt = prepareProject(directory, optimise: Optimise.no).project;
         linked[0].exists.should == true;
         const rebuiltAnswer = cast(Answer)
             rebuilt.program.dependencyImage.resolve("image_unused_answer");
@@ -1339,7 +1369,7 @@ unittest {
         return [dependency.idup];
     }
     DependencyImage makeImage(in string source) {
-        return prepareImage(source, directory);
+        return prepareImage(source, directory, optimise: Optimise.no);
     }
     cache.prepare(*image,
         () {

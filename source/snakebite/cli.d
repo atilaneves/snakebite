@@ -14,6 +14,10 @@ public struct Options {
     public string projectDirectory;
     public string[] programArguments;
     public bool showHelp;
+    // Real `bin/sb` use keeps optimisation: a guest run pays the image's
+    // run time, not just its build time. This flag trades that away for
+    // faster image builds, for a caller that only checks behaviour.
+    public bool noOptimiseImage;
 }
 
 
@@ -49,6 +53,8 @@ public CliResult parseArgs(string[] args) {
                 &result.options.stringImportPaths,
             "version", "Define a version identifier (repeatable).",
                 &result.options.versions,
+            "no-optimise-image", "Build the dependency image without optimisation (faster build, slower run).",
+                &result.options.noOptimiseImage,
         );
     } catch (GetOptException exception) {
         return CliResult(1, exception.msg);
@@ -89,4 +95,6 @@ private enum helpText =
     "  -J, --string-import-path <path>\n" ~
     "                            Add a string import path for a bare directory\n" ~
     "  --version=<identifier>    Define a version identifier (repeatable)\n" ~
+    "  --no-optimise-image       Build the dependency image without\n" ~
+    "                            optimisation (faster build, slower run)\n" ~
     "  -h, --help                Show this help\n";

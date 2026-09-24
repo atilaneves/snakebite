@@ -27,16 +27,16 @@ public struct CallSelection {
     public enum Route { guest, native, builtin }
 
     // The dmd-touching questions a function's route needs, decided once
-    // per function under the compiler lock and read back without one
-    // (ADR-0006, finding 1.2): whether a C-style variadic call must
-    // always go native, whether the function nests inside another (so it
-    // needs this backend's own static chain), the same-declaration
-    // preference every call falls back to otherwise, and - for a
-    // bodiless function - whether dmd classifies it as a compiler
-    // intrinsic this backend has a wrapper for. `route` and
-    // `builtinEntry` together, rather than two separate lookups, so a
-    // builtin call site - the interpreter's hot path included - reads
-    // this cache once per call, not twice.
+    // per function and read back without a lock (ADR-0006, finding
+    // 1.2): whether a C-style variadic call must always go native,
+    // whether the function nests inside another (so it needs this
+    // backend's own static chain), the same-declaration preference
+    // every call falls back to otherwise, and - for a bodiless
+    // function - whether dmd classifies it as a compiler intrinsic this
+    // backend has a wrapper for. `route` and `builtinEntry` together,
+    // rather than two separate lookups, so a builtin call site - the
+    // interpreter's hot path included - reads this cache once per call,
+    // not twice.
     public struct Decision {
         public Route route;
         public BuiltinCall builtinEntry;
@@ -50,6 +50,22 @@ public struct CallSelection {
     // wants: a single cache lookup carries both the route and, for
     // `builtin`, the wrapper to call - `usesGuestBody` below is the one
     // narrower, route-only caller still reaches for.
+    //
+    // No frontend lock here at all (measured: 7,721 acquisitions, 61.3s
+    // wait, in a parallel `bin/ut` run before this fix) - every dmd
+    // field `buildDecision` reads (`fbody`, `type`, `parent`, `vtbl`'s
+    // `isInstantiated`/`isFuncLiteralDeclaration` classification) is set
+    // by dmd's ordinary declaration/type semantic (phase 1), not lazily
+    // deferred to a body walk (`semantic3`) the way `functionNeedsClosure`/
+    // `hasHiddenThis`'s own fields are - a `FuncDeclaration` this ever
+    // sees has already had its own signature resolved by whatever
+    // frontend pass made it a valid call target in the first place, so
+    // there is no dmd forward reference here to force at all, only a
+    // cache miss to fill. `_decisions` is a `SharedTable`, which brings
+    // its own insert lock (ADR-0006), so nothing about this cache needs
+    // the frontend one - the same reasoning `snakebite.backends.
+    // interpreter.walker`'s `Cache.build` already applies to its own
+    // caches.
     public Decision decisionOf(
         FuncDeclaration function_,
         scope bool delegate(FuncDeclaration) isGuest,
@@ -58,18 +74,8 @@ public struct CallSelection {
         if (auto cached = function_ in _decisions)
             return *cached;
 
-        import snakebite.frontend.compiler: withCompilerLock;
-
-        Decision decision;
-        withCompilerLock({
-            if (auto found = function_ in _decisions) {
-                decision = *found;
-                return;
-            }
-            decision = buildDecision(function_, hasNativeSymbol, isGuest);
-            _decisions.insert(function_, decision);
-        });
-        return decision;
+        return *_decisions.insert(
+            function_, buildDecision(function_, hasNativeSymbol, isGuest));
     }
 
     // Whether `function_`'s own body should interpret/compile - the one
@@ -87,8 +93,9 @@ public struct CallSelection {
             == Route.guest;
     }
 
-    // Called under the compiler lock only: every dmd query a function's
-    // decision needs, resolved once and never again.
+    // Every dmd query a function's decision needs, resolved once and
+    // never again - no lock, `decisionOf`'s own doc explains why none of
+    // these reads needs one.
     private static Decision buildDecision(
         FuncDeclaration function_,
         lazy bool hasNativeSymbol,

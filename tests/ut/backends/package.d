@@ -426,6 +426,26 @@ private struct RegisterProgram(string module_, string code) {
     }
 }
 
+// Registers each of `sources` as its own whole guest program under
+// `module_`, the same way `shouldBeRetOf`/`shouldBeStatusOf` register one,
+// and returns their parsed `Module`s in `sources`' order. For a test that
+// calls `parseSnippets([...])` directly on two or more compile-time
+// sources (typically a guest module plus a shared host-callback-
+// declarations module): `registeredSnippets!(sources)()` registers every
+// source at module-ctor time via `RegisterProgram!`, so `prewarmFrontend`
+// parses it in the serial pre-pass instead of the first backend that
+// reaches this test racing 15 others onto the frontend mutex. `sources`
+// must be a compile-time array (a `static foreach` below unrolls it), so
+// this only fits a test whose source text does not depend on anything
+// computed at run time - one that builds its source from a loop or from
+// `args` still calls `parseSnippets` directly.
+public Module[] registeredSnippets(string[] sources, string module_ = __MODULE__)() {
+    Module[] result;
+    static foreach (source; sources)
+        result ~= parsedProgram(RegisterProgram!(module_, source).program);
+    return result;
+}
+
 // Every program each test module will run or call, filled in before `main`.
 private __gshared GuestProgram[][string] _registeredPrograms;
 // Filled in one module at a time by `parsedProgram`.
@@ -455,4 +475,60 @@ private void parseModulePrograms(in string module_) {
     foreach (index, program; programs)
         _parsedPrograms[cast(GuestProgram) program] = guestModules[index];
     _parsedProgramModules[module_] = true;
+}
+
+// Parses every registered snippet and program batch that `selectors`
+// reaches, in one serial pass, before unit-threaded starts its parallel
+// phase. Without this, `parsedFunction`/`parsedProgram` parse lazily on
+// each test module's first touch, so the worker threads that run tests
+// in parallel race onto the single frontend mutex
+// (`snakebite.frontend.compiler.Compiler`) instead of running backends
+// over an already-parsed AST. The frontend mutex still exists and still
+// guards every parse call here; this only moves all the calls into one
+// thread so later, real per-test parses under it never happen.
+//
+// `selectors` is unit-threaded's own `Options.testsToRun` (the test
+// names/packages left after `getopt` strips recognised flags from
+// `args`), so a subset run such as `bin/ut ut.backends.call.pointers`
+// prewarms only the modules that selection can reach, not every
+// registered module.
+public void prewarmFrontend(in string[] selectors) {
+    foreach (module_, snippets; _registered)
+        if (wantsModule(module_, selectors))
+            parsedFunction(snippets[0]);
+
+    foreach (module_, programs; _registeredPrograms)
+        if (wantsModule(module_, selectors))
+            parsedProgram(programs[0]);
+}
+
+// Whether `selectors` reaches any test in `module_`. Mirrors
+// `unit_threaded.runner.factory.isWantedNonTagTest`'s
+// `matchesExactly`/`matchesPackage`, checked in both directions: a
+// selector can name `module_` itself, an ancestor package of it, or one
+// specific test inside it. A `@tag`/`~@tag` selector (the other branch
+// of `isWantedTest`) cannot be resolved here without each test's own
+// tags, so it always prewarms every module - a safe, cheap fallback.
+private bool wantsModule(in string module_, in string[] selectors) {
+    import std.algorithm.searching: any, startsWith;
+
+    if (selectors.length == 0)
+        return true;
+
+    bool reaches(in string selector) {
+        if (selector.length == 0 || selector[0] == '@'
+                || selector.startsWith("~@"))
+            return true;
+        if (selector == module_)
+            return true;
+        if (module_.length > selector.length && module_.startsWith(selector)
+                && module_[selector.length] == '.')
+            return true;
+        if (selector.length > module_.length && selector.startsWith(module_)
+                && selector[module_.length] == '.')
+            return true;
+        return false;
+    }
+
+    return selectors.any!reaches;
 }
