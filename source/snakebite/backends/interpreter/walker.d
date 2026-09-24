@@ -1170,7 +1170,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // see it, instead of the interpreter's own refusal or a hand-built
     // guest exception.
     extern(D) private void throwArrayBounds(
-        DruntimeHook hook,
+        in DruntimeHook hook,
         in Loc loc,
         scope const(void*)[] extraArguments,
     ) {

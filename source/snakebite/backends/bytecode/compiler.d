@@ -6277,7 +6277,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `upper`/`length` for a slice.
     private void compileBoundsHook(
         in size_t inBoundsOffset,
-        DruntimeHook hook,
+        in DruntimeHook hook,
         Arg[] extraArgs,
         in Loc loc,
     ) {
