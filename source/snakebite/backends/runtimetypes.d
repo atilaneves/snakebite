@@ -74,23 +74,51 @@ public struct RuntimeTypes {
     // allocatedInCurrentThread` is flat across 100 repeat calls of the
     // same `extern(D)` untyped variadic call site, both an all-`int`
     // tuple and a `string`-element one).
+    // No frontend lock around the whole build any more (measured: once
+    // `NativeData.reserve` and `PlanCache.hasIndependentNativeSymbol`
+    // stopped taking it, the traffic that used to queue behind them
+    // moved here instead - a lock convoy, the same finding
+    // `NativeData.reserve`'s own doc describes - 2,004 acquisitions,
+    // 43.5s wait, the single largest frontend-lock wait left in a
+    // parallel `bin/ut` run). `build` reads a struct's or an enum's own
+    // dmd-computed layout fields (`alignsize`, `hasPointerField`, the
+    // SysV eightbyte classification `setSysVArgTypes` reads through
+    // `ArgumentPlan.of`, an enum's own `memtype`) that only a completed
+    // forward reference settles - exactly the same `sizeok`/`memtype`
+    // forward references `TypeFacts.of` already forces, through the
+    // identical dmd calls (`AggregateDeclaration.size`, `EnumDeclaration.
+    // getMemtype`) - so force through it, up front, then run `build`
+    // outside the lock. Only for a struct or an enum: `TypeFacts.of`
+    // itself goes on to read `Type.size` after forcing, which dmd
+    // rejects for a `TypeTuple` ("no size for type") - `build`'s own
+    // `TypeTuple` branch never reads a size for the tuple type itself,
+    // only `get`s each element, so this must not force one either.
+    // Every recursive `get` call inside `build` (a pointer's pointee, an
+    // array's element, a tuple's own element, ...) forces its own
+    // component type the same way, on its own way back in here. A
+    // qualified (`const`/`shared`/...) struct or enum type forces
+    // correctly too: dmd represents the qualifier as a `.mod` bit on the
+    // very same `TypeStruct`/`TypeEnum`, reached by `isTypeStruct`/
+    // `isTypeEnum` the same as the unqualified type, over the same
+    // underlying declaration `forceResolved` forces. `_classInfo` and
+    // `_initialValue` force whatever dmd state they still need
+    // themselves, under their own locks (`ClassRuntimeCache`'s own
+    // recursive mutex; `NativeData.initialValue`'s own narrowed one).
+    // `_types` is a `SharedTable` (ADR-0006): two threads racing the
+    // same `type` both build an answer and `insert` keeps whichever
+    // lands first, so no lock is needed to serialize the build itself.
     public TypeInfo get(Type type) {
         if (auto cached = type in _types)
             return *cached;
 
-        import snakebite.frontend.compiler: withCompilerLock;
+        if (type.isTypeStruct !is null || type.isTypeEnum !is null) {
+            import snakebite.nativelayout: TypeFacts;
 
-        TypeInfo info;
-        withCompilerLock({
-            if (auto cached = type in _types)
-                info = *cached;
-            else {
-                info = build(type);
-                if (info !is null)
-                    info = *_types.insert(type, info);
-            }
-        });
-        return info;
+            TypeFacts.of(type);
+        }
+
+        auto info = build(type);
+        return info is null ? null : *_types.insert(type, info);
     }
 
     private TypeInfo build(Type type) {
