@@ -5,14 +5,14 @@ private:
 
 
 // Named distinctly from every class that extends it (`Collector` in
-// `dependencyimage.d`, `InlineAsmCollector` and `InlineAsmVersionGate` in
+// `imagesource.d`, `InlineAsmCollector` and `InlineAsmVersionGate` in
 // `inlineasm.d`): an `extern(C++) class` with no explicit C++ namespace
 // mangles by name alone, so a duplicate name would silently collide at
 // link time instead of erroring.
 //
 // Shared traversal skeleton for the two collectors that walk the
 // declarations a real build compiles in, after semantic analysis:
-// `dependencyimage.d`'s `Collector` and `inlineasm.d`'s
+// `imagesource.d`'s `Collector` and `inlineasm.d`'s
 // `InlineAsmCollector`. Both need the same answer to "does this
 // declaration compile into the build", so that answer lives here once.
 // Each subclass overrides only `visit(FuncDeclaration)`, where the two

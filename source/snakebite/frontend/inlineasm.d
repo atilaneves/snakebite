@@ -38,7 +38,7 @@ public void disableInlineAsmVersion(
 }
 
 
-// Named distinctly from `dependencyimage.d`'s own `Collector` and from
+// Named distinctly from `imagesource.d`'s own `Collector` and from
 // `DeclarationCollector` (`declarationcollector.d`), the shared base both
 // extend: all three are plain `extern(C++) class`es with no explicit C++
 // namespace, so identical class names mangle to the identical C++ symbol
@@ -134,7 +134,7 @@ private extern(C++) class InlineAsmCollector
     }
 }
 
-// Named distinctly from `InlineAsmCollector` above and `dependencyimage.d`'s
+// Named distinctly from `InlineAsmCollector` above and `imagesource.d`'s
 // `Collector` for the same reason as that one: an `extern(C++) class` with
 // no explicit C++ namespace mangles by name alone, so a duplicate name
 // would silently collide at link time instead of erroring.
