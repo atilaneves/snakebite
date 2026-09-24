@@ -4663,14 +4663,19 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         *cast(ubyte**) (bytes + arrayPointerOffset) = elements;
     }
 
-    private struct ArrayLiteralDestination {
+    private struct TemporaryDestination {
         void* place;
         Type type;
         TypeFacts facts;
         size_t mark;
     }
 
-    private ArrayLiteralDestination[] _arrayLiteralDestinations;
+    // The stack `withTemporaryDestination` pushes and pops. Each entry is
+    // the *surrounding* (place, type, facts) destination saved before
+    // `_place` was overwritten with the temporary's own address - it is
+    // what `storeConstant`/`storeAddress`/`copyBytes` write into, not the
+    // temporary itself.
+    private TemporaryDestination[] _temporaryDestinations;
 
     // Reserves a frame temporary of `facts` and substitutes it for the
     // ambient (`_place`, `_type`, `_facts`) destination `run` (and anything
@@ -4680,11 +4685,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // to an arbitrary sequence of them.
     extern(D) protected override void withTemporaryDestination(
             Type type, in TypeFacts facts, scope void delegate() run) {
-        auto destination = ArrayLiteralDestination(
+        auto destination = TemporaryDestination(
             _place, _type, _facts, _frames.mark);
-        _arrayLiteralDestinations ~= destination;
+        _temporaryDestinations ~= destination;
         scope (exit) {
-            _arrayLiteralDestinations.length--;
+            _temporaryDestinations.length--;
             _place = destination.place;
             _type = destination.type;
             _facts = destination.facts;
@@ -4697,6 +4702,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         run();
     }
 
+    // `_place` is the innermost temporary's own address; what it *holds* is
+    // the pointer `_d_arrayliteralTX` (or the equivalent lowering) wrote
+    // into that temporary. Writes the element at `byteOffset` from that
+    // held pointer, not from `_place` itself.
     protected override void evaluateElement(
         Expression element, Type elementType, in TypeFacts facts,
         in size_t byteOffset,
@@ -4705,26 +4714,43 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         evaluate(element, elementType, facts, elements + byteOffset);
     }
 
+    // Valid only inside `withTemporaryDestination`'s `run` delegate: writes
+    // `value` at `byteOffset` into the surrounding destination that call
+    // saved (`_temporaryDestinations[$ - 1]`), not into the temporary.
     protected override void storeConstant(
         in size_t value, in size_t byteOffset,
     ) {
         import snakebite.nativelayout: storeIntegral;
 
-        auto destination = _arrayLiteralDestinations[$ - 1];
+        assert(_temporaryDestinations.length > 0,
+            "storeConstant needs an enclosing withTemporaryDestination");
+        auto destination = _temporaryDestinations[$ - 1];
         storeIntegral(cast(ubyte*) destination.place + byteOffset,
             value, size_t.sizeof);
     }
 
+    // Valid only inside `withTemporaryDestination`'s `run` delegate: copies
+    // the innermost temporary's *value* (the pointer it holds, e.g. what
+    // `_d_arrayliteralTX` returned) to `byteOffset` in the surrounding
+    // destination that call saved.
     protected override void storeAddress(in size_t byteOffset) {
-        auto destination = _arrayLiteralDestinations[$ - 1];
+        assert(_temporaryDestinations.length > 0,
+            "storeAddress needs an enclosing withTemporaryDestination");
+        auto destination = _temporaryDestinations[$ - 1];
         *cast(void**) (cast(ubyte*) destination.place + byteOffset)
             = *cast(void**) _place;
     }
 
+    // Valid only inside `withTemporaryDestination`'s `run` delegate: copies
+    // `width` bytes from the address the innermost temporary holds into the
+    // surrounding destination that call saved (a static array's own bytes,
+    // not a pointer to them).
     protected override void copyBytes(in size_t width) {
         import core.stdc.string: memcpy;
 
-        auto destination = _arrayLiteralDestinations[$ - 1];
+        assert(_temporaryDestinations.length > 0,
+            "copyBytes needs an enclosing withTemporaryDestination");
+        auto destination = _temporaryDestinations[$ - 1];
         memcpy(destination.place, *cast(void**) _place, width);
     }
 

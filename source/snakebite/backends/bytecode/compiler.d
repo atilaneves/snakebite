@@ -4141,13 +4141,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileArrayLiteral(expression, _destination);
     }
 
-    private struct ArrayLiteralDestination {
+    private struct TemporaryDestination {
         size_t offset;
         size_t width;
         Type type;
     }
 
-    private ArrayLiteralDestination[] _arrayLiteralDestinations;
+    // The stack `withTemporaryDestination` pushes and pops. Each entry is
+    // the *surrounding* (`_destination`, `_width`, `_valueType`)
+    // destination saved before `_destination` was overwritten with the
+    // temporary's own offset - it is what `storeConstant`/`storeAddress`/
+    // `copyBytes` emit stores into, not the temporary itself.
+    private TemporaryDestination[] _temporaryDestinations;
 
     // Reserves a temporary of `facts` and substitutes it for the ambient
     // (`_destination`, `_width`, `_valueType`) destination `run` (and
@@ -4159,11 +4164,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // function's frame past what `_layout` reserved.
     extern(D) protected override void withTemporaryDestination(
             Type type, in TypeFacts facts, scope void delegate() run) {
-        auto destination = ArrayLiteralDestination(
+        auto destination = TemporaryDestination(
             _destination, _width, _valueType);
-        _arrayLiteralDestinations ~= destination;
+        _temporaryDestinations ~= destination;
         scope (exit) {
-            _arrayLiteralDestinations.length--;
+            _temporaryDestinations.length--;
             _destination = destination.offset;
             _width = destination.width;
             _valueType = destination.type;
@@ -4175,6 +4180,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         run();
     }
 
+    // `_destination` is the innermost temporary's own offset; what it
+    // *holds* is the pointer `_d_arrayliteralTX` (or the equivalent
+    // lowering) copied there. Emits code that stores the element at
+    // `byteOffset` from that held pointer, not from `_destination` itself.
     protected override void evaluateElement(
         Expression element, Type elementType, in TypeFacts facts,
         in size_t byteOffset,
@@ -4192,22 +4201,40 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opStoreIndirect, addressOffset, elementOffset, facts.size);
     }
 
+    // Valid only inside `withTemporaryDestination`'s `run` delegate: emits
+    // a store of `value` at `byteOffset` into the surrounding destination
+    // that call saved (`_temporaryDestinations[$ - 1]`), not into the
+    // temporary.
     protected override void storeConstant(
         in size_t value, in size_t byteOffset,
     ) {
-        const destination = _arrayLiteralDestinations[$ - 1];
+        assert(_temporaryDestinations.length > 0,
+            "storeConstant needs an enclosing withTemporaryDestination");
+        const destination = _temporaryDestinations[$ - 1];
         emit(&opConstant, destination.offset + byteOffset,
             addConstant(cast(long) value), size_t.sizeof);
     }
 
+    // Valid only inside `withTemporaryDestination`'s `run` delegate: emits
+    // a copy of the innermost temporary's *value* (the pointer it holds,
+    // e.g. what `_d_arrayliteralTX` returned) to `byteOffset` in the
+    // surrounding destination that call saved.
     protected override void storeAddress(in size_t byteOffset) {
-        const destination = _arrayLiteralDestinations[$ - 1];
+        assert(_temporaryDestinations.length > 0,
+            "storeAddress needs an enclosing withTemporaryDestination");
+        const destination = _temporaryDestinations[$ - 1];
         emit(&opCopy, destination.offset + byteOffset,
             _destination, size_t.sizeof);
     }
 
+    // Valid only inside `withTemporaryDestination`'s `run` delegate: emits
+    // a copy of `width` bytes from the address the innermost temporary
+    // holds into the surrounding destination that call saved (a static
+    // array's own bytes, not a pointer to them).
     protected override void copyBytes(in size_t width) {
-        const destination = _arrayLiteralDestinations[$ - 1];
+        assert(_temporaryDestinations.length > 0,
+            "copyBytes needs an enclosing withTemporaryDestination");
+        const destination = _temporaryDestinations[$ - 1];
         emit(&opLoadIndirect, destination.offset, _destination, width);
     }
 

@@ -213,16 +213,29 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // it, so `withTemporaryDestination` substitutes a temporary of the
     // lowering's own type for the surrounding destination while `run`
     // evaluates the call and every element into it, then restores the
-    // surrounding destination once `run` returns. `evaluateElement`,
-    // `storeConstant`, `storeAddress`, and `copyBytes` are ordinary
-    // execution primitives - "evaluate an expression at an offset from the
-    // temporary", "write a constant", "write the temporary's own address",
-    // "copy bytes out of it" - that carry no array-literal knowledge of
-    // their own; a backend runs each one immediately (the interpreter) or
-    // emits an op for the VM to run later (the bytecode compiler). Deciding
-    // the element count, the per-element byte offsets, and whether the
-    // result is a dynamic array, a pointer, or a static array stays here,
-    // shared, instead of being re-derived by each backend.
+    // surrounding destination once `run` returns.
+    //
+    // `evaluateElement`, `storeConstant`, `storeAddress`, and `copyBytes`
+    // are ordinary execution primitives that carry no array-literal
+    // knowledge of their own, but they are valid only inside
+    // `withTemporaryDestination`'s `run` delegate, since all four act on
+    // the temporary it opened:
+    // - `evaluateElement` writes the element at a byte offset from the
+    //   address the temporary *holds* (the pointer `_d_arrayliteralTX`
+    //   returned into it), not from the temporary's own address.
+    // - `storeConstant` writes a constant at a byte offset into the
+    //   *surrounding* destination that `withTemporaryDestination` saved,
+    //   not into the temporary.
+    // - `storeAddress` copies the temporary's own *value* - the pointer
+    //   `_d_arrayliteralTX` returned - to a byte offset in that surrounding
+    //   destination.
+    // - `copyBytes` copies bytes from the address the temporary holds into
+    //   that surrounding destination.
+    // A backend runs each one immediately (the interpreter) or emits an op
+    // for the VM to run later (the bytecode compiler). Deciding the element
+    // count, the per-element byte offsets, and whether the result is a
+    // dynamic array, a pointer, or a static array stays here, shared,
+    // instead of being re-derived by each backend.
     final override void visit(ArrayLiteralExp expression) {
         import dmd.astenums: Tpointer;
         import dmd.typesem: nextOf, toBasetype;
