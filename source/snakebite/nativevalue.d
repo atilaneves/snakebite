@@ -234,127 +234,126 @@ public struct CastLayout {
     public size_t staticLength;
 }
 
-// Executes every `CastKind` above: reads bytes at `source` and writes
+// Carries out one `CastKind`: reads bytes at `source` and writes
 // `layout.destSize` bytes at `destination`, in the native layout every
-// backend already shares - the one place this decision is made,
-// instead of once per backend. The tree-walking interpreter and the
-// bytecode VM both call this directly; the bytecode compiler only ever
-// builds the `CastLayout` that call reads at run time.
+// backend already shares. `kind` is a compile-time parameter so a
+// caller that already knows it - `snakebite.backends.bytecode.vm`'s
+// per-`CastKind` cast ops chief among them - pays for no run-time
+// dispatch on it: `static if` picks the one arm below that applies,
+// the same way `kind`'s own switch arm would have, with the choice
+// made once, at compile time, rather than on every execution. This is
+// the one definition of every kind's semantics; `applyCast` below is a
+// thin run-time-`kind` wrapper around it, for a caller - the
+// tree-walking interpreter, and the bytecode compiler's own
+// `layoutOf` - that only learns `kind` at run time.
 //
 // `source` always points at bytes that already hold the value a kind
 // reads: an evaluated operand for most of them, or - for
 // `sarrayToSlice`/`sarrayToPointer` - a pointer-sized slot holding the
 // operand's own address, the shape both backends already produce for
 // "the address of an expression" (`addressOf`/`compileAddress`).
-public void applyCast(
+//
+// `pragma(inline, true)`, like every other primitive in this module:
+// `snakebite.backends.bytecode.vm`'s own per-`CastKind` op calls this
+// once per execution, and forcing it inline is what lets the optimiser
+// see that most of `layout`'s 8 fields are dead at any one `kind` -
+// its caller only ever fills in the two or three this arm actually
+// reads - rather than spending a real call and a full `CastLayout`
+// passed by value on every cast.
+pragma(inline, true) public void applyCastAs(CastKind kind)(
     in CastLayout layout,
     in void* source,
     void* destination,
 ) @nogc nothrow {
-    final switch (layout.kind) with (CastKind) {
-    case integralToFloat:
+    with (CastKind) {
+    static if (kind == integralToFloat)
         integralToFloating(destination, source, layout.destSize,
             layout.sourceSize, layout.sourceUnsigned);
-        return;
 
-    case floatToIntegral:
+    else static if (kind == floatToIntegral)
         floatingToIntegral(destination, source, layout.destSize,
             layout.sourceSize, layout.destUnsigned);
-        return;
 
-    case floatToBool:
+    else static if (kind == floatToBool)
         floatingToBool(destination, source, layout.sourceSize);
-        return;
 
-    case floatWidth:
+    else static if (kind == floatWidth)
         storeFloating(
             destination, loadFloating(source, layout.sourceSize),
             layout.destSize,
         );
-        return;
 
-    case complexToBool:
+    else static if (kind == complexToBool)
         storeIntegral(
             destination, complexTruth(source, layout.sourceSize),
             layout.destSize,
         );
-        return;
 
-    case complexToReal:
+    else static if (kind == complexToReal)
         storeFloating(
             destination, loadComplexRe(source, layout.sourceSize),
             layout.destSize,
         );
-        return;
 
-    case complexToImaginary:
+    else static if (kind == complexToImaginary)
         storeFloating(
             destination, loadComplexIm(source, layout.sourceSize),
             layout.destSize,
         );
-        return;
 
-    case complexToIntegral:
+    else static if (kind == complexToIntegral)
         floatingToIntegral(destination, source, layout.destSize,
             layout.sourceSize / 2, layout.destUnsigned);
-        return;
 
-    case complexWidth:
+    else static if (kind == complexWidth)
         storeComplex(
             destination, loadComplexRe(source, layout.sourceSize),
             loadComplexIm(source, layout.sourceSize), layout.destSize,
         );
-        return;
 
-    case realToComplex:
+    else static if (kind == realToComplex)
         storeComplex(
             destination, loadFloating(source, layout.sourceSize), 0.0L,
             layout.destSize,
         );
-        return;
 
-    case integralToComplex: {
+    else static if (kind == integralToComplex) {
         const value =
             loadIntegral(source, layout.sourceSize, !layout.sourceUnsigned);
         const re = layout.sourceUnsigned
             ? cast(real) cast(ulong) value : cast(real) value;
         storeComplex(destination, re, 0.0L, layout.destSize);
-        return;
     }
 
-    case imaginaryToComplex:
+    else static if (kind == imaginaryToComplex)
         storeComplex(
             destination, 0.0L, loadFloating(source, layout.sourceSize),
             layout.destSize,
         );
-        return;
 
-    case sarrayToSlice: {
+    else static if (kind == sarrayToSlice) {
         const address = loadUnsigned(source, size_t.sizeof);
         auto bytes = cast(ubyte*) destination;
         storeIntegral(
             bytes + arrayLengthOffset, layout.staticLength, size_t.sizeof);
         storeIntegral(bytes + arrayPointerOffset, address, size_t.sizeof);
-        return;
     }
 
-    case sarrayToPointer:
+    else static if (kind == sarrayToPointer)
         storeIntegral(
             destination, loadUnsigned(source, size_t.sizeof),
             layout.destSize,
         );
-        return;
 
-    case sliceToPointer:
+    else static if (kind == sliceToPointer)
         storeIntegral(
             destination,
             loadUnsigned(
                 cast(ubyte*) source + arrayPointerOffset, size_t.sizeof),
             layout.destSize,
         );
-        return;
 
-    case pointerToArray: {
+    else static if (kind == pointerToArray) {
         import core.stdc.string: memcpy;
 
         const address = loadUnsigned(source, size_t.sizeof);
@@ -362,26 +361,23 @@ public void applyCast(
             destination, cast(const(void)*) cast(size_t) address,
             layout.destSize,
         );
-        return;
     }
 
-    case pointerToIntegral:
+    else static if (kind == pointerToIntegral)
         storeIntegral(
             destination, loadUnsigned(source, size_t.sizeof),
             layout.destSize,
         );
-        return;
 
-    case delegateToPointer:
+    else static if (kind == delegateToPointer)
         storeIntegral(
             destination,
             loadUnsigned(
                 cast(ubyte*) source + delegateContextOffset, size_t.sizeof),
             layout.destSize,
         );
-        return;
 
-    case reinterpretSlice: {
+    else static if (kind == reinterpretSlice) {
         const sourceLength = cast(size_t) loadUnsigned(
             cast(ubyte*) source + arrayLengthOffset, size_t.sizeof);
         const pointer = loadUnsigned(
@@ -391,25 +387,105 @@ public void applyCast(
         auto bytes = cast(ubyte*) destination;
         storeIntegral(bytes + arrayLengthOffset, newLength, size_t.sizeof);
         storeIntegral(bytes + arrayPointerOffset, pointer, size_t.sizeof);
-        return;
     }
 
-    case toBool:
+    else static if (kind == toBool)
         storeIntegral(
             destination, loadUnsigned(source, layout.sourceSize) != 0,
             layout.destSize,
         );
-        return;
 
-    case narrow:
-    case widenSigned:
-    case widenUnsigned:
+    // A narrowing cast keeps only its destination's own low bytes out
+    // of the source's, on this VM's little-endian host - bits sign- or
+    // zero-extension would add live only at or above the source's own
+    // width, never inside the narrower destination, so `narrow` reads
+    // the same regardless of sign. `widenSigned`/`widenUnsigned` fix
+    // the sign the extension itself uses at the kind, rather than at
+    // `layout.sourceUnsigned` - `snakebite.backends.casts.classify`
+    // already chose between them on the source's own signedness, so
+    // there is nothing left for `layout` to add.
+    else static if (kind == narrow)
         storeIntegral(
             destination,
-            cast(ulong) loadIntegral(
-                source, layout.sourceSize, !layout.sourceUnsigned),
+            cast(ulong) loadIntegral(source, layout.sourceSize, true),
             layout.destSize,
         );
-        return;
+
+    else static if (kind == widenSigned)
+        storeIntegral(
+            destination,
+            cast(ulong) loadIntegral(source, layout.sourceSize, true),
+            layout.destSize,
+        );
+
+    else static if (kind == widenUnsigned)
+        storeIntegral(
+            destination,
+            cast(ulong) loadIntegral(source, layout.sourceSize, false),
+            layout.destSize,
+        );
+
+    else
+        static assert(0, "applyCastAs: unhandled CastKind");
+    }
+}
+
+// The tree-walking interpreter, and the bytecode compiler's own
+// `layoutOf`, only learn a cast's `CastKind` at run time, unlike
+// `snakebite.backends.bytecode.vm`'s per-`CastKind` cast ops - this is
+// their entry point, a plain run-time dispatch to the one arm of
+// `applyCastAs` above that `layout.kind` names.
+public void applyCast(
+    in CastLayout layout,
+    in void* source,
+    void* destination,
+) @nogc nothrow {
+    final switch (layout.kind) with (CastKind) {
+    case integralToFloat:
+        return applyCastAs!integralToFloat(layout, source, destination);
+    case floatToIntegral:
+        return applyCastAs!floatToIntegral(layout, source, destination);
+    case floatToBool:
+        return applyCastAs!floatToBool(layout, source, destination);
+    case floatWidth:
+        return applyCastAs!floatWidth(layout, source, destination);
+    case complexToBool:
+        return applyCastAs!complexToBool(layout, source, destination);
+    case complexToReal:
+        return applyCastAs!complexToReal(layout, source, destination);
+    case complexToImaginary:
+        return applyCastAs!complexToImaginary(layout, source, destination);
+    case complexToIntegral:
+        return applyCastAs!complexToIntegral(layout, source, destination);
+    case complexWidth:
+        return applyCastAs!complexWidth(layout, source, destination);
+    case realToComplex:
+        return applyCastAs!realToComplex(layout, source, destination);
+    case integralToComplex:
+        return applyCastAs!integralToComplex(layout, source, destination);
+    case imaginaryToComplex:
+        return applyCastAs!imaginaryToComplex(layout, source, destination);
+    case sarrayToSlice:
+        return applyCastAs!sarrayToSlice(layout, source, destination);
+    case sarrayToPointer:
+        return applyCastAs!sarrayToPointer(layout, source, destination);
+    case sliceToPointer:
+        return applyCastAs!sliceToPointer(layout, source, destination);
+    case pointerToArray:
+        return applyCastAs!pointerToArray(layout, source, destination);
+    case pointerToIntegral:
+        return applyCastAs!pointerToIntegral(layout, source, destination);
+    case delegateToPointer:
+        return applyCastAs!delegateToPointer(layout, source, destination);
+    case reinterpretSlice:
+        return applyCastAs!reinterpretSlice(layout, source, destination);
+    case toBool:
+        return applyCastAs!toBool(layout, source, destination);
+    case narrow:
+        return applyCastAs!narrow(layout, source, destination);
+    case widenSigned:
+        return applyCastAs!widenSigned(layout, source, destination);
+    case widenUnsigned:
+        return applyCastAs!widenUnsigned(layout, source, destination);
     }
 }

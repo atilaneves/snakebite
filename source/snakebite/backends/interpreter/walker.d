@@ -3969,8 +3969,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // Every kind below is only a transformation of the operand's
         // own already-evaluated (or already-addressed) bytes into
         // `_place`'s - `applyCast` is the one place that carries each
-        // of them out, shared with the bytecode VM's own `opCast`;
-        // this interpreter only ever decides where the operand's
+        // of them out, the same `snakebite.nativevalue.applyCastAs`
+        // the bytecode VM's own per-`CastKind` `opCastAs` ops reach
+        // for; this interpreter only ever decides where the operand's
         // bytes already live.
         case complexToBool:
         case complexToReal:
