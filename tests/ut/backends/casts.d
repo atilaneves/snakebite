@@ -4,9 +4,10 @@ module ut.backends.casts;
 import ut;
 import dmd.expression: CastExp;
 import dmd.func: FuncDeclaration;
-import snakebite.backends.casts: classify, CastPlan;
+import snakebite.backends.casts: classify;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction, typeFunctionOf;
+import snakebite.nativevalue: CastKind;
 
 
 // `classify` is a pure function of a `CastExp`'s source and destination
@@ -41,7 +42,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.narrow;
+    plan.kind.should == CastKind.narrow;
     plan.sourceFacts.size.should == long.sizeof;
     plan.destFacts.size.should == int.sizeof;
 }
@@ -56,7 +57,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.widenUnsigned;
+    plan.kind.should == CastKind.widenUnsigned;
 }
 
 
@@ -69,7 +70,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.widenSigned;
+    plan.kind.should == CastKind.widenSigned;
 }
 
 
@@ -82,7 +83,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.toBool;
+    plan.kind.should == CastKind.toBool;
 }
 
 
@@ -95,7 +96,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.copy;
+    plan.kind.should == CastKind.copy;
 }
 
 
@@ -108,7 +109,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.pointerToIntegral;
+    plan.kind.should == CastKind.pointerToIntegral;
 }
 
 
@@ -127,7 +128,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.copy;
+    plan.kind.should == CastKind.copy;
 }
 
 
@@ -144,7 +145,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.widenSigned;
+    plan.kind.should == CastKind.widenSigned;
 }
 
 
@@ -157,7 +158,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.widenUnsigned;
+    plan.kind.should == CastKind.widenUnsigned;
 }
 
 
@@ -174,7 +175,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.toBool;
+    plan.kind.should == CastKind.toBool;
 }
 
 
@@ -195,7 +196,7 @@ unittest {
 
     const plan = classify(parameters[0].type, parameters[1].type);
 
-    plan.kind.should == CastPlan.Kind.sarrayToPointer;
+    plan.kind.should == CastKind.sarrayToPointer;
 }
 
 
@@ -208,7 +209,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.sliceToPointer;
+    plan.kind.should == CastKind.sliceToPointer;
 }
 
 
@@ -221,7 +222,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.reinterpretSlice;
+    plan.kind.should == CastKind.reinterpretSlice;
     plan.sourceFacts.elementSize.should == int.sizeof;
     plan.destFacts.elementSize.should == 1;
 }
@@ -236,7 +237,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.floatWidth;
+    plan.kind.should == CastKind.floatWidth;
 }
 
 
@@ -249,7 +250,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.integralToFloat;
+    plan.kind.should == CastKind.integralToFloat;
 }
 
 
@@ -262,7 +263,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.floatToIntegral;
+    plan.kind.should == CastKind.floatToIntegral;
 }
 
 
@@ -284,7 +285,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.classReference;
+    plan.kind.should == CastKind.classReference;
 }
 
 
@@ -303,7 +304,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.copy;
+    plan.kind.should == CastKind.copy;
 }
 
 
@@ -320,7 +321,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.copy;
+    plan.kind.should == CastKind.copy;
 }
 
 
@@ -338,7 +339,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.delegateToPointer;
+    plan.kind.should == CastKind.delegateToPointer;
 }
 
 
@@ -353,7 +354,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.complexToBool;
+    plan.kind.should == CastKind.complexToBool;
 }
 
 
@@ -366,7 +367,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.complexToReal;
+    plan.kind.should == CastKind.complexToReal;
 }
 
 
@@ -385,7 +386,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.complexToImaginary;
+    plan.kind.should == CastKind.complexToImaginary;
 }
 
 
@@ -398,7 +399,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.complexToIntegral;
+    plan.kind.should == CastKind.complexToIntegral;
 }
 
 
@@ -411,7 +412,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.complexWidth;
+    plan.kind.should == CastKind.complexWidth;
 }
 
 
@@ -424,7 +425,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.realToComplex;
+    plan.kind.should == CastKind.realToComplex;
 }
 
 
@@ -437,7 +438,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.integralToComplex;
+    plan.kind.should == CastKind.integralToComplex;
 }
 
 
@@ -450,7 +451,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.imaginaryToComplex;
+    plan.kind.should == CastKind.imaginaryToComplex;
 }
 
 
@@ -466,7 +467,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.zero;
+    plan.kind.should == CastKind.zero;
 }
 
 
@@ -481,7 +482,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.zero;
+    plan.kind.should == CastKind.zero;
 }
 
 
@@ -494,7 +495,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.zero;
+    plan.kind.should == CastKind.zero;
 }
 
 
@@ -507,7 +508,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.zero;
+    plan.kind.should == CastKind.zero;
 }
 
 
@@ -522,7 +523,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.floatWidth;
+    plan.kind.should == CastKind.floatWidth;
 }
 
 
@@ -537,7 +538,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.floatToBool;
+    plan.kind.should == CastKind.floatToBool;
 }
 
 
@@ -557,7 +558,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.copy;
+    plan.kind.should == CastKind.copy;
 }
 
 
@@ -571,7 +572,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.copy;
+    plan.kind.should == CastKind.copy;
 }
 
 
@@ -584,7 +585,7 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.copy;
+    plan.kind.should == CastKind.copy;
 }
 
 
@@ -598,5 +599,5 @@ unittest {
 
     const plan = classify(cast_.e1.type, cast_.type);
 
-    plan.kind.should == CastPlan.Kind.copy;
+    plan.kind.should == CastKind.copy;
 }

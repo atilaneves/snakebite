@@ -5288,15 +5288,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `cast(bool) 256` as `false` rather than D's own `true`. A cast
     // that does not change width is a reinterpretation of the same bits
     // - `cast(uint)` of an `int`, say - so it just evaluates the operand
-    // straight into `destOffset`. `CastPlan.Kind` and `CastKind` share
-    // every name below by design (only `copy`/`classReference`/`zero`/
-    // `unsupported` have no `CastKind` of their own), so each arm below
-    // just names its own kind twice: once to match `plan.kind`, once to
-    // pick `opCastAs`'s instance of it.
+    // straight into `destOffset`. `plan.kind` is already `CastKind`, so
+    // each arm below just names its own kind twice: once to match
+    // `plan.kind`, once to pick `opCastAs`'s instance of it - the
+    // second naming is what turns a run-time `plan.kind` into a
+    // compile-time template argument, not a translation between two
+    // enums.
     private void compileCast(
         CastExp expression, in size_t destOffset, in size_t width,
     ) {
-        import snakebite.backends.casts: classify, CastPlan;
+        import snakebite.backends.casts: classify;
         import std.conv: text;
 
         auto sourceType = expression.e1.type;
@@ -5330,7 +5331,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // other three each need this compiler's own control flow or
         // rejection instead, so they still emit their own bytecode
         // below.
-        final switch (plan.kind) with (CastPlan.Kind) {
+        final switch (plan.kind) with (CastKind) {
         case copy:
             return evalInto(expression.e1, destOffset, width);
 

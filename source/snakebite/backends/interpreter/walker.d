@@ -3916,9 +3916,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // pre-check below that classify does not see: `cast(void) e`, whose
     // meaning is "keep `e`'s effects, produce no value".
     protected override void visitUnloweredCast(CastExp expression) {
-        import snakebite.backends.casts: classify, CastPlan, layoutOf;
+        import snakebite.backends.casts: classify, layoutOf;
         import snakebite.nativevalue:
-            applyCast, arrayValueSize, delegateValueSize;
+            applyCast, arrayValueSize, CastKind, delegateValueSize;
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
@@ -3944,7 +3944,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto destType = expression.to !is null ? expression.to : _type;
         const plan = classify(expression.e1, destType);
 
-        final switch (plan.kind) with (CastPlan.Kind) {
+        final switch (plan.kind) with (CastKind) {
         case copy:
             evaluate(expression.e1, sourceType, factsOf(sourceType), _place);
             return;

@@ -184,13 +184,30 @@ public enum delegateFunctionOffset = (void*).sizeof;
 public enum delegateValueSize = 2 * (void*).sizeof;
 
 // Which byte-level transform a cast performs, once `snakebite.backends.
-// casts.classify` has decided it. `applyCast` below carries out every
-// kind in this enum with no control flow of its own beyond a `final
-// switch` - `classReference`, `zero`, and `unsupported` each need a
-// backend's own control flow or rejection handling instead, so
-// `snakebite.backends.casts.layoutOf` never produces one of those
-// three, and this enum carries no member for any of them.
+// casts.classify` has decided it. This is the one enum both
+// `snakebite.backends.casts.CastPlan.kind` (classify's own answer,
+// while dmd's types are still in scope) and `applyCast`/`applyCastAs`
+// below (turning that answer into bytes, once they are not) read -
+// `snakebite.backends.bytecode.vm` may not import DMD frontend
+// modules, so keeping the enum here, DMD-free, is what lets it name
+// the same `CastKind` its own per-kind `opCastAs`/`opCastFixedAs` ops
+// are instantiated over. `applyCastAs` below carries out every kind
+// except `copy`, `classReference`, `zero`, and `unsupported`: each of
+// those needs a backend's own control flow (a plain move, a class
+// reference adjustment, a zero fill) or rejection instead, so
+// `applyCast`'s own `final switch` hits `assert(0)` on any of the
+// four - both backends' `compileCast`/`visitUnloweredCast` switches
+// handle them directly and never reach `applyCast` with one.
 public enum CastKind {
+    // Bit-identical representations: a plain move of the destination's
+    // own size. Covers class<->class upcasts, class<->pointer, AA<->AA,
+    // AA<->pointer, pointer<->pointer, equal-width float<->float,
+    // equal-width integral<->integral, delegate<->delegate and
+    // equal-element-width array<->array.
+    copy,
+    // DMD leaves proven upcasts unlowered so code generation can apply
+    // the native reference adjustment. Null stays null.
+    classReference,
     integralToFloat,
     floatToIntegral,
     floatToBool,
@@ -214,6 +231,9 @@ public enum CastKind {
     widenSigned,
     widenUnsigned,
     toBool,
+    zero,
+    // No kind above applies; the backend rejects the cast itself.
+    unsupported,
 }
 
 // The DMD-free subset of `snakebite.backends.casts.CastPlan` that
@@ -434,13 +454,29 @@ pragma(inline, true) public void applyCastAs(CastKind kind)(
 // `layoutOf`, only learn a cast's `CastKind` at run time, unlike
 // `snakebite.backends.bytecode.vm`'s per-`CastKind` cast ops - this is
 // their entry point, a plain run-time dispatch to the one arm of
-// `applyCastAs` above that `layout.kind` names.
+// `applyCastAs` above that `layout.kind` names. `copy`,
+// `classReference`, `zero`, and `unsupported` never reach here: both
+// backends' `compileCast`/`visitUnloweredCast` switches handle each of
+// the four with their own control flow or rejection before either one
+// ever calls `applyCast`.
 public void applyCast(
     in CastLayout layout,
     in void* source,
     void* destination,
 ) @nogc nothrow {
     final switch (layout.kind) with (CastKind) {
+    case copy:
+        assert(0, "applyCast: copy is a backend's own plain move");
+    case classReference:
+        assert(0,
+            "applyCast: classReference needs a backend's own reference "
+            ~ "adjustment");
+    case zero:
+        assert(0, "applyCast: zero needs a backend's own zero fill");
+    case unsupported:
+        assert(0,
+            "applyCast: unsupported casts are rejected before reaching "
+            ~ "applyCast");
     case integralToFloat:
         return applyCastAs!integralToFloat(layout, source, destination);
     case floatToIntegral:
