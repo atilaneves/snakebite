@@ -20,8 +20,8 @@ extern(C) bool executeIndirectCallPlan(
 import snakebite.backends.builtins: BuiltinCall;
 import snakebite.callarguments: CallArguments;
 import snakebite.nativevalue:
-    floatingToBool, floatingToIntegral, integralToFloating, loadFloating,
-    loadSigned, loadUnsigned, storeFloating, storeIntegral;
+    floatingToBool, loadFloating, loadSigned, loadUnsigned, storeFloating,
+    storeIntegral;
 import object: Throwable, TypeInfo_Class;
 
 private alias storeWidth = storeIntegral;
@@ -1725,43 +1725,40 @@ private const(Instruction)* runCastWidenUnsigned(Decoded)(
     return execution.next;
 }
 
-private alias opIntegralToFloat(bool unsigned_) =
-    execute!(runIntegralToFloat, OperandKind.storage, OperandKind.storage, unsigned_);
+// A cast whose `CastKind` is a pure transformation of its source's own
+// bytes into its destination's - `snakebite.nativevalue.applyCast`
+// carries out every one, reading `execution.width` as the index of
+// this cast's own `CastLayout`, packed into 8 consecutive
+// `execution.constants` entries by `snakebite.backends.bytecode.
+// compiler.addCastLayout` rather than carried directly on the
+// instruction, which only has `destination`/`source`/`width`/
+// `sourceWidth` to spend - too few for `CastLayout`'s own fields. The
+// compiler emits this one op for every `CastKind`; only
+// `classReference`, `zero`, and `unsupported` still reach for a
+// `CastExp` opcode of their own.
+package alias opCast =
+    execute!(runCast, OperandKind.storage, OperandKind.storage);
 
-private const(Instruction)* runIntegralToFloat(bool unsigned_, Decoded)(
+private const(Instruction)* runCast(Decoded)(
     ref Decoded execution,
 ) {
-    integralToFloating(
-        execution.destination,
-        execution.source,
-        execution.width,
-        execution.sourceWidth,
-        unsigned_,
+    import snakebite.nativevalue: applyCast, CastKind, CastLayout;
+
+    const base = execution.width;
+    const constants = execution.constants;
+    const layout = CastLayout(
+        cast(CastKind) constants[base],
+        cast(size_t) constants[base + 1],
+        cast(size_t) constants[base + 2],
+        constants[base + 3] != 0,
+        constants[base + 4] != 0,
+        cast(size_t) constants[base + 5],
+        cast(size_t) constants[base + 6],
+        cast(size_t) constants[base + 7],
     );
+    applyCast(layout, execution.source, execution.destination);
     return execution.next;
 }
-
-package alias opIntegralToFloatSigned = opIntegralToFloat!false;
-package alias opIntegralToFloatUnsigned = opIntegralToFloat!true;
-
-private alias opFloatToIntegral(bool unsigned_) =
-    execute!(runFloatToIntegral, OperandKind.storage, OperandKind.storage, unsigned_);
-
-private const(Instruction)* runFloatToIntegral(bool unsigned_, Decoded)(
-    ref Decoded execution,
-) {
-    floatingToIntegral(
-        execution.destination,
-        execution.source,
-        execution.width,
-        execution.sourceWidth,
-        unsigned_,
-    );
-    return execution.next;
-}
-
-package alias opFloatToIntegralSigned = opFloatToIntegral!false;
-package alias opFloatToIntegralUnsigned = opFloatToIntegral!true;
 
 package alias opFloatToBool =
     execute!(runFloatToBool, OperandKind.storage, OperandKind.storage);

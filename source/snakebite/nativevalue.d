@@ -182,3 +182,234 @@ public enum arrayValueSize = size_t.sizeof + (void*).sizeof;
 public enum delegateContextOffset = 0;
 public enum delegateFunctionOffset = (void*).sizeof;
 public enum delegateValueSize = 2 * (void*).sizeof;
+
+// Which byte-level transform a cast performs, once `snakebite.backends.
+// casts.classify` has decided it. `applyCast` below carries out every
+// kind in this enum with no control flow of its own beyond a `final
+// switch` - `classReference`, `zero`, and `unsupported` each need a
+// backend's own control flow or rejection handling instead, so
+// `snakebite.backends.casts.layoutOf` never produces one of those
+// three, and this enum carries no member for any of them.
+public enum CastKind {
+    integralToFloat,
+    floatToIntegral,
+    floatToBool,
+    floatWidth,
+    complexToBool,
+    complexToReal,
+    complexToImaginary,
+    complexToIntegral,
+    complexWidth,
+    realToComplex,
+    integralToComplex,
+    imaginaryToComplex,
+    sarrayToSlice,
+    sarrayToPointer,
+    sliceToPointer,
+    pointerToArray,
+    pointerToIntegral,
+    delegateToPointer,
+    reinterpretSlice,
+    narrow,
+    widenSigned,
+    widenUnsigned,
+    toBool,
+}
+
+// The DMD-free subset of `snakebite.backends.casts.CastPlan` that
+// `applyCast` needs to turn a cast's source bytes into its destination
+// bytes - `snakebite.backends.casts.layoutOf` builds one from a
+// `CastPlan`. Kept here, next to `applyCast` itself, rather than in
+// `casts.d`, because `snakebite.backends.bytecode.vm` may not import
+// DMD frontend modules and `casts.d` reaches dmd's own `Type` in its
+// `classify`.
+public struct CastLayout {
+    public CastKind kind;
+    public size_t sourceSize;
+    public size_t destSize;
+    public bool sourceUnsigned;
+    public bool destUnsigned;
+    public size_t sourceElementSize;
+    public size_t destElementSize;
+    public size_t staticLength;
+}
+
+// Executes every `CastKind` above: reads bytes at `source` and writes
+// `layout.destSize` bytes at `destination`, in the native layout every
+// backend already shares - the one place this decision is made,
+// instead of once per backend. The tree-walking interpreter and the
+// bytecode VM both call this directly; the bytecode compiler only ever
+// builds the `CastLayout` that call reads at run time.
+//
+// `source` always points at bytes that already hold the value a kind
+// reads: an evaluated operand for most of them, or - for
+// `sarrayToSlice`/`sarrayToPointer` - a pointer-sized slot holding the
+// operand's own address, the shape both backends already produce for
+// "the address of an expression" (`addressOf`/`compileAddress`).
+public void applyCast(
+    in CastLayout layout,
+    in void* source,
+    void* destination,
+) @nogc nothrow {
+    final switch (layout.kind) with (CastKind) {
+    case integralToFloat:
+        integralToFloating(destination, source, layout.destSize,
+            layout.sourceSize, layout.sourceUnsigned);
+        return;
+
+    case floatToIntegral:
+        floatingToIntegral(destination, source, layout.destSize,
+            layout.sourceSize, layout.destUnsigned);
+        return;
+
+    case floatToBool:
+        floatingToBool(destination, source, layout.sourceSize);
+        return;
+
+    case floatWidth:
+        storeFloating(
+            destination, loadFloating(source, layout.sourceSize),
+            layout.destSize,
+        );
+        return;
+
+    case complexToBool:
+        storeIntegral(
+            destination, complexTruth(source, layout.sourceSize),
+            layout.destSize,
+        );
+        return;
+
+    case complexToReal:
+        storeFloating(
+            destination, loadComplexRe(source, layout.sourceSize),
+            layout.destSize,
+        );
+        return;
+
+    case complexToImaginary:
+        storeFloating(
+            destination, loadComplexIm(source, layout.sourceSize),
+            layout.destSize,
+        );
+        return;
+
+    case complexToIntegral:
+        floatingToIntegral(destination, source, layout.destSize,
+            layout.sourceSize / 2, layout.destUnsigned);
+        return;
+
+    case complexWidth:
+        storeComplex(
+            destination, loadComplexRe(source, layout.sourceSize),
+            loadComplexIm(source, layout.sourceSize), layout.destSize,
+        );
+        return;
+
+    case realToComplex:
+        storeComplex(
+            destination, loadFloating(source, layout.sourceSize), 0.0L,
+            layout.destSize,
+        );
+        return;
+
+    case integralToComplex: {
+        const value =
+            loadIntegral(source, layout.sourceSize, !layout.sourceUnsigned);
+        const re = layout.sourceUnsigned
+            ? cast(real) cast(ulong) value : cast(real) value;
+        storeComplex(destination, re, 0.0L, layout.destSize);
+        return;
+    }
+
+    case imaginaryToComplex:
+        storeComplex(
+            destination, 0.0L, loadFloating(source, layout.sourceSize),
+            layout.destSize,
+        );
+        return;
+
+    case sarrayToSlice: {
+        const address = loadUnsigned(source, size_t.sizeof);
+        auto bytes = cast(ubyte*) destination;
+        storeIntegral(
+            bytes + arrayLengthOffset, layout.staticLength, size_t.sizeof);
+        storeIntegral(bytes + arrayPointerOffset, address, size_t.sizeof);
+        return;
+    }
+
+    case sarrayToPointer:
+        storeIntegral(
+            destination, loadUnsigned(source, size_t.sizeof),
+            layout.destSize,
+        );
+        return;
+
+    case sliceToPointer:
+        storeIntegral(
+            destination,
+            loadUnsigned(
+                cast(ubyte*) source + arrayPointerOffset, size_t.sizeof),
+            layout.destSize,
+        );
+        return;
+
+    case pointerToArray: {
+        import core.stdc.string: memcpy;
+
+        const address = loadUnsigned(source, size_t.sizeof);
+        memcpy(
+            destination, cast(const(void)*) cast(size_t) address,
+            layout.destSize,
+        );
+        return;
+    }
+
+    case pointerToIntegral:
+        storeIntegral(
+            destination, loadUnsigned(source, size_t.sizeof),
+            layout.destSize,
+        );
+        return;
+
+    case delegateToPointer:
+        storeIntegral(
+            destination,
+            loadUnsigned(
+                cast(ubyte*) source + delegateContextOffset, size_t.sizeof),
+            layout.destSize,
+        );
+        return;
+
+    case reinterpretSlice: {
+        const sourceLength = cast(size_t) loadUnsigned(
+            cast(ubyte*) source + arrayLengthOffset, size_t.sizeof);
+        const pointer = loadUnsigned(
+            cast(ubyte*) source + arrayPointerOffset, size_t.sizeof);
+        const newLength =
+            sourceLength * layout.sourceElementSize / layout.destElementSize;
+        auto bytes = cast(ubyte*) destination;
+        storeIntegral(bytes + arrayLengthOffset, newLength, size_t.sizeof);
+        storeIntegral(bytes + arrayPointerOffset, pointer, size_t.sizeof);
+        return;
+    }
+
+    case toBool:
+        storeIntegral(
+            destination, loadUnsigned(source, layout.sourceSize) != 0,
+            layout.destSize,
+        );
+        return;
+
+    case narrow:
+    case widenSigned:
+    case widenUnsigned:
+        storeIntegral(
+            destination,
+            cast(ulong) loadIntegral(
+                source, layout.sourceSize, !layout.sourceUnsigned),
+            layout.destSize,
+        );
+        return;
+    }
+}

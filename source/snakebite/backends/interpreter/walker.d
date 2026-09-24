@@ -3916,14 +3916,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // pre-check below that classify does not see: `cast(void) e`, whose
     // meaning is "keep `e`'s effects, produce no value".
     protected override void visitUnloweredCast(CastExp expression) {
-        import snakebite.backends.casts: classify, CastPlan;
+        import snakebite.backends.casts: classify, CastPlan, layoutOf;
         import snakebite.nativevalue:
-            complexTruth, floatingToBool, floatingToIntegral,
-            integralToFloating, loadComplexIm, loadComplexRe, loadFloating,
-            storeComplex, storeFloating;
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset, delegateContextOffset,
-            loadIntegral, storeIntegral;
+            applyCast, arrayValueSize, delegateValueSize;
+        import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
         auto sourceType = expression.e1.type;
@@ -3970,147 +3966,76 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        // `cast(bool) someComplex`: true when either component is
-        // nonzero - the same rule `TypeFacts.Truth` gives `if
-        // (someComplex)`.
-        case complexToBool: {
-            align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
-            evaluate(
-                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
-            storeIntegral(
-                _place,
-                complexTruth(buffer.ptr, plan.sourceFacts.size),
-                _facts.size,
-            );
-            return;
-        }
-
-        // `cast(double) someComplex`/`someComplex.re`: the real
-        // component alone, converted to the destination's own width.
-        case complexToReal: {
-            align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
-            evaluate(
-                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
-            storeFloating(
-                _place,
-                loadComplexRe(buffer.ptr, plan.sourceFacts.size),
-                _facts.size,
-            );
-            return;
-        }
-
-        // `someComplex.im`: the imaginary component alone (`classify`'s
-        // own doc comment on `destType`/`.to` above is what routes this
-        // cast here instead of `complexToReal`).
-        case complexToImaginary: {
-            align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
-            evaluate(
-                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
-            storeFloating(
-                _place,
-                loadComplexIm(buffer.ptr, plan.sourceFacts.size),
-                _facts.size,
-            );
-            return;
-        }
-
-        // `cast(int) someComplex`: the real component, converted the
-        // same way `floatToIntegral` converts a plain real operand - the
-        // component's own bytes sit at `buffer`'s first half already, so
-        // `floatingToIntegral` reading `sourceFacts.size / 2` bytes from
-        // there needs nothing else.
-        case complexToIntegral: {
-            align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
-            evaluate(
-                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
-            floatingToIntegral(
-                _place, buffer.ptr, _facts.size, plan.sourceFacts.size / 2,
-                _facts.isUnsigned,
-            );
-            return;
-        }
-
-        // `cast(cfloat) someCreal`: both components, independently
-        // rounded to the destination's own width.
+        // Every kind below is only a transformation of the operand's
+        // own already-evaluated (or already-addressed) bytes into
+        // `_place`'s - `applyCast` is the one place that carries each
+        // of them out, shared with the bytecode VM's own `opCast`;
+        // this interpreter only ever decides where the operand's
+        // bytes already live.
+        case complexToBool:
+        case complexToReal:
+        case complexToImaginary:
+        case complexToIntegral:
         case complexWidth: {
             align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
             evaluate(
                 expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
-            storeComplex(
-                _place,
-                loadComplexRe(buffer.ptr, plan.sourceFacts.size),
-                loadComplexIm(buffer.ptr, plan.sourceFacts.size),
-                _facts.size,
-            );
+            applyCast(layoutOf(plan), buffer.ptr, _place);
             return;
         }
 
-        // `cast(cdouble) someDouble`: the real axis carries the value,
-        // the imaginary one is zero.
-        case realToComplex: {
-            align(real.alignof) ubyte[real.sizeof] buffer = void;
-            evaluate(
-                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
-            storeComplex(
-                _place, loadFloating(buffer.ptr, plan.sourceFacts.size),
-                0.0L, _facts.size,
-            );
-            return;
-        }
-
-        // `cast(cdouble) someInt`: as `realToComplex`, from an integral
-        // operand.
-        case integralToComplex: {
-            align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
-            evaluate(
-                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
-            const value = loadIntegral(
-                buffer.ptr, plan.sourceFacts.size, !plan.sourceFacts.isUnsigned);
-            const re = plan.sourceFacts.isUnsigned
-                ? cast(real) cast(ulong) value : cast(real) value;
-            storeComplex(_place, re, 0.0L, _facts.size);
-            return;
-        }
-
-        // `cast(cdouble) someIdouble`: the reverse of `complexToImaginary`
-        // - the imaginary axis carries the value, the real one is zero.
+        case realToComplex:
         case imaginaryToComplex: {
             align(real.alignof) ubyte[real.sizeof] buffer = void;
             evaluate(
                 expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
-            storeComplex(
-                _place, 0.0L, loadFloating(buffer.ptr, plan.sourceFacts.size),
-                _facts.size,
-            );
+            applyCast(layoutOf(plan), buffer.ptr, _place);
+            return;
+        }
+
+        case integralToComplex: {
+            align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            applyCast(layoutOf(plan), buffer.ptr, _place);
             return;
         }
 
         // An explicit pointer-to-integral cast preserves the native
-        // address bits.
-        case pointerToIntegral:
-            storeIntegral(
-                _place, cast(size_t) asPointer(expression.e1), _facts.size);
-            return;
-
-        // `cast(void*) someDelegate`: the same context word `dg.ptr`
-        // itself reads (`visitDelegateWord` below).
-        case delegateToPointer:
-            visitDelegateWord(expression.e1, delegateContextOffset);
-            return;
-
-        case sarrayToSlice: {
-            auto bytes = cast(ubyte*) _place;
-            storeIntegral(
-                bytes + arrayLengthOffset, plan.staticLength, size_t.sizeof);
-            *cast(void**) (bytes + arrayPointerOffset) =
-                addressOf(expression.e1);
+        // address bits: the same ones `asPointer` would read.
+        case pointerToIntegral: {
+            align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            applyCast(layoutOf(plan), buffer.ptr, _place);
             return;
         }
 
-        case sarrayToPointer:
-            storeIntegral(
-                _place, cast(size_t) addressOf(expression.e1), _facts.size);
+        // `cast(void*) someDelegate`: `applyCast` reads the same
+        // context word `dg.ptr` itself reads (`visitDelegateWord`
+        // above), out of the delegate's own two evaluated words.
+        case delegateToPointer: {
+            align(size_t.sizeof) ubyte[delegateValueSize] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            applyCast(layoutOf(plan), buffer.ptr, _place);
             return;
+        }
+
+        // `addressOf` hands back the operand's own address directly,
+        // the same shape `evaluate` leaves an ordinary value in once
+        // stored through a buffer, so `applyCast` reads it back the
+        // same way for both.
+        case sarrayToSlice:
+        case sarrayToPointer: {
+            align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
+            storeIntegral(
+                buffer.ptr, cast(size_t) addressOf(expression.e1),
+                size_t.sizeof,
+            );
+            applyCast(layoutOf(plan), buffer.ptr, _place);
+            return;
+        }
 
         // `arr.ptr` is not a real member: `.ptr` is one of the two
         // properties dmd recognises directly on a dynamic array, and its
@@ -4121,29 +4046,23 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // `_d_arrayappendcTX_`, on the `~=` lowering's own chain, reads
         // `px.ptr` this way to ask the GC what it already knows about the
         // block backing the array being grown.
-        case sliceToPointer: {
-            const bytes = cast(ubyte*) addressOf(expression.e1);
-            const value = *cast(void**) (bytes + arrayPointerOffset);
-            storeIntegral(_place, cast(size_t) value, _facts.size);
+        case sliceToPointer:
+            applyCast(layoutOf(plan), addressOf(expression.e1), _place);
             return;
-        }
 
         // D reinterprets the same bytes at the new element width, so the
         // byte count - not the element count - is what has to stay the
-        // same across the cast. `newLength` is truncated, the same
-        // truncation `object.d`'s own `T[] to U[]` cast does, rather than
-        // refused on a remainder: a remainder means the source array's
-        // byte length is not a whole number of destination elements,
-        // which is druntime's call to make, not this interpreter's.
+        // same across the cast; `applyCast` truncates the scaled length
+        // the same way `object.d`'s own `T[] to U[]` cast does, rather
+        // than refusing on a remainder: a remainder means the source
+        // array's byte length is not a whole number of destination
+        // elements, which is druntime's call to make, not this
+        // interpreter's.
         case reinterpretSlice: {
-            const value = evaluateArray(expression.e1, plan.sourceFacts);
-            const newLength = value.length * plan.sourceFacts.elementSize
-                / plan.destFacts.elementSize;
-
-            auto bytes = cast(ubyte*) _place;
-            storeIntegral(bytes + arrayLengthOffset, newLength, size_t.sizeof);
-            *cast(const(void)**) (bytes + arrayPointerOffset) =
-                value.elements;
+            align(size_t.sizeof) ubyte[arrayValueSize] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            applyCast(layoutOf(plan), buffer.ptr, _place);
             return;
         }
 
@@ -4161,62 +4080,48 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         case toBool: {
             align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
             evaluate(expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
-            const value = loadIntegral(buffer.ptr, plan.sourceFacts.size, false);
-            storeIntegral(_place, value != 0, _facts.size);
+            applyCast(layoutOf(plan), buffer.ptr, _place);
             return;
         }
 
-        // `asIntegral` already sign- or zero-extends the operand to 64
-        // bits per its own signedness, so storing the destination's low
-        // bytes of that value is correct whichever way the width
-        // changes - the same widen-then-truncate the `combine`d binary
-        // operators already rely on, just with the two types differing
-        // instead of matching.
+        // `applyCast` sign- or zero-extends the operand to 64 bits per
+        // its own signedness, then stores the destination's low bytes
+        // of that value - correct whichever way the width changes,
+        // the same widen-then-truncate the `combine`d binary operators
+        // already rely on, just with the two types differing instead
+        // of matching.
         case narrow:
         case widenSigned:
-        case widenUnsigned:
-            storeIntegral(
-                _place,
-                asIntegral(expression.e1, plan.sourceFacts),
-                _facts.size,
-            );
+        case widenUnsigned: {
+            align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
+            evaluate(expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            applyCast(layoutOf(plan), buffer.ptr, _place);
             return;
+        }
 
         // The shared operation reads the source's native width and
         // signedness, then rounds once at the destination width.
-        case integralToFloat: {
-            align(real.alignof) ubyte[real.sizeof] buffer = void;
-            evaluate(
-                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
-            integralToFloating(
-                _place,
-                buffer.ptr,
-                plan.destFacts.size,
-                plan.sourceFacts.size,
-                plan.sourceFacts.isUnsigned,
-            );
-            return;
-        }
-
-        // A floating-to-floating cast rounds the operand's own value to
-        // the destination's own precision - `asFloating` already widens
-        // any of the three to `real` without loss, so narrowing that back
-        // to the destination's width is the one rounding the host's own
-        // `cast(float)`/`cast(double)`/`cast(real)` performs.
-        // Sized rather than dispatched on `_type.ty`/`sourceType.ty`, so
-        // the one kind also carries an imaginary-to-imaginary width
-        // change: an imaginary value's native layout is a single
-        // `float`/`double`/`real`, the same shape a plain real one is,
-        // just at a different offset than `sourceType.ty`'s own family
-        // would suggest were this dispatched by type instead of size.
+        //
+        // A floating-to-floating cast (`floatWidth`) rounds the
+        // operand's own value to the destination's own precision -
+        // `asFloating` already widens any of the three to `real`
+        // without loss, so narrowing that back to the destination's
+        // width is the one rounding the host's own `cast(float)`/
+        // `cast(double)`/`cast(real)` performs. Sized rather than
+        // dispatched on `_type.ty`/`sourceType.ty`, so it also carries
+        // an imaginary-to-imaginary width change: an imaginary value's
+        // native layout is a single `float`/`double`/`real`, the same
+        // shape a plain real one is, just at a different offset than
+        // `sourceType.ty`'s own family would suggest were this
+        // dispatched by type instead of size.
+        case integralToFloat:
+        case floatToIntegral:
+        case floatToBool:
         case floatWidth: {
             align(real.alignof) ubyte[real.sizeof] buffer = void;
             evaluate(
                 expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
-            storeFloating(
-                _place, loadFloating(buffer.ptr, plan.sourceFacts.size),
-                _facts.size,
-            );
+            applyCast(layoutOf(plan), buffer.ptr, _place);
             return;
         }
 
@@ -4228,28 +4133,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 text("interpreter cannot evaluate a `", expression.op,
                     "` expression: `", expression.toString, "`"),
             );
-
-        case floatToIntegral: {
-            align(real.alignof) ubyte[real.sizeof] buffer = void;
-            evaluate(
-                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
-            floatingToIntegral(
-                _place,
-                buffer.ptr,
-                plan.destFacts.size,
-                plan.sourceFacts.size,
-                plan.destFacts.isUnsigned,
-            );
-            return;
-        }
-
-        case floatToBool: {
-            align(real.alignof) ubyte[real.sizeof] buffer = void;
-            evaluate(
-                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
-            floatingToBool(_place, buffer.ptr, plan.sourceFacts.size);
-            return;
-        }
         }
     }
 

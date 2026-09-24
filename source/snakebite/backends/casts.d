@@ -5,6 +5,7 @@ private:
 
 
 import snakebite.nativelayout: TypeFacts;
+import snakebite.nativevalue: CastKind, CastLayout;
 
 
 public struct CastPlan {
@@ -389,6 +390,60 @@ public CastPlan classify(
             CastPlan.Kind.zero, TypeFacts.init, TypeFacts.of(destType));
 
     return classify(expression.type, destType);
+}
+
+// The DMD-free subset of `plan` that `snakebite.nativevalue.applyCast`
+// needs to turn its source bytes into its destination bytes -
+// `snakebite.backends.bytecode.vm` may not import DMD frontend modules,
+// so it reaches `plan.kind`/`sourceFacts`/`destFacts` through this value
+// instead of `CastPlan` itself. Only meaningful for a `plan.kind`
+// `applyCast` accepts; neither backend calls this for `copy`,
+// `classReference`, `zero`, or `unsupported`, each of which needs its
+// own control flow instead.
+public CastLayout layoutOf(in CastPlan plan) @safe pure nothrow @nogc {
+    return CastLayout(
+        nativeKindOf(plan.kind),
+        plan.sourceFacts.size,
+        plan.destFacts.size,
+        plan.sourceFacts.isUnsigned,
+        plan.destFacts.isUnsigned,
+        plan.sourceFacts.elementSize,
+        plan.destFacts.elementSize,
+        plan.staticLength,
+    );
+}
+
+private CastKind nativeKindOf(in CastPlan.Kind kind) @safe pure nothrow @nogc {
+    final switch (kind) with (CastPlan.Kind) {
+        case integralToFloat: return CastKind.integralToFloat;
+        case floatToIntegral: return CastKind.floatToIntegral;
+        case floatToBool: return CastKind.floatToBool;
+        case floatWidth: return CastKind.floatWidth;
+        case complexToBool: return CastKind.complexToBool;
+        case complexToReal: return CastKind.complexToReal;
+        case complexToImaginary: return CastKind.complexToImaginary;
+        case complexToIntegral: return CastKind.complexToIntegral;
+        case complexWidth: return CastKind.complexWidth;
+        case realToComplex: return CastKind.realToComplex;
+        case integralToComplex: return CastKind.integralToComplex;
+        case imaginaryToComplex: return CastKind.imaginaryToComplex;
+        case sarrayToSlice: return CastKind.sarrayToSlice;
+        case sarrayToPointer: return CastKind.sarrayToPointer;
+        case sliceToPointer: return CastKind.sliceToPointer;
+        case pointerToArray: return CastKind.pointerToArray;
+        case pointerToIntegral: return CastKind.pointerToIntegral;
+        case delegateToPointer: return CastKind.delegateToPointer;
+        case reinterpretSlice: return CastKind.reinterpretSlice;
+        case narrow: return CastKind.narrow;
+        case widenSigned: return CastKind.widenSigned;
+        case widenUnsigned: return CastKind.widenUnsigned;
+        case toBool: return CastKind.toBool;
+        case copy:
+        case classReference:
+        case zero:
+        case unsupported:
+            assert(0, "no native CastKind for this Kind");
+    }
 }
 
 // Whether `type` is `float`/`double`/`real` - `TypeFacts` has no notion of
