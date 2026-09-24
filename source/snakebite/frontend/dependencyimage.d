@@ -126,11 +126,12 @@ private extern(C++) class Collector
             // Diagnostic type spellings are not always valid D expressions.
             // Parse each candidate inside the guarded mixin so an inaccessible
             // instance can keep its normal guest fallback.
-            result ~= text("static if (__traits(compiles, { auto pointer = mixin(q{&", key, "}); })) {\n",
+            const guard = addressGuard(reference, key);
+            result ~= text("static if (", guard, ") {\n",
                 "    export __gshared auto retained", i, " = mixin(q{&", key, "});\n",
                 "} else {\n");
-            registry ~= text("    static if (__traits(compiles, { auto pointer = mixin(q{&", key,
-                "}); })) { static if (!is(typeof(mixin(q{&", key,
+            registry ~= text("    static if (", guard,
+                ") { static if (!is(typeof(mixin(q{&", key,
                 "})) == delegate)) {\n");
             // An eponymous template's .mangleof can name its template
             // instance rather than the function returned by its address.
@@ -153,6 +154,44 @@ private extern(C++) class Collector
         registry ~= "    return null;\n}\n";
         result ~= registry;
         return result;
+    }
+
+    // `mixin(q{&key})` takes the address of a diagnostic instantiation
+    // spelling, not of a specific `FuncDeclaration`: when `key` names one
+    // member of an eponymous template, two sibling overloads share the
+    // exact same spelling and the plain `auto pointer = mixin(q{&key})`
+    // check already fails on that ambiguity alone. When `key` instead names
+    // one of several distinct, separately declared function templates (e.g.
+    // `std.regex.regex`'s single-pattern and array-of-patterns overloads),
+    // dmd's template partial ordering can pick a *different* overload than
+    // the one this `key` was recorded for, with no ambiguity error at all:
+    // `auto pointer = mixin(q{&key})` happily accepts whichever declaration
+    // dmd silently settled on. Assigning that same, freshly re-resolved
+    // `pointer` value into a variable of each referenced function's own
+    // pointer type forces an exact type match, closing that hole the same
+    // way `overloadRegistry`'s typed selection already does, and sends a
+    // mismatch to the safe, ordinal-selected fallback instead. The typed
+    // declaration is parsed through a nested `mixin(q{...})`, the same
+    // deferral `overloadRegistry` below relies on: a printed pointer type
+    // can carry a linkage attribute (`extern(C) ... function(...)`), and
+    // `__traits(compiles, ...)` only gags a semantic error, not a parse
+    // error from source sitting directly in its block - deferring the
+    // parse into a nested mixin makes it happen speculatively too.
+    private extern(D) string addressGuard(Reference reference, in string key) {
+        import dmd.typesem: pointerTo;
+
+        const untyped = text("mixin(q{&", key, "})");
+        string guard = text("__traits(compiles, { auto pointer = ", untyped, "; })");
+        foreach (function_; reference.functions) {
+            if (function_.type.isTypeFunction is null)
+                continue;
+            auto pointerType = function_.type.pointerTo; // DMD caches mutable type nodes.
+            const declaration = text(sourceSpelling(pointerType.toChars.fromStringz),
+                " matched = pointer;");
+            guard ~= text(" && __traits(compiles, { auto pointer = ", untyped,
+                "; mixin(q{", declaration, "}); })");
+        }
+        return guard;
     }
 
     private extern(D) string overloadRegistry(

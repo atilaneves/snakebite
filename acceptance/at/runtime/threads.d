@@ -58,10 +58,20 @@ static foreach (backend; Matrix!(
             // the guest run's behaviour (a clean exit, never a segfault)
             // is checked, never its speed. Skipping optimisation keeps
             // this test's own build fast without weakening what it proves.
+            //
+            // The Native branch above runs `dub test` with `directory` as
+            // its working directory, so the guest branch must match: the
+            // copied `unit-threaded` package under test runs its own
+            // suite, and that suite's `unit_threaded.integration` module
+            // constructor does `rmdirRecurse("tmp/unit-threaded")`
+            // relative to the child's cwd. Leaving the cwd at this
+            // process's own repo root would point that at the very
+            // sandbox root this test binary uses for its own concurrent
+            // tests, deleting it out from under them.
             const result = execute([
                 buildPath(getcwd, "bin", "sb"), "-b",
                 backendIdentity!backend.text, "--no-optimise-image", directory,
-            ]);
+            ], null, Config.none, size_t.max, directory);
         }
         // A backend may still disagree with `dub test` on a few of
         // `unit-threaded`'s own tests, unrelated to this bug. What every

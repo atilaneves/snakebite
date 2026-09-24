@@ -109,6 +109,65 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// An imaginary condition shares the same one-word nonzero test a real
+// one gets, just over the imaginary value's own bytes (`TypeFacts.
+// Truth.of`'s `isFloat` case, sized to the operand rather than dispatched
+// on its type).
+static foreach (backend; Matrix!()) {
+    @("condition.floatingTruth.imaginary." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                idouble zero = 0.0i;
+                idouble nonzero = 3.0i;
+                if (zero) assert(false);
+                if (nonzero) {} else assert(false);
+            }
+        });
+    }
+}
+
+
+// A complex condition is true when either component is nonzero - `cast
+// (bool)` and `if` share the one `Truth` rule (`nativelayout.d`'s own
+// doc comment on `Truth.of`'s `Tcomplex*` case).
+static foreach (backend; Matrix!()) {
+    @("condition.floatingTruth.complex." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                cdouble zero = 0.0 + 0.0i;
+                cdouble realOnly = 1.0 + 0.0i;
+                cdouble imaginaryOnly = 0.0 + 1.0i;
+                if (zero) assert(false);
+                if (realOnly) {} else assert(false);
+                if (imaginaryOnly) {} else assert(false);
+            }
+        });
+    }
+}
+
+
+// `typeof(null)` has only ever the one value - always zero bits, so
+// `if (x)` on it is always false, but it must still be a condition a
+// backend can evaluate at all rather than reject outright.
+static foreach (backend; Matrix!()) {
+    @("condition.nullTypeIsAlwaysFalse." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                typeof(null) x;
+                if (x) assert(false);
+                assert(!cast(bool) x);
+            }
+        });
+    }
+}
+
+
 // DMD emits this shape for cleanup code, including the cleanup in the
 // benchmark's generated `write` function.
 static foreach (backend; Matrix!()) {

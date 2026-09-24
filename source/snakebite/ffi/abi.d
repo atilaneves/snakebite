@@ -118,6 +118,12 @@ public struct ArgumentPlan {
         none,
         integer,
         sse,
+        // The two eightbytes a scalar `real` (`long double`) always
+        // spans together (`classify`'s own `Tfloat80` case) - never
+        // produced alone, since `real`'s own 16-byte size and alignment
+        // mean nothing smaller ever reaches an X87 classification.
+        x87,
+        x87up,
         memory,
     }
 
@@ -154,19 +160,25 @@ public struct ArgumentPlan {
     }
 
     public static ArgumentPlan ofReturn(Type type) {
-        import dmd.astenums: Tfloat80;
         import dmd.typesem: size;
 
-        if (type.ty == Tfloat80)
+        // A bare `real` return and a struct (or union) return that,
+        // once classified, is nothing but the two eightbytes a `real`
+        // field spans - `isX87OnlyAggregate`'s own doc - crosses in
+        // `%st0` instead of a general-purpose or SSE register: the one
+        // case `aggregatePlan` cannot answer for itself, since a
+        // *parameter* of that same shape has no `%st0` argument
+        // register to travel in and has to fall back to `of`'s own
+        // MEMORY route below (verified against gcc -O0: `struct
+        // { long double r; } make(void)` compiles to `fld`/`fstp`/
+        // `fld`/`ret`, ending with the value already loaded into
+        // `%st0`).
+        if (isX87OnlyAggregate(type))
             return ArgumentPlan(
                 [Register(Register.Kind.x87, cast(ubyte) type.size),
                     Register.init],
                 1,
                 false,
-            );
-        if (containsReal(type))
-            throw new Exception(
-                "ffi cannot return an aggregate containing `real`",
             );
         return of(type);
     }
@@ -201,32 +213,59 @@ private void validateMemoryParameter(
 // explicit parameter, it never becomes an `ArgumentPlan` `buildMoves`
 // places on the stack, so `ArgumentPlan.of`'s alignment limit does not
 // apply to it.
-public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: Tfloat80;
+public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type unbasedType) {
+    import dmd.typesem: toBasetype;
 
-    if (type.ty == Tfloat80)
+    // An enum has its base type's native layout and classification -
+    // `classify`'s own entry unwraps it the same way for a parameter or
+    // a field, and `isX87OnlyAggregate` unwraps it again for itself, so
+    // this only has to happen once more here, for `aggregatePlan`'s own
+    // fallback below.
+    auto type = unbasedType.toBasetype;
+
+    // A clean X87 return (`isX87OnlyAggregate`'s own doc) crosses in
+    // `%st0`, never through a hidden pointer.
+    if (isX87OnlyAggregate(type))
         return false;
-    if (type.ty != Tfloat80 && containsReal(type))
-        throw new Exception(
-            "ffi cannot return an aggregate containing `real`",
-        );
     const plan = aggregatePlan(type);
     return plan.memory || plan.indirect;
 }
 
-private bool containsReal(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: Tfloat80;
-    import dmd.typesem: nextOf;
+// Whether `type`, classified by `classify` below, is nothing but the
+// X87/X87UP eightbyte pair a scalar `real` field spans on its own - a
+// bare `real`, or a struct/union whose only field (or only overlapping
+// fields, for a union) is one, however deeply nested - with no other
+// field sharing either eightbyte to force a different class. `real`'s
+// own 16-byte size and 16-byte alignment mean this is the *only* shape
+// an aggregate up to two eightbytes can take without also containing a
+// non-`real` field in the same eightbyte: field 0 at offset 0 always
+// claims the entire first eightbyte pair, so a second field can only
+// ever land in the same eightbytes through a union, not sequential
+// struct layout.
+//
+// A *parameter* of this same shape still has no `%st0` argument
+// register to travel in - only `ofReturn` asks this question, ahead of
+// `aggregatePlan`'s own MEMORY route (verified against gcc -O0: `struct
+// { long double r; } take(struct S s)` reads `s` directly off the
+// stack, at `[rbp+0x10]`, never through a register).
+private bool isX87OnlyAggregate(imported!"dmd.mtype".Type unbasedType) {
+    import dmd.astenums: Tvoid;
+    import dmd.typesem: size, toBasetype;
 
-    if (type.ty == Tfloat80)
-        return true;
-    if (auto array = type.isTypeSArray)
-        return containsReal(type.nextOf);
-    if (auto aggregate = type.isTypeStruct)
-        foreach (field; aggregate.sym.fields)
-            if (field.type !is null && containsReal(field.type))
-                return true;
-    return false;
+    auto type = unbasedType.toBasetype;
+    if (type.ty == Tvoid)
+        return false;
+
+    const bytes = type.size;
+    if (bytes == 0 || bytes > 16)
+        return false;
+
+    ArgumentPlan.ValueClass[2] classes = [
+        ArgumentPlan.ValueClass.none, ArgumentPlan.ValueClass.none,
+    ];
+    bool memory;
+    classify(type, 0, classes, memory);
+    return !memory && classes[0] == ArgumentPlan.ValueClass.x87;
 }
 
 // Whether `type` is a non-trivially-copyable struct, possibly through a
@@ -251,12 +290,19 @@ private bool isNonTriviallyCopyable(imported!"dmd.mtype".Type type) {
     return aggregate !is null && !aggregate.sym.isPOD();
 }
 
-private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
+private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     import dmd.astenums:
         Taarray, Tclass, Tfloat32, Tfloat64, Tfloat80, Tnull, Tpointer,
         Tvoid;
-    import dmd.typesem: alignsize, isIntegral, isUnsigned, size;
+    import dmd.typesem: alignsize, isIntegral, isUnsigned, size, toBasetype;
     import std.algorithm: min;
+
+    // An enum has its base type's native layout and classification - the
+    // one rule this whole module follows (`classify`'s own doc). Every
+    // `type.ty` check below only matches a base-type case, so an enum
+    // argument or return has to be unwrapped once here, before any of
+    // them run.
+    auto type = unbasedType.toBasetype;
 
     ArgumentPlan plan;
     if (type.ty == Tvoid)
@@ -324,6 +370,23 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
     ];
     bool memory;
     classify(type, 0, classes, memory);
+    // No argument register exists for an X87/X87UP eightbyte - only a
+    // *return* value can cross in `%st0` (`isX87OnlyAggregate`'s own
+    // doc, checked by `ofReturn` before this function ever runs for a
+    // clean real-only shape), so this function's own callers - every
+    // parameter, and `ofReturn`'s own fallback for anything that is not
+    // a clean X87 shape - always take the MEMORY route real native code
+    // takes for such a value (verified against gcc -O0: `struct
+    // { long double r; } take(struct S s)` reads `s` straight off the
+    // stack, never a register; `union { long double r; short a; } u`
+    // - X87UP without a preceding X87, once the union's `short` field
+    // merges eightbyte 0 away from X87 - returns through a hidden
+    // pointer the same as any other MEMORY-class return).
+    if (!memory)
+        foreach (class_; classes)
+            if (class_ == ArgumentPlan.ValueClass.x87
+                    || class_ == ArgumentPlan.ValueClass.x87up)
+                memory = true;
     if (memory) {
         plan.memory = true;
         plan.memoryBytes = bytes;
@@ -349,6 +412,10 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
                 );
                 ++plan.count;
                 break;
+            case x87, x87up:
+                // Ruled out above: every path here already forced
+                // `memory` for either class.
+                assert(false);
             case memory:
                 assert(false);
         }
@@ -357,19 +424,29 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type type) {
 }
 
 private void classify(
-    imported!"dmd.mtype".Type type,
+    imported!"dmd.mtype".Type unbasedType,
     in size_t offset,
     ref ArgumentPlan.ValueClass[2] classes,
     ref bool memory,
 ) {
     import dmd.astenums:
-        Tarray, Tclass, Tcomplex32, Tcomplex64, Tdelegate, Tfloat32,
-        Tfloat64, Tnull, Tpointer, Tsarray;
+        Taarray, Tarray, Tclass, Tcomplex32, Tcomplex64, Tdelegate,
+        Tfloat32, Tfloat64, Tfloat80, Tnull, Tpointer, Tsarray;
     import dmd.expressionsem: toInteger;
-    import dmd.typesem: alignsize, isIntegral, nextOf, size;
+    import dmd.typesem: alignsize, isIntegral, nextOf, size, toBasetype;
 
     if (memory)
         return;
+
+    // An enum has its base type's native layout and classification, the
+    // same "native layout" rule every backend already follows for every
+    // other type (`ai/CODING.md`'s runtime-semantics section). `type.ty`
+    // below never matches `Tenum` itself, only a base-type case, so an
+    // unclassified enum has to be unwrapped exactly once, here at this
+    // function's own entry - the only place every path into `classify` (a
+    // parameter, a return, a struct field walked recursively from
+    // `aggregatePlan` below) passes through.
+    auto type = unbasedType.toBasetype;
 
     const bytes = type.size;
     if (bytes == 0)
@@ -384,6 +461,23 @@ private void classify(
         return;
     }
 
+    // `real` (`long double`) always spans exactly two eightbytes on this
+    // ABI - its own 16-byte size and 16-byte alignment (`isIntegralSize`
+    // never matches it, so it never takes the `isIntegral` case below)
+    // - X87 for the low eightbyte, X87UP for the high one. A `creal`
+    // field (`Tcomplex80`) never reaches this function at all: it is
+    // always 32 bytes, so the `offset + bytes > 16` check above this
+    // function's entry already forces MEMORY for it before any
+    // type-specific case runs, the same route a `creal` return or
+    // parameter already takes through `aggregatePlan`'s own
+    // `count > 2` branch.
+    if (type.ty == Tfloat80) {
+        merge(classes, offset, 8, ArgumentPlan.ValueClass.x87, memory);
+        merge(classes, offset + 8, 8, ArgumentPlan.ValueClass.x87up,
+            memory);
+        return;
+    }
+
     if (type.ty == Tcomplex32 || type.ty == Tcomplex64) {
         foreach (i; 0 .. (bytes + 7) / 8)
             merge(classes, offset + i * 8, 8,
@@ -392,7 +486,7 @@ private void classify(
     }
 
     if (type.ty == Tpointer || type.ty == Tclass || type.ty == Tdelegate
-            || type.ty == Tnull) {
+            || type.ty == Taarray || type.ty == Tnull) {
         foreach (i; 0 .. (bytes + 7) / 8)
             merge(classes, offset + i * 8, 8,
                 ArgumentPlan.ValueClass.integer, memory);
@@ -464,6 +558,24 @@ private void classify(
     );
 }
 
+// The SysV merge rule two different eightbyte classes go through when a
+// union overlaps them at the same offset (`classify`'s own `TypeStruct`
+// case walks every field, union or not, at its own declared offset, so
+// two fields sharing an eightbyte only ever happens for a union),
+// applied in the ABI's own priority order: equal classes need no rule;
+// otherwise NONE always loses to whatever else is there (the "first
+// field at this offset" case, handled by the caller directly above);
+// INTEGER always wins next, since a plain 8-byte register copy is a
+// valid, lossless way to carry any of these eightbytes' raw bytes; an
+// X87 or X87UP eightbyte that cannot merge into INTEGER has no shared
+// register class left to fall back to - unlike two different
+// non-INTEGER, non-X87 classes, which SSE always can - so the whole
+// argument becomes MEMORY instead (verified against gcc -O0: `union
+// { long double r; short a; } take(union U u)` reads `u` straight off
+// the stack, and `union U make(void)` returns through a hidden pointer,
+// not `%st0` - `a`'s own INTEGER class merges X87 away from eightbyte 0,
+// leaving eightbyte 1's X87UP without the eightbyte 0 X87 the post-merge
+// check right after this function's own caller requires).
 private void merge(
     ref ArgumentPlan.ValueClass[2] classes,
     in size_t offset,
@@ -479,9 +591,21 @@ private void merge(
     }
 
     foreach (i; first .. last + 1) {
-        if (classes[i] == ArgumentPlan.ValueClass.none)
+        const existing = classes[i];
+        if (existing == ArgumentPlan.ValueClass.none) {
             classes[i] = incoming;
-        else if (classes[i] != incoming)
+        } else if (existing == incoming) {
+            // Nothing to merge - both fields already agree.
+        } else if (existing == ArgumentPlan.ValueClass.integer
+                || incoming == ArgumentPlan.ValueClass.integer) {
             classes[i] = ArgumentPlan.ValueClass.integer;
+        } else if (existing == ArgumentPlan.ValueClass.x87
+                || existing == ArgumentPlan.ValueClass.x87up
+                || incoming == ArgumentPlan.ValueClass.x87
+                || incoming == ArgumentPlan.ValueClass.x87up) {
+            memory = true;
+        } else {
+            classes[i] = ArgumentPlan.ValueClass.sse;
+        }
     }
 }

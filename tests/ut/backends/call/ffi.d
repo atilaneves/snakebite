@@ -3370,3 +3370,212 @@ static foreach (backend; Matrix!()) {
         );
     }
 }
+
+
+// A guest delegate literal assigned to a delegate-typed variable compiles
+// through `compileDelegateValue` -> `callableAddress` -> `prepareCallback`
+// (`snakebite.backends.bytecode.compiler`), which classifies the
+// delegate's own signature through the same `abi.classify` walk a native
+// call site's arguments and return value go through - a callback still
+// needs an ABI-shaped trampoline even when nothing outside the guest
+// program ever calls it. `classify`'s reference-type case list
+// (`Tpointer`/`Tclass`/`Tdelegate`/`Tnull`) left out `Taarray`, so a
+// struct returned by such a delegate, with an associative-array field,
+// threw instead of classifying INTEGER, even though a bare associative
+// array already classified correctly (`aggregatePlan`'s own top-level
+// check).
+static foreach (backend; Matrix!()) {
+    @("struct.associativeArrayFieldCrossesDelegateReturn."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Settings {
+                int[string] table;
+            }
+
+            void main() {
+                Settings delegate() make = () => Settings(["a": 1]);
+                assert(make().table["a"] == 1);
+            }
+        });
+    }
+}
+
+
+// The same `compileDelegateValue` -> `callableAddress` -> `prepareCallback`
+// path the sibling test above exercises also has to shape a struct
+// containing a `real` field. `needsHiddenReturnPointer` (`abi.d`) used to
+// reject any `real`-containing return outright, before ever asking how big
+// the aggregate was - but a `real` field forces `Pair.sizeof` past two
+// eightbytes (`real` alone is already one full eightbyte pair on this
+// ABI), so `aggregatePlan`'s own size check already routes it to MEMORY
+// class, the same hidden-pointer return path a fieldless or
+// associative-array-holding struct already takes above (`ut.ffi.plan`'s
+// `abi.oversizedStructWithRealFieldNeedsHiddenPointer` pins the
+// classifier itself; this pins the same fix end to end, through the
+// callback trampoline a real guest program builds).
+static foreach (backend; Matrix!()) {
+    @("struct.realFieldCrossesDelegateReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Pair { real r; int i; }
+
+            void main() {
+                Pair delegate() make = () => Pair(1.5L, 7);
+                auto p = make();
+                assert(p.r == 1.5L);
+                assert(p.i == 7);
+            }
+        });
+    }
+}
+
+
+// The same fix (sibling test above), on a struct wide enough to need more
+// than the two eightbytes a fieldless or two-field MEMORY-class struct
+// already exercises - `buildMoves`' `memoryWords` count has to walk every
+// whole eightbyte the hidden-pointer write copies, not just the first two,
+// so this checks every field survives the copy, not only the first one.
+static foreach (backend; Matrix!()) {
+    @("struct.wideRealFieldCrossesDelegateReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide { real r; long a; long b; int i; }
+
+            void main() {
+                Wide delegate() make = () => Wide(2.5L, 10, 20, 3);
+                auto w = make();
+                assert(w.r == 2.5L);
+                assert(w.a == 10);
+                assert(w.b == 20);
+                assert(w.i == 3);
+            }
+        });
+    }
+}
+
+
+// A struct whose only field is `real` is the one real-containing shape
+// small enough to return through a register instead: `classify` (`abi.d`)
+// gives it nothing but the X87/X87UP eightbyte pair a bare `real` return
+// already crosses in `%st0` (`ut.ffi.plan`'s `abi.
+// structRealOnlyDoesNotNeedHiddenPointer` pins the classifier itself) -
+// this pins the same shape through the callback trampoline, not just a
+// direct native call.
+static foreach (backend; Matrix!()) {
+    @("struct.realOnlyFieldCrossesDelegateReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct RealOnly { real r; }
+
+            void main() {
+                RealOnly delegate() make = () => RealOnly(3.5L);
+                assert(make().r == 3.5L);
+            }
+        });
+    }
+}
+
+
+// The same shape (sibling test above), as a *parameter* instead of a
+// return: `RealOnly` has no `%st0` argument register to travel in
+// (`ut.ffi.plan`'s `abi.structRealOnlyParameterIsMemoryClass` pins the
+// classifier itself), so it crosses the callback trampoline as an
+// ordinary MEMORY-class argument - the same `unpackArguments` route
+// any other MEMORY-class delegate parameter already takes, exercised
+// here for the one field shape `classify` used to throw on.
+static foreach (backend; Matrix!()) {
+    @("struct.realOnlyFieldCrossesDelegateArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct RealOnly { real r; }
+
+            void main() {
+                RealOnly delegate(RealOnly) doubleIt =
+                    (RealOnly value) => RealOnly(value.r * 2);
+                assert(doubleIt(RealOnly(3.5L)).r == 7.0L);
+            }
+        });
+    }
+}
+
+
+// A union redeclares the same bytes under two names instead of laying
+// them out sequentially, so the `long` field here shares eightbyte 0 with
+// `r` instead of pushing `Conflict` past two eightbytes the way `Pair`'s
+// own sequential `int` field does above. `merge` (`abi.d`) resolves that
+// conflict to INTEGER, which leaves eightbyte 1's X87UP without the
+// eightbyte 0 X87 its own post-merge check requires, so this still ends
+// up MEMORY-class and hidden-pointer-returned, the same route `Pair`
+// takes for a different reason (`ut.ffi.plan`'s `abi.
+// unionRealWithIntegerFieldNeedsHiddenPointer` pins the classifier
+// itself).
+static foreach (backend; Matrix!()) {
+    @("struct.unionRealWithIntegerFieldCrossesDelegateReturn."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            union Conflict { real r; long a; }
+
+            void main() {
+                Conflict delegate() make = () {
+                    Conflict c;
+                    c.a = 42;
+                    return c;
+                };
+                assert(make().a == 42);
+            }
+        });
+    }
+}
+
+
+// An enum has its base type's native layout and classification - the same
+// rule `abi.classify`'s own doc states. A `string`-based enum crossing a
+// delegate return - the same `compileDelegateValue` -> `callableAddress` ->
+// `prepareCallback` path the sibling test above exercises - used to throw
+// `ffi cannot classify a value of type \`E\`` instead of classifying as
+// the two-eightbyte INTEGER pair a bare `string` return already does.
+static foreach (backend; Matrix!()) {
+    @("enum.stringBaseCrossesDelegateReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum E : string { a = "a" }
+
+            void main() {
+                E delegate() make = () => E.a;
+                assert(make() == E.a);
+            }
+        });
+    }
+}
+
+
+// The same enum-return fix (sibling test above) also has to hold for a
+// `string`-based enum reached as a struct field, the only way `classify`
+// itself - not `aggregatePlan`'s own top-level checks - ever sees an
+// enum's type (`abi.d`'s own doc on `classify`'s entry).
+static foreach (backend; Matrix!()) {
+    @("struct.enumStringFieldCrossesDelegateReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum E : string { a = "a" }
+            struct Settings {
+                E e;
+            }
+
+            void main() {
+                Settings delegate() make = () => Settings(E.a);
+                assert(make().e == E.a);
+            }
+        });
+    }
+}

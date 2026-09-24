@@ -70,12 +70,18 @@ public struct CallSelection {
         FuncDeclaration function_,
         scope bool delegate(FuncDeclaration) isGuest,
         lazy bool hasNativeSymbol,
+        lazy bool hasIndependentNativeSymbol,
     ) {
         if (auto cached = function_ in _decisions)
             return *cached;
 
         return *_decisions.insert(
-            function_, buildDecision(function_, hasNativeSymbol, isGuest));
+            function_,
+            buildDecision(
+                function_, hasNativeSymbol, hasIndependentNativeSymbol,
+                isGuest,
+            ),
+        );
     }
 
     // Whether `function_`'s own body should interpret/compile - the one
@@ -88,9 +94,11 @@ public struct CallSelection {
         FuncDeclaration function_,
         scope bool delegate(FuncDeclaration) isGuest,
         lazy bool hasNativeSymbol,
+        lazy bool hasIndependentNativeSymbol,
     ) {
-        return decisionOf(function_, isGuest, hasNativeSymbol).route
-            == Route.guest;
+        return decisionOf(
+            function_, isGuest, hasNativeSymbol, hasIndependentNativeSymbol,
+        ).route == Route.guest;
     }
 
     // Every dmd query a function's decision needs, resolved once and
@@ -99,6 +107,7 @@ public struct CallSelection {
     private static Decision buildDecision(
         FuncDeclaration function_,
         lazy bool hasNativeSymbol,
+        lazy bool hasIndependentNativeSymbol,
         scope bool delegate(FuncDeclaration) isGuest,
     ) {
         import dmd.astenums: VarArg;
@@ -130,10 +139,18 @@ public struct CallSelection {
             return Decision(Route.guest);
 
         // A root-owned body must run as guest even when its linker name
-        // is in the host (notably _Dmain). A template can reuse the host
-        // instantiation; a missing template symbol leaves its guest body.
+        // is in the host (notably _Dmain). A template instance can reuse
+        // a native copy only when that copy is independent of the running
+        // executable - the dependency image or an already-loaded shared
+        // object (ADR-0008, ADR-0009). The executable's own copy is never
+        // preferred: snakebite instantiates plenty of the same templates a
+        // guest program also instantiates (`dirEntries` in
+        // `snakebite.project` among them), and that copy's nested closures
+        // carry the host compiler's frame layout, not this backend's -
+        // reusing it for a guest call reads that closure with the wrong
+        // layout. A missing independent symbol leaves the guest body.
         const prefers = function_.isInstantiated() !is null
-            ? !hasNativeSymbol : isGuest(function_);
+            ? !hasIndependentNativeSymbol : isGuest(function_);
         return Decision(prefers ? Route.guest : Route.native);
     }
 
@@ -248,4 +265,30 @@ public bool arityMismatches(
     return allowExtra
         ? count < parameterList.length
         : count != parameterList.length;
+}
+
+// An indirect call - one whose callee `expression.e1` is a bare value,
+// not a resolved `FuncDeclaration` - is a delegate call whenever that
+// value's own type is `Tdelegate`, never mind whether dmd's parser put a
+// `PtrExp` there. `key in aa` on an associative array of delegates, and
+// `&someDelegateVariable`, both give a *pointer to a delegate*; calling
+// through either dereferences with the same `(*p)(args)` syntax dmd
+// itself lowers a bare function-pointer call to (`fn(args)` becomes
+// `(*fn)(args)`, see `snakebite.backends.layout.FrameLayout.
+// ofParameters`'s own callers). Reading the syntax instead of `e1.type`
+// mistakes that delegate-pointer dereference for the function-pointer
+// shape it merely resembles: `deref.e1`, the pointer's own pointee, is a
+// `Tdelegate`, not the `Tfunction` a function pointer's pointee always
+// is, so a function-pointer read off it is nonsense. Either shape leaves
+// `e1` itself as the one expression to evaluate for the callee's value -
+// the delegate's own two words when `e1.type` is `Tdelegate` (dereferenced
+// already, whatever the syntax), or, when it is a `PtrExp` and dmd's
+// lowering leaves `e1.type` the pointed-to `Tfunction`, that `PtrExp`'s
+// own `e1` for the function pointer's single word.
+public bool isIndirectDelegateCall(
+    imported!"dmd.mtype".Type calleeType,
+) {
+    import dmd.astenums: Tdelegate;
+
+    return calleeType !is null && calleeType.ty == Tdelegate;
 }

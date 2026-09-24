@@ -115,47 +115,69 @@ static foreach (backend; Matrix!(
 }
 
 
-// The same shape, but the branch executes. Compiled D would call `labs`
-// and get back a real ABI answer for it. The bytecode compiler's native
-// call barrier still cannot classify the wide return, so a call that
-// does execute a rejected callee must fail there, and must not run an
-// empty body left over from an earlier attempt to compile it.
-@("destructorExecutedBranchWithUnclassifiableNativeCallIsRejected.Bytecode")
-@Tags(Bytecode.stringof)
-unittest {
-    1.shouldBeStatusOf!(Bytecode, q{
-        struct Wide {
-            real value;
-        }
+// The same shape as the sibling test above, but the branch executes.
+// `Wide`'s only field is `real`, which the SysV ABI classifies as nothing
+// but the X87/X87UP eightbyte pair a bare `real` return already crosses
+// in `%st0` (`ffi.abi.classify`'s `Tfloat80` case, `ffi.abi.
+// isX87OnlyAggregate`), so the native call barrier plans it like any
+// other call now, and compiled D's own answer for it is the real ABI
+// result, not a rejection. A destructor reaches that native call through
+// another function, behind a branch it does take, and must read back the
+// same value compiled D would.
+private struct Wide {
+    real value;
+}
 
-        pragma(mangle, "labs")
-        extern(C) Wide labs(long);
+private extern(C) Wide snakebite_ut_destructor_real_only_return() {
+    return Wide(2.5L);
+}
 
-        void nativeBody() {
-            labs(-1);
-        }
-
-        void helper(bool execute) {
-            if (execute)
-                nativeBody();
-        }
-
-        class Resource {
-            int* count;
-            this(int* count) { this.count = count; }
-            ~this() {
-                helper(true);
-                ++*count;
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot convert a class reference to void** in `destroy`"),
+)) {
+    @("destructorExecutedBranchWithRealAggregateNativeCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide {
+                real value;
             }
-        }
 
-        void main() {
-            int count;
-            auto resource = new Resource(&count);
-            destroy(resource);
-            assert(count == 1);
-        }
-    });
+            pragma(mangle, "snakebite_ut_destructor_real_only_return")
+            extern(C) Wide nativeCall();
+
+            real nativeBody() {
+                return nativeCall().value;
+            }
+
+            real helper(bool execute) {
+                return execute ? nativeBody() : 0.0L;
+            }
+
+            class Resource {
+                int* count;
+                real* result;
+                this(int* count, real* result) {
+                    this.count = count;
+                    this.result = result;
+                }
+                ~this() {
+                    *result = helper(true);
+                    ++*count;
+                }
+            }
+
+            void main() {
+                int count;
+                real result;
+                auto resource = new Resource(&count, &result);
+                destroy(resource);
+                assert(count == 1);
+                assert(result == 2.5L);
+            }
+        });
+    }
 }
 
 
@@ -604,6 +626,49 @@ static foreach (backend; Matrix!(
     }
 }
 
+// `scope` on the variable, not the class, still runs the destructor at
+// scope exit and allocates off the GC heap. `resource`'s type is inferred
+// (dmd's dsymbolsem.d runs a full expressionSemantic on the initialiser
+// early to work out the type, which attaches `NewExp.lowering` - the
+// `_d_newclassT` GC allocation call - while `NewExp.onstack` is still
+// unset); only afterwards does dsymbolsem set `NewExp.onstack` for the
+// `scope` variable's initialiser, on that same already-lowered node,
+// without clearing `lowering`. The ordinary (non-`scope`) class here ends
+// up with a `NewExp` that has both a non-null `lowering` and `onstack`
+// set, unlike `scope class Resource` above where the class declaration
+// itself, not just the variable, drives allocation. A backend that
+// dispatches on `lowering !is null` alone runs the heap-allocating
+// lowering and never takes the on-stack path.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the mutable static destruction counter"),
+)) {
+    @("scopeVariableOfOrdinaryClassRunsDestructorAtScopeExit." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int destructions;
+
+            class Resource {
+                int value;
+                this(int value) { this.value = value; }
+                ~this() {
+                    ++destructions;
+                }
+            }
+
+            void main() {
+                {
+                    scope resource = new Resource(42);
+                    assert(resource.value == 42);
+                }
+                assert(destructions == 1);
+            }
+        });
+    }
+}
+
 // A call through an interface reference finds the class's override, which
 // needs the interface's own offset rather than the class vtable.
 static foreach (backend; Matrix!()) {
@@ -794,6 +859,128 @@ static foreach (backend; Matrix!(
                 Object o = new Outer.Inner;
                 assert(o.classinfo is Outer.Inner.classinfo);
                 assert(o.classinfo !is Outer.classinfo);
+            }
+        });
+    }
+}
+
+// An implicit `new Inner()` written inside an `Outer` method has dmd
+// synthesize `NewExp.thisexp` as `this` (`expressionsem.d`, `NewExp`
+// semantic) - the guest never writes `this.new Inner()` itself, but the
+// allocation still needs `Inner`'s hidden `vthis` field filled with that
+// `Outer` instance for `value` to resolve inside `Inner`'s own methods.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "dmd's own CTFE engine reports `class `this.this` is `null` and " ~
+        "cannot be dereferenced` for this snippet, independently of " ~
+        "either LoweringVisitor backend - not yet investigated"),
+)) {
+    @("nestedClassImplicitContextReadsAndWritesOuterField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Outer {
+                int value = 7;
+                final class Inner {
+                    int get() { return value; }
+                    void set(int v) { value = v; }
+                }
+                int make() {
+                    auto inner = new Inner();
+                    inner.set(inner.get() + 1);
+                    return value;
+                }
+            }
+            void main() {
+                assert(new Outer().make() == 8);
+            }
+        });
+    }
+}
+
+// `outer.new Inner()`, the explicit form of the same allocation: dmd sets
+// `NewExp.thisexp` to `outer` directly instead of synthesizing it from
+// `this`, so `Inner`'s `vthis` must resolve to that same expression's
+// value from outside `Outer` entirely, with no enclosing `Outer` method on
+// the call stack to read a context from.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "dmd's own CTFE engine reports `class `this.this` is `null` and " ~
+        "cannot be dereferenced` for this snippet, independently of " ~
+        "either LoweringVisitor backend - not yet investigated"),
+)) {
+    @("nestedClassExplicitOuterContextReadsAndWritesOuterField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Outer {
+                int value = 7;
+                final class Inner {
+                    int get() { return value; }
+                    void set(int v) { value = v; }
+                }
+            }
+            void main() {
+                auto outer = new Outer();
+                auto inner = outer.new Inner();
+                inner.set(inner.get() + 1);
+                assert(outer.value == 8);
+            }
+        });
+    }
+}
+
+// A class nested in a *function* rather than in another class never gets
+// `NewExp.thisexp` (dmd only synthesizes or accepts `thisexp` for a class
+// nested in a class) - `Inner`'s `vthis` must instead resolve to `main`'s
+// own frame, the same way a nested *struct* already reads its enclosing
+// function's context.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "dmd's own CTFE engine reports `class `this.this` is `null` and " ~
+        "cannot be dereferenced` for this snippet, independently of " ~
+        "either LoweringVisitor backend - not yet investigated"),
+)) {
+    @("functionLocalNestedClassReadsAndWritesOuterLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int value = 7;
+                final class Inner {
+                    int get() { return value; }
+                    void set(int v) { value = v; }
+                }
+                auto inner = new Inner();
+                inner.set(inner.get() + 1);
+                assert(value == 8);
+            }
+        });
+    }
+}
+
+// As above, but allocated on the stack with `scope`: the on-stack `NewExp`
+// path (`visitUnloweredNew`) must fill the same `vthis` the heap path
+// does, not just skip straight to the constructor call.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.unconfirmed,
+        "dmd's own CTFE engine reports `class `this.this` is `null` and " ~
+        "cannot be dereferenced` for this snippet, independently of " ~
+        "either LoweringVisitor backend - not yet investigated"),
+)) {
+    @("functionLocalNestedScopeClassReadsAndWritesOuterLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int value = 7;
+                final class Inner {
+                    int get() { return value; }
+                    void set(int v) { value = v; }
+                }
+                scope inner = new Inner();
+                inner.set(inner.get() + 1);
+                assert(value == 8);
             }
         });
     }

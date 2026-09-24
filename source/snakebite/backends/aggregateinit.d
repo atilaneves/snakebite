@@ -37,15 +37,27 @@ public struct InitStep {
     public Type type;
     // The element count `broadcast` copies `source` into.
     public size_t count;
-    // The expression to evaluate for `value`, `bitfield` and `broadcast`.
+    // The expression to evaluate for `value`, `bitfield` and `broadcast`,
+    // and, for a `vthis` step whose source is `NewExp.thisexp` rather than
+    // an enclosing function's context, the outer-object expression itself.
     public Expression source;
     // The field being written, for a `bitfield` step's masked store.
     public VarDeclaration field;
-    // The enclosing function whose context a `vthis` step stores - `null`
-    // when the struct's own lexical parent is not a function, which is
-    // dmd fact and not itself an error: `sd.toParent2()` only ever names
-    // a class parent for a class nested in a class, never for a struct.
+    // The enclosing function whose context a `vthis` step stores when the
+    // aggregate is a nested struct reading its own function's frame -
+    // `null` when the struct's own lexical parent is not a function, which
+    // is dmd fact and not itself an error: `sd.toParent2()` only ever
+    // names a class parent for a class nested in a class, never for a
+    // struct. Also `null`, and unused, for a `vthis` step whose `source`
+    // is set instead (a nested class's `NewExp.thisexp`).
     public FuncDeclaration parentFunction;
+    // A byte adjustment a `vthis` step with `source` set adds after
+    // evaluating it - the same base-class offset dmd's own glue layer
+    // (`glue/e2ir.d`, `NewExp.thisexp` case) adds when `thisexp`'s static
+    // type is a class *derived* from the nested class's actual lexical
+    // parent, computed the same way an upcast `CastExp` computes it
+    // (`snakebite.backends.casts.classify`'s `classReference` kind).
+    public int sourceAdjustment;
 }
 
 public struct AggregateInitPlan {
@@ -128,19 +140,78 @@ in (arguments is null || arguments.length <= sd.fields.length)
     return AggregateInitPlan(false, steps);
 }
 
-// `sd.isNested()` is true only when dmd gave the struct a hidden `vthis`
-// field; a `static struct` declared inside a function is lexically nested
-// but has no such field.
-private bool tryVthisStep(
-    imported!"dmd.dstruct".StructDeclaration sd, out InitStep step,
+// The single decision both backends' heap `NewExp` adapters read for a
+// class's own hidden context field: empty for every `NewExp` but a nested
+// class's own construction, one `vthis` step otherwise. dmd's semantic
+// pass (`expressionsem.d`, `NewExp` semantic) synthesizes `thisexp` for
+// the implicit `new Inner()` written inside a method the same way it
+// resolves the explicit `outer.new Inner()`/`this.new Inner()` forms -
+// walking `.outer` once per further nesting level - so both surface forms
+// reach this plan identically through `classVthisStep`. A class nested in
+// a *function* rather than a class never gets a `thisexp` at all - there
+// is no outer object to name - so that case falls to the same
+// `tryVthisStep` the struct paths above use, reading the enclosing
+// function's own frame instead.
+public AggregateInitPlan planClassContext(
+    imported!"dmd.expression".NewExp expression,
 ) {
-    if (!sd.isNested() || sd.vthis is null)
+    auto classType = expression.newtype.isTypeClass;
+    if (classType is null)
+        return AggregateInitPlan.init;
+
+    if (expression.thisexp !is null)
+        return AggregateInitPlan(
+            false, [classVthisStep(classType.sym, expression.thisexp)]);
+
+    InitStep step;
+    if (!tryVthisStep(classType.sym, step))
+        return AggregateInitPlan.init;
+
+    return AggregateInitPlan(false, [step]);
+}
+
+// `ad.isNested()` is true only when dmd gave the aggregate a hidden
+// `vthis` field; a `static struct`/`static class` declared inside a
+// function is lexically nested but has no such field. Shared by a nested
+// struct's own construction and a nested *class*'s construction when it
+// has no `thisexp` (nested in a function, not in another class) - both
+// read the same enclosing function's frame the same way.
+private bool tryVthisStep(
+    imported!"dmd.aggregate".AggregateDeclaration ad, out InitStep step,
+) {
+    if (!ad.isNested() || ad.vthis is null)
         return false;
 
-    auto parent = sd.toParent2();
-    step = InitStep(InitStep.Kind.vthis, sd.vthis.offset);
+    auto parent = ad.toParent2();
+    step = InitStep(InitStep.Kind.vthis, ad.vthis.offset);
     step.parentFunction = parent is null ? null : parent.isFuncDeclaration;
     return true;
+}
+
+// `thisexp`'s own static type can be a class *derived* from `cd`'s actual
+// lexical parent - dmd allows constructing a class nested in a base class
+// through a more-derived outer instance - so the pointer stored into
+// `vthis` is not always `thisexp`'s own value unchanged. `classify` (the
+// same plan an upcast `CastExp` builds) gives the identical byte offset
+// dmd's own glue layer (`glue/e2ir.d`, `NewExp.thisexp` case) adds in that
+// situation; when `thisexp`'s type already *is* the lexical parent, that
+// offset comes back zero, so this needs no separate same-type case.
+private InitStep classVthisStep(
+    imported!"dmd.dclass".ClassDeclaration cd,
+    imported!"dmd.expression".Expression thisexp,
+)
+in (cd.isNested() && cd.vthis !is null)
+{
+    import snakebite.backends.casts: classify;
+
+    auto step = InitStep(
+        InitStep.Kind.vthis, cd.vthis.offset, TypeFacts.pointer(),
+        thisexp.type);
+    step.source = thisexp;
+    step.sourceAdjustment = classify(
+        thisexp.type, cd.toParentLocal().isClassDeclaration().type,
+    ).referenceOffset;
+    return step;
 }
 
 private InitStep fieldStep(

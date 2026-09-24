@@ -133,6 +133,41 @@ pragma(inline, true) public void floatingToBool(
     storeIntegral(destination, loadFloating(source, sourceSize) != 0, 1);
 }
 
+// A complex value's native layout is its two components, `re` then `im`,
+// each exactly half the whole value's size - `float`+`float` for
+// `cfloat`, and so on. Every complex primitive below shares that one
+// halving instead of taking the component size as a separate argument.
+pragma(inline, true) public real loadComplexRe(
+    in void* place,
+    in size_t size,
+) @nogc nothrow {
+    return loadFloating(place, size / 2);
+}
+
+pragma(inline, true) public real loadComplexIm(
+    in void* place,
+    in size_t size,
+) @nogc nothrow {
+    return loadFloating(cast(const(ubyte)*) place + size / 2, size / 2);
+}
+
+pragma(inline, true) public void storeComplex(
+    void* place,
+    in real re,
+    in real im,
+    in size_t size,
+) @nogc nothrow {
+    storeFloating(place, re, size / 2);
+    storeFloating(cast(ubyte*) place + size / 2, im, size / 2);
+}
+
+pragma(inline, true) public bool complexTruth(
+    in void* place,
+    in size_t size,
+) @nogc nothrow {
+    return loadComplexRe(place, size) != 0 || loadComplexIm(place, size) != 0;
+}
+
 // Whether an integral width has a native representation handled above.
 public bool isIntegralSize(in size_t size) @safe @nogc nothrow pure {
     return size == 1 || size == 2 || size == 4 || size == 8;

@@ -258,6 +258,106 @@ public struct TypeFacts {
         if (auto arrayType = type.isTypeSArray)
             forceResolved(arrayType.next);
     }
+
+    // Which native bytes of a value of `type` decide whether it is true
+    // as a condition (`if`, `assert`, `!`, `&&`, `||`, `?:`) - dmd's own
+    // `toBoolean` (`dmd.expressionsem`) leaves such a condition's type
+    // unchanged for every case here, so the real test is the one native
+    // codegen makes of the value's bytes, not any `bool` conversion:
+    //
+    // * A floating value is true when nonzero, compared as a float, at
+    //   `size` bytes from the value's own start.
+    // * A dynamic array is true by its pointer word alone (`ptr !is
+    //   null`) - a zero-length array over real storage is still true -
+    //   so only `arrayPointerOffset` is tested, never the length word.
+    //   (A length with a null pointer is not pinned either way: dmd
+    //   2.112 and ldc2 1.42 disagree on it, and no guest program either
+    //   backend can run builds that value.)
+    // * A delegate is true when either of its two words (`ptr`,
+    //   `funcptr`) is nonzero - the one shape here with a second word
+    //   to test, at `secondOffset`.
+    // * A pointer, a class reference, an associative array's one
+    //   pointer-sized handle, and every integral (`bool`, `char`, an
+    //   enum with an integral base, ...) are already exactly one native
+    //   word: `offset` alone, `size` bytes, decides it.
+    //
+    // One rule shared by every backend that compiles or interprets a
+    // condition, so neither special-cases an associative array or a
+    // delegate on its own.
+    public struct Truth {
+        // `false` when `type` cannot be used as a condition at all (for
+        // instance an integral width with no native layout); every
+        // other field is meaningless then, and the caller reports its
+        // own rejection.
+        public bool supported;
+        public bool isFloat;
+        // Offset, from the value's own start, and width, of the bytes
+        // that decide truth on their own (the only bytes there are,
+        // unless `secondOffset` names a second word).
+        public size_t offset;
+        public size_t size;
+        // Offset of a second, `size_t.sizeof`-wide word to test as well
+        // (true if either word is nonzero) - `noSecondWord` when the
+        // first word already decides it alone.
+        public size_t secondOffset = noSecondWord;
+
+        public enum noSecondWord = size_t.max;
+
+        public static Truth of(Type type) {
+            import dmd.astenums:
+                Taarray, Tarray, Tclass, Tcomplex32, Tcomplex64, Tcomplex80,
+                Tdelegate, Tfloat32, Tfloat64, Tfloat80, Timaginary32,
+                Timaginary64, Timaginary80, Tnull, Tpointer;
+            import dmd.typesem: isIntegral, size, toBasetype;
+
+            type = type.toBasetype;
+
+            // An imaginary value is one `float`/`double`/`real`-shaped
+            // component on its own - the same nonzero test a real one
+            // gets, just at its own (imaginary) type's size.
+            if (type.ty == Tfloat32 || type.ty == Tfloat64
+                    || type.ty == Tfloat80
+                    || type.ty == Timaginary32 || type.ty == Timaginary64
+                    || type.ty == Timaginary80)
+                return Truth(true, true, 0, type.size);
+
+            // A complex value is true when either of its two
+            // `float`/`double`/`real`-shaped components (`re`, `im`,
+            // each exactly half `type.size` - `nativevalue.
+            // loadComplexRe`/`loadComplexIm`'s own layout) is nonzero -
+            // `isFloat` picks the same per-word nonzero test the single-
+            // component case above does, applied twice by `secondOffset`
+            // the way a delegate's two integral words already are.
+            if (type.ty == Tcomplex32 || type.ty == Tcomplex64
+                    || type.ty == Tcomplex80) {
+                const half = type.size / 2;
+                return Truth(true, true, 0, half, half);
+            }
+
+            if (type.ty == Tarray)
+                return Truth(
+                    true, false, arrayPointerOffset, size_t.sizeof);
+
+            if (type.ty == Tdelegate)
+                return Truth(
+                    true, false, delegateContextOffset, size_t.sizeof,
+                    delegateFunctionOffset,
+                );
+
+            // `typeof(null)` has only ever the one value - always zero
+            // bits, so `if (x)` on it is always false - but that is
+            // still the same one-word nonzero test a pointer's own
+            // `Truth` already is, not a rejection of its own.
+            if (type.ty == Tpointer || type.ty == Tclass
+                    || type.ty == Taarray || type.ty == Tnull)
+                return Truth(true, false, 0, type.size);
+
+            if (type.isIntegral && isIntegralSize(type.size))
+                return Truth(true, false, 0, type.size);
+
+            return Truth(false);
+        }
+    }
 }
 
 // Rounds `offset` up to the next multiple of `alignment`, by way of dmd's
@@ -297,6 +397,30 @@ public imported!"dmd.expression".Expression initializerValueOf(
     if (auto blit = value.isBlitExp)
         return blit.e2;
     return value;
+}
+
+// `T[n] v = source;` (a static array constructed from a slice or a
+// scalar, never an array literal) is not a plain value initializer: dmd
+// rewrites the construction to `v[] = source` (expressionsem.d, around
+// line 12776), a `ConstructExp`/`BlitExp` whose `e1` is a `SliceExp` of
+// `v`, not `v` itself. That node's own value is the slice `e1` evaluates
+// to - storing it as `v`'s own type stores the slice header, not the
+// elements. A declaration initializer shaped this way must run as an
+// effect, through the normal assignment path that resolves `e1`'s
+// address and writes through it, rather than have `initializerValueOf`'s
+// `e2` evaluated into `v`'s slot as if it were `v`'s own value.
+public bool initializerConstructsThroughSlice(
+    imported!"dmd.init".ExpInitializer initializer,
+    imported!"dmd.declaration".VarDeclaration variable,
+) {
+    auto value = initializer.exp;
+    auto e1 = value.isConstructExp ? value.isConstructExp.e1
+        : value.isBlitExp ? value.isBlitExp.e1 : null;
+    if (e1 is null)
+        return false;
+
+    auto target = e1.isVarExp;
+    return target is null || target.var !is variable;
 }
 
 // These literals require neither execution nor a fresh runtime allocation.
@@ -712,8 +836,10 @@ private void storeValue(
 ) {
     import core.stdc.string: memcpy, memset;
     import dmd.astenums:
-        Tarray, Tfloat32, Tfloat64, Tfloat80, Tpointer, Tsarray;
-    import dmd.expressionsem: toInteger, toReal;
+        Tarray, Tcomplex32, Tcomplex64, Tcomplex80, Tfloat32, Tfloat64,
+        Tfloat80, Timaginary32, Timaginary64, Timaginary80, Tpointer,
+        Tsarray;
+    import dmd.expressionsem: toComplex, toImaginary, toInteger, toReal;
     import dmd.typesem: mutableOf, nextOf, size, toBasetype;
     import std.conv: text;
 
@@ -859,6 +985,45 @@ private void storeValue(
 
     if (type.ty == Tfloat80) {
         *cast(real*) place = value.toReal;
+        return;
+    }
+
+    // A complex value's native layout is its `{re, im}` pair, each
+    // exactly half of `facts.size` - `dmd.expressionsem.toComplex`
+    // already answers `re`/`im` for an `IntegerExp`/`RealExp` (an
+    // implicit real-to-complex promotion, `im` zero) as well as a
+    // `ComplexExp` literal, so this one case covers every constant
+    // source a `complex`-typed constant declaration can have.
+    if (type.ty == Tcomplex32 || type.ty == Tcomplex64
+            || type.ty == Tcomplex80) {
+        const parts = value.toComplex;
+        const half = facts.size / 2;
+        if (half == float.sizeof) {
+            *cast(float*) bytes = cast(float) parts.re;
+            *cast(float*) (bytes + half) = cast(float) parts.im;
+        } else if (half == double.sizeof) {
+            *cast(double*) bytes = cast(double) parts.re;
+            *cast(double*) (bytes + half) = cast(double) parts.im;
+        } else {
+            *cast(real*) bytes = parts.re;
+            *cast(real*) (bytes + half) = parts.im;
+        }
+        return;
+    }
+
+    // An imaginary value is one component on its own - `toImaginary`
+    // answers `0` for any source with no imaginary axis (an `Integer`/
+    // real-typed `RealExp`), the same way `toReal` above answers `0`
+    // for an imaginary-typed one.
+    if (type.ty == Timaginary32 || type.ty == Timaginary64
+            || type.ty == Timaginary80) {
+        const im = value.toImaginary;
+        if (facts.size == float.sizeof)
+            *cast(float*) place = cast(float) im;
+        else if (facts.size == double.sizeof)
+            *cast(double*) place = cast(double) im;
+        else
+            *cast(real*) place = im;
         return;
     }
 

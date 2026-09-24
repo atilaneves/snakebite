@@ -319,7 +319,8 @@ private struct Shared {
         const(void)* word;
         if (callSelection.usesGuestBody(method,
                 (callee) => program.isInterpreted(callee),
-                plans.hasNativeSymbol(method))) {
+                plans.hasNativeSymbol(method),
+                plans.hasIndependentNativeSymbol(method))) {
             plans.registerGuestFunction(cast(void*) method, method);
             word = cast(void*) method;
         }
@@ -374,7 +375,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.ffi.abi: Register;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
-        initializerValueOf, isIntegralSize, TypeFacts;
+        initializerConstructsThroughSlice, initializerValueOf,
+        isIntegralSize, TypeFacts;
     import object:
         Error, Exception, Throwable, TypeInfo, TypeInfo_Class,
         TypeInfo_Tuple;
@@ -841,6 +843,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return _plans.hasNativeSymbol(function_);
     }
 
+    private bool hasIndependentNativeSymbol(FuncDeclaration function_) {
+        return _plans.hasIndependentNativeSymbol(function_);
+    }
+
     // `function_`'s frame layout, from the shared table; computed on its
     // first call on any thread. The returned pointer stays valid and is
     // the same on every thread.
@@ -1077,6 +1083,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             function_,
             (callee) => _program.isInterpreted(callee),
             hasNativeSymbol(function_),
+            hasIndependentNativeSymbol(function_),
         );
         final switch (decision.route) with (CallSelection.Route) {
         case native:
@@ -1956,38 +1963,51 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _controlFlow.continueTo(statement.ident);
     }
 
+    // `TypeFacts.Truth` decides which native bytes of `expression`'s
+    // value make it true - the whole value for a pointer, a class
+    // reference, an associative array's handle, or an integral; only the
+    // pointer word for a dynamic array; either of a delegate's two words
+    // (`ptr`, `funcptr`) - so this method carries no case of its own for
+    // any of them, and reads the same shared rule the bytecode compiler
+    // does.
     private bool truthOf(Expression expression) {
+        import snakebite.nativelayout: TypeFacts, loadIntegral;
+        import snakebite.nativevalue: loadFloating;
         import std.conv: text;
 
         auto type = expression.type;
+        const truth = TypeFacts.Truth.of(type);
+        if (!truth.supported)
+            throw new SnakebiteException(
+                text("interpreter cannot evaluate `", expression.toString,
+                    "` as a condition: its type is `", type.toString, "`"),
+            );
+
+        // Sized to `creal`, the widest condition value `Truth.of` ever
+        // answers `supported` for - a plain real, an imaginary, or one
+        // component of a complex all fit within it too.
         const facts = factsOf(type);
+        align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
+        assert(facts.size <= buffer.sizeof,
+            "a condition value wider than a `creal` reached the scratch"
+                ~ " buffer");
+        evaluate(expression, type, facts, buffer.ptr);
 
-        // DMD classifies pointers as integral for some type queries, but
-        // their value must be read as an address, not as a signed integer.
-        if (type.ty == Tpointer || type.ty == Tclass)
-            return asPointer(expression) !is null;
+        if (truth.isFloat) {
+            if (loadFloating(buffer.ptr + truth.offset, truth.size) != 0)
+                return true;
+            if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
+                return false;
+            return loadFloating(
+                buffer.ptr + truth.secondOffset, truth.size) != 0;
+        }
 
-        if (facts.isIntegral)
-            return asIntegral(expression, facts) != 0;
-
-        const baseType = type.toBasetype;
-        if (baseType.ty == Tfloat32 || baseType.ty == Tfloat64
-                || baseType.ty == Tfloat80)
-            return asFloating(expression) != 0;
-
-        // The pointer alone decides. dmd 2.112 and ldc2 1.42 disagree on
-        // an array with a length but a null pointer - dmd calls it true,
-        // ldc2 false - so that half is not something to assert as a
-        // language rule. No guest program this interpreter can run builds
-        // that value, so no test pins it either way; when one can, the
-        // oracle the suite compares against settles it.
-        if (type.ty == Tarray)
-            return evaluateArray(expression, facts).elements !is null;
-
-        throw new SnakebiteException(
-            text("interpreter cannot evaluate `", expression.toString,
-                "` as a condition: its type is `", type.toString, "`"),
-        );
+        if (loadIntegral(buffer.ptr + truth.offset, truth.size, false) != 0)
+            return true;
+        if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
+            return false;
+        return loadIntegral(
+            buffer.ptr + truth.secondOffset, size_t.sizeof, false) != 0;
     }
 
     // A dynamic array's two fields, for a caller that reads them rather
@@ -2105,8 +2125,56 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _nativeData.write(_type, _facts, expression, _place);
     }
 
+    // `1.0f + 0.0fi`: dmd's own constant folding already reduces
+    // `complex`-literal arithmetic to one `ComplexExp` (`EXP.complex80`
+    // regardless of the actual `cfloat`/`cdouble`/`creal` width - only
+    // `.type` differs), the same compile-time constant `RealExp` above
+    // is for a real one.
+    override void visit(ComplexExp expression) {
+        _nativeData.write(_type, _facts, expression, _place);
+    }
+
     override void visit(NullExp expression) {
         _nativeData.write(_type, _facts, expression, _place);
+    }
+
+    // `int4 v = 1;`/`cast(int4) 1`: dmd's own semantic pass (`dcast.d`)
+    // rewrites either shape to this node, `e1` already cast to the
+    // vector's own element type, and its meaning is "every lane gets
+    // this one value" - filling the first lane by evaluating `e1`
+    // straight into `_place` and then copying those same bytes to every
+    // remaining lane. `int4 v = cast(int4) someInt4Sarray;` reaches this
+    // node too, with `e1` a matching-size static array instead: dmd's
+    // own `dcast.d` (`T[n] <-- __vector(U[m])`... in reverse) wraps
+    // that shape here rather than the scalar element cast, and its
+    // meaning is a plain reinterpret of the array's own bytes, not a
+    // broadcast of a single "element".
+    override void visit(VectorExp expression) {
+        import core.stdc.string: memcpy;
+
+        if (expression.e1.type.toBasetype.ty == Tsarray) {
+            evaluate(expression.e1, expression.e1.type,
+                factsOf(expression.e1.type), _place);
+            return;
+        }
+
+        const elementFacts = factsOf(expression.e1.type);
+        evaluate(expression.e1, expression.e1.type, elementFacts, _place);
+        auto bytes = cast(ubyte*) _place;
+        foreach (i; 1 .. _facts.size / elementFacts.size)
+            memcpy(bytes + i * elementFacts.size, bytes, elementFacts.size);
+    }
+
+    // `someVector.array`: dmd's own semantic pass (`typesem.d`'s
+    // `TypeVector.dotExp`, `Id.array`) reinterprets the vector as its
+    // own `basetype` static array - the same bytes, so evaluating `e1`
+    // with its own (vector) type straight into `_place` already is the
+    // static array's own value.
+    override void visit(VectorArrayExp expression) {
+        evaluate(
+            expression.e1, expression.e1.type, factsOf(expression.e1.type),
+            _place,
+        );
     }
 
     override void visit(StringExp expression) {
@@ -2554,8 +2622,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "initializer is supported"),
             );
 
-        auto value = initializerValueOf(expInitializer);
         auto slot = storageOf(variable);
+
+        if (initializerConstructsThroughSlice(expInitializer, variable)) {
+            _temporaries.initialize(variable, expression, slot, {
+                runForEffect(expInitializer.exp);
+            });
+            return;
+        }
+
+        auto value = initializerValueOf(expInitializer);
         _temporaries.initialize(variable, expression, slot, {
             if (isRefStorage(variable)) {
                 import snakebite.nativelayout: storeIntegral;
@@ -3842,9 +3918,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     protected override void visitUnloweredCast(CastExp expression) {
         import snakebite.backends.casts: classify, CastPlan;
         import snakebite.nativevalue:
-            floatingToBool, floatingToIntegral, integralToFloating;
+            complexTruth, floatingToBool, floatingToIntegral,
+            integralToFloating, loadComplexIm, loadComplexRe, loadFloating,
+            storeComplex, storeFloating;
         import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset, storeIntegral;
+            arrayLengthOffset, arrayPointerOffset, delegateContextOffset,
+            loadIntegral, storeIntegral;
         import std.conv: text;
 
         auto sourceType = expression.e1.type;
@@ -3857,7 +3936,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        const plan = classify(expression.e1, _type);
+        // `.im` on a `complex` value is dmd's own `e.castTo(sc,
+        // timaginaryN)` (`typesem.d`'s `Id.im` case for `Tcomplex*`)
+        // with the resulting node's `.type` then overwritten straight to
+        // the matching `Tfloat*` - a same-size reinterpret with no
+        // `CastExp` of its own, done directly on the expression `castTo`
+        // already built. `.type` (`_type` here) is that overwritten
+        // field; `.to` still names the cast `castTo` actually performed,
+        // so it is the one `classify` has to see to tell that apart from
+        // `.re`, whose `.to` and `.type` agree.
+        auto destType = expression.to !is null ? expression.to : _type;
+        const plan = classify(expression.e1, destType);
 
         final switch (plan.kind) with (CastPlan.Kind) {
         case copy:
@@ -3881,11 +3970,132 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
+        // `cast(bool) someComplex`: true when either component is
+        // nonzero - the same rule `TypeFacts.Truth` gives `if
+        // (someComplex)`.
+        case complexToBool: {
+            align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            storeIntegral(
+                _place,
+                complexTruth(buffer.ptr, plan.sourceFacts.size),
+                _facts.size,
+            );
+            return;
+        }
+
+        // `cast(double) someComplex`/`someComplex.re`: the real
+        // component alone, converted to the destination's own width.
+        case complexToReal: {
+            align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            storeFloating(
+                _place,
+                loadComplexRe(buffer.ptr, plan.sourceFacts.size),
+                _facts.size,
+            );
+            return;
+        }
+
+        // `someComplex.im`: the imaginary component alone (`classify`'s
+        // own doc comment on `destType`/`.to` above is what routes this
+        // cast here instead of `complexToReal`).
+        case complexToImaginary: {
+            align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            storeFloating(
+                _place,
+                loadComplexIm(buffer.ptr, plan.sourceFacts.size),
+                _facts.size,
+            );
+            return;
+        }
+
+        // `cast(int) someComplex`: the real component, converted the
+        // same way `floatToIntegral` converts a plain real operand - the
+        // component's own bytes sit at `buffer`'s first half already, so
+        // `floatingToIntegral` reading `sourceFacts.size / 2` bytes from
+        // there needs nothing else.
+        case complexToIntegral: {
+            align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            floatingToIntegral(
+                _place, buffer.ptr, _facts.size, plan.sourceFacts.size / 2,
+                _facts.isUnsigned,
+            );
+            return;
+        }
+
+        // `cast(cfloat) someCreal`: both components, independently
+        // rounded to the destination's own width.
+        case complexWidth: {
+            align(real.alignof) ubyte[2 * real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            storeComplex(
+                _place,
+                loadComplexRe(buffer.ptr, plan.sourceFacts.size),
+                loadComplexIm(buffer.ptr, plan.sourceFacts.size),
+                _facts.size,
+            );
+            return;
+        }
+
+        // `cast(cdouble) someDouble`: the real axis carries the value,
+        // the imaginary one is zero.
+        case realToComplex: {
+            align(real.alignof) ubyte[real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            storeComplex(
+                _place, loadFloating(buffer.ptr, plan.sourceFacts.size),
+                0.0L, _facts.size,
+            );
+            return;
+        }
+
+        // `cast(cdouble) someInt`: as `realToComplex`, from an integral
+        // operand.
+        case integralToComplex: {
+            align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            const value = loadIntegral(
+                buffer.ptr, plan.sourceFacts.size, !plan.sourceFacts.isUnsigned);
+            const re = plan.sourceFacts.isUnsigned
+                ? cast(real) cast(ulong) value : cast(real) value;
+            storeComplex(_place, re, 0.0L, _facts.size);
+            return;
+        }
+
+        // `cast(cdouble) someIdouble`: the reverse of `complexToImaginary`
+        // - the imaginary axis carries the value, the real one is zero.
+        case imaginaryToComplex: {
+            align(real.alignof) ubyte[real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            storeComplex(
+                _place, 0.0L, loadFloating(buffer.ptr, plan.sourceFacts.size),
+                _facts.size,
+            );
+            return;
+        }
+
         // An explicit pointer-to-integral cast preserves the native
         // address bits.
         case pointerToIntegral:
             storeIntegral(
                 _place, cast(size_t) asPointer(expression.e1), _facts.size);
+            return;
+
+        // `cast(void*) someDelegate`: the same context word `dg.ptr`
+        // itself reads (`visitDelegateWord` below).
+        case delegateToPointer:
+            visitDelegateWord(expression.e1, delegateContextOffset);
             return;
 
         case sarrayToSlice: {
@@ -3941,9 +4151,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // this has to be its own kind rather than an ordinary
         // integral-to-integral narrowing: D specifies `cast(bool) x` as
         // `x != 0`, not "keep the low byte" - `cast(bool) 256` is `true`
-        // in D, not the `false` a truncation would store.
+        // in D, not the `false` a truncation would store. `classify` also
+        // reaches this kind for a pointer operand (`cast(bool) somePtr`),
+        // which `asIntegral` itself refuses (`Type.isIntegral` is false
+        // for `Tpointer`), so this reads the operand's raw bytes directly
+        // instead - the same bytes `asPointer` would read for a pointer,
+        // or `asIntegral` for an integral, just without either one's own
+        // gate on the operand's type.
         case toBool: {
-            const value = asIntegral(expression.e1, plan.sourceFacts);
+            align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
+            evaluate(expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            const value = loadIntegral(buffer.ptr, plan.sourceFacts.size, false);
             storeIntegral(_place, value != 0, _facts.size);
             return;
         }
@@ -3985,14 +4203,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // any of the three to `real` without loss, so narrowing that back
         // to the destination's width is the one rounding the host's own
         // `cast(float)`/`cast(double)`/`cast(real)` performs.
+        // Sized rather than dispatched on `_type.ty`/`sourceType.ty`, so
+        // the one kind also carries an imaginary-to-imaginary width
+        // change: an imaginary value's native layout is a single
+        // `float`/`double`/`real`, the same shape a plain real one is,
+        // just at a different offset than `sourceType.ty`'s own family
+        // would suggest were this dispatched by type instead of size.
         case floatWidth: {
-            const value = asFloating(expression.e1);
-            if (_type.ty == Tfloat32)
-                *cast(float*) _place = cast(float) value;
-            else if (_type.ty == Tfloat64)
-                *cast(double*) _place = cast(double) value;
-            else
-                *cast(real*) _place = value;
+            align(real.alignof) ubyte[real.sizeof] buffer = void;
+            evaluate(
+                expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            storeFloating(
+                _place, loadFloating(buffer.ptr, plan.sourceFacts.size),
+                _facts.size,
+            );
             return;
         }
 
@@ -4223,6 +4447,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // which would be a different thing wearing the same words.
     override void visit(AssertExp expression) {
         import std.conv: text;
+        import snakebite.backends.exceptions:
+            AssertInvariantPlan, assertInvariantPlanOf;
 
         if (expression.type !is null && expression.type.ty == Tnoreturn)
             throw new SnakebiteException(
@@ -4230,9 +4456,47 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     expression.toString, "`"),
             );
 
-        if (truthOf(expression.e1))
+        // `assertInvariantPlanOf` answers the same question dmd's own
+        // glue layer (`e2ir.d`'s `visitAssert`) asks of `e1`'s type alone,
+        // gated the same way on `useInvariants`: every other assert - the
+        // overwhelming majority - takes the plain path unchanged below.
+        auto plan = assertInvariantPlanOf(expression);
+        if (plan.kind == AssertInvariantPlan.Kind.none) {
+            if (!truthOf(expression.e1))
+                throwAssertFailure(expression);
             return;
+        }
 
+        // `e1` is a class reference or a struct pointer here - a single
+        // pointer-sized value that is its own truth test
+        // (`TypeFacts.Truth.of`'s own answer for either shape) - evaluated
+        // once and reused for both the condition check and the invariant
+        // call below, the same "evaluate once, reuse the same compiler
+        // temporary for both" dmd's own glue layer does with its one
+        // temporary. A null reference fails the condition here, before
+        // ever reaching the invariant call - reaching it first would
+        // crash on druntime's own `_d_invariant`'s own null check instead
+        // of throwing this guest-visible `AssertError`.
+        import snakebite.nativelayout: loadIntegral;
+
+        align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
+        evaluate(expression.e1, expression.e1.type, buffer.ptr);
+        auto object =
+            cast(void*) loadIntegral(buffer.ptr, size_t.sizeof, false);
+        if (object is null) {
+            throwAssertFailure(expression);
+            return;
+        }
+
+        if (plan.kind == AssertInvariantPlan.Kind.class_)
+            callClassInvariant(object);
+        else
+            callStructInvariant(plan.structInvariant, object);
+    }
+
+    // What a failed `assert` throws to the guest, shared by every path
+    // through `visit(AssertExp)` above.
+    private void throwAssertFailure(AssertExp expression) {
         import core.exception: AssertError;
         import snakebite.backends.exceptions: assertFailureOf;
 
@@ -4242,6 +4506,56 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const failure = assertFailureOf(expression);
         throw new GuestException(
             new AssertError(failure.message, failure.file, failure.line));
+    }
+
+    // A class reference's own invariant is druntime's job, not this
+    // project's: `_d_invariant` (`rt.invariant_`) walks every base class's
+    // own invariant in turn, resolved purely by its linker symbol through
+    // the FFI barrier - the same `rawPlanOf`/`callPlan` shape
+    // `visitUnloweredCatDcharAssign` already uses for a druntime hook with
+    // no `FuncDeclaration` of its own - and called here with the object
+    // reference as its one argument.
+    private void callClassInvariant(void* objectPointer) {
+        import snakebite.backends.exceptions: classInvariantSymbol;
+        import std.conv: text;
+
+        countForeignNameLookup;
+        auto plan = _plans.rawPlanOf(
+            classInvariantSymbol,
+            [Register(Register.Kind.pointer, size_t.sizeof)],
+        );
+        if (plan is null)
+            throw new SnakebiteException(
+                text("interpreter cannot resolve the symbol ",
+                    "`", classInvariantSymbol, "`: it is not in this ",
+                    "process"),
+            );
+
+        const(void*)[1] arguments = [cast(const(void)*) &objectPointer];
+        callPlan(plan, null, arguments[]);
+    }
+
+    // A struct pointer's own invariant is a plain guest function call to
+    // its own merged `inv`, the same shape `dmd.func.FuncDeclaration.
+    // addInvariant` already builds for a member function's own entry/exit
+    // check (`CallExp(DotVarExp(ThisExp, inv))`, see `unresolvedCalleeOf`)
+    // - but `assert(&s)` never gives this backend that `CallExp` to walk,
+    // so this builds `inv`'s own frame directly instead, with
+    // `thisPointer` filling the one hidden `this` slot it declares.
+    private void callStructInvariant(
+        FuncDeclaration inv, void* thisPointer,
+    ) {
+        import snakebite.nativelayout: storeIntegral;
+
+        auto layout = layoutOf(inv);
+        auto frame = _frames.push(layout.size, layout.alignment);
+        storeIntegral(
+            frame.base + layout.hiddenThis.parameter.offset,
+            cast(size_t) thisPointer, size_t.sizeof,
+        );
+        _temporaries.withNestedCall({
+            executeRaw(inv, null, frame.base, layout, null, null, 0);
+        });
     }
 
     protected override void visitThrowExp(ThrowExp expression) {
@@ -4537,10 +4851,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private NewDestination[] _newDestinations;
 
     protected override void prepareNew(NewExp expression) {
-        if (expression.placement !is null || expression.thisexp !is null)
+        if (expression.placement !is null)
             throw new SnakebiteException(
                 text("interpreter cannot allocate `", expression.toString,
-                    "` with placement or an explicit outer context"),
+                    "` with placement"),
             );
 
         // Keeps pointed-to storage mutable during destination restoration.
@@ -4608,15 +4922,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private void finishNew(NewExp expression, ubyte* object) {
+        import snakebite.backends.aggregateinit:
+            InitStep, planClassContext, planPositionalFields;
+
         auto classType = expression.newtype.isTypeClass;
         if (classType !is null) {
+            // A nested class's `vthis` sits inside the allocation at the
+            // same native offset a value of that class type would use -
+            // filled here, once, ahead of the constructor call, the same
+            // order the struct branch below fills its own `vthis`.
+            foreach (step; planClassContext(expression).steps)
+                applyStep(step, object);
+
             if (expression.member !is null)
                 constructAggregate(expression, object);
             return;
         }
-
-        import snakebite.backends.aggregateinit:
-            InitStep, planPositionalFields;
 
         auto declaration = expression.newtype.isTypeStruct.sym;
         auto plan = planPositionalFields(declaration,
@@ -4815,6 +5136,24 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         final switch (step.kind) with (InitStep.Kind) {
         case vthis:
+            // A nested class's `vthis` reads `NewExp.thisexp` directly
+            // (`step.source`), then adds `sourceAdjustment` if `thisexp`'s
+            // static type is a base-class view narrower than the nested
+            // class's actual lexical parent - see `classVthisStep`'s own
+            // doc (`aggregateinit.d`).
+            if (step.source !is null) {
+                evaluate(step.source, step.type, step.facts,
+                    base + step.offset);
+                if (step.sourceAdjustment != 0)
+                    storeIntegral(
+                        base + step.offset,
+                        cast(ulong) (loadIntegral(base + step.offset,
+                            step.facts.size, false) + step.sourceAdjustment),
+                        step.facts.size,
+                    );
+                return;
+            }
+
             // `parentFunction` is `null` when the struct's lexical parent
             // is not a function - dmd fact, not itself an error: leaving
             // `vthis` at its `.init` zero here matches the language's own
@@ -5202,14 +5541,30 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // pointed-to `Tfunction`, not `Tpointer` - `deref.e1` is the pointer
     // expression itself, read with `asPointer` the same way any other
     // dereference reads what it points at.
+    //
+    // The callee kind comes from `callee.type`, not from whether `callee`
+    // is a `PtrExp` (`isIndirectDelegateCall`'s own doc): a pointer to a
+    // delegate (`key in aa` on a delegate-valued associative array, or
+    // `&someDelegateVariable`) dereferences with the same `(*p)(args)`
+    // syntax dmd's own function-pointer-call lowering produces, but
+    // `callee.type` there is `Tdelegate`, not the `Tfunction` a
+    // dereferenced function pointer's type always is.
     private Callee calleeOf(CallExp expression) {
+        import snakebite.backends.calls: isIndirectDelegateCall;
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize,
             loadIntegral;
         import std.conv: text;
 
         auto callee = expression.e1;
-        if (auto deref = callee.isPtrExp) {
+        if (!isIndirectDelegateCall(callee.type)) {
+            auto deref = callee.isPtrExp;
+            if (deref is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot call an unresolved function: `",
+                        expression.toString, "`"),
+                );
+
             auto function_ = cast(FuncDeclaration) asPointer(deref.e1);
             if (function_ is null)
                 throw new SnakebiteException(
@@ -5225,12 +5580,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     deref.type.isTypeFunction);
             return Callee(function_, null, false);
         }
-
-        if (callee.type.ty != Tdelegate)
-            throw new SnakebiteException(
-                text("interpreter cannot call an unresolved function: `",
-                    expression.toString, "`"),
-            );
 
         const facts = factsOf(callee.type);
         assert(facts.size == delegateValueSize

@@ -357,6 +357,113 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// `pick(S)(S value)` and `pick(S : C[], C)(S[] values)` are two distinct
+// module-scope function templates, not two members of one eponymous
+// template (that shape is `image.overloadRegistryAnswersEachOverload`,
+// below). `&pick!(string)` is not a hard ambiguity error here: dmd's
+// template partial ordering silently binds the explicit-argument address to
+// the more specialized array overload, the same shape as `std.regex.regex`,
+// which has a single-pattern overload and an array-of-patterns overload.
+// `source()`'s untyped fast path took that address into an `auto` variable
+// and never checked which declaration it landed on, so it registered the
+// array overload's address under the scalar overload's mangled name too.
+// `pick("hello")` from guest code is a normal call, resolved by argument
+// type the ordinary way, so it must still reach the scalar overload's body.
+static foreach (backend; Matrix!()) {
+    @("image.overloadPartialOrderingMismatch." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        enum moduleName = "image_partial_ordering_" ~ backend.stringof;
+        sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+            "module " ~ moduleName ~ ";\n" ~ q{
+                size_t pick(S)(S value) { return 1; }
+                size_t pick(S : C[], C)(S[] values) { return 2; }
+            });
+        sandbox.writeFile("app/root_" ~ moduleName ~ ".d", "module root_" ~ moduleName ~ ";\nimport "
+            ~ moduleName ~ ";\n" ~ q{
+                int main() {
+                    assert(pick("hello") == 1);
+                    return 0;
+                }
+            });
+        const directory = sandbox.inSandboxPath("app");
+        const imports = [sandbox.inSandboxPath("deps")];
+        static if (is(backend == Native)) {
+            const executable = sandbox.inSandboxPath("test");
+            const result = execute([defaultCompiler, "-I" ~ imports[0],
+                sandbox.inSandboxPath("app/root_" ~ moduleName ~ ".d"), "-of=" ~ executable]);
+            result.status.shouldEqual(0, result.output);
+            execute([executable]).status.should == 0;
+        } else {
+            auto project = prepareProject(directory, imports).project;
+            scope instance = new backend(project.program);
+            run(instance, project.program).should == 0;
+        }
+    }
+}
+
+// `only!false` is a dependency template function with a nested function
+// `f` that captures a local (`captured`). `f`'s use escapes `only!false`
+// through the returned `Wrapped!f`, so a real build gives `only!false` a
+// heap-allocated closure frame for `captured`. `f` is always interpreted:
+// `calls.d`'s `CallSelection.buildDecision` routes any function with an
+// enclosing function straight to the guest backend, before ever resolving
+// a native address, because a nested function's static chain points into
+// frames whose offsets belong to that one backend. `only!false` itself is
+// an ordinary, addressable dependency template instance and stays native;
+// its nested `f` is always interpreted. dmd (this test's host and image
+// compiler) happens to still agree with snakebite's own closure layout, so
+// running `only!false` and checking its answer here cannot catch a layout
+// mismatch between the two sides. ldc (`bin/sb`) is the real correctness
+// guard: this test runs the whole thing end to end, on every backend.
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot allocate a runtime closure frame"))) {
+    @("image.dependencyClosureAcrossBarrier." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        enum moduleName = "image_closure_dep_" ~ backend.stringof;
+        sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+            "module " ~ moduleName ~ ";\n" ~ q{
+                struct Wrapped(alias pred) {
+                    int value;
+                    int get() { return pred(value); }
+                }
+                auto only(bool exact)(int base) {
+                    int captured = base;
+                    int f(int x) {
+                        static if (exact)
+                            return x * captured;
+                        else
+                            return x + captured;
+                    }
+                    return Wrapped!f(5);
+                }
+            });
+        sandbox.writeFile("app/root_" ~ moduleName ~ ".d", "module root_" ~ moduleName ~ ";\nimport "
+            ~ moduleName ~ ";\n" ~ q{
+                int main() {
+                    assert(only!false(10).get() == 15);
+                    return 0;
+                }
+            });
+        const directory = sandbox.inSandboxPath("app");
+        const imports = [sandbox.inSandboxPath("deps")];
+        static if (is(backend == Native)) {
+            const executable = sandbox.inSandboxPath("test");
+            const result = execute([defaultCompiler, "-I" ~ imports[0],
+                sandbox.inSandboxPath("app/root_" ~ moduleName ~ ".d"), "-of=" ~ executable]);
+            result.status.shouldEqual(0, result.output);
+            execute([executable]).status.should == 0;
+        } else {
+            auto project = prepareProject(directory, imports).project;
+            scope instance = new backend(project.program);
+            run(instance, project.program).should == 0;
+        }
+    }
+}
+
 // Two overloads of one template share the name `answer!int`, so the address
 // expression `&answer!int` is ambiguous without a target type. Each overload
 // still has its own mangled name, and the registry must answer a lookup by
@@ -574,6 +681,101 @@ unittest {
         ).should == null;
 
     resolver.lookups.should == 1;
+}
+
+
+// `bin/ut` (`--export-dynamic`) exports this under the same linker name a
+// separately loaded shared object below also defines. A guest-declared
+// symbol must resolve to the loaded shared object's copy, not to this one:
+// snakebite itself can hold a native instantiation of a template a guest
+// program also calls (`dirEntries` in `snakebite.project`, see
+// docs/adr/0008), built with the host compiler's own closure layout, and a
+// guest backend reading that layout back would see garbage.
+export extern(C) int snakebite_symbol_dual_definition_test() { return 999; }
+
+@("symbolAddress.loadedSharedObjectAnswersBeforeExecutable")
+@Serial
+unittest {
+    import core.sys.posix.dlfcn: dlclose, dlopen, RTLD_GLOBAL, RTLD_NOW;
+    import std.string: toStringz;
+
+    enum name = "snakebite_symbol_dual_definition_test";
+    auto image = prepareImage(
+        "export extern(C) int " ~ name ~ "() { return 511; }",
+        sharedImageCache);
+
+    // `RTLD_GLOBAL` is what puts a shared object's symbols into the
+    // process-wide scope the fix searches (`RTLD_NEXT` in `symbolAddress`);
+    // `prepareImage`'s own load keeps the image `RTLD_LOCAL` so it never
+    // answers a lookup this way, only through the `DependencyImage` it
+    // returns (a separate, already-tested tier). This second `dlopen` on
+    // the same path does not load a second copy: it promotes the same
+    // already-loaded object into the global scope.
+    auto handle = dlopen(image.path.toStringz, RTLD_NOW | RTLD_GLOBAL);
+    handle.should.not == null;
+    scope(exit) dlclose(handle);
+
+    Resolver resolver;
+    alias Answer = extern(C) int function();
+    const answer = cast(Answer) resolver.resolve(name);
+    answer.should.not == null;
+    answer().should == 511;
+}
+
+// A name of its own, never defined in `bin/ut` itself: nothing here masks
+// the answer with a symbol the executable-only test above (or any other
+// test's promoted shared object) already put in the process-wide scope.
+@("resolveIndependent.stillAnswersFromALoadedSharedObject")
+@Serial
+unittest {
+    import core.sys.posix.dlfcn: dlclose, dlopen, RTLD_GLOBAL, RTLD_NOW;
+    import std.string: toStringz;
+
+    enum name = "snakebite_symbol_independent_only_test";
+    auto image = prepareImage(
+        "export extern(C) int " ~ name ~ "() { return 522; }",
+        sharedImageCache);
+
+    auto handle = dlopen(image.path.toStringz, RTLD_NOW | RTLD_GLOBAL);
+    handle.should.not == null;
+    scope(exit) dlclose(handle);
+
+    Resolver resolver;
+    alias Answer = extern(C) int function();
+    const answer = cast(Answer) resolver.resolveIndependent(name);
+    answer.should.not == null;
+    answer().should == 522;
+}
+
+
+// Nothing but `bin/ut` itself defines this symbol: the executable is still
+// the answer when no dependency image and no other loaded shared object
+// has it, the same as any native fixture `bin/ut`/`bin/at` build straight
+// into the test binary.
+export extern(C) int snakebite_symbol_executable_only_test() { return 733; }
+
+@("symbolAddress.fallsBackToExecutableWhenNothingElseHasIt")
+unittest {
+    Resolver resolver;
+    alias Answer = extern(C) int function();
+    const answer = cast(Answer)
+        resolver.resolve("snakebite_symbol_executable_only_test");
+    answer.should.not == null;
+    answer().should == 733;
+}
+
+// `resolveIndependent` answers the question `CallSelection.buildDecision`
+// (`snakebite.backends.calls`) asks for a template instance: `resolve`
+// still finds this executable-only symbol (the test right above), but
+// `resolveIndependent` must never reach that last-resort tier - a guest
+// call through a template instance must not bind to `bin/ut`'s own copy
+// just because nothing else answers the name.
+@("resolveIndependent.neverFallsBackToExecutable")
+unittest {
+    Resolver resolver;
+    resolver.resolveIndependent(
+        "snakebite_symbol_executable_only_test",
+    ).should == null;
 }
 
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
@@ -1454,4 +1656,61 @@ unittest {
         "settings", [root]);
     empty.prepare(hit, () => "", () {}, &failImage, false,
         &dependencyInputs).should == false;
+}
+
+
+// The recorded image is a function of the generator that built it, not
+// only of its inputs: a new snakebite binary must not reuse an image an
+// older binary produced, even when nothing about the project changed.
+@("image.projectCacheDetectsChangedGenerator")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("root.d", "root");
+    const root = sandbox.inSandboxPath("root.d");
+    const directory = sandbox.sandboxPath;
+    const record = buildPath(directory, "project.json");
+    sandbox.writeFile("generator-stand-in", "generator v1");
+    const generator = sandbox.inSandboxPath("generator-stand-in");
+    string[] noInputs() { return []; }
+    DependencyImage makeImage(in string source) {
+        return prepareImage(source, directory);
+    }
+
+    auto cache = ProjectImageCache(record, "settings", [root], defaultCompiler, generator);
+    auto image = new DependencyImage;
+    cache.prepare(*image, () => atomicSource, () {}, &makeImage, true,
+        &noInputs).should == true;
+
+    // Same generator, unchanged: the recorded image is restored.
+    auto unchanged = ProjectImageCache(record, "settings", [root], defaultCompiler, generator);
+    DependencyImage hit;
+    size_t sourceCalls;
+    unchanged.prepare(hit, () {
+            ++sourceCalls;
+            return atomicSource;
+        },
+        () {
+            throw new Exception("An unchanged generator must skip preparation");
+        },
+        &makeImage, true, &noInputs).should == true;
+    hit.path.should == image.path;
+    sourceCalls.should == 0;
+
+    // A rebuilt generator at the same path must be treated as a cache
+    // miss: the recorded image was produced by a binary that no longer
+    // exists in that form.
+    sandbox.writeFile("generator-stand-in", "generator v2, rebuilt");
+    auto rebuilt = ProjectImageCache(record, "settings", [root], defaultCompiler, generator);
+    DependencyImage regenerated;
+    size_t regeneratedSourceCalls;
+    size_t builds;
+    rebuilt.prepare(regenerated, () {
+            ++regeneratedSourceCalls;
+            return atomicSource;
+        },
+        () { ++builds; },
+        &makeImage, true, &noInputs).should == true;
+    regeneratedSourceCalls.should == 1;
+    builds.should == 1;
 }

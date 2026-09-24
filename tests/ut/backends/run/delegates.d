@@ -37,6 +37,35 @@ static foreach (backend; Matrix!(
 }
 
 
+// A delegate is true when either of its two words (`ptr`, `funcptr`) is
+// nonzero: `null` leaves both zero, and assigning a method delegate sets
+// both, so the assignment alone flips the condition.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot evaluate a method delegate as a compile-time "
+            ~ "boolean condition"),
+)) {
+    @("delegateTruthyAfterAssignment." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Counter {
+                int value;
+                int read() { return value; }
+            }
+            void main() {
+                int delegate() callback;
+                assert(!callback);
+
+                Counter counter = Counter(42);
+                callback = &counter.read;
+                assert(callback);
+            }
+        });
+    }
+}
+
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read callable TypeInfo fields"),
@@ -196,6 +225,60 @@ static foreach (backend; Matrix!(
 
                 assert(dg() == 6);
                 assert(captured == 6);
+            }
+        });
+    }
+}
+
+
+// `key in aa` gives a pointer to the matched value, not the value
+// itself, so calling through it is a call through a delegate pointer,
+// not a call on a delegate. dmd's own `(*handler)(...)` syntax for that
+// dereference looks exactly like a function-pointer call's own lowered
+// shape (issue: bytecode/interpreter must pick the callee kind from
+// `e1`'s type, `Tdelegate`, never from `e1` being a `PtrExp`).
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot access delegate function pointers"),
+)) {
+    @("callDelegateThroughPointerFromAssociativeArrayIn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            alias Handler = int delegate(int);
+            void main() {
+                int total;
+                Handler[string] handlers;
+                handlers["a"] = (int x) { total += x; return x * 2; };
+                auto handler = "a" in handlers;
+                assert(handler !is null);
+                assert((*handler)(5) == 10);
+                assert(total == 5);
+            }
+        });
+    }
+}
+
+
+// The address-of a delegate variable is a pointer to a delegate, so
+// calling through it dereferences to the two-word delegate value first -
+// the same `(*p)(...)` syntax a function pointer's own call lowers to,
+// but `p`'s pointee type is `Tdelegate`, not `Tfunction`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot access delegate function pointers"),
+)) {
+    @("callDelegateThroughPlainPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            alias Handler = int delegate(int);
+            void main() {
+                int total;
+                Handler h = (int x) { total += x; return x * 2; };
+                Handler* p = &h;
+                assert((*p)(5) == 10);
+                assert(total == 5);
             }
         });
     }

@@ -1128,6 +1128,7 @@ public struct PlanCache {
     private SharedTable!(FuncDeclaration, CallPlan*) _plans;
     private SharedTable!(string, CallPlan*) _rawPlans;
     private SharedTable!(FuncDeclaration, bool) _nativeSymbols;
+    private SharedTable!(FuncDeclaration, bool) _independentNativeSymbols;
     private Resolver _resolver;
     private shared size_t _preparations;
     version(unittest) private size_t _nativeSymbolLookups;
@@ -1169,6 +1170,41 @@ public struct PlanCache {
             mangleExact(function_).fromStringz,
         ) !is null;
         return *_nativeSymbols.insert(function_, found);
+    }
+
+    // Whether `function_` has machine code from a genuine, independent
+    // native copy: the dependency image, or an already-loaded shared
+    // object. Never the running executable's own copy of a template
+    // instance snakebite itself instantiated
+    // (`snakebite.backends.calls.CallSelection.buildDecision` asks this,
+    // never `hasNativeSymbol`, for that check). `nativeTarget` is a fixed
+    // host wrapper, not a `dlsym` answer, so it counts as independent here
+    // too.
+    public bool hasIndependentNativeSymbol(
+        FuncDeclaration function_,
+    ) {
+        import dmd.mangle: mangleExact;
+        import snakebite.druntime.constructoratomic: nativeTarget;
+        import std.string: fromStringz;
+
+        if (auto cached = function_ in _independentNativeSymbols)
+            return *cached;
+
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        bool found;
+        withCompilerLock({
+            if (auto cached = function_ in _independentNativeSymbols) {
+                found = *cached;
+                return;
+            }
+            auto target = nativeTarget(function_);
+            found = target.address !is null || _resolver.resolveIndependent(
+                mangleExact(function_).fromStringz,
+            ) !is null;
+            _independentNativeSymbols.insert(function_, found);
+        });
+        return found;
     }
 
     version(unittest)

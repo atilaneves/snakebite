@@ -4,8 +4,10 @@ status: accepted
 
 # Dependencies are one image, built up front by snakebite
 
-The resolver calls `dlsym` on the running process. It can only reach
-symbols linked into the snakebite binary. A dub project's
+The resolver calls `dlsym` on the running process (see ADR-0008 for the
+order that search now follows). A dub dependency ships as a static
+archive (`.a`); nothing loads that into the process, so `dlsym` cannot
+reach it at all, loaded shared object or not. A dub project's
 dependencies, for example unit-threaded's nine archives for
 `examples/rt`, are unreachable today. Issue #36 proposed relinking
 dub's archives into one shared object, loaded on first dependency
