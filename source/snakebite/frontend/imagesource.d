@@ -36,9 +36,9 @@ public imported!"snakebite.dependencyimage".DependencyImage prepareImage(
     import snakebite.dependencyimage: dependencyImagePrepareImage = prepareImage;
 
     return dependencyImagePrepareImage(imageSource(program), cacheDirectory,
-        compiler, imageInputs(program) ~ inputs, importPaths,
-        stringImportPaths, compilerArguments, linkerFiles, linkerArguments,
-        cppSource, cxxCompiler, cxxCompilerArguments, optimise);
+        compiler, inputs, importPaths, stringImportPaths, compilerArguments,
+        linkerFiles, linkerArguments, cppSource, cxxCompiler,
+        cxxCompilerArguments, optimise);
 }
 
 
