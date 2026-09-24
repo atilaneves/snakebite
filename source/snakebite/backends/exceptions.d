@@ -86,18 +86,11 @@ public struct AssertInvariantPlan {
     public imported!"dmd.func".FuncDeclaration structInvariant;
 }
 
-// Druntime's `_d_invariant` (`rt.invariant_`) has plain `extern(D)`
-// linkage, so its linker symbol is its mangled name, not the bare
-// identifier - the same mangled string dmd's own backend hardcodes for
-// `RTLSYM.DINVARIANT` (`dmd.backend.drtlsym`), since D name mangling is
-// part of the language ABI, not something either compiler is free to
-// invent independently. Both backends resolve this same symbol through
-// the FFI barrier rather than a `FuncDeclaration` - `_d_invariant` is
-// never referenced by any guest `CallExp`, so there is no other way to
-// name it.
-public enum string classInvariantSymbol =
-    "_D2rt10invariant_12_d_invariantFC6ObjectZv";
-
+// A class reference's invariant call itself goes through
+// `snakebite.backends.druntimehooks`'s `DruntimeHook.classInvariant` -
+// `_d_invariant` is never referenced by any guest `CallExp`, so there is
+// no `FuncDeclaration` to resolve it by, and that module owns its
+// mangled linker symbol.
 public AssertInvariantPlan assertInvariantPlanOf(
     imported!"dmd.expression".AssertExp expression,
 ) {

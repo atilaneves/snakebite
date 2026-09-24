@@ -12,8 +12,8 @@ import snakebite.backends.fullexpression:
     FullExpressionKind, FullExpressionScope;
 import snakebite.backends.controlflow:
     ScopeFrame, cleanupCount, scopePath;
+import snakebite.backends.druntimehooks: DruntimeHook, planOf, specOf;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
-import snakebite.ffi.abi: Register;
 
 
 // Whether `type` is `float`/`double`/`real` - `TypeFacts` has no notion of
@@ -306,15 +306,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         // `SharedTable`, ADR-0006), so two threads racing here store the
         // same value; the store just needs to be visible to a later
         // reader.
-        auto plan = _plans.rawPlanOf(
-            "gc_malloc",
-            [
-                Register(Register.Kind.unsigned, 8),
-                Register(Register.Kind.unsigned, 4),
-                Register(Register.Kind.pointer, 8),
-            ],
-            Register(Register.Kind.pointer, 8),
-        );
+        auto plan = planOf(_plans, DruntimeHook.gcMalloc);
         if (plan is null)
             throw new SnakebiteException(
                 "bytecode compiler cannot resolve druntime's " ~
@@ -1886,12 +1878,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileClassInvariantCall(
         AssertExp expression, in size_t objectOffset,
     ) {
-        import snakebite.backends.exceptions: classInvariantSymbol;
-
-        auto plan = _bytecode._plans.rawPlanOf(
-            classInvariantSymbol,
-            [Register(Register.Kind.pointer, size_t.sizeof)],
-        );
+        auto plan = planOf(_bytecode._plans, DruntimeHook.classInvariant);
         if (plan is null)
             throw rejection(
                 _function, expression.loc, expressionText(expression));
@@ -3934,8 +3921,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             SliceExp expression,
             size_t sourceLengthOffset,
             size_t sourcePointerOffset) {
-        import snakebite.backends.elementaddress:
-            sliceBoundsHook, sliceBoundsRegisters;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset;
 
@@ -3971,8 +3956,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             size_t.sizeof);
         compileBoundsHook(
             orderOffset,
-            sliceBoundsHook,
-            sliceBoundsRegisters,
+            DruntimeHook.sliceBounds,
             [
                 Arg(lowOffset, 0, size_t.sizeof),
                 Arg(highOffset, 0, size_t.sizeof),
@@ -3986,8 +3970,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             size_t.sizeof);
         compileBoundsHook(
             orderOffset,
-            sliceBoundsHook,
-            sliceBoundsRegisters,
+            DruntimeHook.sliceBounds,
             [
                 Arg(lowOffset, 0, size_t.sizeof),
                 Arg(highOffset, 0, size_t.sizeof),
@@ -4348,9 +4331,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const object = reserveTemp(pointerFacts);
         evalInto(expression.e1, object, size_t.sizeof);
-        auto plan = _bytecode._plans.rawPlanOf(
-            "_d_callfinalizer", [Register(Register.Kind.pointer, size_t.sizeof)],
-        );
+        auto plan = planOf(_bytecode._plans, DruntimeHook.callFinalizer);
         _callSites ~= CallSite.native(plan,
             [Arg(object, 0, size_t.sizeof)], 0);
         emit(&opCall, discardResult, _callSites.length - 1, 0);
@@ -4488,20 +4469,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.nativelayout: arrayValueSize;
 
         auto elementType = expression.e1.type.nextOf;
-        const name = elementType.ty == Tchar ? "_d_arrayappendcd"
-            : elementType.ty == Twchar ? "_d_arrayappendwd"
-            : null;
-        if (name is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        auto plan = _bytecode._plans.rawPlanOf(
-            name,
-            [
-                Register(Register.Kind.pointer, 8),
-                Register(Register.Kind.unsigned, 4),
-            ],
-        );
+        const validElement =
+            elementType.ty == Tchar || elementType.ty == Twchar;
+        const hook = elementType.ty == Twchar
+            ? DruntimeHook.arrayAppendWchar : DruntimeHook.arrayAppendChar;
+        auto plan = validElement ? planOf(_bytecode._plans, hook) : null;
         if (plan is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
@@ -6326,14 +6298,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `upper`/`length` for a slice.
     private void compileBoundsHook(
         in size_t inBoundsOffset,
-        string hookName,
-        scope const(Register)[] parameterRegisters,
+        DruntimeHook hook,
         Arg[] extraArgs,
         in Loc loc,
     ) {
-        auto plan = _bytecode._plans.rawPlanOf(hookName, parameterRegisters);
+        auto plan = planOf(_bytecode._plans, hook);
         if (plan is null)
-            throw rejection(_function, loc, hookName);
+            throw rejection(_function, loc, specOf(hook).name);
 
         const branchIndex = _instructions.length;
         emit(&opBranchTrue, inBoundsOffset, 0, 1);
@@ -6536,17 +6507,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public void storageIndexBounds(
             IndexExp expression, size_t index, size_t length,
         ) {
-            import snakebite.backends.elementaddress:
-                indexBoundsHook, indexBoundsRegisters;
-
             const inBounds = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opCopy, inBounds, index, size_t.sizeof);
             compiler.emit(&opLessThanUnsigned, inBounds, length,
                 size_t.sizeof);
             compiler.compileBoundsHook(
                 inBounds,
-                indexBoundsHook,
-                indexBoundsRegisters,
+                DruntimeHook.indexBounds,
                 [
                     Arg(index, 0, size_t.sizeof),
                     Arg(length, 0, size_t.sizeof),

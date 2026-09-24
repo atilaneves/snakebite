@@ -370,9 +370,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.backends.interpreter.nativestack:
         InterpreterStack, defaultInterpreterStackBytes, fiberContextOf,
         snakebite_interpreter_call_on_stack;
+    import snakebite.backends.druntimehooks: DruntimeHook;
     import snakebite.ffi:
         CallAdapter, CallbackCall, CallPlan, CallResult, PlanCache;
-    import snakebite.ffi.abi: Register;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.nativelayout:
         initializerConstructsThroughSlice, initializerValueOf,
@@ -1162,7 +1162,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     // Calls druntime's own bounds-failure hook - `_d_arraybounds_indexp`
-    // or `_d_arraybounds_slicep`, see `snakebite.backends.elementaddress`
+    // or `_d_arraybounds_slicep`, see `snakebite.backends.druntimehooks`
     // - the same one the bytecode compiler emits a call to. It never
     // returns, so every caller here only reaches this once its own bounds
     // check already failed; wrapping its throw through `callPlan`, the
@@ -1170,16 +1170,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // see it, instead of the interpreter's own refusal or a hand-built
     // guest exception.
     extern(D) private void throwArrayBounds(
-        string hookName,
-        scope const(Register)[] parameterRegisters,
+        DruntimeHook hook,
         in Loc loc,
         scope const(void*)[] extraArguments,
     ) {
-        auto plan = _plans.rawPlanOf(hookName, parameterRegisters);
+        import snakebite.backends.druntimehooks: planOf, specOf;
+
+        auto plan = planOf(*_plans, hook);
         if (plan is null)
             throw new SnakebiteException(
-                text("interpreter cannot resolve the symbol `", hookName,
-                    "`: it is not in this process"),
+                text("interpreter cannot resolve the symbol `",
+                    specOf(hook).name, "`: it is not in this process"),
             );
 
         const file = cast(const(char)*) loc.filename;
@@ -3000,8 +3001,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         public void storageIndexBounds(
             IndexExp expression, void* index, size_t length,
         ) {
-            import snakebite.backends.elementaddress:
-                indexBoundsHook, indexBoundsRegisters;
+            import snakebite.backends.druntimehooks: DruntimeHook;
             import snakebite.nativelayout: loadIntegral;
 
             const value = loadIntegral(index, size_t.sizeof, false);
@@ -3009,7 +3009,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return;
 
             evaluator.throwArrayBounds(
-                indexBoundsHook, indexBoundsRegisters, expression.loc,
+                DruntimeHook.indexBounds, expression.loc,
                 [cast(const(void)*) index,
                     cast(const(void)*) &length],
             );
@@ -4516,19 +4516,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // no `FuncDeclaration` of its own - and called here with the object
     // reference as its one argument.
     private void callClassInvariant(void* objectPointer) {
-        import snakebite.backends.exceptions: classInvariantSymbol;
+        import snakebite.backends.druntimehooks: planOf, specOf;
         import std.conv: text;
 
         countForeignNameLookup;
-        auto plan = _plans.rawPlanOf(
-            classInvariantSymbol,
-            [Register(Register.Kind.pointer, size_t.sizeof)],
-        );
+        auto plan = planOf(*_plans, DruntimeHook.classInvariant);
         if (plan is null)
             throw new SnakebiteException(
-                text("interpreter cannot resolve the symbol ",
-                    "`", classInvariantSymbol, "`: it is not in this ",
-                    "process"),
+                text("interpreter cannot resolve the symbol `",
+                    specOf(DruntimeHook.classInvariant).name,
+                    "`: it is not in this process"),
             );
 
         const(void*)[1] arguments = [cast(const(void)*) &objectPointer];
@@ -4681,13 +4678,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         if (knownLength) {
             if (lo < 0 || hi < lo || cast(size_t) hi > sourceLength) {
-                import snakebite.backends.elementaddress:
-                    sliceBoundsHook, sliceBoundsRegisters;
+                import snakebite.backends.druntimehooks: DruntimeHook;
 
                 const lower = cast(size_t) lo;
                 const upper = cast(size_t) hi;
                 throwArrayBounds(
-                    sliceBoundsHook, sliceBoundsRegisters, expression.loc,
+                    DruntimeHook.sliceBounds, expression.loc,
                     [cast(const(void)*) &lower, cast(const(void)*) &upper,
                         cast(const(void)*) &sourceLength],
                 );
@@ -5248,31 +5244,25 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // own storage instead.
     override void visitUnloweredCatDcharAssign(CatDcharAssignExp expression) {
         import core.stdc.string: memcpy;
+        import snakebite.backends.druntimehooks: planOf, specOf;
         import std.conv: text;
 
         auto elementType = expression.e1.type.nextOf;
-        const name = elementType.ty == Tchar ? "_d_arrayappendcd"
-            : elementType.ty == Twchar ? "_d_arrayappendwd"
-            : null;
-        if (name is null)
+        if (elementType.ty != Tchar && elementType.ty != Twchar)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "`: appending a `dchar` to `", expression.e1.type.toString,
                     "` is neither `char[]` nor `wchar[]`"),
             );
+        const hook = elementType.ty == Tchar
+            ? DruntimeHook.arrayAppendChar : DruntimeHook.arrayAppendWchar;
 
         countForeignNameLookup;
-        auto plan = _plans.rawPlanOf(
-            name,
-            [
-                Register(Register.Kind.pointer, 8),
-                Register(Register.Kind.unsigned, 4),
-            ],
-        );
+        auto plan = planOf(*_plans, hook);
         if (plan is null)
             throw new SnakebiteException(
-                text("interpreter cannot resolve the symbol `", name,
-                    "` for `", expression.toString,
+                text("interpreter cannot resolve the symbol `",
+                    specOf(hook).name, "` for `", expression.toString,
                     "`: it is not in this process"),
             );
 
