@@ -176,25 +176,54 @@ public struct TypeFacts {
     // `toBasetype`), or a struct's own size
     // (`AggregateDeclaration.determineSize`, reached through `size`/
     // `alignsize` directly, or through `Type.baseElemOf`'s
-    // `toBasetype`-then-descend walk for a static array). Each branch
-    // reads the exact field the matching dmd function gates itself on
-    // (`EnumDeclaration._scope`, `AggregateDeclaration.sizeok`), so
-    // `false` here is the same answer dmd's own call would reach first
-    // anyway - never a guess at it. A pointer, a class handle, a
-    // dynamic array's own two words, and every basic type answer `size`/
-    // `alignsize` from a fixed table with no dsymbol to force at all
-    // (`dmd.typesem.size`'s own switch), so this defaults to `true` for
-    // any `Type` kind not named below.
+    // `toBasetype`-then-descend walk for a static array). A pointer, a
+    // class handle, a dynamic array's own two words, and every basic
+    // type answer `size`/`alignsize` from a fixed table with no dsymbol
+    // to force at all (`dmd.typesem.size`'s own switch), so this
+    // defaults to `true` for any `Type` kind not named below.
+    //
+    // Every field read here is `atomicLoad!(MemoryOrder.acq)`, not a
+    // plain read - `forceIfNeeded`'s own doc (`snakebite.frontend.
+    // compiler`) explains why an unlocked reader needs that much, and
+    // why the field itself must be the one dmd sets only once the data
+    // it guards is completely settled, not merely a field dmd's own
+    // single-threaded code happens to gate re-entrancy on.
     private static bool resolved(Type type) {
+        import core.atomic: atomicLoad, MemoryOrder;
         import dmd.astenums: Sizeok;
+        import dmd.dsymbol: PASS;
 
+        // `EnumDeclaration.enumSemantic` (dmd/enumsem.d) clears `_scope`
+        // (dmd's own re-entrancy gate, and the field `getMemtype` itself
+        // reads) as soon as it starts, long before `memtype` is
+        // reassigned to its resolved form a few lines later - `_scope
+        // is null` can be true while a racing reader still sees the
+        // pre-semantic, unresolved `memtype` the parser first assigned
+        // (e.g. a `TypeIdentifier` for `enum E : SomeAlias`), not a real
+        // answer to `size`/`alignsize`. `semanticRun` only reaches
+        // `semanticdone` after that reassignment, on every path through
+        // `enumSemantic` that starts with `memtype` non-null - gate on
+        // that field instead. `enum { A, B, C }` (no explicit base)
+        // leaves `memtype` null past `semanticdone` too (dmd fills it in
+        // later still, from the first member's own value) - `memtype
+        // !is null` below stays false for that case until dmd truly
+        // sets it, keeping every caller on the locked path meanwhile, so
+        // it is kept alongside the corrected `semanticRun` check rather
+        // than dropped.
         if (auto enumType = type.isTypeEnum)
-            return enumType.sym._scope is null
-                && enumType.sym.memtype !is null
+            return atomicLoad!(MemoryOrder.acq)(enumType.sym.semanticRun)
+                    >= PASS.semanticdone
+                && atomicLoad!(MemoryOrder.acq)(enumType.sym.memtype)
+                    !is null
                 && resolved(enumType.sym.memtype);
 
+        // `finalizeSize` (dsymbolsem.d) sets `sizeok = Sizeok.done` as
+        // its very last write, strictly after `structsize`/`alignsize`
+        // are both final - unlike `EnumDeclaration._scope` above, this
+        // field really is the last word.
         if (auto structType = type.isTypeStruct)
-            return structType.sym.sizeok == Sizeok.done;
+            return atomicLoad!(MemoryOrder.acq)(structType.sym.sizeok)
+                == Sizeok.done;
 
         if (auto arrayType = type.isTypeSArray)
             return resolved(arrayType.next);

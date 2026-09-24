@@ -887,12 +887,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // unlike this cache, by native FFI call sites this interpreter
         // never walks a body for), guarded the same way, so it is always
         // a no-op by the time it runs here.
+        import core.atomic: atomicLoad, MemoryOrder;
         import dmd.dsymbol: PASS;
         import dmd.funcsem: functionSemantic3;
         import snakebite.frontend.compiler: forceIfNeeded;
 
+        // Acquire load - see `forceIfNeeded`'s own doc
+        // (`snakebite.frontend.compiler`) for why the unlocked check
+        // needs that much, not a plain field read.
         forceIfNeeded(
-            () => function_.semanticRun >= PASS.semantic3done,
+            () => atomicLoad!(MemoryOrder.acq)(function_.semanticRun)
+                >= PASS.semantic3done,
             () { functionSemantic3(function_); },
         );
 

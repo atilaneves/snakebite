@@ -4,9 +4,22 @@ module snakebite.backends.classinfo;
 private:
 
 
+import core.sync.mutex: Mutex;
 import dmd.dclass: ClassDeclaration;
 import dmd.func: FuncDeclaration;
 import object: Interface, TypeInfo_Class;
+
+
+// Bootstraps a `ClassRuntimeCache`'s own `_lock` (its own doc): guards
+// only the moment that per-instance lock is being made, never a `build`
+// itself, the same split `snakebite.sharedtable.SharedTable`'s own
+// `bootstrapLock` keeps, so making two different caches' locks at once,
+// on two threads, cannot make one wait for the other's `build`.
+private __gshared Mutex _bootstrapLock;
+
+shared static this() {
+    _bootstrapLock = new Mutex;
+}
 
 
 // Callable addresses and field initializers differ between backends.
@@ -36,25 +49,58 @@ public struct ClassRuntimeCache {
     // storage with the original until one side grows.
     @disable this(this);
 
+    import core.atomic: atomicLoad, atomicStore, MemoryOrder;
     import snakebite.sharedtable: SharedTable;
 
     private SharedTable!(ClassDeclaration, TypeInfo_Class) _published;
     private TypeInfo_Class[ClassDeclaration] _pending;
     private size_t _depth;
+    // This cache's own lock, not the dmd frontend one: it guards
+    // `_pending`/`_depth`, both this cache's own bookkeeping, not dmd's
+    // state - `make` (`classRuntimeInfo` below) reaches into dmd only
+    // through fields a class already has by the time anything asks for
+    // its runtime info (`structsize`, `vtbl`, `baseClass`, `dtor`,
+    // `vtblInterfaces` - all resolved by dmd's own ordinary class
+    // semantic, never lazily deferred to a body walk the way a
+    // function's closure state is) and through `hooks.methodAddress`,
+    // which is each backend's own already-guarded entry point
+    // (`Bytecode.compileFunction`'s own `_compileLock`, similarly
+    // guarded interpreter/native paths) - so nothing under `make` here
+    // needs the frontend lock *for this cache's own sake*. Bootstrapped
+    // lazily, the same as `SharedTable.lockOf` (this struct's own doc
+    // above): a default-initialised `ClassRuntimeCache` (no explicit
+    // constructor, per this struct's own fields) must still be safe to
+    // use. Recursive (`Mutex`'s default): `classRuntimeInfo` reaches
+    // `build` again, on the same thread, for a base class or an
+    // interface while still inside the derived class's own `make`.
+    private shared(Mutex) _lock;
+
+    private Mutex lockOf() {
+        if (auto existing = atomicLoad!(MemoryOrder.acq)(_lock))
+            return cast(Mutex) existing;
+
+        _bootstrapLock.lock;
+        scope(exit) _bootstrapLock.unlock;
+        if (_lock is null)
+            atomicStore!(MemoryOrder.rel)(_lock, cast(shared(Mutex)) new Mutex);
+        return cast(Mutex) _lock;
+    }
 
     // A complete entry, or null.
     public TypeInfo_Class* find(ClassDeclaration declaration) {
         return declaration in _published;
     }
 
-    // Runs `make` under the compiler lock and returns its result.
+    // Runs `make` under this cache's own lock (`_lock`'s own doc, above)
+    // and returns its result.
     public TypeInfo_Class build(
         scope TypeInfo_Class delegate() make,
     ) {
-        import snakebite.frontend.compiler: withCompilerLock;
-
         TypeInfo_Class info;
-        withCompilerLock({
+        auto lock = lockOf;
+        lock.lock;
+        scope(exit) lock.unlock;
+        {
             ++_depth;
             scope(exit) --_depth;
             // A partial entry `make` registered (`classRuntimeInfo`
@@ -69,7 +115,7 @@ public struct ClassRuntimeCache {
             info = make();
             if (_depth == 1)
                 publish;
-        });
+        }
         return info;
     }
 

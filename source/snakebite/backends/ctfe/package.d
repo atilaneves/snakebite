@@ -89,7 +89,23 @@ private InterpretResult interpret(
 
     InterpretResult result;
 
-    // CTFE keeps its state (call stack, depth) in dmd's globals.
+    // Stays locked for the whole call, unlike every other backend's own
+    // dmd-touching entry point (`forceIfNeeded`'s doc, `snakebite.
+    // frontend.compiler`): `ctfeInterpret` is dmd's own tree-walking
+    // interpreter, not a forward reference this could force once and
+    // then read without a lock. It reads and writes one `__gshared
+    // CtfeGlobals ctfeGlobals` (dmd's `dinterpret.d`) for as long as the
+    // call runs - a single, process-global call stack (`ctfeGlobals.
+    // stack.startFrame`/`push`/`getValue`, mutated at every guest
+    // statement CTFE steps through, not once at the start), a bump
+    // allocator region (`ctfeGlobals.region.malloc`/`savePos`/`release`,
+    // read and written every time CTFE allocates a guest value) and a
+    // call-depth counter (`ctfeGlobals.callDepth`) - genuinely mutable
+    // state for the interpreter's whole run, not a cache with a single
+    // "done" flag to check. Two threads inside `ctfeInterpret` at once
+    // would corrupt that one shared call stack and region for both, so
+    // this backend's own entry point has nothing narrower to force: the
+    // lock has to cover the interpretation itself, exactly as before.
     withCompilerLock({
         resetErrors;
 

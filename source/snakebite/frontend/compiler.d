@@ -111,6 +111,57 @@ public void withCompilerLock(scope void delegate() action) {
 // this same lock, so whichever thread gets there first does the one
 // real forcing and every later thread's `force` call is itself a no-op
 // once inside.
+//
+// `ready` must read its dmd field with `core.atomic.atomicLoad!
+// (MemoryOrder.acq)`, never a plain field read, even though dmd writes
+// that field with a plain (non-atomic) store. Without the acquire, two
+// things can go wrong that a "the mutex already handles this" argument
+// misses: (1) the D memory model gives a plain, unsynchronised read of
+// memory another thread writes no visibility guarantee at all - not
+// only a stale value, an optimising backend is free to treat it as
+// invariant across the reading thread's own prior operations; (2) even
+// with a fresh value, a thread that sees `ready` flip to `true` must
+// also see every dmd write that logically precedes it (the actual
+// struct size, an enum's own base type, a function's closure
+// variables) - a plain read gives no ordering promise that those
+// writes are visible too, only that this one field's bit pattern was
+// read from memory at some point.
+//
+// This is safe as the standard "flag publish" pattern, not a guess:
+// every dmd write `force` performs runs inside `withCompilerLock`,
+// strictly before that call's `scope(exit) mutex.unlock`. `mutex.
+// unlock` is an opaque call the compiler cannot see through, so it can
+// never hoist dmd's plain writes past it (a basic property of every
+// optimising backend: an opaque external call is a compiler-level
+// memory barrier), and the underlying OS mutex unlock itself lowers to
+// a hardware release operation on every platform this project targets
+// (a release-ordered store or equivalent), which drains that thread's
+// pending writes no later than the unlock's own effect becomes visible
+// to other cores. `atomicLoad!(MemoryOrder.acq)` on the reading thread
+// is the matching half: it is itself a real acquire instruction (or,
+// on x86, at least a compiler-level barrier - x86 stores are already
+// ordered), so nothing after it in program order can be hoisted before
+// it, and it is guaranteed to observe memory no staler than the point
+// it executes. A release that drains a thread's writes and an acquire
+// that later observes any value from at or after that drain together
+// make every earlier write visible to the acquiring thread - the same
+// guarantee two threads get from actually sharing the mutex, without
+// either thread needing to take it. `ready` must be the *only* thing
+// `force`'s caller reads before this load - every other field the
+// caller goes on to read (a struct's size, an enum's memtype, a
+// function's closure variables) is read afterwards, in program order,
+// so it rides the same acquire.
+//
+// This is why `forceIfNeeded` callers must pick a field dmd sets only
+// once the data it reads afterward is completely settled - not any
+// field dmd happens to gate its own single-threaded re-entrancy on.
+// dmd was never written for concurrent readers: some of its own gates
+// (e.g. `EnumDeclaration._scope`, cleared as soon as a forward
+// reference is consumed, well before the enum's `memtype` is fully
+// resolved) go false-y long before the data is actually settled, and
+// are wrong to reuse here even though dmd's own forcing function reads
+// the very same field. Each caller's own comment states which dmd
+// function was read to verify the field it checks really is set last.
 public void forceIfNeeded(
     scope bool delegate() ready,
     scope void delegate() force,

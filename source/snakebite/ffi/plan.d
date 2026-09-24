@@ -1066,6 +1066,13 @@ public struct PlanCache {
     // indirect call.
     private SharedTable!(Signature, CallPlan*) _signatures;
 
+    // No frontend lock: `_shapeOf` forces every dmd forward reference it
+    // could still need itself, up front, through `TypeFacts.of` (its
+    // own doc), and `_signatures` is a `SharedTable`, which brings its
+    // own insert lock (ADR-0006) - the same reasoning `snakebite.
+    // backends.interpreter.walker`'s `Cache.build` and `snakebite.
+    // backends.calls.CallSelection.decisionOf` already apply to their
+    // own caches.
     public const(CallPlan)* signatureOf(
         TypeFunction type, in bool context,
     ) {
@@ -1075,24 +1082,14 @@ public struct PlanCache {
         if (auto cached = key in _signatures)
             return *cached;
 
-        import snakebite.frontend.compiler: withCompilerLock;
-
-        CallPlan* plan;
-        withCompilerLock({
-            if (auto cached = key in _signatures) {
-                plan = *cached;
-                return;
-            }
-            plan = new CallPlan;
-            // These indirect calls pass only the declared parameters.
-            // A C variadic call with no extra arguments still needs its
-            // variadic ABI plan (including the SSE register count).
-            *plan = _shapeOf(type, context, type.linkage, null,
-                type.parameterList.varargs == VarArg.variadic);
-            plan._callbacks = _callbacks;
-            plan = *_signatures.insert(key, plan);
-        });
-        return plan;
+        auto plan = new CallPlan;
+        // These indirect calls pass only the declared parameters.
+        // A C variadic call with no extra arguments still needs its
+        // variadic ABI plan (including the SSE register count).
+        *plan = _shapeOf(type, context, type.linkage, null,
+            type.parameterList.varargs == VarArg.variadic);
+        plan._callbacks = _callbacks;
+        return *_signatures.insert(key, plan);
     }
 
     // The registry of this backend instance's guest function words, and
@@ -1148,6 +1145,14 @@ public struct PlanCache {
     // Whether `function_` has machine code in this process. Missing symbols
     // are cached too because a synthesized function with a body can validly
     // have no native counterpart.
+    // No frontend lock: `nativeTarget` reads only a template instance's
+    // own already-resolved arguments (an AST structure walk, no forward
+    // reference to force), `mangleExact` mangles a declaration dmd has
+    // already given a real type and parameters (verified: dmd's own
+    // `mangle.d` never calls a struct's or an enum's own forcing
+    // functions), and `resolve` is a host symbol lookup, not a dmd one -
+    // nothing here ever touches dmd's own mutable state. `_nativeSymbols`
+    // is a `SharedTable` (ADR-0006).
     public bool hasNativeSymbol(
         FuncDeclaration function_,
     ) {
@@ -1158,22 +1163,12 @@ public struct PlanCache {
         if (auto cached = function_ in _nativeSymbols)
             return *cached;
 
-        import snakebite.frontend.compiler: withCompilerLock;
-
-        bool found;
-        withCompilerLock({
-            if (auto cached = function_ in _nativeSymbols) {
-                found = *cached;
-                return;
-            }
-            version(unittest) ++_nativeSymbolLookups;
-            auto target = nativeTarget(function_);
-            found = target.address !is null || resolve(
-                mangleExact(function_).fromStringz,
-            ) !is null;
-            _nativeSymbols.insert(function_, found);
-        });
-        return found;
+        version(unittest) ++_nativeSymbolLookups;
+        auto target = nativeTarget(function_);
+        const found = target.address !is null || resolve(
+            mangleExact(function_).fromStringz,
+        ) !is null;
+        return *_nativeSymbols.insert(function_, found);
     }
 
     version(unittest)
@@ -1212,27 +1207,21 @@ public struct PlanCache {
     // Returned by pointer, the same kind `variadicOf`/`rawPlanOf` return:
     // the plan stays in the cache, and a caller only ever calls through
     // it.
+    // No frontend lock: `prepare` (through `shapeOf`/`_shapeOf`) forces
+    // every dmd forward reference it could still need itself, up front
+    // (`signatureOf`'s own doc), and `_plans` is a `SharedTable`
+    // (ADR-0006).
     public const(CallPlan)* of(
         FuncDeclaration function_,
     ) {
         if (auto cached = function_ in _plans)
             return *cached;
 
-        import snakebite.frontend.compiler: withCompilerLock;
-
-        CallPlan* plan;
-        withCompilerLock({
-            if (auto cached = function_ in _plans) {
-                plan = *cached;
-                return;
-            }
-            countPreparation;
-            plan = new CallPlan;
-            *plan = prepare(function_, _resolver);
-            plan._callbacks = _callbacks;
-            plan = *_plans.insert(function_, plan);
-        });
-        return plan;
+        countPreparation;
+        auto plan = new CallPlan;
+        *plan = prepare(function_, _resolver);
+        plan._callbacks = _callbacks;
+        return *_plans.insert(function_, plan);
     }
 
     // As `.of`, but for one call site of an `extern(C)` C-style or
@@ -1246,22 +1235,20 @@ public struct PlanCache {
     // `CallExp` (`Evaluator.CallSitePlan`), and the bytecode compiler
     // calls this only once, while compiling the one `CallSite` a guest
     // `CallExp` ever produces.
+    // No frontend lock: never cached (this method's own doc), so every
+    // call touches dmd, but only through `prepareVariadic` (`shapeOf`/
+    // `_shapeOf`), which forces every dmd forward reference it could
+    // still need itself, up front (`signatureOf`'s own doc). This is
+    // still a compile-time-triggered path: a caller reaches it once per
+    // call site, not once per guest call.
     public const(CallPlan)* variadicOf(
         FuncDeclaration function_,
         scope Type[] extraArgumentTypes,
     ) {
-        import snakebite.frontend.compiler: withCompilerLock;
-
-        // Never cached (this method's own doc), so every call - not only
-        // a cache miss - touches dmd (finding 1.2) and must take the
-        // lock. This is still a compile-time-triggered path: a caller
-        // reaches it once per call site, not once per guest call.
+        countPreparation;
         auto plan = new CallPlan;
-        withCompilerLock({
-            countPreparation;
-            *plan = prepareVariadic(function_, _resolver, extraArgumentTypes);
-            plan._callbacks = _callbacks;
-        });
+        *plan = prepareVariadic(function_, _resolver, extraArgumentTypes);
+        plan._callbacks = _callbacks;
         return plan;
     }
 
@@ -1271,6 +1258,10 @@ public struct PlanCache {
     // program reuses the first one's resolved address and plan. Returns
     // `null` when the symbol is not in this process, the same convention
     // `resolve` itself uses.
+    // No frontend lock: `CallPlan.ofRawAddress` classifies from
+    // caller-supplied `Register`s alone, with no `dmd.mtype.Type` and so
+    // no dmd forward reference to force at all, and `_rawPlans` is a
+    // `SharedTable` (ADR-0006).
     public const(CallPlan)* rawPlanOf(
         string name,
         scope const(Register)[]
@@ -1291,21 +1282,11 @@ public struct PlanCache {
         if (address is null)
             return null;
 
-        import snakebite.frontend.compiler: withCompilerLock;
-
-        CallPlan* plan;
-        withCompilerLock({
-            if (auto cached = name in _rawPlans) {
-                plan = *cached;
-                return;
-            }
-            countPreparation;
-            plan = new CallPlan;
-            *plan = CallPlan.ofRawAddress(
-                address, parameterRegisters, returnRegister);
-            plan = *_rawPlans.insert(name, plan);
-        });
-        return plan;
+        countPreparation;
+        auto plan = new CallPlan;
+        *plan = CallPlan.ofRawAddress(
+            address, parameterRegisters, returnRegister);
+        return *_rawPlans.insert(name, plan);
     }
 
 }
@@ -1456,6 +1437,35 @@ private CallPlan _shapeOf(
             throw new Exception(
                 "ffi cannot call a value without a function type",
             );
+
+        // Forces every dmd forward reference a struct or enum argument
+        // or return type could still have - a class handle, a pointer
+        // and every basic type have none (`TypeFacts.of`'s own doc) - up
+        // front, through the one mechanism every other backend and cache
+        // already forces one through (`snakebite.frontend.compiler.
+        // forceIfNeeded`, reached here via `TypeFacts.of`), each only
+        // while dmd has not already resolved it. `classify`/`ArgumentPlan.
+        // of` (`snakebite.ffi.abi`) read a struct's own `.size`/
+        // `.alignsize` directly, not through `TypeFacts`, so without this
+        // they would be the one place left in this whole call reading a
+        // forward reference dmd might still need to resolve, unlocked -
+        // forcing the struct itself here is enough for its own fields
+        // too: dmd's `finalizeSize` (`dsymbolsem.d`) determines every
+        // field's own size as part of computing the struct's, all under
+        // the one lock `TypeFacts.of` takes only while still needed, so
+        // `classify`'s later, recursive field reads find every size it
+        // touches already resolved.
+        {
+            import snakebite.nativelayout: TypeFacts;
+
+            auto returnType = type.nextOf;
+            if (returnType !is null)
+                TypeFacts.of(returnType);
+            foreach (i, parameter; type.parameterList)
+                TypeFacts.of(parameter.type);
+            foreach (extraType; extraArgumentTypes)
+                TypeFacts.of(extraType);
+        }
 
         // A variadic callee is handed its extra arguments differently -
         // on the System V AMD64 ABI the caller must also report how many

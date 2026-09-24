@@ -45,6 +45,7 @@ public bool isCtfeVariable(Declaration variable) {
 // module, reached through a delegate) would otherwise answer `false` to
 // one backend and, once analysed, `true` to the other.
 public bool functionNeedsClosure(FuncDeclaration function_) {
+    import core.atomic: atomicLoad, MemoryOrder;
     import dmd.dsymbol: PASS;
     import dmd.funcsem: functionSemantic3, needsClosure;
     import snakebite.frontend.compiler: forceIfNeeded;
@@ -52,9 +53,13 @@ public bool functionNeedsClosure(FuncDeclaration function_) {
     // `forceIfNeeded`'s own doc explains why reading `semanticRun`
     // first, unlocked, and skipping the call below when it already says
     // `semantic3done`, is exactly as safe as `functionSemantic3`'s own
-    // gate - never a guess at it.
+    // gate - never a guess at it. The read itself is
+    // `atomicLoad!(MemoryOrder.acq)`, not a plain field read - see
+    // `forceIfNeeded`'s doc for why the unlocked check needs that much,
+    // even though `semanticRun` is dmd's own plain field.
     forceIfNeeded(
-        () => function_.semanticRun >= PASS.semantic3done,
+        () => atomicLoad!(MemoryOrder.acq)(function_.semanticRun)
+            >= PASS.semantic3done,
         () { functionSemantic3(function_); },
     );
     return function_.needsClosure();
@@ -89,6 +94,7 @@ public bool functionNeedsClosure(FuncDeclaration function_) {
 // case, below, only ever narrows a non-null `vthis` to unused, never
 // widens a null one.
 public bool hasHiddenThis(FuncDeclaration function_) {
+    import core.atomic: atomicLoad, MemoryOrder;
     import dmd.dsymbol: PASS;
     import dmd.funcsem: functionSemantic3;
     import dmd.tokens: TOK;
@@ -97,9 +103,10 @@ public bool hasHiddenThis(FuncDeclaration function_) {
     // As `functionNeedsClosure`'s own guarded force: skips the frontend
     // lock once `function_` is already past `semantic3`, which is
     // exactly the condition `functionSemantic3` itself checks before
-    // doing anything.
+    // doing anything. Acquire load - see `forceIfNeeded`'s doc.
     forceIfNeeded(
-        () => function_.semanticRun >= PASS.semantic3done,
+        () => atomicLoad!(MemoryOrder.acq)(function_.semanticRun)
+            >= PASS.semantic3done,
         () { functionSemantic3(function_); },
     );
 
