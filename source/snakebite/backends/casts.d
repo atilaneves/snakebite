@@ -5,6 +5,7 @@ private:
 
 
 import snakebite.nativelayout: TypeFacts;
+import snakebite.nativevalue: CastKind, CastLayout;
 
 
 public struct CastPlan {
@@ -13,62 +14,12 @@ public struct CastPlan {
     // destination types compatible. Both the bytecode compiler and the
     // interpreter used to re-derive this from the same `(sourceType.ty,
     // destType.ty)` if-chain; `classify` decides it once, and each backend
-    // keeps only the primitive that executes the chosen kind.
-    public enum Kind {
-        // Bit-identical representations: a plain move of `destFacts.size`
-        // bytes. Covers class<->class upcasts, class<->pointer, AA<->AA,
-        // AA<->pointer, pointer<->pointer, equal-width float<->float,
-        // equal-width integral<->integral, delegate<->delegate and
-        // equal-element-width array<->array.
-        copy,
-        // DMD leaves proven upcasts unlowered so code generation can apply
-        // the native reference adjustment. Null stays null.
-        classReference,
-        integralToFloat,
-        floatToIntegral,
-        floatToBool,
-        floatWidth,
-        // `complex`/`imaginary` share `floatToBool`/`floatWidth` above
-        // wherever their own native layout lines up with a plain
-        // `float`/`double`/`real`'s: an imaginary value is one such
-        // value on its own, so an imaginary-to-imaginary width change or
-        // an imaginary-to-`bool` truth test is the identical byte
-        // operation, just fed the imaginary operand's own offset and
-        // size. Only the shapes with no such twin get a kind of their
-        // own, below.
-        complexToBool,
-        complexToReal,
-        complexToImaginary,
-        complexToIntegral,
-        complexWidth,
-        realToComplex,
-        integralToComplex,
-        imaginaryToComplex,
-        sarrayToSlice,
-        sarrayToPointer,
-        sliceToPointer,
-        pointerToArray,
-        pointerToIntegral,
-        // `cast(void*) someDelegate`: dmd keeps only the context word
-        // (deprecated in favour of `.ptr`, still accepted). The reverse
-        // direction, and a delegate to `bool`/an integral, are dmd
-        // frontend errors, so this is one-directional.
-        delegateToPointer,
-        // Dynamic array to dynamic array with a different element width:
-        // the byte length stays the same, so the element count scales by
-        // the ratio of the two element sizes.
-        reinterpretSlice,
-        narrow,
-        widenSigned,
-        widenUnsigned,
-        toBool,
-        zero,
-        // No kind above applies; `reason` names the source and destination
-        // types for the backend's own rejection.
-        unsupported,
-    }
-
-    public Kind kind;
+    // keeps only the primitive that executes the chosen kind. `kind` is
+    // `snakebite.nativevalue.CastKind`, not an enum of its own: that
+    // enum is already DMD-free, so it is the one place both this
+    // (dmd-typed) classifier and `applyCast`/`applyCastAs`/the VM's own
+    // per-kind ops (none of which may import dmd) name a cast's kind.
+    public CastKind kind;
     public TypeFacts sourceFacts;
     public TypeFacts destFacts;
     // Element count, only meaningful for `sarrayToSlice`.
@@ -103,18 +54,18 @@ public CastPlan classify(
     const destFacts = TypeFacts.of(destType);
 
     if (sourceType.ty == Tnull)
-        return CastPlan(CastPlan.Kind.zero, sourceFacts, destFacts);
+        return CastPlan(CastKind.zero, sourceFacts, destFacts);
 
     if (sourceType.ty == Tclass && destType.ty == Tclass) {
         auto plan = CastPlan(
-            CastPlan.Kind.classReference, sourceFacts, destFacts);
+            CastKind.classReference, sourceFacts, destFacts);
         destType.isTypeClass.sym.isBaseOf(
             sourceType.isTypeClass.sym, &plan.referenceOffset);
         return plan;
     }
 
     if (sourceType.ty == Taarray && destType.ty == Taarray)
-        return CastPlan(CastPlan.Kind.copy, sourceFacts, destFacts);
+        return CastPlan(CastKind.copy, sourceFacts, destFacts);
 
     // dmd's own `dcast.d` (bugzilla 3133) reinterprets the bytes of two
     // equal-size "fat values" - a `struct`, a static array, or a
@@ -130,12 +81,12 @@ public CastPlan classify(
     // special case.
     if (isFatValue(sourceType) && isFatValue(destType)
             && sourceFacts.size == destFacts.size)
-        return CastPlan(CastPlan.Kind.copy, sourceFacts, destFacts);
+        return CastPlan(CastKind.copy, sourceFacts, destFacts);
 
     // DMD has checked the conversion. Function attributes do not change
     // a delegate's context and function words.
     if (sourceType.ty == Tdelegate && destType.ty == Tdelegate)
-        return CastPlan(CastPlan.Kind.copy, sourceFacts, destFacts);
+        return CastPlan(CastKind.copy, sourceFacts, destFacts);
 
     // `cast(void*) someDelegate` (deprecated, still accepted): the
     // reverse (`cast(SomeDelegate) somePointer`) and `cast(bool)`/an
@@ -143,11 +94,11 @@ public CastPlan classify(
     // direction is reached.
     if (sourceType.ty == Tdelegate && destType.ty == Tpointer)
         return CastPlan(
-            CastPlan.Kind.delegateToPointer, sourceFacts, destFacts);
+            CastKind.delegateToPointer, sourceFacts, destFacts);
 
     if ((sourceType.ty == Tclass && destType.ty == Tpointer)
             || (sourceType.ty == Tpointer && destType.ty == Tclass))
-        return CastPlan(CastPlan.Kind.copy, sourceFacts, destFacts);
+        return CastPlan(CastKind.copy, sourceFacts, destFacts);
 
     // An associative array is one pointer-sized handle natively, the same
     // shape `Tclass`-`Tpointer` already gets `copy` for above.
@@ -156,7 +107,7 @@ public CastPlan classify(
     // other side.
     if ((sourceType.ty == Taarray && destType.ty == Tpointer)
             || (sourceType.ty == Tpointer && destType.ty == Taarray))
-        return CastPlan(CastPlan.Kind.copy, sourceFacts, destFacts);
+        return CastPlan(CastKind.copy, sourceFacts, destFacts);
 
     // `complex`/`imaginary` are deprecated but still full members of the
     // language dmd accepts, with their own cast rules: a `complex` value
@@ -170,36 +121,36 @@ public CastPlan classify(
         if (isComplexType(sourceType))
             return CastPlan(
                 sourceFacts.size == destFacts.size
-                    ? CastPlan.Kind.copy : CastPlan.Kind.complexWidth,
+                    ? CastKind.copy : CastKind.complexWidth,
                 sourceFacts, destFacts,
             );
 
         if (isImaginaryType(sourceType))
             return CastPlan(
-                CastPlan.Kind.imaginaryToComplex, sourceFacts, destFacts);
+                CastKind.imaginaryToComplex, sourceFacts, destFacts);
 
         if (isFloatingType(sourceType))
             return CastPlan(
-                CastPlan.Kind.realToComplex, sourceFacts, destFacts);
+                CastKind.realToComplex, sourceFacts, destFacts);
 
         if (sourceFacts.isIntegral && isIntegralSize(sourceFacts.size))
             return CastPlan(
-                CastPlan.Kind.integralToComplex, sourceFacts, destFacts);
+                CastKind.integralToComplex, sourceFacts, destFacts);
 
-        return CastPlan(CastPlan.Kind.unsupported, sourceFacts, destFacts);
+        return CastPlan(CastKind.unsupported, sourceFacts, destFacts);
     }
 
     if (isImaginaryType(destType)) {
         if (isImaginaryType(sourceType))
             return CastPlan(
                 sourceFacts.size == destFacts.size
-                    ? CastPlan.Kind.copy : CastPlan.Kind.floatWidth,
+                    ? CastKind.copy : CastKind.floatWidth,
                 sourceFacts, destFacts,
             );
 
         if (isComplexType(sourceType))
             return CastPlan(
-                CastPlan.Kind.complexToImaginary, sourceFacts, destFacts);
+                CastKind.complexToImaginary, sourceFacts, destFacts);
 
         // Neither a real value nor an integral (`bool`/`char` included)
         // has an imaginary component to carry over: dmd's own constant
@@ -209,45 +160,45 @@ public CastPlan classify(
         // time.
         if (isFloatingType(sourceType)
                 || (sourceFacts.isIntegral && isIntegralSize(sourceFacts.size)))
-            return CastPlan(CastPlan.Kind.zero, sourceFacts, destFacts);
+            return CastPlan(CastKind.zero, sourceFacts, destFacts);
 
-        return CastPlan(CastPlan.Kind.unsupported, sourceFacts, destFacts);
+        return CastPlan(CastKind.unsupported, sourceFacts, destFacts);
     }
 
     if (isFloatingType(destType)) {
         if (isFloatingType(sourceType))
             return CastPlan(
                 sourceFacts.size == destFacts.size
-                    ? CastPlan.Kind.copy : CastPlan.Kind.floatWidth,
+                    ? CastKind.copy : CastKind.floatWidth,
                 sourceFacts, destFacts,
             );
 
         if (isComplexType(sourceType))
             return CastPlan(
-                CastPlan.Kind.complexToReal, sourceFacts, destFacts);
+                CastKind.complexToReal, sourceFacts, destFacts);
 
         // The reverse of the imaginary-destination zero fill above: a
         // real value has no imaginary axis to read back either.
         if (isImaginaryType(sourceType))
-            return CastPlan(CastPlan.Kind.zero, sourceFacts, destFacts);
+            return CastPlan(CastKind.zero, sourceFacts, destFacts);
 
         if (sourceFacts.isIntegral && isIntegralSize(sourceFacts.size))
             return CastPlan(
-                CastPlan.Kind.integralToFloat, sourceFacts, destFacts);
+                CastKind.integralToFloat, sourceFacts, destFacts);
 
-        return CastPlan(CastPlan.Kind.unsupported, sourceFacts, destFacts);
+        return CastPlan(CastKind.unsupported, sourceFacts, destFacts);
     }
 
     if (isComplexType(sourceType)) {
         if (destType.ty == Tbool)
             return CastPlan(
-                CastPlan.Kind.complexToBool, sourceFacts, destFacts);
+                CastKind.complexToBool, sourceFacts, destFacts);
 
         if (destFacts.isIntegral && isIntegralSize(destFacts.size))
             return CastPlan(
-                CastPlan.Kind.complexToIntegral, sourceFacts, destFacts);
+                CastKind.complexToIntegral, sourceFacts, destFacts);
 
-        return CastPlan(CastPlan.Kind.unsupported, sourceFacts, destFacts);
+        return CastPlan(CastKind.unsupported, sourceFacts, destFacts);
     }
 
     if (isImaginaryType(sourceType)) {
@@ -256,33 +207,33 @@ public CastPlan classify(
         // operand.
         if (destType.ty == Tbool)
             return CastPlan(
-                CastPlan.Kind.floatToBool, sourceFacts, destFacts);
+                CastKind.floatToBool, sourceFacts, destFacts);
 
         // No real projection to convert, same as the imaginary
         // destination case above.
         if (destFacts.isIntegral && isIntegralSize(destFacts.size))
-            return CastPlan(CastPlan.Kind.zero, sourceFacts, destFacts);
+            return CastPlan(CastKind.zero, sourceFacts, destFacts);
 
-        return CastPlan(CastPlan.Kind.unsupported, sourceFacts, destFacts);
+        return CastPlan(CastKind.unsupported, sourceFacts, destFacts);
     }
 
     if (isFloatingType(sourceType)) {
         if (destType.ty == Tbool)
             return CastPlan(
-                CastPlan.Kind.floatToBool, sourceFacts, destFacts);
+                CastKind.floatToBool, sourceFacts, destFacts);
 
         if (destFacts.isIntegral && isIntegralSize(destFacts.size))
             return CastPlan(
-                CastPlan.Kind.floatToIntegral, sourceFacts, destFacts);
+                CastKind.floatToIntegral, sourceFacts, destFacts);
 
-        return CastPlan(CastPlan.Kind.unsupported, sourceFacts, destFacts);
+        return CastPlan(CastKind.unsupported, sourceFacts, destFacts);
     }
 
     if (sourceType.ty == Tpointer && destType.ty == Tpointer)
-        return CastPlan(CastPlan.Kind.copy, sourceFacts, destFacts);
+        return CastPlan(CastKind.copy, sourceFacts, destFacts);
 
     if (sourceType.ty == Tpointer && destFacts.isDynamicArray)
-        return CastPlan(CastPlan.Kind.pointerToArray, sourceFacts, destFacts);
+        return CastPlan(CastKind.pointerToArray, sourceFacts, destFacts);
 
     // `cast(bool)` on a pointer (a plain pointer or a function pointer,
     // both `Tpointer`) tests the same nonzero bytes an integral `toBool`
@@ -292,7 +243,7 @@ public CastPlan classify(
     // semantics have to be checked before `pointerToIntegral` below,
     // which is why it stays out of that byte-preserving kind.
     if (sourceType.ty == Tpointer && destType.ty == Tbool)
-        return CastPlan(CastPlan.Kind.toBool, sourceFacts, destFacts);
+        return CastPlan(CastKind.toBool, sourceFacts, destFacts);
 
     // An explicit pointer-to-integral cast preserves the native address
     // bits; `bool` has truth-conversion semantics instead, so it stays
@@ -300,7 +251,7 @@ public CastPlan classify(
     if (sourceType.ty == Tpointer && destFacts.isIntegral
             && destType.ty != Tbool)
         return CastPlan(
-            CastPlan.Kind.pointerToIntegral, sourceFacts, destFacts);
+            CastKind.pointerToIntegral, sourceFacts, destFacts);
 
     // The reverse of `pointerToIntegral`: an explicit integral-to-pointer
     // cast (`cast(void*) someInt`, `core.stdc.stdarg.alignUp`'s own
@@ -320,9 +271,9 @@ public CastPlan classify(
             && isIntegralSize(sourceFacts.size))
         return CastPlan(
             destFacts.size == sourceFacts.size
-                ? CastPlan.Kind.copy
+                ? CastKind.copy
                 : sourceFacts.isUnsigned
-                    ? CastPlan.Kind.widenUnsigned : CastPlan.Kind.widenSigned,
+                    ? CastKind.widenUnsigned : CastKind.widenSigned,
             sourceFacts, destFacts,
         );
 
@@ -330,7 +281,7 @@ public CastPlan classify(
             && destType.nextOf !is null
             && sourceType.nextOf.mutableOf.equals(destType.nextOf.mutableOf)) {
         auto plan = CastPlan(
-            CastPlan.Kind.sarrayToSlice, sourceFacts, destFacts);
+            CastKind.sarrayToSlice, sourceFacts, destFacts);
         plan.staticLength =
             cast(size_t) sourceType.isTypeSArray.dim.toInteger;
         return plan;
@@ -341,39 +292,39 @@ public CastPlan classify(
     if (sourceType.ty == Tsarray && destType.ty == Tpointer
             && destType.nextOf !is null
             && sourceType.nextOf.mutableOf.equals(destType.nextOf.mutableOf))
-        return CastPlan(CastPlan.Kind.sarrayToPointer, sourceFacts, destFacts);
+        return CastPlan(CastKind.sarrayToPointer, sourceFacts, destFacts);
 
     // Explicit array-to-pointer casts preserve the data address even when
     // the pointed-to type differs from the array's element type.
     if (sourceFacts.isDynamicArray && destType.ty == Tpointer)
-        return CastPlan(CastPlan.Kind.sliceToPointer, sourceFacts, destFacts);
+        return CastPlan(CastKind.sliceToPointer, sourceFacts, destFacts);
 
     if (sourceFacts.isDynamicArray && destFacts.isDynamicArray)
         return CastPlan(
             sourceFacts.elementSize == destFacts.elementSize
-                ? CastPlan.Kind.copy : CastPlan.Kind.reinterpretSlice,
+                ? CastKind.copy : CastKind.reinterpretSlice,
             sourceFacts, destFacts,
         );
 
     if (!sourceFacts.isIntegral || !isIntegralSize(sourceFacts.size)
             || !destFacts.isIntegral)
-        return CastPlan(CastPlan.Kind.unsupported, sourceFacts, destFacts);
+        return CastPlan(CastKind.unsupported, sourceFacts, destFacts);
 
     // dmd classifies `bool` as `integral | unsigned`, so this has to be
     // checked before the general integral resize below: `cast(bool) x`
     // means `x != 0`, not "keep the low byte".
     if (destType.ty == Tbool)
-        return CastPlan(CastPlan.Kind.toBool, sourceFacts, destFacts);
+        return CastPlan(CastKind.toBool, sourceFacts, destFacts);
 
     if (destFacts.size == sourceFacts.size)
-        return CastPlan(CastPlan.Kind.copy, sourceFacts, destFacts);
+        return CastPlan(CastKind.copy, sourceFacts, destFacts);
 
     if (destFacts.size < sourceFacts.size)
-        return CastPlan(CastPlan.Kind.narrow, sourceFacts, destFacts);
+        return CastPlan(CastKind.narrow, sourceFacts, destFacts);
 
     return CastPlan(
         sourceFacts.isUnsigned
-            ? CastPlan.Kind.widenUnsigned : CastPlan.Kind.widenSigned,
+            ? CastKind.widenUnsigned : CastKind.widenSigned,
         sourceFacts, destFacts,
     );
 }
@@ -386,9 +337,31 @@ public CastPlan classify(
 ) {
     if (expression.isNullExp !is null)
         return CastPlan(
-            CastPlan.Kind.zero, TypeFacts.init, TypeFacts.of(destType));
+            CastKind.zero, TypeFacts.init, TypeFacts.of(destType));
 
     return classify(expression.type, destType);
+}
+
+// The DMD-free subset of `plan` that `snakebite.nativevalue.applyCast`
+// needs to turn its source bytes into its destination bytes -
+// `snakebite.backends.bytecode.vm` may not import DMD frontend modules,
+// so it reaches `plan.sourceFacts`/`destFacts` through this value
+// instead of `CastPlan` itself; `plan.kind` is already the DMD-free
+// `CastKind` `applyCast` takes, so it carries straight over with no
+// mapping. Only meaningful for a `plan.kind` `applyCast` accepts;
+// neither backend calls this for `copy`, `classReference`, `zero`, or
+// `unsupported`, each of which needs its own control flow instead.
+public CastLayout layoutOf(in CastPlan plan) @safe pure nothrow @nogc {
+    return CastLayout(
+        plan.kind,
+        plan.sourceFacts.size,
+        plan.destFacts.size,
+        plan.sourceFacts.isUnsigned,
+        plan.destFacts.isUnsigned,
+        plan.sourceFacts.elementSize,
+        plan.destFacts.elementSize,
+        plan.staticLength,
+    );
 }
 
 // Whether `type` is `float`/`double`/`real` - `TypeFacts` has no notion of

@@ -208,6 +208,34 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
 
     protected abstract void visitTupleElement(Expression expression);
 
+    // A lowered literal's own `_d_arrayliteralTX` call needs somewhere to
+    // put its result before this visitor can read the address back out of
+    // it, so `withTemporaryDestination` substitutes a temporary of the
+    // lowering's own type for the surrounding destination while `run`
+    // evaluates the call and every element into it, then restores the
+    // surrounding destination once `run` returns.
+    //
+    // `evaluateElement`, `storeConstant`, `storeAddress`, and `copyBytes`
+    // are ordinary execution primitives that carry no array-literal
+    // knowledge of their own, but they are valid only inside
+    // `withTemporaryDestination`'s `run` delegate, since all four act on
+    // the temporary it opened:
+    // - `evaluateElement` writes the element at a byte offset from the
+    //   address the temporary *holds* (the pointer `_d_arrayliteralTX`
+    //   returned into it), not from the temporary's own address.
+    // - `storeConstant` writes a constant at a byte offset into the
+    //   *surrounding* destination that `withTemporaryDestination` saved,
+    //   not into the temporary.
+    // - `storeAddress` copies the temporary's own *value* - the pointer
+    //   `_d_arrayliteralTX` returned - to a byte offset in that surrounding
+    //   destination.
+    // - `copyBytes` copies bytes from the address the temporary holds into
+    //   that surrounding destination.
+    // A backend runs each one immediately (the interpreter) or emits an op
+    // for the VM to run later (the bytecode compiler). Deciding the element
+    // count, the per-element byte offsets, and whether the result is a
+    // dynamic array, a pointer, or a static array stays here, shared,
+    // instead of being re-derived by each backend.
     final override void visit(ArrayLiteralExp expression) {
         import dmd.astenums: Tpointer;
         import dmd.typesem: nextOf, toBasetype;
@@ -215,27 +243,30 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
             arrayLengthOffset, arrayPointerOffset;
 
         if (expression.lowering !is null) {
-            prepareArrayLiteral(expression);
-            scope (exit) restoreArrayLiteral;
-            expression.lowering.accept(this);
-            const count = expression.elements is null
-                ? 0 : expression.elements.length;
-            auto elementType = expression.type.nextOf;
-            const elementFacts = TypeFacts.of(elementType);
-            foreach (i; 0 .. count)
-                storeArrayLiteralElement(
-                    expression[i], elementType, elementFacts,
-                    i * elementFacts.size,
-                );
+            const temporaryFacts = TypeFacts.of(expression.lowering.type);
+            withTemporaryDestination(
+                    expression.lowering.type, temporaryFacts, {
+                expression.lowering.accept(this);
 
-            const facts = TypeFacts.of(expression.type);
-            if (facts.isDynamicArray) {
-                storeArrayLiteralCount(count, arrayLengthOffset);
-                storeArrayLiteralPointer(arrayPointerOffset);
-            } else if (expression.type.toBasetype.ty == Tpointer)
-                storeArrayLiteralPointer(0);
-            else
-                copyArrayLiteralStorage(facts.size);
+                const count = expression.elements is null
+                    ? 0 : expression.elements.length;
+                auto elementType = expression.type.nextOf;
+                const elementFacts = TypeFacts.of(elementType);
+                foreach (i; 0 .. count)
+                    evaluateElement(
+                        expression[i], elementType, elementFacts,
+                        i * elementFacts.size,
+                    );
+
+                const facts = TypeFacts.of(expression.type);
+                if (facts.isDynamicArray) {
+                    storeConstant(count, arrayLengthOffset);
+                    storeAddress(arrayPointerOffset);
+                } else if (expression.type.toBasetype.ty == Tpointer)
+                    storeAddress(0);
+                else
+                    copyBytes(facts.size);
+            });
             return;
         }
 
@@ -245,17 +276,18 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     protected abstract void visitUnloweredArrayLiteral(
         ArrayLiteralExp expression);
 
-    protected abstract void prepareArrayLiteral(ArrayLiteralExp expression);
-    protected abstract void restoreArrayLiteral();
-    protected abstract void storeArrayLiteralElement(
+    extern(D) protected abstract void withTemporaryDestination(
+        Type type, in TypeFacts facts, scope void delegate() run,
+    );
+    protected abstract void evaluateElement(
         Expression element, Type elementType, in TypeFacts facts,
         in size_t byteOffset,
     );
-    protected abstract void storeArrayLiteralCount(
-        in size_t count, in size_t byteOffset,
+    protected abstract void storeConstant(
+        in size_t value, in size_t byteOffset,
     );
-    protected abstract void storeArrayLiteralPointer(in size_t byteOffset);
-    protected abstract void copyArrayLiteralStorage(in size_t width);
+    protected abstract void storeAddress(in size_t byteOffset);
+    protected abstract void copyBytes(in size_t width);
 
     // `~` concatenation is always `_d_arraycatnTX`; the one shape without a
     // `lowering` is a node this visitor does not otherwise support, the same

@@ -14,7 +14,7 @@ import snakebite.exception: SnakebiteException;
 import ut.backends;
 import snakebite.backends.backend: Program, run;
 import snakebite.execution: prepareProject;
-import snakebite.frontend.dependencyimage: imageSource;
+import snakebite.frontend.imagesource: imageSource;
 import core.atomic;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -1232,7 +1232,7 @@ unittest {
 // module-level dependency function - a normal dependency, not a local one.
 // A walk that treats the aliased symbol itself as "function-local" merely
 // because it is a `FuncDeclaration` (rather than checking its *ancestors*
-// for an enclosing function, see `dependencyimage.d`'s
+// for an enclosing function, see `imagesource.d`'s
 // `hasFunctionLocalType`) wrongly drops this instantiation from the image.
 @("image.aliasArgumentDependencyFunction")
 @Serial
@@ -1267,7 +1267,7 @@ unittest {
 // checking only the aliased symbol's own module misses the root-owned type
 // nested inside *its* template arguments - the same class of hole that
 // `image.nestedTemplateArgumentRootType` covers for a type argument, but
-// reached here through an alias argument instead (see `dependencyimage.d`'s
+// reached here through an alias argument instead (see `imagesource.d`'s
 // `eachFoundSymbol`, used from both `eachTemplateArgumentSymbol`'s
 // `toDsymbol` path and `eachTemplateArgument`'s `isDsymbol` path). The
 // instantiation must not leak an unresolvable, unqualified `Thing` spelling

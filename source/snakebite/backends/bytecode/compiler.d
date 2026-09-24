@@ -12,8 +12,8 @@ import snakebite.backends.fullexpression:
     FullExpressionKind, FullExpressionScope;
 import snakebite.backends.controlflow:
     ScopeFrame, cleanupCount, scopePath;
+import snakebite.backends.druntimehooks: DruntimeHook, planOf, specOf;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
-import snakebite.ffi.abi: Register;
 
 
 // Whether `type` is `float`/`double`/`real` - `TypeFacts` has no notion of
@@ -306,15 +306,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         // `SharedTable`, ADR-0006), so two threads racing here store the
         // same value; the store just needs to be visible to a later
         // reader.
-        auto plan = _plans.rawPlanOf(
-            "gc_malloc",
-            [
-                Register(Register.Kind.unsigned, 8),
-                Register(Register.Kind.unsigned, 4),
-                Register(Register.Kind.pointer, 8),
-            ],
-            Register(Register.Kind.pointer, 8),
-        );
+        auto plan = planOf(_plans, DruntimeHook.gcMalloc);
         if (plan is null)
             throw new SnakebiteException(
                 "bytecode compiler cannot resolve druntime's " ~
@@ -576,11 +568,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         WithStatement;
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
-        Arg, AssertSite, CallSite, ClosureSlot, discardResult, indirectStorage,
+        Arg, AssertSite, CallSite, ClosureSlot, castSizeWithSignedness,
+        discardResult, indirectStorage,
         ExceptionHandler, Function,
         Instruction,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall,
+        opCastAs, opCastFixedAs,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
         opArrayEqual, opConstant, opCopy, opCopyFixed,
         opDivideSigned, opDivideUnsigned,
@@ -592,11 +586,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opFloatAdd, opFloatDivide, opFloatEqual, opFloatGreaterOrEqual,
         opFloatGreaterThan, opFloatLessOrEqual, opFloatLessThan,
         opFloatModulo, opFloatMultiply, opFloatNegate, opFloatNotEqual,
-        opFloatSubtract, opFloatToBool, opFloatToIntegralSigned,
-        opFloatToIntegralUnsigned,
+        opFloatSubtract, opFloatToBool,
         opFloatWidthCast, opFrameAddress, opGreaterOrEqualSigned,
         opGreaterOrEqualUnsigned, opGreaterThanSigned, opGreaterThanUnsigned,
-        opIntegralToFloatSigned, opIntegralToFloatUnsigned,
         opJump, opLessOrEqualSigned, opLessOrEqualUnsigned, opLessThanSigned,
         opLessThanUnsigned, opLoadBitfield, opLoadIndirect, opLogicalNot,
         opModuloSigned,
@@ -624,6 +616,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.nativelayout:
         alignUp, initializerConstructsThroughSlice, initializerValueOf,
         isIntegralSize, TypeFacts;
+    import snakebite.nativevalue: CastKind;
 
     alias visit = LoweringVisitor.visit;
 
@@ -957,6 +950,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             static foreach (size; [1, 2, 4, 8, 16]) {
                 if (width == size)
                     handler = &opCopyFixed!size;
+            }
+        }
+        // `narrow`/`widenSigned`/`widenUnsigned`/`toBool` only ever see
+        // `width`/`sourceWidth` in `1`/`2`/`4`/`8` - every D integral's
+        // own byte count - so this is the same peephole as `opCopy`'s
+        // own above, just over both sizes `opCastFixedAs` takes as
+        // template parameters instead of reading off the instruction.
+        static foreach (kind; [
+            CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned,
+            CastKind.toBool,
+        ]) {
+            if (handler is &opCastAs!kind) {
+                static foreach (destSize; [1UL, 2, 4, 8])
+                    static foreach (sourceSize; [1UL, 2, 4, 8])
+                        if (width == destSize && sourceWidth == sourceSize)
+                            handler =
+                                &opCastFixedAs!(kind, destSize, sourceSize);
             }
         }
         _instructions ~= Instruction(
@@ -1886,12 +1896,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileClassInvariantCall(
         AssertExp expression, in size_t objectOffset,
     ) {
-        import snakebite.backends.exceptions: classInvariantSymbol;
-
-        auto plan = _bytecode._plans.rawPlanOf(
-            classInvariantSymbol,
-            [Register(Register.Kind.pointer, size_t.sizeof)],
-        );
+        auto plan = planOf(_bytecode._plans, DruntimeHook.classInvariant);
         if (plan is null)
             throw rejection(
                 _function, expression.loc, expressionText(expression));
@@ -3809,12 +3814,35 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, _destination, baseOffset + field.offset, _width);
     }
 
-    // Executes an aggregate plan in its final storage. A storage operand
-    // preserves field offsets for both frame values and allocations.
-    // The plan already decided which field is a plain value, a bitfield,
-    // or a static-array broadcast, and whether `vthis` needs filling; this
-    // is the only place that turns a step into bytecode.
-    //
+    // The four hooks `snakebite.backends.aggregateinit.applyStep` and
+    // `driveInit` drive, one per `InitStep.Kind`, each turning one step
+    // into bytecode at `base`, a storage operand that preserves field
+    // offsets for both frame values and allocations alike.
+
+    // Satisfies `aggregateinit`'s `Hooks` contract: forwards each
+    // `InitStep.Kind` to the matching `apply*Step` method below, at
+    // whichever `base`/`loc` its call site is compiling into. Built
+    // once per call site instead of the four lambdas each used to
+    // build.
+    private struct AggregateInitHooks {
+        private FunctionCompiler _compiler;
+        private Loc _loc;
+        private size_t _base;
+
+        public void applyVthis(InitStep step) {
+            _compiler.applyVthisStep(step, _loc, _base);
+        }
+        public void applyValue(InitStep step) {
+            _compiler.applyValueStep(step, _base);
+        }
+        public void applyBitfield(InitStep step) {
+            _compiler.applyBitfieldStep(step, _base);
+        }
+        public void applyBroadcast(InitStep step) {
+            _compiler.applyBroadcastStep(step, _base);
+        }
+    }
+
     // A `vthis` step with `source` set (a nested class's `NewExp.thisexp`)
     // evaluates that expression directly, then adds `sourceAdjustment` if
     // it is non-zero. Otherwise it is a nested struct reading its own
@@ -3825,67 +3853,56 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // reject it here: leaving `vthis` at its `.init` zero instead reads
     // back a null context the first time a method on that instance uses
     // it.
-    private void applyStep(
-        InitStep step,
-        Loc loc,
-        in size_t base,
-    ) {
-        final switch (step.kind) with (InitStep.Kind) {
-        case vthis:
-            if (step.source !is null) {
-                evalInto(step.source, base + step.offset, step.facts.size,
-                    step.type);
-                if (step.sourceAdjustment != 0) {
-                    const adjustment = reserveTemp(pointerFacts);
-                    emit(&opConstant, adjustment,
-                        addConstant(cast(long) step.sourceAdjustment),
-                        size_t.sizeof);
-                    emit(&opAdd, base + step.offset, adjustment,
-                        size_t.sizeof);
-                }
-                return;
-            }
-
-            if (step.parentFunction is null)
-                throw rejection(_function, loc, "a nested struct's static chain");
-
-            const context = contextAddressOf(step.parentFunction);
-            emit(&opCopy, base + step.offset, context, size_t.sizeof);
-            return;
-
-        case value:
+    private void applyVthisStep(InitStep step, Loc loc, in size_t base) {
+        if (step.source !is null) {
             evalInto(step.source, base + step.offset, step.facts.size,
                 step.type);
-            return;
-
-        case bitfield:
-            const valueOffset = reserveTemp(step.facts);
-            evalInto(step.source, valueOffset, step.facts.size, step.type);
-
-            const addressOffset = reserveTemp(pointerFacts);
-            emit(&opFrameAddress, addressOffset, base + step.offset,
-                size_t.sizeof);
-
-            emitBitfieldStore(step.field, addressOffset, valueOffset,
-                step.facts.size);
-            return;
-
-        case broadcast:
-            // Reached alike for a `StructLiteralExp`'s `elements` and a
-            // `NewExp`'s positional `arguments`: both are narrowed by
-            // dmd's own `fit` (`expressionsem.d`) ahead of `fill`, which
-            // walks a static-array field's nested array levels until a
-            // single given value matches one, leaving that value's own
-            // (narrower) type on the source expression instead of
-            // widening it to the full field type.
-            const tempOffset = reserveTemp(step.facts);
-            evalInto(step.source, tempOffset, step.facts.size);
-
-            foreach (i; 0 .. step.count)
-                emit(&opCopy, base + step.offset + i * step.facts.size,
-                    tempOffset, step.facts.size);
+            if (step.sourceAdjustment != 0) {
+                const adjustment = reserveTemp(pointerFacts);
+                emit(&opConstant, adjustment,
+                    addConstant(cast(long) step.sourceAdjustment),
+                    size_t.sizeof);
+                emit(&opAdd, base + step.offset, adjustment, size_t.sizeof);
+            }
             return;
         }
+
+        if (step.parentFunction is null)
+            throw rejection(_function, loc, "a nested struct's static chain");
+
+        const context = contextAddressOf(step.parentFunction);
+        emit(&opCopy, base + step.offset, context, size_t.sizeof);
+    }
+
+    private void applyValueStep(InitStep step, in size_t base) {
+        evalInto(step.source, base + step.offset, step.facts.size, step.type);
+    }
+
+    private void applyBitfieldStep(InitStep step, in size_t base) {
+        const valueOffset = reserveTemp(step.facts);
+        evalInto(step.source, valueOffset, step.facts.size, step.type);
+
+        const addressOffset = reserveTemp(pointerFacts);
+        emit(&opFrameAddress, addressOffset, base + step.offset,
+            size_t.sizeof);
+
+        emitBitfieldStore(step.field, addressOffset, valueOffset,
+            step.facts.size);
+    }
+
+    // Reached alike for a `StructLiteralExp`'s `elements` and a `NewExp`'s
+    // positional `arguments`: both are narrowed by dmd's own `fit`
+    // (`expressionsem.d`) ahead of `fill`, which walks a static-array
+    // field's nested array levels until a single given value matches one,
+    // leaving that value's own (narrower) type on the source expression
+    // instead of widening it to the full field type.
+    private void applyBroadcastStep(InitStep step, in size_t base) {
+        const tempOffset = reserveTemp(step.facts);
+        evalInto(step.source, tempOffset, step.facts.size);
+
+        foreach (i; 0 .. step.count)
+            emit(&opCopy, base + step.offset + i * step.facts.size,
+                tempOffset, step.facts.size);
     }
 
     // `Point(3, 4)`, dmd's own literal form for a plain-old struct with no
@@ -3903,11 +3920,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         emit(&opZero, _destination, 0, _width);
 
-        import snakebite.backends.aggregateinit: planStructLiteral;
+        import snakebite.backends.aggregateinit: applyStep, planStructLiteral;
 
         auto plan = planStructLiteral(expression);
+        auto hooks = AggregateInitHooks(this, expression.loc, _destination);
         foreach (step; plan.steps)
-            applyStep(step, expression.loc, _destination);
+            applyStep(hooks, step);
     }
 
     // `arr.length`: the array's own length word, read straight out of its
@@ -3934,8 +3952,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             SliceExp expression,
             size_t sourceLengthOffset,
             size_t sourcePointerOffset) {
-        import snakebite.backends.elementaddress:
-            sliceBoundsHook, sliceBoundsRegisters;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset;
 
@@ -3971,8 +3987,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             size_t.sizeof);
         compileBoundsHook(
             orderOffset,
-            sliceBoundsHook,
-            sliceBoundsRegisters,
+            DruntimeHook.sliceBounds,
             [
                 Arg(lowOffset, 0, size_t.sizeof),
                 Arg(highOffset, 0, size_t.sizeof),
@@ -3986,8 +4001,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             size_t.sizeof);
         compileBoundsHook(
             orderOffset,
-            sliceBoundsHook,
-            sliceBoundsRegisters,
+            DruntimeHook.sliceBounds,
             [
                 Arg(lowOffset, 0, size_t.sizeof),
                 Arg(highOffset, 0, size_t.sizeof),
@@ -4148,33 +4162,50 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileArrayLiteral(expression, _destination);
     }
 
-    private struct ArrayLiteralDestination {
+    private struct TemporaryDestination {
         size_t offset;
         size_t width;
         Type type;
     }
 
-    private ArrayLiteralDestination[] _arrayLiteralDestinations;
+    // The stack `withTemporaryDestination` pushes and pops. Each entry is
+    // the *surrounding* (`_destination`, `_width`, `_valueType`)
+    // destination saved before `_destination` was overwritten with the
+    // temporary's own offset - it is what `storeConstant`/`storeAddress`/
+    // `copyBytes` emit stores into, not the temporary itself.
+    private TemporaryDestination[] _temporaryDestinations;
 
-    protected override void prepareArrayLiteral(ArrayLiteralExp expression) {
-        auto destination = ArrayLiteralDestination(
+    // Reserves a temporary of `facts` and substitutes it for the ambient
+    // (`_destination`, `_width`, `_valueType`) destination `run` (and
+    // anything it compiles through this visitor) targets, restoring the
+    // surrounding destination once `run` returns - the same save/reserve/
+    // restore shape `evalInto` below already uses for a single expression,
+    // generalised to an arbitrary sequence of them. Bytecode temporaries
+    // are never released early: `reserveTemp` only ever grows this
+    // function's frame past what `_layout` reserved.
+    extern(D) protected override void withTemporaryDestination(
+            Type type, in TypeFacts facts, scope void delegate() run) {
+        auto destination = TemporaryDestination(
             _destination, _width, _valueType);
-        const facts = TypeFacts.of(expression.lowering.type);
-        _arrayLiteralDestinations ~= destination;
+        _temporaryDestinations ~= destination;
+        scope (exit) {
+            _temporaryDestinations.length--;
+            _destination = destination.offset;
+            _width = destination.width;
+            _valueType = destination.type;
+        }
+
         _destination = reserveTemp(facts);
         _width = facts.size;
-        _valueType = expression.lowering.type;
+        _valueType = type;
+        run();
     }
 
-    protected override void restoreArrayLiteral() {
-        auto destination = _arrayLiteralDestinations[$ - 1];
-        _arrayLiteralDestinations.length--;
-        _destination = destination.offset;
-        _width = destination.width;
-        _valueType = destination.type;
-    }
-
-    protected override void storeArrayLiteralElement(
+    // `_destination` is the innermost temporary's own offset; what it
+    // *holds* is the pointer `_d_arrayliteralTX` (or the equivalent
+    // lowering) copied there. Emits code that stores the element at
+    // `byteOffset` from that held pointer, not from `_destination` itself.
+    protected override void evaluateElement(
         Expression element, Type elementType, in TypeFacts facts,
         in size_t byteOffset,
     ) {
@@ -4191,22 +4222,40 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opStoreIndirect, addressOffset, elementOffset, facts.size);
     }
 
-    protected override void storeArrayLiteralCount(
-        in size_t count, in size_t byteOffset,
+    // Valid only inside `withTemporaryDestination`'s `run` delegate: emits
+    // a store of `value` at `byteOffset` into the surrounding destination
+    // that call saved (`_temporaryDestinations[$ - 1]`), not into the
+    // temporary.
+    protected override void storeConstant(
+        in size_t value, in size_t byteOffset,
     ) {
-        const destination = _arrayLiteralDestinations[$ - 1];
+        assert(_temporaryDestinations.length > 0,
+            "storeConstant needs an enclosing withTemporaryDestination");
+        const destination = _temporaryDestinations[$ - 1];
         emit(&opConstant, destination.offset + byteOffset,
-            addConstant(cast(long) count), size_t.sizeof);
+            addConstant(cast(long) value), size_t.sizeof);
     }
 
-    protected override void storeArrayLiteralPointer(in size_t byteOffset) {
-        const destination = _arrayLiteralDestinations[$ - 1];
+    // Valid only inside `withTemporaryDestination`'s `run` delegate: emits
+    // a copy of the innermost temporary's *value* (the pointer it holds,
+    // e.g. what `_d_arrayliteralTX` returned) to `byteOffset` in the
+    // surrounding destination that call saved.
+    protected override void storeAddress(in size_t byteOffset) {
+        assert(_temporaryDestinations.length > 0,
+            "storeAddress needs an enclosing withTemporaryDestination");
+        const destination = _temporaryDestinations[$ - 1];
         emit(&opCopy, destination.offset + byteOffset,
             _destination, size_t.sizeof);
     }
 
-    protected override void copyArrayLiteralStorage(in size_t width) {
-        const destination = _arrayLiteralDestinations[$ - 1];
+    // Valid only inside `withTemporaryDestination`'s `run` delegate: emits
+    // a copy of `width` bytes from the address the innermost temporary
+    // holds into the surrounding destination that call saved (a static
+    // array's own bytes, not a pointer to them).
+    protected override void copyBytes(in size_t width) {
+        assert(_temporaryDestinations.length > 0,
+            "copyBytes needs an enclosing withTemporaryDestination");
+        const destination = _temporaryDestinations[$ - 1];
         emit(&opLoadIndirect, destination.offset, _destination, width);
     }
 
@@ -4305,40 +4354,33 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // DMD leaves constructor and positional field initialization outside
     // the allocation lowering. Its result already occupies _destination.
+    // `driveInit` (`aggregateinit.d`) owns the order the `vthis` steps, the
+    // constructor call, and the remaining positional field stores run in -
+    // a nested struct's or nested class's `vthis` sits inside the
+    // allocation the lowering just returned, at the same native offset a
+    // value of that aggregate type would use, filled before either the
+    // constructor call or the remaining field stores, so both a
+    // `new Adder(2)` with a constructor and a bare `new Reader` (no
+    // arguments at all) get a real context rather than `.init`'s zero.
     private void compileNew(NewExp expression) {
+        import snakebite.backends.aggregateinit:
+            driveInit, planClassContext, planPositionalFields;
+
         auto structType = expression.newtype.isTypeStruct;
         const objectOffset = _destination;
-
-        // A nested struct's or nested class's `vthis` sits inside the
-        // allocation the lowering just returned, at the same native offset
-        // a value of that aggregate type would use - filled here, once,
-        // ahead of either the constructor call below or the positional
-        // field stores further down, so both a `new Adder(2)` with a
-        // constructor and a bare `new Reader` (no arguments at all) get
-        // a real context rather than `.init`'s zero.
-        import snakebite.backends.aggregateinit:
-            planClassContext, planPositionalFields;
+        const storage = indirectStorage(objectOffset);
 
         auto plan = structType is null
             ? planClassContext(expression)
             : planPositionalFields(structType.sym,
                 expression.member is null ? expression.arguments : null);
 
-        foreach (step; plan.steps)
-            if (step.kind == InitStep.Kind.vthis)
-                applyStep(step, expression.loc, indirectStorage(objectOffset));
-
-        if (expression.member !is null) {
-            compileResolvedCall(
+        auto hooks = AggregateInitHooks(this, expression.loc, storage);
+        driveInit(hooks, plan, expression.member !is null,
+            () => compileResolvedCall(
                 expression.member, expression.arguments, expression.loc,
                 expressionText(expression), true, () => objectOffset,
-                discardResult);
-            return;
-        }
-
-        foreach (step; plan.steps)
-            if (step.kind != InitStep.Kind.vthis)
-                applyStep(step, expression.loc, indirectStorage(objectOffset));
+                discardResult));
     }
 
     override void visit(DeleteExp expression) {
@@ -4348,9 +4390,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const object = reserveTemp(pointerFacts);
         evalInto(expression.e1, object, size_t.sizeof);
-        auto plan = _bytecode._plans.rawPlanOf(
-            "_d_callfinalizer", [Register(Register.Kind.pointer, size_t.sizeof)],
-        );
+        auto plan = planOf(_bytecode._plans, DruntimeHook.callFinalizer);
         _callSites ~= CallSite.native(plan,
             [Arg(object, 0, size_t.sizeof)], 0);
         emit(&opCall, discardResult, _callSites.length - 1, 0);
@@ -4488,20 +4528,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.nativelayout: arrayValueSize;
 
         auto elementType = expression.e1.type.nextOf;
-        const name = elementType.ty == Tchar ? "_d_arrayappendcd"
-            : elementType.ty == Twchar ? "_d_arrayappendwd"
-            : null;
-        if (name is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        auto plan = _bytecode._plans.rawPlanOf(
-            name,
-            [
-                Register(Register.Kind.pointer, 8),
-                Register(Register.Kind.unsigned, 4),
-            ],
-        );
+        const validElement =
+            elementType.ty == Tchar || elementType.ty == Twchar;
+        const hook = elementType.ty == Twchar
+            ? DruntimeHook.arrayAppendWchar : DruntimeHook.arrayAppendChar;
+        auto plan = validElement ? planOf(_bytecode._plans, hook) : null;
         if (plan is null)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
@@ -5302,17 +5333,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `cast(bool) 256` as `false` rather than D's own `true`. A cast
     // that does not change width is a reinterpretation of the same bits
     // - `cast(uint)` of an `int`, say - so it just evaluates the operand
-    // straight into `destOffset`; narrowing does too, into a wider
-    // temporary first, since this VM's little-endian layout already
-    // makes the low bytes of a wider stored value its truncation to a
-    // narrower one (`opCopy` reads exactly those bytes); only widening
-    // needs the operand's own signedness to fill the new high bits
-    // correctly, so it alone reaches for `opCastWidenSigned`/
-    // `opCastWidenUnsigned`.
+    // straight into `destOffset`. `plan.kind` is already `CastKind`, so
+    // each arm below just names its own kind twice: once to match
+    // `plan.kind`, once to pick `opCastAs`'s instance of it - the
+    // second naming is what turns a run-time `plan.kind` into a
+    // compile-time template argument, not a translation between two
+    // enums.
     private void compileCast(
         CastExp expression, in size_t destOffset, in size_t width,
     ) {
-        import snakebite.backends.casts: classify, CastPlan;
+        import snakebite.backends.casts: classify;
         import std.conv: text;
 
         auto sourceType = expression.e1.type;
@@ -5330,7 +5360,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const plan = classify(expression.e1, destType);
 
-        final switch (plan.kind) with (CastPlan.Kind) {
+        // Every kind below is only a transformation of the operand's
+        // own already-evaluated (or already-addressed) bytes into
+        // `destOffset`'s - `snakebite.nativevalue.applyCastAs`, reached
+        // here through `opCastAs`'s own instance of `plan.kind`, is the
+        // one place that carries each of them out; this compiler only
+        // ever decides where the operand's bytes already live and
+        // which of `width`/`sourceWidth` on the instruction it emits
+        // carries which of `applyCastAs`'s sizes - `castSizeWithSigned
+        // ness` packs a signedness bit into one of them for the four
+        // kinds that need one, the same way `opCastWidenSigned`'s own
+        // `source` field already carries a size rather than an offset.
+        // `copy`, `classReference`, `zero`, and `unsupported` are not:
+        // a plain reinterpret needs no transformation at all, and the
+        // other three each need this compiler's own control flow or
+        // rejection instead, so they still emit their own bytecode
+        // below.
+        final switch (plan.kind) with (CastKind) {
         case copy:
             return evalInto(expression.e1, destOffset, width);
 
@@ -5354,101 +5400,50 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opZero, destOffset, 0, width);
             return;
 
-        // A complex value's native layout is its two components, `re`
-        // then `im`, each exactly half the whole value's size
-        // (`nativevalue.loadComplexRe`/`loadComplexIm`'s own doc
-        // comment) - every complex kind below reaches its `im` half by
-        // adding that same offset to a temporary already holding the
-        // whole value, rather than a primitive of its own for reading
-        // or writing one component, the same way `delegateToPointer`
-        // above reaches a delegate's own second word.
-        case complexToBool: {
-            const componentSize = plan.sourceFacts.size / 2;
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opFloatToBool, destOffset, sourceOffset, componentSize);
-            const imaginaryBool = reserveTemp(plan.destFacts);
-            emit(&opFloatToBool, imaginaryBool,
-                sourceOffset + componentSize, componentSize);
-            emit(&opBitOr, destOffset, imaginaryBool, width);
-            return;
-        }
-
-        case complexToReal: {
-            const componentSize = plan.sourceFacts.size / 2;
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opFloatWidthCast, destOffset, sourceOffset,
-                plan.destFacts.size, componentSize);
-            return;
-        }
-
-        case complexToImaginary: {
-            const componentSize = plan.sourceFacts.size / 2;
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opFloatWidthCast, destOffset,
-                sourceOffset + componentSize,
-                plan.destFacts.size, componentSize);
-            return;
-        }
-
-        case complexToIntegral: {
-            const componentSize = plan.sourceFacts.size / 2;
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(
-                plan.destFacts.isUnsigned
-                    ? &opFloatToIntegralUnsigned : &opFloatToIntegralSigned,
-                destOffset, sourceOffset, plan.destFacts.size, componentSize,
-            );
-            return;
-        }
-
-        case complexWidth: {
-            const sourceComponentSize = plan.sourceFacts.size / 2;
-            const destComponentSize = plan.destFacts.size / 2;
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opFloatWidthCast, destOffset, sourceOffset,
-                destComponentSize, sourceComponentSize);
-            emit(&opFloatWidthCast, destOffset + destComponentSize,
-                sourceOffset + sourceComponentSize,
-                destComponentSize, sourceComponentSize);
-            return;
-        }
-
-        case realToComplex: {
-            const componentSize = plan.destFacts.size / 2;
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opFloatWidthCast, destOffset, sourceOffset,
-                componentSize, plan.sourceFacts.size);
-            emit(&opZero, destOffset + componentSize, 0, componentSize);
-            return;
-        }
-
-        case integralToComplex: {
-            const componentSize = plan.destFacts.size / 2;
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(
-                plan.sourceFacts.isUnsigned
-                    ? &opIntegralToFloatUnsigned : &opIntegralToFloatSigned,
-                destOffset, sourceOffset, componentSize,
-                plan.sourceFacts.size,
-            );
-            emit(&opZero, destOffset + componentSize, 0, componentSize);
-            return;
-        }
-
+        // Each of these kinds reads its whole evaluated operand out of
+        // one temporary and writes `destFacts.size` bytes: no
+        // signedness bit to pack in, so `width`/`sourceWidth` alone
+        // carry the two sizes `castOp(plan.kind)`'s instance of
+        // `applyCastAs` needs.
+        case complexToBool:
+        case complexToReal:
+        case complexToImaginary:
+        case complexWidth:
+        case realToComplex:
         case imaginaryToComplex: {
-            const componentSize = plan.destFacts.size / 2;
             const sourceOffset = reserveTemp(plan.sourceFacts);
             evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opZero, destOffset, 0, componentSize);
-            emit(&opFloatWidthCast, destOffset + componentSize, sourceOffset,
-                componentSize, plan.sourceFacts.size);
+            emit(castOp(plan.kind), destOffset, sourceOffset,
+                plan.destFacts.size, plan.sourceFacts.size);
+            return;
+        }
+
+        // These two are the destination-signedness half of the four
+        // kinds `castSizeWithSignedness` exists for: the value they
+        // produce is integral, so it is `destFacts`'s own signedness
+        // that decides how `applyCastAs` fills it in.
+        case complexToIntegral:
+        case floatToIntegral: {
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(castOp(plan.kind), destOffset, sourceOffset,
+                castSizeWithSignedness(
+                    plan.destFacts.size, plan.destFacts.isUnsigned),
+                plan.sourceFacts.size);
+            return;
+        }
+
+        // The other half: the value they consume is integral, so it
+        // is `sourceFacts`'s own signedness `applyCastAs` needs
+        // instead.
+        case integralToComplex:
+        case integralToFloat: {
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(castOp(plan.kind), destOffset, sourceOffset,
+                plan.destFacts.size,
+                castSizeWithSignedness(
+                    plan.sourceFacts.size, plan.sourceFacts.isUnsigned));
             return;
         }
 
@@ -5456,165 +5451,139 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const sourceOffset = plan.sourceFacts.size > plan.destFacts.size
                 ? reserveTemp(plan.sourceFacts) : destOffset;
             evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opFloatWidthCast, destOffset, sourceOffset,
+            emit(&opCastAs!(CastKind.floatWidth), destOffset, sourceOffset,
                 plan.destFacts.size, plan.sourceFacts.size);
-            return;
-        }
-
-        case integralToFloat: {
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(
-                plan.sourceFacts.isUnsigned
-                    ? &opIntegralToFloatUnsigned
-                    : &opIntegralToFloatSigned,
-                destOffset, sourceOffset, plan.destFacts.size,
-                plan.sourceFacts.size,
-            );
-            return;
-        }
-
-        case floatToIntegral: {
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(
-                plan.destFacts.isUnsigned
-                    ? &opFloatToIntegralUnsigned
-                    : &opFloatToIntegralSigned,
-                destOffset, sourceOffset, plan.destFacts.size,
-                plan.sourceFacts.size,
-            );
             return;
         }
 
         case floatToBool: {
             const sourceOffset = reserveTemp(plan.sourceFacts);
             evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opFloatToBool, destOffset, sourceOffset,
-                plan.sourceFacts.size);
+            emit(&opCastAs!(CastKind.floatToBool), destOffset, sourceOffset,
+                0, plan.sourceFacts.size);
             return;
         }
 
-        case pointerToArray: {
+        // A pointer's native address bits already sit in a
+        // pointer-sized temporary: `pointerToArray` copies
+        // `destFacts.size` of them starting at that address, and
+        // `pointerToIntegral` truncates them to `destFacts.size`
+        // bytes in place, the same truncation a narrowing integral
+        // cast performs.
+        case pointerToArray:
+        case pointerToIntegral: {
             const addressOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, addressOffset, plan.sourceFacts.size);
-            emit(&opLoadIndirect, destOffset, addressOffset,
+            emit(castOp(plan.kind), destOffset, addressOffset,
                 plan.destFacts.size);
             return;
         }
 
-        // An explicit pointer-to-integral cast preserves the native
-        // address bits: `sourceOffset` already holds them as a
-        // `size_t`, so keeping the low `destFacts.size` bytes is the
-        // same truncation a narrowing integral cast performs.
-        case pointerToIntegral: {
-            const sourceOffset = reserveTemp(pointerFacts);
+        // `cast(void*) someDelegate`: `applyCastAs` reads the same
+        // context word `dg.ptr` itself reads (`compileDelegateWord`
+        // below), out of a temporary holding the delegate's own two
+        // words. `sliceToPointer` reads the matching word out of a
+        // slice's own two.
+        case delegateToPointer:
+        case sliceToPointer: {
+            const sourceOffset = reserveTemp(plan.sourceFacts);
             evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opCopy, destOffset, sourceOffset, plan.destFacts.size);
-            return;
-        }
-
-        // `cast(void*) someDelegate`: the same context word `dg.ptr`
-        // itself reads (`compileDelegateWord` below), out of a temporary
-        // holding the delegate's own two words.
-        case delegateToPointer: {
-            import snakebite.nativelayout: delegateContextOffset;
-
-            const delegateOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, delegateOffset, plan.sourceFacts.size);
-            emit(&opCopy, destOffset, delegateOffset + delegateContextOffset,
+            emit(castOp(plan.kind), destOffset, sourceOffset,
                 plan.destFacts.size);
             return;
         }
 
+        // `compileAddress` hands back a slot holding the operand's own
+        // address - the same shape `evalInto` leaves an ordinary
+        // value in, just with that address as its "value" - so
+        // `applyCastAs` reads it back the same way for both.
         case sarrayToSlice: {
-            import snakebite.nativelayout:
-                arrayLengthOffset, arrayPointerOffset;
-
             const addressOffset = compileAddress(expression.e1);
-            emit(&opConstant, destOffset + arrayLengthOffset,
-                addConstant(cast(long) plan.staticLength), size_t.sizeof);
-            emit(&opCopy, destOffset + arrayPointerOffset,
-                addressOffset, size_t.sizeof);
+            emit(&opCastAs!(CastKind.sarrayToSlice), destOffset,
+                addressOffset, plan.staticLength);
             return;
         }
 
-        // `xs.ptr`: dmd's own semantic pass for `Id.ptr` on a static array
-        // (`TypeSArray.dotExp`) casts straight to a pointer to its element
-        // type - the array's own address is already that pointer, with no
-        // bytes to move.
         case sarrayToPointer: {
             const addressOffset = compileAddress(expression.e1);
-            emit(&opCopy, destOffset, addressOffset, size_t.sizeof);
+            emit(&opCastAs!(CastKind.sarrayToPointer), destOffset,
+                addressOffset, plan.destFacts.size);
             return;
         }
 
-        case sliceToPointer: {
-            import snakebite.nativelayout: arrayPointerOffset;
-
-            const arrayOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, arrayOffset, plan.sourceFacts.size);
-            emit(&opCopy, destOffset, arrayOffset + arrayPointerOffset,
-                size_t.sizeof);
-            return;
-        }
-
-        // D reinterprets the same bytes at the new element width, so the
-        // byte count - not the element count - is what has to stay the
-        // same across the cast: the destination's length is the
-        // source's own length scaled by the ratio of the two element
-        // sizes, both compile-time constants here.
+        // D reinterprets the same bytes at the new element width, so
+        // the byte count - not the element count - is what has to
+        // stay the same across the cast; `applyCastAs` scales the
+        // source's own length by the ratio of the two element sizes,
+        // both compile-time constants already on `plan`.
         case reinterpretSlice: {
-            import snakebite.nativelayout:
-                arrayLengthOffset, arrayPointerOffset;
-
             const arrayOffset = reserveTemp(plan.sourceFacts);
             evalInto(expression.e1, arrayOffset, plan.sourceFacts.size);
-            emit(&opCopy, destOffset + arrayPointerOffset,
-                arrayOffset + arrayPointerOffset, size_t.sizeof);
-            emit(&opCopy, destOffset + arrayLengthOffset,
-                arrayOffset + arrayLengthOffset, size_t.sizeof);
+            emit(&opCastAs!(CastKind.reinterpretSlice), destOffset,
+                arrayOffset, plan.destFacts.elementSize,
+                plan.sourceFacts.elementSize);
+            return;
+        }
 
-            const ratioOffset = reserveTemp(pointerFacts);
-            emit(&opConstant, ratioOffset,
-                addConstant(cast(long) plan.sourceFacts.elementSize),
-                size_t.sizeof);
-            emit(&opMultiply, destOffset + arrayLengthOffset, ratioOffset,
-                size_t.sizeof);
-            emit(&opConstant, ratioOffset,
-                addConstant(cast(long) plan.destFacts.elementSize),
-                size_t.sizeof);
-            emit(&opDivideUnsigned, destOffset + arrayLengthOffset,
-                ratioOffset, size_t.sizeof);
+        // `narrow` reads its operand into a full-width temporary
+        // first, since truncating straight into a narrower
+        // `destOffset` while evaluating would overrun it; `toBool`/
+        // `widenSigned`/`widenUnsigned` never widen past their
+        // operand's own width while evaluating it, so they can
+        // evaluate straight into `destOffset` and cast it in place.
+        // `emit`'s own peephole still substitutes `opCastFixedAs` for
+        // all four once it sees `width`/`sourceWidth` are one of the
+        // four D integral sizes, comparing the handler by identity -
+        // `castOp(plan.kind)` below returns the same `&opCastAs!kind`
+        // a case arm naming only its own kind would.
+        case narrow: {
+            const temp = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, temp, plan.sourceFacts.size);
+            emit(&opCastAs!(CastKind.narrow), destOffset, temp,
+                plan.destFacts.size, plan.sourceFacts.size);
             return;
         }
 
         case toBool:
+        case widenSigned:
+        case widenUnsigned: {
             evalInto(expression.e1, destOffset, plan.sourceFacts.size);
-            emit(&opCastToBool, destOffset, 0, plan.sourceFacts.size);
-            return;
-
-        case narrow: {
-            const temp = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, temp, plan.sourceFacts.size);
-            emit(&opCopy, destOffset, temp, width);
+            emit(castOp(plan.kind), destOffset, destOffset,
+                plan.destFacts.size, plan.sourceFacts.size);
             return;
         }
-
-        case widenSigned:
-        case widenUnsigned:
-            evalInto(expression.e1, destOffset, plan.sourceFacts.size);
-            emit(
-                plan.kind == widenUnsigned
-                    ? &opCastWidenUnsigned : &opCastWidenSigned,
-                destOffset, plan.sourceFacts.size, width,
-            );
-            return;
 
         case unsupported:
             throw rejection(_function, expression.loc,
                 text("a cast from `", sourceType.toString, "` to `",
                     destType.toString, "`"));
+        }
+    }
+
+    // `plan.kind` above is a run-time value inside every arm several
+    // kinds share, so it cannot itself be `opCastAs`'s own
+    // compile-time template argument the way naming
+    // `CastKind.someKind` literally in a single-kind arm can - this is
+    // what turns it back into one, the same `&opCastAs!kind` instance
+    // a case arm with only that one label would name directly.
+    // `copy`, `classReference`, `zero`, and `unsupported` never reach
+    // here: `compileCast`'s own arms for them return, or throw,
+    // without ever falling into an arm that calls this.
+    private Instruction.Handler castOp(in CastKind kind) {
+        import std.traits: EnumMembers;
+
+        final switch (kind) with (CastKind) {
+        case copy:
+        case classReference:
+        case zero:
+        case unsupported:
+            assert(0);
+        static foreach (member; EnumMembers!CastKind) {
+            static if (member != copy && member != classReference
+                    && member != zero && member != unsupported)
+                case member:
+                    return &opCastAs!member;
+        }
         }
     }
 
@@ -6326,14 +6295,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `upper`/`length` for a slice.
     private void compileBoundsHook(
         in size_t inBoundsOffset,
-        string hookName,
-        scope const(Register)[] parameterRegisters,
+        in DruntimeHook hook,
         Arg[] extraArgs,
         in Loc loc,
     ) {
-        auto plan = _bytecode._plans.rawPlanOf(hookName, parameterRegisters);
+        auto plan = planOf(_bytecode._plans, hook);
         if (plan is null)
-            throw rejection(_function, loc, hookName);
+            throw rejection(_function, loc, specOf(hook).name);
 
         const branchIndex = _instructions.length;
         emit(&opBranchTrue, inBoundsOffset, 0, 1);
@@ -6536,17 +6504,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public void storageIndexBounds(
             IndexExp expression, size_t index, size_t length,
         ) {
-            import snakebite.backends.elementaddress:
-                indexBoundsHook, indexBoundsRegisters;
-
             const inBounds = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opCopy, inBounds, index, size_t.sizeof);
             compiler.emit(&opLessThanUnsigned, inBounds, length,
                 size_t.sizeof);
             compiler.compileBoundsHook(
                 inBounds,
-                indexBoundsHook,
-                indexBoundsRegisters,
+                DruntimeHook.indexBounds,
                 [
                     Arg(index, 0, size_t.sizeof),
                     Arg(length, 0, size_t.sizeof),

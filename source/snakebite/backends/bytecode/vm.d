@@ -20,8 +20,8 @@ extern(C) bool executeIndirectCallPlan(
 import snakebite.backends.builtins: BuiltinCall;
 import snakebite.callarguments: CallArguments;
 import snakebite.nativevalue:
-    floatingToBool, floatingToIntegral, integralToFloating, loadFloating,
-    loadSigned, loadUnsigned, storeFloating, storeIntegral;
+    CastKind, floatingToBool, loadFloating, loadSigned, loadUnsigned,
+    storeFloating, storeIntegral;
 import object: Throwable, TypeInfo_Class;
 
 private alias storeWidth = storeIntegral;
@@ -1694,12 +1694,14 @@ private const(Instruction)* runCastToBool(Decoded)(
 
 // Widens the `execution.source`-byte operand already at `destination` to fill
 // `execution.width` bytes there instead, copying the sign bit into the new high
-// bits. A narrowing cast needs no opcode of its own: on this VM's
-// little-endian host, the low bytes of any stored integral already are
-// its truncation to a narrower width, so the compiler reaches for
-// `opCopy` instead. Reinterpreting a same-width operand as a differently
-// signed one changes no bits at all, so the compiler does not even emit
-// a copy for that.
+// bits. This op is for `snakebite.backends.bytecode.compiler`'s own
+// internal widening of an already-evaluated operand into a wider storage
+// slot - `readScalar`/`evalOperandInto` - where there is no `CastExp` to
+// drive `compileCast`. A source-level cast, narrowing included, reaches
+// `compileCast`, which always emits the `opCastAs!(CastKind)` instance
+// for its own kind instead, `narrow`/`widenSigned`/`widenUnsigned`
+// included. Reinterpreting a same-width operand as a differently signed
+// one changes no bits at all, so neither caller emits a copy for that.
 package alias opCastWidenSigned =
     execute!(runCastWidenSigned, OperandKind.storage, OperandKind.immediate);
 
@@ -1725,43 +1727,142 @@ private const(Instruction)* runCastWidenUnsigned(Decoded)(
     return execution.next;
 }
 
-private alias opIntegralToFloat(bool unsigned_) =
-    execute!(runIntegralToFloat, OperandKind.storage, OperandKind.storage, unsigned_);
+// A cast whose `CastKind` is a pure transformation of its source's own
+// bytes into its destination's - `snakebite.nativevalue.applyCastAs`
+// carries out every one, with `kind` itself a template parameter, so
+// `snakebite.backends.bytecode.compiler.compileCast`'s own `final
+// switch` on `CastPlan.kind` picks one instance of this op per
+// `CastKind`, at compile time, rather than one op that reads its
+// `CastKind` back out of `execution.constants` on every execution. The
+// two sizes every kind but `sarrayToSlice`/`reinterpretSlice` needs
+// come from `width`/`sourceWidth` directly, the same fields
+// `opCastWidenSigned` above already spends on the one size it needs;
+// `sarrayToSlice` reads `width` as its element count instead, and
+// `reinterpretSlice` reads both as its two element sizes. Only
+// `integralToFloat`, `floatToIntegral`, `complexToIntegral`, and
+// `integralToComplex` also need a signedness bit that neither field
+// has room for on top of its own size - `castSizeWithSignedness` below
+// packs that bit into the same field's own top bit, the way
+// `indirectStorage` above already tells an address slot from a plain
+// displacement, rather than spending an `execution.constants` entry
+// on it. Only `classReference`, `zero`, and `unsupported` still reach
+// for a `CastExp` opcode of their own.
+package alias opCastAs(CastKind kind) =
+    execute!(runCastAs, OperandKind.storage, OperandKind.storage, kind);
 
-private const(Instruction)* runIntegralToFloat(bool unsigned_, Decoded)(
+private const(Instruction)* runCastAs(CastKind kind, Decoded)(
     ref Decoded execution,
 ) {
-    integralToFloating(
-        execution.destination,
-        execution.source,
-        execution.width,
-        execution.sourceWidth,
-        unsigned_,
-    );
+    import snakebite.nativevalue: applyCastAs, CastLayout;
+
+    with (CastKind) {
+    static if (kind == integralToFloat || kind == integralToComplex)
+        applyCastAs!kind(
+            CastLayout(
+                kind, castSize(execution.sourceWidth), execution.width,
+                castUnsigned(execution.sourceWidth),
+            ),
+            execution.source, execution.destination,
+        );
+    else static if (kind == floatToIntegral || kind == complexToIntegral)
+        applyCastAs!kind(
+            CastLayout(
+                kind, execution.sourceWidth, castSize(execution.width),
+                false, castUnsigned(execution.width),
+            ),
+            execution.source, execution.destination,
+        );
+    else static if (kind == reinterpretSlice)
+        applyCastAs!kind(
+            CastLayout(
+                kind, 0, 0, false, false,
+                execution.sourceWidth, execution.width,
+            ),
+            execution.source, execution.destination,
+        );
+    else static if (kind == sarrayToSlice)
+        applyCastAs!kind(
+            CastLayout(kind, 0, 0, false, false, 0, 0, execution.width),
+            execution.source, execution.destination,
+        );
+    else static if (kind == sarrayToPointer || kind == sliceToPointer
+            || kind == pointerToArray || kind == pointerToIntegral
+            || kind == delegateToPointer)
+        applyCastAs!kind(
+            CastLayout(kind, 0, execution.width),
+            execution.source, execution.destination,
+        );
+    else static if (kind == floatToBool)
+        applyCastAs!kind(
+            CastLayout(kind, execution.sourceWidth, 0),
+            execution.source, execution.destination,
+        );
+    else
+        // complexToBool, complexToReal, complexToImaginary, complexWidth,
+        // realToComplex, imaginaryToComplex, floatWidth, toBool, narrow,
+        // widenSigned, widenUnsigned: `applyCastAs` needs nothing beyond
+        // the two plain sizes.
+        applyCastAs!kind(
+            CastLayout(kind, execution.sourceWidth, execution.width),
+            execution.source, execution.destination,
+        );
+    }
     return execution.next;
 }
 
-package alias opIntegralToFloatSigned = opIntegralToFloat!false;
-package alias opIntegralToFloatUnsigned = opIntegralToFloat!true;
+// The one bit `integralToFloat`/`floatToIntegral`/`complexToIntegral`/
+// `integralToComplex` need beyond the size `width`/`sourceWidth` above
+// already carry for every cast op: their source's or destination's own
+// signedness. `size` here is always small - a source or destination
+// byte count - so its own top bit is always free to hold that one
+// extra bit instead, the same trick `indirectStorage` above already
+// uses to tell an address slot from a plain displacement.
+package size_t castSizeWithSignedness(
+    in size_t size, in bool unsigned,
+) @safe pure nothrow @nogc {
+    assert(size < (1UL << 63));
+    return unsigned ? (size | (1UL << 63)) : size;
+}
 
-private alias opFloatToIntegral(bool unsigned_) =
-    execute!(runFloatToIntegral, OperandKind.storage, OperandKind.storage, unsigned_);
+private size_t castSize(in size_t packed) @safe pure nothrow @nogc {
+    return packed & ~(1UL << 63);
+}
 
-private const(Instruction)* runFloatToIntegral(bool unsigned_, Decoded)(
+private bool castUnsigned(in size_t packed) @safe pure nothrow @nogc {
+    return (packed & (1UL << 63)) != 0;
+}
+
+// As `opCastAs`, but for `narrow`/`widenSigned`/`widenUnsigned`/`toBool`
+// only, and with both sizes template parameters instead of `width`/
+// `sourceWidth` - the same idea as `opCopyFixed!size` above for a
+// fixed-width `opCopy`: every D integral width is one of `1`/`2`/`4`/
+// `8`, known at compile time to whichever `compileCast` call site
+// reaches one of these four kinds, so `applyCastAs!kind`'s two
+// `storeIntegral`/`loadIntegral` calls see compile-time-constant sizes
+// and fold their own `switch` away entirely, the same straight-line
+// code `opCopyFixed!size` already gets for a plain copy.
+// `snakebite.backends.bytecode.compiler.emit`'s own peephole is what
+// actually picks this over `opCastAs!kind`, once it sees both sizes
+// are one of those four.
+package alias opCastFixedAs(CastKind kind, size_t destSize, size_t sourceSize) =
+    execute!(
+        runCastFixedAs, OperandKind.storage, OperandKind.storage,
+        kind, destSize, sourceSize,
+    );
+
+private const(Instruction)* runCastFixedAs(
+    CastKind kind, size_t destSize, size_t sourceSize, Decoded,
+)(
     ref Decoded execution,
 ) {
-    floatingToIntegral(
-        execution.destination,
-        execution.source,
-        execution.width,
-        execution.sourceWidth,
-        unsigned_,
+    import snakebite.nativevalue: applyCastAs, CastLayout;
+
+    applyCastAs!kind(
+        CastLayout(kind, sourceSize, destSize),
+        execution.source, execution.destination,
     );
     return execution.next;
 }
-
-package alias opFloatToIntegralSigned = opFloatToIntegral!false;
-package alias opFloatToIntegralUnsigned = opFloatToIntegral!true;
 
 package alias opFloatToBool =
     execute!(runFloatToBool, OperandKind.storage, OperandKind.storage);
