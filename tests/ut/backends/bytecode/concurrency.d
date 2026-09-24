@@ -142,3 +142,135 @@ unittest {
                 );
     }
 }
+
+
+// Regression test for `compileFunction`'s own redesign away from one
+// `Mutex` shared by every compile on this backend (measured on master:
+// 5,231 acquisitions, 15-28s wait, *and* 80-92s hold, in a parallel
+// `bin/ut` run - every unrelated function this backend ever compiled, on
+// every thread, serialized behind that one hold). The test above already
+// covers dmd's own frontend races (issue #278) with a fresh `Bytecode`
+// per thread; this one shares *one* `Bytecode` instance across every
+// thread instead, so it is `_compiled`/`state.compiling`/`_hostLayouts`
+// - this backend's own bookkeeping, not dmd's - that a race could
+// corrupt. Every thread calls `sharedG0` first, a deliberate race over
+// the very same function's first compile (`_compiled.insert`'s "two
+// threads that build the same answer end up with the one answer"
+// guarantee), then its own pair of otherwise-distinct functions
+// (genuinely concurrent compiles of *different* functions on the same
+// backend, the capability the redesign exists for), then a recursive
+// function every thread also races into (recursion, via this thread's
+// own `state.compiling`, has to keep working while unrelated compiles
+// for other threads run at the same time on the same backend).
+//
+// This test cannot be made red against master: master's single global
+// `_compileLock` is always correct, only serial, so no wrong answer or
+// crash distinguishes the two - only wall time does, which a unittest
+// cannot assert on without flakiness. It stays as a same-instance
+// correctness regression test for the new design.
+private enum sharedFunctionCount = 12;
+private enum sharedThreadCount = 8;
+private enum sharedRounds = 4;
+
+private string sharedGuestSource(in size_t round) {
+    string source = text(
+        "module ut.backends.bytecode.concurrency_shared", round, ";\n",
+        "struct U", round, " { long value; }\n",
+    );
+    foreach (i; 0 .. sharedFunctionCount)
+        source ~= text(
+            "long sharedG", i, "() { U", round, "[] a; ",
+            "foreach (j; 0 .. 3) a ~= U", round, "(", i, " + j); ",
+            "long sum = 0; foreach (v; a) sum += v.value; ",
+            "return sum; }\n",
+        );
+    source ~= text(
+        "long sharedCountDown", round, "(long n) { ",
+        "return n <= 0 ? 0 : 1 + sharedCountDown", round, "(n - 1); }\n",
+    );
+    return source;
+}
+
+@("compileFunction.sharedInstanceConcurrentCompilesAgree")
+unittest {
+    import core.atomic: atomicLoad, atomicOp, atomicStore;
+    import core.thread: Thread;
+
+    foreach (round; 0 .. sharedRounds) {
+        auto guestModule = parseSnippet(sharedGuestSource(round));
+        auto program = Program([guestModule]);
+        auto backend = new Bytecode(program);
+
+        shared size_t ready = 0;
+        shared bool go = false;
+        Throwable[sharedThreadCount] failures;
+
+        auto threads = new Thread[sharedThreadCount];
+        foreach (t; 0 .. sharedThreadCount) {
+            const threadIndex = t;
+            threads[t] = new Thread({
+                atomicOp!"+="(ready, 1);
+                while (!atomicLoad(go)) {}
+
+                try {
+                    auto zero = findFunction(guestModule, "sharedG0");
+                    long zeroResult;
+                    backend.call(zero, &zeroResult, []);
+                    if (zeroResult != expectedResult(0))
+                        throw new Exception(text(
+                            "sharedG0() returned ", zeroResult,
+                            ", expected ", expectedResult(0),
+                        ));
+
+                    foreach (which; 0 .. 2) {
+                        const index = 1
+                            + (threadIndex * 2 + which)
+                                % (sharedFunctionCount - 1);
+                        auto function_ = findFunction(
+                            guestModule, text("sharedG", index));
+                        long result;
+                        backend.call(function_, &result, []);
+
+                        const expected = expectedResult(index);
+                        if (result != expected)
+                            throw new Exception(text(
+                                "sharedG", index, "() returned ", result,
+                                ", expected ", expected,
+                            ));
+                    }
+
+                    auto countDown = findFunction(
+                        guestModule, text("sharedCountDown", round));
+                    long depth = 50;
+                    long countResult;
+                    backend.call(
+                        countDown, &countResult, [cast(void*) &depth]);
+                    if (countResult != depth)
+                        throw new Exception(text(
+                            "sharedCountDown", round, "(", depth,
+                            ") returned ", countResult,
+                            ", expected ", depth,
+                        ));
+                } catch (Throwable throwable)
+                    failures[threadIndex] = throwable;
+            });
+            threads[t].start;
+        }
+
+        while (atomicLoad(ready) < sharedThreadCount) {}
+        atomicStore(go, true);
+
+        foreach (t; 0 .. sharedThreadCount)
+            threads[t].join;
+
+        foreach (t; 0 .. sharedThreadCount)
+            if (failures[t] !is null)
+                throw new UnitTestException(
+                    text(
+                        "round ", round, ", thread ", t, ": ",
+                        failures[t].msg,
+                    ),
+                    __FILE__, __LINE__,
+                );
+    }
+}

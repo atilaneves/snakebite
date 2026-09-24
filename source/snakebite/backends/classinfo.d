@@ -64,8 +64,8 @@ public struct ClassRuntimeCache {
     // semantic, never lazily deferred to a body walk the way a
     // function's closure state is) and through `hooks.methodAddress`,
     // which is each backend's own already-guarded entry point
-    // (`Bytecode.compileFunction`'s own `_compileLock`, similarly
-    // guarded interpreter/native paths) - so nothing under `make` here
+    // (`Bytecode.compileFunction`'s own `_compiled`/`_compileState`,
+    // similarly guarded interpreter/native paths) - so nothing under `make` here
     // needs the frontend lock *for this cache's own sake*. Bootstrapped
     // lazily, the same as `SharedTable.lockOf` (this struct's own doc
     // above): a default-initialised `ClassRuntimeCache` (no explicit
