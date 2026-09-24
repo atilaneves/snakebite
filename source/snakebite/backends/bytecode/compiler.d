@@ -4149,25 +4149,33 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private ArrayLiteralDestination[] _arrayLiteralDestinations;
 
-    protected override void prepareArrayLiteral(ArrayLiteralExp expression) {
+    // Reserves a temporary of `facts` and substitutes it for the ambient
+    // (`_destination`, `_width`, `_valueType`) destination `run` (and
+    // anything it compiles through this visitor) targets, restoring the
+    // surrounding destination once `run` returns - the same save/reserve/
+    // restore shape `evalInto` below already uses for a single expression,
+    // generalised to an arbitrary sequence of them. Bytecode temporaries
+    // are never released early: `reserveTemp` only ever grows this
+    // function's frame past what `_layout` reserved.
+    extern(D) protected override void withTemporaryDestination(
+            Type type, in TypeFacts facts, scope void delegate() run) {
         auto destination = ArrayLiteralDestination(
             _destination, _width, _valueType);
-        const facts = TypeFacts.of(expression.lowering.type);
         _arrayLiteralDestinations ~= destination;
+        scope (exit) {
+            _arrayLiteralDestinations.length--;
+            _destination = destination.offset;
+            _width = destination.width;
+            _valueType = destination.type;
+        }
+
         _destination = reserveTemp(facts);
         _width = facts.size;
-        _valueType = expression.lowering.type;
+        _valueType = type;
+        run();
     }
 
-    protected override void restoreArrayLiteral() {
-        auto destination = _arrayLiteralDestinations[$ - 1];
-        _arrayLiteralDestinations.length--;
-        _destination = destination.offset;
-        _width = destination.width;
-        _valueType = destination.type;
-    }
-
-    protected override void storeArrayLiteralElement(
+    protected override void evaluateElement(
         Expression element, Type elementType, in TypeFacts facts,
         in size_t byteOffset,
     ) {
@@ -4184,21 +4192,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opStoreIndirect, addressOffset, elementOffset, facts.size);
     }
 
-    protected override void storeArrayLiteralCount(
-        in size_t count, in size_t byteOffset,
+    protected override void storeConstant(
+        in size_t value, in size_t byteOffset,
     ) {
         const destination = _arrayLiteralDestinations[$ - 1];
         emit(&opConstant, destination.offset + byteOffset,
-            addConstant(cast(long) count), size_t.sizeof);
+            addConstant(cast(long) value), size_t.sizeof);
     }
 
-    protected override void storeArrayLiteralPointer(in size_t byteOffset) {
+    protected override void storeAddress(in size_t byteOffset) {
         const destination = _arrayLiteralDestinations[$ - 1];
         emit(&opCopy, destination.offset + byteOffset,
             _destination, size_t.sizeof);
     }
 
-    protected override void copyArrayLiteralStorage(in size_t width) {
+    protected override void copyBytes(in size_t width) {
         const destination = _arrayLiteralDestinations[$ - 1];
         emit(&opLoadIndirect, destination.offset, _destination, width);
     }

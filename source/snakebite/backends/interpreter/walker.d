@@ -4671,27 +4671,32 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     private ArrayLiteralDestination[] _arrayLiteralDestinations;
 
-    protected override void prepareArrayLiteral(ArrayLiteralExp expression) {
+    // Reserves a frame temporary of `facts` and substitutes it for the
+    // ambient (`_place`, `_type`, `_facts`) destination `run` (and anything
+    // it evaluates through this visitor) sees, restoring the surrounding
+    // destination once `run` returns - the same save/reserve/restore shape
+    // `evaluate` below already uses for a single expression, generalised
+    // to an arbitrary sequence of them.
+    extern(D) protected override void withTemporaryDestination(
+            Type type, in TypeFacts facts, scope void delegate() run) {
         auto destination = ArrayLiteralDestination(
             _place, _type, _facts, _frames.mark);
-        const facts = factsOf(expression.lowering.type);
-        auto place = _frames.reserve(facts.size, facts.alignment);
         _arrayLiteralDestinations ~= destination;
-        _place = place;
-        _type = expression.lowering.type;
+        scope (exit) {
+            _arrayLiteralDestinations.length--;
+            _place = destination.place;
+            _type = destination.type;
+            _facts = destination.facts;
+            _frames.release(destination.mark);
+        }
+
+        _place = _frames.reserve(facts.size, facts.alignment);
+        _type = type;
         _facts = facts;
+        run();
     }
 
-    protected override void restoreArrayLiteral() {
-        auto destination = _arrayLiteralDestinations[$ - 1];
-        _arrayLiteralDestinations.length--;
-        _place = destination.place;
-        _type = destination.type;
-        _facts = destination.facts;
-        _frames.release(destination.mark);
-    }
-
-    protected override void storeArrayLiteralElement(
+    protected override void evaluateElement(
         Expression element, Type elementType, in TypeFacts facts,
         in size_t byteOffset,
     ) {
@@ -4699,23 +4704,23 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         evaluate(element, elementType, facts, elements + byteOffset);
     }
 
-    protected override void storeArrayLiteralCount(
-        in size_t count, in size_t byteOffset,
+    protected override void storeConstant(
+        in size_t value, in size_t byteOffset,
     ) {
         import snakebite.nativelayout: storeIntegral;
 
         auto destination = _arrayLiteralDestinations[$ - 1];
         storeIntegral(cast(ubyte*) destination.place + byteOffset,
-            count, size_t.sizeof);
+            value, size_t.sizeof);
     }
 
-    protected override void storeArrayLiteralPointer(in size_t byteOffset) {
+    protected override void storeAddress(in size_t byteOffset) {
         auto destination = _arrayLiteralDestinations[$ - 1];
         *cast(void**) (cast(ubyte*) destination.place + byteOffset)
             = *cast(void**) _place;
     }
 
-    protected override void copyArrayLiteralStorage(in size_t width) {
+    protected override void copyBytes(in size_t width) {
         import core.stdc.string: memcpy;
 
         auto destination = _arrayLiteralDestinations[$ - 1];
