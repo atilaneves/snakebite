@@ -458,6 +458,7 @@ public struct NativeData {
     // changed it.
     @disable this(this);
 
+    import core.sync.mutex: Mutex;
     import dmd.aggregate: AggregateDeclaration;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration, VarDeclaration;
@@ -477,17 +478,36 @@ public struct NativeData {
     // Read and written only under the compiler lock. Key by the object,
     // not a reference expression, to preserve aliases and cycles.
     private void*[StructLiteralExp] _classValues;
-    // Written under the compiler lock only, like every miss below.
+    // `reserve`'s own bump allocator, guarded by `_reserveLock`, not the
+    // frontend lock: growing `_blocks`/`_available` touches no dmd state,
+    // only this instance's own storage (finding: measured as the single
+    // largest frontend-lock wait in a parallel `bin/ut` run - 15,180
+    // acquisitions, 38-44s wait, ~0-1s hold - for work that never reads
+    // or writes anything dmd owns).
     private void[][] _blocks;
     private void[] _available;
+    private Mutex _reserveLock;
     // Read without a lock by every thread that runs guest code
     // (ADR-0006). A `shared`/`__gshared`/`immutable` variable's storage
-    // is published once it is initialised; until then only
-    // `_pendingStatics`, which the initialising thread alone reads,
-    // knows it, so an initializer that refers to its own variable finds
-    // the storage.
+    // is published once it is initialised; until then only this
+    // building thread's own `_pending` entry knows it, so an initializer
+    // that refers to its own variable, on the same thread, finds the
+    // storage instead of reserving and building it a second time.
     private SharedTable!(VarDeclaration, void[]) _statics;
-    private void[][VarDeclaration] _pendingStatics;
+    // Genuinely thread-local (`PerThread`), not merely read by one
+    // thread at a time under a lock: two threads can race to build the
+    // very same `shared`/`__gshared` variable's storage for the first
+    // time (`storageOf`'s own doc - no lock serializes that race any
+    // more), and each must see only its own in-progress reservation for
+    // a self-referential initializer to resolve correctly, never the
+    // other thread's. `_statics.insert` (`buildInitialBytes`'s callers)
+    // keeps whichever of the two finished builds lands first - the
+    // loser's build is internally self-consistent too, just never
+    // looked up again.
+    private struct PendingStatics {
+        void[][VarDeclaration] entries;
+    }
+    private PerThread!(PendingStatics*) _pending;
     private SharedTable!(Type, const(void)[]) _defaults;
     // A thread-local variable's template: the bytes its storage starts
     // with on every thread, built once under the lock like `_statics`
@@ -508,6 +528,8 @@ public struct NativeData {
         _threadLocalAddress = threadLocalAddress;
         _classInfo = classInfo;
         _tls = PerThread!(TlsSlots*)(() => new TlsSlots);
+        _reserveLock = new Mutex;
+        _pending = PerThread!(PendingStatics*)(() => new PendingStatics);
     }
 
     public void write(
@@ -559,17 +581,21 @@ public struct NativeData {
         if (auto found = type in _defaults)
             return *found;
 
+        // Only `initialExpression` touches dmd (it calls
+        // `defaultInitLiteral`, which can force a struct or enum's own
+        // forward references); `value` below only reserves this
+        // instance's own storage (`reserve`, its own lock) and copies
+        // bytes out of the expression `initialExpression` already built,
+        // so it runs outside the frontend lock. `_defaults` is a
+        // `SharedTable` (ADR-0006): two threads racing the same `type`
+        // both build an expression and a value, and `insert` keeps
+        // whichever lands first, so no second check under a lock is
+        // needed here.
         import snakebite.frontend.compiler: withCompilerLock;
 
-        const(void)[] bytes;
-        withCompilerLock({
-            if (auto found = type in _defaults)
-                bytes = *found;
-            else
-                bytes = *_defaults.insert(
-                    type, value(type, initialExpression(type, loc)));
-        });
-        return bytes;
+        Expression initial;
+        withCompilerLock({ initial = initialExpression(type, loc); });
+        return *_defaults.insert(type, value(type, initial));
     }
 
     public const(void)[] value(
@@ -583,24 +609,29 @@ public struct NativeData {
     }
 
     private void[] reserve(in TypeFacts facts) {
-        import snakebite.frontend.compiler: withCompilerLock;
+        // This instance's own lock (see `_reserveLock`'s doc), not the
+        // frontend one: nothing here reads or writes dmd state, only
+        // `_available`/`_blocks`. Held for the whole allocation, not just
+        // the growth branch, because a slot's start address is computed
+        // from `_available.ptr` - two threads interleaving between "grow"
+        // and "carve a slot off the front" would hand out overlapping
+        // slots.
+        _reserveLock.lock;
+        scope(exit) _reserveLock.unlock;
 
-        void[] bytes;
-        withCompilerLock({
-            // Slots cannot move: constants can hold addresses of other
-            // slots.
-            const needed = facts.size + facts.alignment - 1;
-            if (_available.length < needed) {
-                import std.algorithm: max;
+        // Slots cannot move: constants can hold addresses of other
+        // slots.
+        const needed = facts.size + facts.alignment - 1;
+        if (_available.length < needed) {
+            import std.algorithm: max;
 
-                _available = new void[max(4096, needed)];
-                _blocks ~= _available;
-            }
-            const start =
-                -cast(size_t) _available.ptr & (facts.alignment - 1);
-            bytes = _available[start .. start + facts.size];
-            _available = _available[start + facts.size .. $];
-        });
+            _available = new void[max(4096, needed)];
+            _blocks ~= _available;
+        }
+        const start =
+            -cast(size_t) _available.ptr & (facts.alignment - 1);
+        auto bytes = _available[start .. start + facts.size];
+        _available = _available[start + facts.size .. $];
         return bytes;
     }
 
@@ -632,57 +663,48 @@ public struct NativeData {
         if (auto found = variable in _statics)
             return *found;
 
-        import snakebite.frontend.compiler: withCompilerLock;
-
-        void[] bytes;
-        withCompilerLock({
-            if (auto found = variable in _statics) {
-                bytes = *found;
-                return;
-            }
-            bytes = buildInitialBytes(variable, facts);
-            _statics.insert(variable, bytes);
-        });
-        return bytes;
+        // No frontend lock around the miss path any more (measured
+        // alongside `NativeData.reserve`'s own doc): `buildInitialBytes`
+        // forces whatever dmd state it still needs itself, through its
+        // own narrowly-locked calls (`reserve`'s own lock;
+        // `initialValue`/`write`'s own narrowed frontend-lock use), and
+        // `_statics` is a `SharedTable` (ADR-0006) - two threads racing
+        // the same `variable` both build a value and `insert` keeps
+        // whichever lands first (`_pending`'s own doc says why that is
+        // safe even for a self-referential initializer).
+        return *_statics.insert(variable, buildInitialBytes(variable, facts));
     }
 
     // The bytes every thread's own copy of a thread-local variable
     // starts from, and the identity `TlsSlots.slotFor` keys that copy
-    // by - built once, under the lock, and read without one after that
-    // (like `_statics`). The bytecode compiler bakes a pointer to this
-    // into an `opTls*` instruction operand in place of a resolved
-    // address (finding 1.3): a thread-local variable's address is never
-    // a compile-time constant, the same way it never is in compiled D.
+    // by - built once and read without a lock after that (like
+    // `_statics`). The bytecode compiler bakes a pointer to this into an
+    // `opTls*` instruction operand in place of a resolved address
+    // (finding 1.3): a thread-local variable's address is never a
+    // compile-time constant, the same way it never is in compiled D.
+    //
+    // No frontend lock, the same reasoning as `storageOf`'s own doc:
+    // `TypeFacts.of` and `nativeSymbolName` (a mangle walk, like
+    // `hasNativeSymbol`'s own doc) force or avoid whatever dmd state
+    // they need on their own, and `_tlsDescriptors` is a `SharedTable`.
     public const(TlsDescriptor)* tlsDescriptorOf(VarDeclaration variable) {
         if (auto found = variable in _tlsDescriptors)
             return found;
 
-        import snakebite.frontend.compiler: withCompilerLock;
-
-        const(TlsDescriptor)* descriptor;
-        withCompilerLock({
-            if (auto found = variable in _tlsDescriptors) {
-                descriptor = found;
-                return;
-            }
-            const facts = TypeFacts.of(variable.type);
-            if (hasNativeStorage(variable)) {
-                const name = nativeSymbolName(variable);
-                // Only to learn that the symbol is there: this thread's
-                // address is not the descriptor's to keep.
-                if (_threadLocalAddress(name) !is null) {
-                    descriptor = _tlsDescriptors.insert(variable, TlsDescriptor(
-                        cast(const(void)*) variable, null, facts.size,
-                        name, _threadLocalAddress));
-                    return;
-                }
-                assert(!isExtern(variable), name);
-            }
-            const bytes = buildInitialBytes(variable, facts);
-            descriptor = _tlsDescriptors.insert(variable, TlsDescriptor(
-                cast(const(void)*) variable, bytes.ptr, bytes.length));
-        });
-        return descriptor;
+        const facts = TypeFacts.of(variable.type);
+        if (hasNativeStorage(variable)) {
+            const name = nativeSymbolName(variable);
+            // Only to learn that the symbol is there: this thread's
+            // address is not the descriptor's to keep.
+            if (_threadLocalAddress(name) !is null)
+                return _tlsDescriptors.insert(variable, TlsDescriptor(
+                    cast(const(void)*) variable, null, facts.size,
+                    name, _threadLocalAddress));
+            assert(!isExtern(variable), name);
+        }
+        const bytes = buildInitialBytes(variable, facts);
+        return _tlsDescriptors.insert(variable, TlsDescriptor(
+            cast(const(void)*) variable, bytes.ptr, bytes.length));
     }
 
     // Whether `variable`'s storage is native rather than this program's
@@ -703,22 +725,26 @@ public struct NativeData {
         return (variable.storage_class & STC.extern_) != 0;
     }
 
-    // Reserves and fills a variable's own storage bytes: called under
-    // the compiler lock, for a `shared`/`__gshared` variable's one and
-    // only storage, or for a thread-local variable's template. A
-    // recursive call for the same variable - its own initializer refers
-    // to it - finds the reservation `_pendingStatics` is already holding
-    // for it, rather than reserving a second time.
+    // Reserves and fills a variable's own storage bytes, for a
+    // `shared`/`__gshared` variable's one and only storage, or for a
+    // thread-local variable's template. A recursive call for the same
+    // variable, on this same thread - its own initializer refers to it -
+    // finds the reservation this thread's own `_pending` entry is
+    // already holding for it, rather than reserving a second time
+    // (`_pending`'s own doc explains why this must be this thread's own
+    // entry, never shared with another thread racing the same
+    // variable).
     private void[] buildInitialBytes(VarDeclaration variable, in TypeFacts facts) {
         import core.stdc.string: memcpy;
         import dmd.expressionsem: getConstInitializer;
 
-        if (auto pending = variable in _pendingStatics)
-            return *pending;
+        auto pending = _pending.current;
+        if (auto found = variable in pending.entries)
+            return *found;
 
         auto bytes = reserve(facts);
-        _pendingStatics[variable] = bytes;
-        scope (exit) _pendingStatics.remove(variable);
+        pending.entries[variable] = bytes;
+        scope (exit) pending.entries.remove(variable);
 
         if (variable._init is null) {
             const initial = initialValue(variable.type, variable.loc);

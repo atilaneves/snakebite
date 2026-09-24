@@ -462,8 +462,31 @@ public struct CallbackBridge {
     // The pool entry for `word`, reserved on first use, or null when
     // `word` is not a guest function this backend registered - a host
     // address, or already an entry - and so crosses the barrier as it is.
+    //
+    // Only `prepareCallback` touches dmd; the pool reservation
+    // (`reserve`, its own mutex - ADR-0003) and the `_wordOfEntry`
+    // insert (its own `SharedTable` lock) do not, so only `prepareCallback`
+    // runs under the frontend lock (measured: keeping the whole block
+    // locked, as this used to, cost 984 acquisitions/27.5s wait in a
+    // parallel `bin/ut` run once other frontend-lock callers stopped
+    // taking it and the traffic they used to queue behind moved here -
+    // the same lock-convoy finding `NativeData.reserve`'s own doc
+    // describes). Splitting them never risks the two-lock-order deadlock
+    // the old single block avoided: the pool mutex (`ffi.callback`'s own
+    // `__gshared mutex`) is reached only from `reserve`/
+    // `callbackChunkCount`/`beginCallbackChunk`, none of which ever try
+    // to take the frontend lock, so the two are never both held by one
+    // thread waiting on the other.
+    //
+    // Two threads racing the very first crossing of the same `word` each
+    // prepare their own plan and reserve their own slot; `cas` below
+    // keeps whichever publishes first, the same "two threads that build
+    // the same answer end up with the one answer" tolerance
+    // `SharedTable`'s own doc describes - the loser's slot is simply
+    // never looked up again (a pool entry is never released anyway,
+    // ADR-0003's own doc).
     public const(void)* entryOf(const(void)* word) {
-        import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+        import core.atomic: atomicLoad, cas, MemoryOrder;
 
         auto registered = word in _words;
         if (registered is null)
@@ -475,29 +498,22 @@ public struct CallbackBridge {
         if (_prepare !is null)
             _prepare(_owner, registered.declaration);
 
-        // `prepareCallback` touches dmd (finding 1.2), so this takes the
-        // compiler lock in place of a bridge-only mutex: one lock order
-        // everywhere - the compiler lock, then the pool (ADR-0003) -
-        // instead of two locks a caller could take in either order.
         import snakebite.frontend.compiler: withCompilerLock;
 
-        withCompilerLock({
-            if (registered.entry is null) {
-                auto plan = new CallPlan;
-                *plan = prepareCallback(registered.declaration);
-                const entry = reserve(Slot(
-                    _handler, _owner, word, registered.declaration, plan));
-                _wordOfEntry.insert(entry, word);
-                atomicStore!(MemoryOrder.rel)(registered.entry, entry);
-            }
-        });
+        auto plan = new CallPlan;
+        withCompilerLock({ *plan = prepareCallback(registered.declaration); });
 
-        // A plain read here would be racing the `atomicStore` above:
-        // this thread's own write is visible to itself either way, but
+        const entry = reserve(Slot(
+            _handler, _owner, word, registered.declaration, plan));
+        _wordOfEntry.insert(entry, word);
+        cas(&registered.entry, cast(const(void)*) null, entry);
+
+        // A plain read here would be racing the `cas` above: this
+        // thread's own write is visible to itself either way, but
         // another thread's `entryOf` call for the same word, arriving
-        // just after `withCompilerLock` released the lock, needs the
-        // acquire load to be certain it sees the stored entry and not
-        // a stale `null` (finding 8).
+        // just after this one published, needs the acquire load to be
+        // certain it sees the stored entry and not a stale `null`
+        // (finding 8).
         return atomicLoad!(MemoryOrder.acq)(registered.entry);
     }
 
@@ -540,25 +556,22 @@ public struct CallbackBridge {
         if (auto entry = key in _adjustedEntries)
             return *entry;
 
+        // Only `prepareCallback` touches dmd - `entryOf`'s own doc, just
+        // above, explains why the pool reservation and the table
+        // inserts run outside the frontend lock here too, and why two
+        // threads racing the same `key` is safe.
         import snakebite.frontend.compiler: withCompilerLock;
 
-        const(void)* entry;
-        withCompilerLock({
-            if (auto found = key in _adjustedEntries) {
-                entry = *found;
-                return;
-            }
-            auto plan = new CallPlan;
-            *plan = prepareCallback(declaration);
-            assert(plan.hasHiddenContext);
-            const reserved = reserve(Slot(
-                _handler, _owner, word, declaration, plan, adjustment,
-                contains(word) ? null : word,
-            ));
-            if (contains(word))
-                _adjustedGuestEntries.insert(reserved, key);
-            entry = *_adjustedEntries.insert(key, reserved);
-        });
-        return entry;
+        auto plan = new CallPlan;
+        withCompilerLock({ *plan = prepareCallback(declaration); });
+        assert(plan.hasHiddenContext);
+
+        const reserved = reserve(Slot(
+            _handler, _owner, word, declaration, plan, adjustment,
+            contains(word) ? null : word,
+        ));
+        if (contains(word))
+            _adjustedGuestEntries.insert(reserved, key);
+        return *_adjustedEntries.insert(key, reserved);
     }
 }
