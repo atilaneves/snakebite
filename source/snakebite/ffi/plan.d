@@ -1180,6 +1180,14 @@ public struct PlanCache {
     // never `hasNativeSymbol`, for that check). `nativeTarget` is a fixed
     // host wrapper, not a `dlsym` answer, so it counts as independent here
     // too.
+    // No frontend lock, the same reasoning as `hasNativeSymbol`'s own
+    // doc: `nativeTarget` and `mangleExact` touch no dmd forward
+    // reference, and `resolveIndependent` is a host symbol lookup behind
+    // its own `SharedTable` (`Resolver._independentAddresses`), not a dmd
+    // one. Measured as the third-largest frontend-lock wait in a
+    // parallel `bin/ut` run (3,781 acquisitions, 15-18s wait) for work
+    // that, like `reserve`'s, never touched dmd state - the lock here
+    // was never load-bearing.
     public bool hasIndependentNativeSymbol(
         FuncDeclaration function_,
     ) {
@@ -1190,21 +1198,11 @@ public struct PlanCache {
         if (auto cached = function_ in _independentNativeSymbols)
             return *cached;
 
-        import snakebite.frontend.compiler: withCompilerLock;
-
-        bool found;
-        withCompilerLock({
-            if (auto cached = function_ in _independentNativeSymbols) {
-                found = *cached;
-                return;
-            }
-            auto target = nativeTarget(function_);
-            found = target.address !is null || _resolver.resolveIndependent(
-                mangleExact(function_).fromStringz,
-            ) !is null;
-            _independentNativeSymbols.insert(function_, found);
-        });
-        return found;
+        auto target = nativeTarget(function_);
+        const found = target.address !is null || _resolver.resolveIndependent(
+            mangleExact(function_).fromStringz,
+        ) !is null;
+        return *_independentNativeSymbols.insert(function_, found);
     }
 
     version(unittest)
