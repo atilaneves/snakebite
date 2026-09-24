@@ -3814,12 +3814,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, _destination, baseOffset + field.offset, _width);
     }
 
-    // Executes an aggregate plan in its final storage. A storage operand
-    // preserves field offsets for both frame values and allocations.
-    // The plan already decided which field is a plain value, a bitfield,
-    // or a static-array broadcast, and whether `vthis` needs filling; this
-    // is the only place that turns a step into bytecode.
-    //
+    // The four hooks `snakebite.backends.aggregateinit.applyStep` and
+    // `driveInit` drive, one per `InitStep.Kind`, each turning one step
+    // into bytecode at `base`, a storage operand that preserves field
+    // offsets for both frame values and allocations alike.
+
     // A `vthis` step with `source` set (a nested class's `NewExp.thisexp`)
     // evaluates that expression directly, then adds `sourceAdjustment` if
     // it is non-zero. Otherwise it is a nested struct reading its own
@@ -3830,67 +3829,56 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // reject it here: leaving `vthis` at its `.init` zero instead reads
     // back a null context the first time a method on that instance uses
     // it.
-    private void applyStep(
-        InitStep step,
-        Loc loc,
-        in size_t base,
-    ) {
-        final switch (step.kind) with (InitStep.Kind) {
-        case vthis:
-            if (step.source !is null) {
-                evalInto(step.source, base + step.offset, step.facts.size,
-                    step.type);
-                if (step.sourceAdjustment != 0) {
-                    const adjustment = reserveTemp(pointerFacts);
-                    emit(&opConstant, adjustment,
-                        addConstant(cast(long) step.sourceAdjustment),
-                        size_t.sizeof);
-                    emit(&opAdd, base + step.offset, adjustment,
-                        size_t.sizeof);
-                }
-                return;
-            }
-
-            if (step.parentFunction is null)
-                throw rejection(_function, loc, "a nested struct's static chain");
-
-            const context = contextAddressOf(step.parentFunction);
-            emit(&opCopy, base + step.offset, context, size_t.sizeof);
-            return;
-
-        case value:
+    private void applyVthisStep(InitStep step, Loc loc, in size_t base) {
+        if (step.source !is null) {
             evalInto(step.source, base + step.offset, step.facts.size,
                 step.type);
-            return;
-
-        case bitfield:
-            const valueOffset = reserveTemp(step.facts);
-            evalInto(step.source, valueOffset, step.facts.size, step.type);
-
-            const addressOffset = reserveTemp(pointerFacts);
-            emit(&opFrameAddress, addressOffset, base + step.offset,
-                size_t.sizeof);
-
-            emitBitfieldStore(step.field, addressOffset, valueOffset,
-                step.facts.size);
-            return;
-
-        case broadcast:
-            // Reached alike for a `StructLiteralExp`'s `elements` and a
-            // `NewExp`'s positional `arguments`: both are narrowed by
-            // dmd's own `fit` (`expressionsem.d`) ahead of `fill`, which
-            // walks a static-array field's nested array levels until a
-            // single given value matches one, leaving that value's own
-            // (narrower) type on the source expression instead of
-            // widening it to the full field type.
-            const tempOffset = reserveTemp(step.facts);
-            evalInto(step.source, tempOffset, step.facts.size);
-
-            foreach (i; 0 .. step.count)
-                emit(&opCopy, base + step.offset + i * step.facts.size,
-                    tempOffset, step.facts.size);
+            if (step.sourceAdjustment != 0) {
+                const adjustment = reserveTemp(pointerFacts);
+                emit(&opConstant, adjustment,
+                    addConstant(cast(long) step.sourceAdjustment),
+                    size_t.sizeof);
+                emit(&opAdd, base + step.offset, adjustment, size_t.sizeof);
+            }
             return;
         }
+
+        if (step.parentFunction is null)
+            throw rejection(_function, loc, "a nested struct's static chain");
+
+        const context = contextAddressOf(step.parentFunction);
+        emit(&opCopy, base + step.offset, context, size_t.sizeof);
+    }
+
+    private void applyValueStep(InitStep step, in size_t base) {
+        evalInto(step.source, base + step.offset, step.facts.size, step.type);
+    }
+
+    private void applyBitfieldStep(InitStep step, in size_t base) {
+        const valueOffset = reserveTemp(step.facts);
+        evalInto(step.source, valueOffset, step.facts.size, step.type);
+
+        const addressOffset = reserveTemp(pointerFacts);
+        emit(&opFrameAddress, addressOffset, base + step.offset,
+            size_t.sizeof);
+
+        emitBitfieldStore(step.field, addressOffset, valueOffset,
+            step.facts.size);
+    }
+
+    // Reached alike for a `StructLiteralExp`'s `elements` and a `NewExp`'s
+    // positional `arguments`: both are narrowed by dmd's own `fit`
+    // (`expressionsem.d`) ahead of `fill`, which walks a static-array
+    // field's nested array levels until a single given value matches one,
+    // leaving that value's own (narrower) type on the source expression
+    // instead of widening it to the full field type.
+    private void applyBroadcastStep(InitStep step, in size_t base) {
+        const tempOffset = reserveTemp(step.facts);
+        evalInto(step.source, tempOffset, step.facts.size);
+
+        foreach (i; 0 .. step.count)
+            emit(&opCopy, base + step.offset + i * step.facts.size,
+                tempOffset, step.facts.size);
     }
 
     // `Point(3, 4)`, dmd's own literal form for a plain-old struct with no
@@ -3908,11 +3896,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         emit(&opZero, _destination, 0, _width);
 
-        import snakebite.backends.aggregateinit: planStructLiteral;
+        import snakebite.backends.aggregateinit: applyStep, planStructLiteral;
 
         auto plan = planStructLiteral(expression);
         foreach (step; plan.steps)
-            applyStep(step, expression.loc, _destination);
+            applyStep(step,
+                (s) => applyVthisStep(s, expression.loc, _destination),
+                (s) => applyValueStep(s, _destination),
+                (s) => applyBitfieldStep(s, _destination),
+                (s) => applyBroadcastStep(s, _destination));
     }
 
     // `arr.length`: the array's own length word, read straight out of its
@@ -4306,40 +4298,36 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // DMD leaves constructor and positional field initialization outside
     // the allocation lowering. Its result already occupies _destination.
+    // `driveInit` (`aggregateinit.d`) owns the order the `vthis` steps, the
+    // constructor call, and the remaining positional field stores run in -
+    // a nested struct's or nested class's `vthis` sits inside the
+    // allocation the lowering just returned, at the same native offset a
+    // value of that aggregate type would use, filled before either the
+    // constructor call or the remaining field stores, so both a
+    // `new Adder(2)` with a constructor and a bare `new Reader` (no
+    // arguments at all) get a real context rather than `.init`'s zero.
     private void compileNew(NewExp expression) {
+        import snakebite.backends.aggregateinit:
+            driveInit, planClassContext, planPositionalFields;
+
         auto structType = expression.newtype.isTypeStruct;
         const objectOffset = _destination;
-
-        // A nested struct's or nested class's `vthis` sits inside the
-        // allocation the lowering just returned, at the same native offset
-        // a value of that aggregate type would use - filled here, once,
-        // ahead of either the constructor call below or the positional
-        // field stores further down, so both a `new Adder(2)` with a
-        // constructor and a bare `new Reader` (no arguments at all) get
-        // a real context rather than `.init`'s zero.
-        import snakebite.backends.aggregateinit:
-            planClassContext, planPositionalFields;
+        const storage = indirectStorage(objectOffset);
 
         auto plan = structType is null
             ? planClassContext(expression)
             : planPositionalFields(structType.sym,
                 expression.member is null ? expression.arguments : null);
 
-        foreach (step; plan.steps)
-            if (step.kind == InitStep.Kind.vthis)
-                applyStep(step, expression.loc, indirectStorage(objectOffset));
-
-        if (expression.member !is null) {
-            compileResolvedCall(
+        driveInit(plan, expression.member !is null,
+            (step) => applyVthisStep(step, expression.loc, storage),
+            (step) => applyValueStep(step, storage),
+            (step) => applyBitfieldStep(step, storage),
+            (step) => applyBroadcastStep(step, storage),
+            () => compileResolvedCall(
                 expression.member, expression.arguments, expression.loc,
                 expressionText(expression), true, () => objectOffset,
-                discardResult);
-            return;
-        }
-
-        foreach (step; plan.steps)
-            if (step.kind != InitStep.Kind.vthis)
-                applyStep(step, expression.loc, indirectStorage(objectOffset));
+                discardResult));
     }
 
     override void visit(DeleteExp expression) {

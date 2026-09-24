@@ -69,6 +69,61 @@ public struct AggregateInitPlan {
     public InitStep[] steps;
 }
 
+// The one place that turns an `InitStep.Kind` into an action, shared by
+// both backends instead of each keeping its own `final switch`. A
+// backend supplies one hook per kind - "store a value into a field",
+// "store a bitfield", "broadcast a static-array element", "write the
+// hidden context pointer" - and reads nothing about the plan itself;
+// `step.kind` alone chooses the hook.
+public void applyStep(
+    InitStep step,
+    scope void delegate(InitStep step) applyVthis,
+    scope void delegate(InitStep step) applyValue,
+    scope void delegate(InitStep step) applyBitfield,
+    scope void delegate(InitStep step) applyBroadcast,
+) {
+    final switch (step.kind) with (InitStep.Kind) {
+    case vthis: applyVthis(step); return;
+    case value: applyValue(step); return;
+    case bitfield: applyBitfield(step); return;
+    case broadcast: applyBroadcast(step); return;
+    }
+}
+
+// The single order both backends' `NewExp` adapters used to re-derive for
+// themselves: every `vthis` step runs first, so a constructor's own body
+// already sees the right hidden context the moment it starts, whether
+// that body reads it directly or hands it on to a nested aggregate of its
+// own. A plan with a constructor to call (`hasConstructor`) then hands
+// off to it and stops - the constructor's own body owns the rest of
+// construction, not this driver - otherwise the remaining, non-`vthis`
+// steps run in the plan's own order, the same "no constructor" shape
+// `planPositionalFields`'s own doc describes. Neither backend decides
+// this order for itself any more; each supplies only the same four
+// per-kind hooks `applyStep` takes, plus how to call the constructor.
+public void driveInit(
+    AggregateInitPlan plan,
+    in bool hasConstructor,
+    scope void delegate(InitStep step) applyVthis,
+    scope void delegate(InitStep step) applyValue,
+    scope void delegate(InitStep step) applyBitfield,
+    scope void delegate(InitStep step) applyBroadcast,
+    scope void delegate() callConstructor,
+) {
+    foreach (step; plan.steps)
+        if (step.kind == InitStep.Kind.vthis)
+            applyStep(step, applyVthis, applyValue, applyBitfield, applyBroadcast);
+
+    if (hasConstructor) {
+        callConstructor();
+        return;
+    }
+
+    foreach (step; plan.steps)
+        if (step.kind != InitStep.Kind.vthis)
+            applyStep(step, applyVthis, applyValue, applyBitfield, applyBroadcast);
+}
+
 // The single decision both backends' `StructLiteralExp` adapters read:
 // `expression.elements` pairs positionally with `expression.sd.fields`,
 // with a `null` entry for a field the literal leaves out entirely.

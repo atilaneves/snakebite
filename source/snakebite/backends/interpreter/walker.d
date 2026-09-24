@@ -4800,40 +4800,27 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         storeIntegral(_place, cast(size_t) object, _facts.size);
     }
 
+    // `driveInit` (`aggregateinit.d`) owns the order `vthis` steps, a
+    // constructor call, and the remaining fields run in; a nested class's
+    // `vthis` sits inside the allocation at the same native offset a
+    // value of that class type would use, so it lands before the
+    // constructor call the same way a nested struct's own `vthis` does.
     private void finishNew(NewExp expression, ubyte* object) {
         import snakebite.backends.aggregateinit:
-            InitStep, planClassContext, planPositionalFields;
+            driveInit, planClassContext, planPositionalFields;
 
-        auto classType = expression.newtype.isTypeClass;
-        if (classType !is null) {
-            // A nested class's `vthis` sits inside the allocation at the
-            // same native offset a value of that class type would use -
-            // filled here, once, ahead of the constructor call, the same
-            // order the struct branch below fills its own `vthis`.
-            foreach (step; planClassContext(expression).steps)
-                applyStep(step, object);
+        auto structType = expression.newtype.isTypeStruct;
+        auto plan = structType is null
+            ? planClassContext(expression)
+            : planPositionalFields(structType.sym,
+                expression.member is null ? expression.arguments : null);
 
-            if (expression.member !is null)
-                constructAggregate(expression, object);
-            return;
-        }
-
-        auto declaration = expression.newtype.isTypeStruct.sym;
-        auto plan = planPositionalFields(declaration,
-            expression.member is null ? expression.arguments : null);
-
-        foreach (step; plan.steps)
-            if (step.kind == InitStep.Kind.vthis)
-                applyStep(step, object);
-
-        if (expression.member !is null) {
-            constructAggregate(expression, object);
-            return;
-        }
-
-        foreach (step; plan.steps)
-            if (step.kind != InitStep.Kind.vthis)
-                applyStep(step, object);
+        driveInit(plan, expression.member !is null,
+            (step) => applyVthisStep(step, object),
+            (step) => applyValueStep(step, object),
+            (step) => applyBitfieldStep(step, object),
+            (step) => applyBroadcastStep(step, object),
+            () => constructAggregate(expression, object));
     }
 
     override void visit(DeleteExp expression) {
@@ -5000,71 +4987,66 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         memcpy(place, bytes.ptr, bytes.length);
     }
 
-    // Executes one step of an `AggregateInitPlan` (`aggregateinit.d`) at
-    // `base`, the aggregate's own bytes directly - `visit(StructLiteralExp)`
-    // passes `_place`, `finishNew` the fresh allocation, both already plain
+    // The four hooks `snakebite.backends.aggregateinit.applyStep` and
+    // `driveInit` drive, one per `InitStep.Kind`, each run at `base`, the
+    // aggregate's own bytes directly - `visit(StructLiteralExp)` passes
+    // `_place`, `finishNew` the fresh allocation, both already plain
     // `ubyte*` here since the interpreter never distinguishes a value
     // place from a pointer the way the bytecode compiler's frame offsets
     // do.
-    private void applyStep(
-        InitStep step,
-        ubyte* base,
-    ) {
-        import core.stdc.string: memcpy;
+
+    // A nested class's `vthis` reads `NewExp.thisexp` directly
+    // (`step.source`), then adds `sourceAdjustment` if `thisexp`'s static
+    // type is a base-class view narrower than the nested class's actual
+    // lexical parent - see `classVthisStep`'s own doc (`aggregateinit.d`).
+    private void applyVthisStep(InitStep step, ubyte* base) {
         import snakebite.nativelayout: loadIntegral, storeIntegral;
 
-        final switch (step.kind) with (InitStep.Kind) {
-        case vthis:
-            // A nested class's `vthis` reads `NewExp.thisexp` directly
-            // (`step.source`), then adds `sourceAdjustment` if `thisexp`'s
-            // static type is a base-class view narrower than the nested
-            // class's actual lexical parent - see `classVthisStep`'s own
-            // doc (`aggregateinit.d`).
-            if (step.source !is null) {
-                evaluate(step.source, step.type, step.facts,
-                    base + step.offset);
-                if (step.sourceAdjustment != 0)
-                    storeIntegral(
-                        base + step.offset,
-                        cast(ulong) (loadIntegral(base + step.offset,
-                            step.facts.size, false) + step.sourceAdjustment),
-                        step.facts.size,
-                    );
-                return;
-            }
-
-            // `parentFunction` is `null` when the struct's lexical parent
-            // is not a function - dmd fact, not itself an error: leaving
-            // `vthis` at its `.init` zero here matches the language's own
-            // treatment of a `static struct` with no captured context.
-            if (step.parentFunction !is null)
+        if (step.source !is null) {
+            evaluate(step.source, step.type, step.facts, base + step.offset);
+            if (step.sourceAdjustment != 0)
                 storeIntegral(
                     base + step.offset,
-                    cast(size_t) contextOf(step.parentFunction),
-                    size_t.sizeof,
+                    cast(ulong) (loadIntegral(base + step.offset,
+                        step.facts.size, false) + step.sourceAdjustment),
+                    step.facts.size,
                 );
             return;
-
-        case value:
-            evaluate(step.source, step.type, step.facts, base + step.offset);
-            return;
-
-        case bitfield:
-            auto value = _frames.push(step.facts.size, step.facts.alignment);
-            evaluate(step.source, step.type, step.facts, value.base);
-            storeBitfieldAt(step.field, base + step.offset,
-                loadIntegral(value.base, step.facts.size,
-                    !step.facts.isUnsigned));
-            return;
-
-        case broadcast:
-            auto value = _frames.push(step.facts.size, step.facts.alignment);
-            evaluate(step.source, step.type, step.facts, value.base);
-            foreach (i; 0 .. step.count)
-                memcpy(base + step.offset + i * step.facts.size, value.base,
-                    step.facts.size);
-            return;
         }
+
+        // `parentFunction` is `null` when the struct's lexical parent is
+        // not a function - dmd fact, not itself an error: leaving `vthis`
+        // at its `.init` zero here matches the language's own treatment
+        // of a `static struct` with no captured context.
+        if (step.parentFunction !is null)
+            storeIntegral(
+                base + step.offset,
+                cast(size_t) contextOf(step.parentFunction),
+                size_t.sizeof,
+            );
+    }
+
+    private void applyValueStep(InitStep step, ubyte* base) {
+        evaluate(step.source, step.type, step.facts, base + step.offset);
+    }
+
+    private void applyBitfieldStep(InitStep step, ubyte* base) {
+        import snakebite.nativelayout: loadIntegral;
+
+        auto value = _frames.push(step.facts.size, step.facts.alignment);
+        evaluate(step.source, step.type, step.facts, value.base);
+        storeBitfieldAt(step.field, base + step.offset,
+            loadIntegral(value.base, step.facts.size, !step.facts.isUnsigned));
+    }
+
+    private void applyBroadcastStep(InitStep step, ubyte* base) {
+        import core.stdc.string: memcpy;
+
+        auto value = _frames.push(step.facts.size, step.facts.alignment);
+        evaluate(step.source, step.type, step.facts, value.base);
+        foreach (i; 0 .. step.count)
+            memcpy(base + step.offset + i * step.facts.size, value.base,
+                step.facts.size);
     }
 
     override void visit(StructLiteralExp expression) {
@@ -5090,14 +5072,19 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     "`: its fields do not match the struct layout"),
             );
 
-        import snakebite.backends.aggregateinit: planStructLiteral;
+        import snakebite.backends.aggregateinit: applyStep, planStructLiteral;
 
         auto plan = planStructLiteral(expression);
         if (plan.zeroFill)
             memset(_place, 0, _facts.size);
 
+        auto base = cast(ubyte*) _place;
         foreach (step; plan.steps)
-            applyStep(step, cast(ubyte*) _place);
+            applyStep(step,
+                (s) => applyVthisStep(s, base),
+                (s) => applyValueStep(s, base),
+                (s) => applyBitfieldStep(s, base),
+                (s) => applyBroadcastStep(s, base));
     }
 
     protected override void visitUnloweredCat(CatExp expression) {
