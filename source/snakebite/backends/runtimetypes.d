@@ -261,6 +261,7 @@ public struct RuntimeTypes {
     private TypeInfo linkedInfo(Type type) {
         import dmd.common.outbuffer: OutBuffer;
         import dmd.mangle: mangleToBuffer;
+        import snakebite.frontend.compiler: withCompilerLock;
         import std.conv: text;
 
         if (type.vtinfo is null)
@@ -272,9 +273,18 @@ public struct RuntimeTypes {
                 && classType.sym.isInterfaceDeclaration is null) {
             // Codegen aliases an unqualified class's TypeInfo declaration
             // to its __Class symbol. The frontend alone leaves the alias
-            // unresolved.
+            // unresolved. `mangleToBuffer` walks dmd's own AST (a class's
+            // bases, identifiers, parent module) the same as any other
+            // frontend call, so it is dmd-touching work like any other and
+            // needs the frontend lock - `ClassRuntimeCache.build`'s own
+            // lock (this call's usual caller, `classinfo.classRuntimeInfo`
+            // -> `hooks.linkedClassInfo`) guards only that cache's own
+            // bookkeeping, never dmd's state (its own doc). Narrowed to
+            // just the mangle: `type`'s own fields above are already
+            // resolved by ordinary class semantic, the same as every other
+            // read `RuntimeTypes.get`'s own doc lists as safe unlocked.
             OutBuffer mangled;
-            mangleToBuffer(classType.sym, mangled);
+            withCompilerLock({ mangleToBuffer(classType.sym, mangled); });
             name = text("_D", mangled[], "7__ClassZ");
         }
         return cast(TypeInfo) _resolve(name);
