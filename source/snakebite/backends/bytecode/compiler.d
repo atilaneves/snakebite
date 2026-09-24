@@ -3829,16 +3829,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         private Loc _loc;
         private size_t _base;
 
-        void applyVthis(InitStep step) {
+        public void applyVthis(InitStep step) {
             _compiler.applyVthisStep(step, _loc, _base);
         }
-        void applyValue(InitStep step) {
+        public void applyValue(InitStep step) {
             _compiler.applyValueStep(step, _base);
         }
-        void applyBitfield(InitStep step) {
+        public void applyBitfield(InitStep step) {
             _compiler.applyBitfieldStep(step, _base);
         }
-        void applyBroadcast(InitStep step) {
+        public void applyBroadcast(InitStep step) {
             _compiler.applyBroadcastStep(step, _base);
         }
     }

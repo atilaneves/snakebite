@@ -5032,16 +5032,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         private Evaluator _evaluator;
         private ubyte* _base;
 
-        void applyVthis(InitStep step) {
+        public void applyVthis(InitStep step) {
             _evaluator.applyVthisStep(step, _base);
         }
-        void applyValue(InitStep step) {
+        public void applyValue(InitStep step) {
             _evaluator.applyValueStep(step, _base);
         }
-        void applyBitfield(InitStep step) {
+        public void applyBitfield(InitStep step) {
             _evaluator.applyBitfieldStep(step, _base);
         }
-        void applyBroadcast(InitStep step) {
+        public void applyBroadcast(InitStep step) {
             _evaluator.applyBroadcastStep(step, _base);
         }
     }
