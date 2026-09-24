@@ -59,10 +59,7 @@ compiled, or called via FFI.
 # DMD lowerings
 
 All runtime AST visitors, including those for new backends, must inherit
-`LoweringVisitor`. Its final overrides own lowering dispatch. Put backend
-operations for null-lowering cases in the `visitUnlowered*` hooks.
-Allocation result handling and constructor execution use the shared
-visitor's allocation hooks.
+`LoweringVisitor`. Its final overrides own lowering dispatch.
 
 Any exception to executing a lowering belongs in `LoweringVisitor` and
 applies to all backends. Its compile-time check requires a final shared
