@@ -3819,6 +3819,30 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // into bytecode at `base`, a storage operand that preserves field
     // offsets for both frame values and allocations alike.
 
+    // Satisfies `aggregateinit`'s `Hooks` contract: forwards each
+    // `InitStep.Kind` to the matching `apply*Step` method below, at
+    // whichever `base`/`loc` its call site is compiling into. Built
+    // once per call site instead of the four lambdas each used to
+    // build.
+    private struct AggregateInitHooks {
+        private FunctionCompiler _compiler;
+        private Loc _loc;
+        private size_t _base;
+
+        void applyVthis(InitStep step) {
+            _compiler.applyVthisStep(step, _loc, _base);
+        }
+        void applyValue(InitStep step) {
+            _compiler.applyValueStep(step, _base);
+        }
+        void applyBitfield(InitStep step) {
+            _compiler.applyBitfieldStep(step, _base);
+        }
+        void applyBroadcast(InitStep step) {
+            _compiler.applyBroadcastStep(step, _base);
+        }
+    }
+
     // A `vthis` step with `source` set (a nested class's `NewExp.thisexp`)
     // evaluates that expression directly, then adds `sourceAdjustment` if
     // it is non-zero. Otherwise it is a nested struct reading its own
@@ -3899,12 +3923,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.backends.aggregateinit: applyStep, planStructLiteral;
 
         auto plan = planStructLiteral(expression);
+        auto hooks = AggregateInitHooks(this, expression.loc, _destination);
         foreach (step; plan.steps)
-            applyStep(step,
-                (s) => applyVthisStep(s, expression.loc, _destination),
-                (s) => applyValueStep(s, _destination),
-                (s) => applyBitfieldStep(s, _destination),
-                (s) => applyBroadcastStep(s, _destination));
+            applyStep(hooks, step);
     }
 
     // `arr.length`: the array's own length word, read straight out of its
@@ -4354,11 +4375,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             : planPositionalFields(structType.sym,
                 expression.member is null ? expression.arguments : null);
 
-        driveInit(plan, expression.member !is null,
-            (step) => applyVthisStep(step, expression.loc, storage),
-            (step) => applyValueStep(step, storage),
-            (step) => applyBitfieldStep(step, storage),
-            (step) => applyBroadcastStep(step, storage),
+        auto hooks = AggregateInitHooks(this, expression.loc, storage);
+        driveInit(hooks, plan, expression.member !is null,
             () => compileResolvedCall(
                 expression.member, expression.arguments, expression.loc,
                 expressionText(expression), true, () => objectOffset,

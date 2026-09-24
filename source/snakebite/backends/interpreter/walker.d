@@ -4847,11 +4847,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             : planPositionalFields(structType.sym,
                 expression.member is null ? expression.arguments : null);
 
-        driveInit(plan, expression.member !is null,
-            (step) => applyVthisStep(step, object),
-            (step) => applyValueStep(step, object),
-            (step) => applyBitfieldStep(step, object),
-            (step) => applyBroadcastStep(step, object),
+        auto hooks = AggregateInitHooks(this, object);
+        driveInit(hooks, plan, expression.member !is null,
             () => constructAggregate(expression, object));
     }
 
@@ -5027,6 +5024,28 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // place from a pointer the way the bytecode compiler's frame offsets
     // do.
 
+    // Satisfies `aggregateinit`'s `Hooks` contract: forwards each
+    // `InitStep.Kind` to the matching `apply*Step` method below, at
+    // whichever `base` its call site is writing into. Built once per
+    // call site instead of the four lambdas each used to build.
+    private struct AggregateInitHooks {
+        private Evaluator _evaluator;
+        private ubyte* _base;
+
+        void applyVthis(InitStep step) {
+            _evaluator.applyVthisStep(step, _base);
+        }
+        void applyValue(InitStep step) {
+            _evaluator.applyValueStep(step, _base);
+        }
+        void applyBitfield(InitStep step) {
+            _evaluator.applyBitfieldStep(step, _base);
+        }
+        void applyBroadcast(InitStep step) {
+            _evaluator.applyBroadcastStep(step, _base);
+        }
+    }
+
     // A nested class's `vthis` reads `NewExp.thisexp` directly
     // (`step.source`), then adds `sourceAdjustment` if `thisexp`'s static
     // type is a base-class view narrower than the nested class's actual
@@ -5110,13 +5129,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (plan.zeroFill)
             memset(_place, 0, _facts.size);
 
-        auto base = cast(ubyte*) _place;
+        auto hooks = AggregateInitHooks(this, cast(ubyte*) _place);
         foreach (step; plan.steps)
-            applyStep(step,
-                (s) => applyVthisStep(s, base),
-                (s) => applyValueStep(s, base),
-                (s) => applyBitfieldStep(s, base),
-                (s) => applyBroadcastStep(s, base));
+            applyStep(hooks, step);
     }
 
     protected override void visitUnloweredCat(CatExp expression) {

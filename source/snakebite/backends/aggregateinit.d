@@ -69,24 +69,33 @@ public struct AggregateInitPlan {
     public InitStep[] steps;
 }
 
+// Checked by `applyStep` and `driveInit`: a backend's hooks type needs
+// exactly these four per-`InitStep.Kind` methods - its own methods, or a
+// small adapter over them - so a backend that gets a name wrong sees one
+// clear "does not satisfy" error at its own call site rather than an
+// obscure one inside this module.
+private enum isAggregateInitHooks(Hooks) = is(typeof((ref Hooks hooks, InitStep step) {
+    hooks.applyVthis(step);
+    hooks.applyValue(step);
+    hooks.applyBitfield(step);
+    hooks.applyBroadcast(step);
+}));
+
 // The one place that turns an `InitStep.Kind` into an action, shared by
-// both backends instead of each keeping its own `final switch`. A
-// backend supplies one hook per kind - "store a value into a field",
-// "store a bitfield", "broadcast a static-array element", "write the
-// hidden context pointer" - and reads nothing about the plan itself;
-// `step.kind` alone chooses the hook.
-public void applyStep(
-    InitStep step,
-    scope void delegate(InitStep step) applyVthis,
-    scope void delegate(InitStep step) applyValue,
-    scope void delegate(InitStep step) applyBitfield,
-    scope void delegate(InitStep step) applyBroadcast,
-) {
+// both backends instead of each keeping its own `final switch`. `Hooks`
+// is a compile-time parameter, not four delegates, so a backend states
+// its four per-kind actions - "store a value into a field", "store a
+// bitfield", "broadcast a static-array element", "write the hidden
+// context pointer" - once, instead of rebuilding the same four lambdas
+// at every call site; `step.kind` alone chooses which method runs.
+public void applyStep(Hooks)(ref Hooks hooks, InitStep step)
+if (isAggregateInitHooks!Hooks)
+{
     final switch (step.kind) with (InitStep.Kind) {
-    case vthis: applyVthis(step); return;
-    case value: applyValue(step); return;
-    case bitfield: applyBitfield(step); return;
-    case broadcast: applyBroadcast(step); return;
+    case vthis: hooks.applyVthis(step); return;
+    case value: hooks.applyValue(step); return;
+    case bitfield: hooks.applyBitfield(step); return;
+    case broadcast: hooks.applyBroadcast(step); return;
     }
 }
 
@@ -99,20 +108,21 @@ public void applyStep(
 // construction, not this driver - otherwise the remaining, non-`vthis`
 // steps run in the plan's own order, the same "no constructor" shape
 // `planPositionalFields`'s own doc describes. Neither backend decides
-// this order for itself any more; each supplies only the same four
-// per-kind hooks `applyStep` takes, plus how to call the constructor.
-public void driveInit(
+// this order for itself any more; each supplies only the same `Hooks`
+// `applyStep` takes, plus how to call the constructor - which stays a
+// per-call argument since the two call sites genuinely differ here (a
+// `NewExp`'s own constructor call vs. none for a `StructLiteralExp`).
+public void driveInit(Hooks)(
+    ref Hooks hooks,
     AggregateInitPlan plan,
     in bool hasConstructor,
-    scope void delegate(InitStep step) applyVthis,
-    scope void delegate(InitStep step) applyValue,
-    scope void delegate(InitStep step) applyBitfield,
-    scope void delegate(InitStep step) applyBroadcast,
     scope void delegate() callConstructor,
-) {
+)
+if (isAggregateInitHooks!Hooks)
+{
     foreach (step; plan.steps)
         if (step.kind == InitStep.Kind.vthis)
-            applyStep(step, applyVthis, applyValue, applyBitfield, applyBroadcast);
+            applyStep(hooks, step);
 
     if (hasConstructor) {
         callConstructor();
@@ -121,7 +131,7 @@ public void driveInit(
 
     foreach (step; plan.steps)
         if (step.kind != InitStep.Kind.vthis)
-            applyStep(step, applyVthis, applyValue, applyBitfield, applyBroadcast);
+            applyStep(hooks, step);
 }
 
 // The single decision both backends' `StructLiteralExp` adapters read:
