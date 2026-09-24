@@ -5355,70 +5355,48 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opZero, destOffset, 0, width);
             return;
 
-        case complexToBool: {
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.complexToBool), destOffset,
-                sourceOffset, plan.destFacts.size, plan.sourceFacts.size);
-            return;
-        }
-
-        case complexToReal: {
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.complexToReal), destOffset,
-                sourceOffset, plan.destFacts.size, plan.sourceFacts.size);
-            return;
-        }
-
-        case complexToImaginary: {
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.complexToImaginary), destOffset,
-                sourceOffset, plan.destFacts.size, plan.sourceFacts.size);
-            return;
-        }
-
-        case complexWidth: {
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.complexWidth), destOffset,
-                sourceOffset, plan.destFacts.size, plan.sourceFacts.size);
-            return;
-        }
-
-        case realToComplex: {
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.realToComplex), destOffset,
-                sourceOffset, plan.destFacts.size, plan.sourceFacts.size);
-            return;
-        }
-
+        // Each of these kinds reads its whole evaluated operand out of
+        // one temporary and writes `destFacts.size` bytes: no
+        // signedness bit to pack in, so `width`/`sourceWidth` alone
+        // carry the two sizes `castOp(plan.kind)`'s instance of
+        // `applyCastAs` needs.
+        case complexToBool:
+        case complexToReal:
+        case complexToImaginary:
+        case complexWidth:
+        case realToComplex:
         case imaginaryToComplex: {
             const sourceOffset = reserveTemp(plan.sourceFacts);
             evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.imaginaryToComplex), destOffset,
-                sourceOffset, plan.destFacts.size, plan.sourceFacts.size);
+            emit(castOp(plan.kind), destOffset, sourceOffset,
+                plan.destFacts.size, plan.sourceFacts.size);
             return;
         }
 
-        case complexToIntegral: {
+        // These two are the destination-signedness half of the four
+        // kinds `castSizeWithSignedness` exists for: the value they
+        // produce is integral, so it is `destFacts`'s own signedness
+        // that decides how `applyCastAs` fills it in.
+        case complexToIntegral:
+        case floatToIntegral: {
             const sourceOffset = reserveTemp(plan.sourceFacts);
             evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.complexToIntegral), destOffset,
-                sourceOffset,
+            emit(castOp(plan.kind), destOffset, sourceOffset,
                 castSizeWithSignedness(
                     plan.destFacts.size, plan.destFacts.isUnsigned),
                 plan.sourceFacts.size);
             return;
         }
 
-        case integralToComplex: {
+        // The other half: the value they consume is integral, so it
+        // is `sourceFacts`'s own signedness `applyCastAs` needs
+        // instead.
+        case integralToComplex:
+        case integralToFloat: {
             const sourceOffset = reserveTemp(plan.sourceFacts);
             evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.integralToComplex), destOffset,
-                sourceOffset, plan.destFacts.size,
+            emit(castOp(plan.kind), destOffset, sourceOffset,
+                plan.destFacts.size,
                 castSizeWithSignedness(
                     plan.sourceFacts.size, plan.sourceFacts.isUnsigned));
             return;
@@ -5433,27 +5411,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        case integralToFloat: {
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.integralToFloat), destOffset,
-                sourceOffset, plan.destFacts.size,
-                castSizeWithSignedness(
-                    plan.sourceFacts.size, plan.sourceFacts.isUnsigned));
-            return;
-        }
-
-        case floatToIntegral: {
-            const sourceOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.floatToIntegral), destOffset,
-                sourceOffset,
-                castSizeWithSignedness(
-                    plan.destFacts.size, plan.destFacts.isUnsigned),
-                plan.sourceFacts.size);
-            return;
-        }
-
         case floatToBool: {
             const sourceOffset = reserveTemp(plan.sourceFacts);
             evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
@@ -5462,36 +5419,32 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        case pointerToArray: {
+        // A pointer's native address bits already sit in a
+        // pointer-sized temporary: `pointerToArray` copies
+        // `destFacts.size` of them starting at that address, and
+        // `pointerToIntegral` truncates them to `destFacts.size`
+        // bytes in place, the same truncation a narrowing integral
+        // cast performs.
+        case pointerToArray:
+        case pointerToIntegral: {
             const addressOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, addressOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.pointerToArray), destOffset,
-                addressOffset, plan.destFacts.size);
-            return;
-        }
-
-        // An explicit pointer-to-integral cast preserves the native
-        // address bits: `sourceOffset` already holds them as a
-        // `size_t`, so `applyCastAs` keeping the low `destFacts.size`
-        // bytes is the same truncation a narrowing integral cast
-        // performs.
-        case pointerToIntegral: {
-            const sourceOffset = reserveTemp(pointerFacts);
-            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.pointerToIntegral), destOffset,
-                sourceOffset, plan.destFacts.size);
+            emit(castOp(plan.kind), destOffset, addressOffset,
+                plan.destFacts.size);
             return;
         }
 
         // `cast(void*) someDelegate`: `applyCastAs` reads the same
         // context word `dg.ptr` itself reads (`compileDelegateWord`
         // below), out of a temporary holding the delegate's own two
-        // words.
-        case delegateToPointer: {
-            const delegateOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, delegateOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.delegateToPointer), destOffset,
-                delegateOffset, plan.destFacts.size);
+        // words. `sliceToPointer` reads the matching word out of a
+        // slice's own two.
+        case delegateToPointer:
+        case sliceToPointer: {
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(castOp(plan.kind), destOffset, sourceOffset,
+                plan.destFacts.size);
             return;
         }
 
@@ -5513,14 +5466,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        case sliceToPointer: {
-            const arrayOffset = reserveTemp(plan.sourceFacts);
-            evalInto(expression.e1, arrayOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.sliceToPointer), destOffset,
-                arrayOffset, plan.destFacts.size);
-            return;
-        }
-
         // D reinterprets the same bytes at the new element width, so
         // the byte count - not the element count - is what has to
         // stay the same across the cast; `applyCastAs` scales the
@@ -5535,13 +5480,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        case toBool: {
-            evalInto(expression.e1, destOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.toBool), destOffset, destOffset,
-                plan.destFacts.size, plan.sourceFacts.size);
-            return;
-        }
-
+        // `narrow` reads its operand into a full-width temporary
+        // first, since truncating straight into a narrower
+        // `destOffset` while evaluating would overrun it; `toBool`/
+        // `widenSigned`/`widenUnsigned` never widen past their
+        // operand's own width while evaluating it, so they can
+        // evaluate straight into `destOffset` and cast it in place.
+        // `emit`'s own peephole still substitutes `opCastFixedAs` for
+        // all four once it sees `width`/`sourceWidth` are one of the
+        // four D integral sizes, comparing the handler by identity -
+        // `castOp(plan.kind)` below returns the same `&opCastAs!kind`
+        // a case arm naming only its own kind would.
         case narrow: {
             const temp = reserveTemp(plan.sourceFacts);
             evalInto(expression.e1, temp, plan.sourceFacts.size);
@@ -5550,16 +5499,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        case widenSigned: {
-            evalInto(expression.e1, destOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.widenSigned), destOffset, destOffset,
-                plan.destFacts.size, plan.sourceFacts.size);
-            return;
-        }
-
+        case toBool:
+        case widenSigned:
         case widenUnsigned: {
             evalInto(expression.e1, destOffset, plan.sourceFacts.size);
-            emit(&opCastAs!(CastKind.widenUnsigned), destOffset, destOffset,
+            emit(castOp(plan.kind), destOffset, destOffset,
                 plan.destFacts.size, plan.sourceFacts.size);
             return;
         }
@@ -5568,6 +5512,33 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, expression.loc,
                 text("a cast from `", sourceType.toString, "` to `",
                     destType.toString, "`"));
+        }
+    }
+
+    // `plan.kind` above is a run-time value inside every arm several
+    // kinds share, so it cannot itself be `opCastAs`'s own
+    // compile-time template argument the way naming
+    // `CastKind.someKind` literally in a single-kind arm can - this is
+    // what turns it back into one, the same `&opCastAs!kind` instance
+    // a case arm with only that one label would name directly.
+    // `copy`, `classReference`, `zero`, and `unsupported` never reach
+    // here: `compileCast`'s own arms for them return, or throw,
+    // without ever falling into an arm that calls this.
+    private Instruction.Handler castOp(in CastKind kind) {
+        import std.traits: EnumMembers;
+
+        final switch (kind) with (CastKind) {
+        case copy:
+        case classReference:
+        case zero:
+        case unsupported:
+            assert(0);
+        static foreach (member; EnumMembers!CastKind) {
+            static if (member != copy && member != classReference
+                    && member != zero && member != unsupported)
+                case member:
+                    return &opCastAs!member;
+        }
         }
     }
 
