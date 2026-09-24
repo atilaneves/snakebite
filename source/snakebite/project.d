@@ -312,7 +312,7 @@ public void prepareDependencies(
     in imported!"snakebite.dependencyimage".Optimise optimise
         = imported!"snakebite.dependencyimage".Optimise.yes,
 ) {
-    import snakebite.frontend.dependencyimage: imageSource, imageInputs;
+    import snakebite.frontend.imagesource: imageSource, imageInputs;
     import snakebite.dependencyimage:
         DependencyImage, ProjectImageCache, prepareImage, defaultCompiler;
     import std.path: buildPath;
@@ -331,6 +331,18 @@ public void prepareDependencies(
     auto cache = ProjectImageCache(buildPath(directory, "project.json"),
         settings, project.sources.files);
     auto image = new DependencyImage;
+    // Computed once and reused by both the build step and the input list
+    // below: both only run on a cache miss, but the program does not change
+    // between them, so there is no reason to walk its dependencies twice.
+    string[] dependencyInputs;
+    bool dependencyInputsComputed;
+    string[] cachedDependencyInputs() {
+        if (!dependencyInputsComputed) {
+            dependencyInputs = imageInputs(project.program);
+            dependencyInputsComputed = true;
+        }
+        return dependencyInputs;
+    }
     const prepared = cache.prepare(*image,
         () => imageSource(project.program),
         () {
@@ -343,7 +355,7 @@ public void prepareDependencies(
             }
         },
         source => prepareImage(source, directory, defaultCompiler,
-            imageInputs(project.program), project.sources.importPaths,
+            cachedDependencyInputs(), project.sources.importPaths,
             project.sources.stringImportPaths,
             project.sources.flags.compilerArguments,
             project.sources.linkerFiles, project.sources.linkerFlags,
@@ -352,7 +364,7 @@ public void prepareDependencies(
         () {
             import snakebite.dub: dubInputs;
 
-            return imageInputs(project.program) ~ project.sources.linkerFiles
+            return cachedDependencyInputs() ~ project.sources.linkerFiles
                 ~ (isDubProject(project.directory)
                     ? dubInputs(project.directory,
                         project.sources.dubDescription) : null);

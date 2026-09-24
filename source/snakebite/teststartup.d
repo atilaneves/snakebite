@@ -66,7 +66,8 @@ public TestStartupReport runTestsAndMain(
     imported!"snakebite.backends.backend".Program program,
     in string[] arguments,
 ) {
-    import snakebite.backends.backend: TestHooks, runMain, runModuleConstructors;
+    import snakebite.backends.backend: runMain, runModuleConstructors;
+    import snakebite.dependencyimage: TestHooks;
     import std.algorithm.iteration: map;
     import std.array: array;
     import std.datetime.stopwatch: AutoStart, StopWatch;

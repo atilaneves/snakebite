@@ -14,7 +14,7 @@ import snakebite.exception: SnakebiteException;
 import ut.backends;
 import snakebite.backends.backend: Program, run;
 import snakebite.execution: prepareProject;
-import snakebite.frontend.dependencyimage: imageSource;
+import snakebite.frontend.imagesource: imageSource, prepareImage;
 import core.atomic;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -524,7 +524,7 @@ unittest {
         }
     });
     auto program = Program([module_]);
-    const image = prepareImage(imageSource(program), sharedImageCache,
+    const image = prepareImage(program, sharedImageCache,
         defaultCompiler, null, null, null, ["-w"], optimise: Optimise.no);
     alias Rebindable = int[] function(int[]);
     // The mangle is that of `rebindable!(int[])` with its inferred attributes.
@@ -571,7 +571,7 @@ static foreach (backend; Matrix!()) {
         } else {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache,
+            auto image = prepareImage(program, sharedImageCache,
                 defaultCompiler, null, null, null, ["-w"], optimise: Optimise.no);
             program.dependencyImage = &image;
             scope instance = new backend(program);
@@ -603,7 +603,7 @@ static foreach (backend; Matrix!()) {
         } else {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache,
+            auto image = prepareImage(program, sharedImageCache,
                 defaultCompiler, null, null, null, ["-w"], optimise: Optimise.no);
             program.dependencyImage = &image;
             scope instance = new backend(program);
@@ -800,8 +800,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
         } else {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
-            const source = imageSource(program);
-            auto image = prepareImage(source, sharedImageCache,
+            auto image = prepareImage(program, sharedImageCache,
                 defaultCompiler, null, null, null, ["-w", "-checkaction=context"], optimise: Optimise.no);
             alias FetchAdd = __traits(getOverloads, core.atomic, "atomicFetchAdd", true)[0];
             image.resolve(FetchAdd!(MemoryOrder.seq, int).mangleof)
@@ -1073,7 +1072,7 @@ static foreach (backend; Matrix!()) {
         } else {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
+            auto image = prepareImage(program, sharedImageCache, optimise: Optimise.no);
             program.dependencyImage = &image;
             scope instance = new backend(program);
             int result;
@@ -1103,7 +1102,7 @@ static foreach (backend; Matrix!()) {
         } else {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
+            auto image = prepareImage(program, sharedImageCache, optimise: Optimise.no);
             program.dependencyImage = &image;
             scope instance = new backend(program);
             int result;
@@ -1128,7 +1127,7 @@ static foreach (backend; Matrix!()) {
         } else {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
+            auto image = prepareImage(program, sharedImageCache, optimise: Optimise.no);
             program.dependencyImage = &image;
             scope instance = new backend(program);
             int result;
@@ -1157,7 +1156,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
         } else {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
-            auto image = prepareImage(imageSource(program), sharedImageCache, optimise: Optimise.no);
+            auto image = prepareImage(program, sharedImageCache, optimise: Optimise.no);
             program.dependencyImage = &image;
             scope instance = new backend(program);
             int result;
@@ -1177,8 +1176,7 @@ unittest {
         import core.thread.osthread: Thread;
         Thread allocate() { return _d_newclassT!Thread(); }
     });
-    const source = imageSource(Program([module_]));
-    auto image = prepareImage(source, sharedImageCache,
+    auto image = prepareImage(Program([module_]), sharedImageCache,
         defaultCompiler, null, null, null, ["-de"], optimise: Optimise.no);
     image.resolve(_d_newclassT!Thread.mangleof).should.not == null;
 }

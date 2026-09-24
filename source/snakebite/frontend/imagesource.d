@@ -1,4 +1,4 @@
-module snakebite.frontend.dependencyimage;
+module snakebite.frontend.imagesource;
 
 
 private:
@@ -9,6 +9,36 @@ public string imageSource(imported!"snakebite.backends.backend".Program program)
     foreach (module_; program.rootModules)
         module_.accept(collector);
     return collector.source;
+}
+
+
+// The common two-step case: generate the image source from the analysed
+// program, then hand it to `snakebite.dependencyimage.prepareImage` along
+// with the program's own dependency inputs. Callers that need to interleave
+// caching with source generation (`snakebite.project.prepareDependencies`)
+// still call `imageSource`/`imageInputs` themselves.
+public imported!"snakebite.dependencyimage".DependencyImage prepareImage(
+    imported!"snakebite.backends.backend".Program program,
+    in string cacheDirectory,
+    in string compiler = imported!"snakebite.dependencyimage".defaultCompiler,
+    in string[] inputs = null,
+    in string[] importPaths = null,
+    in string[] stringImportPaths = null,
+    in string[] compilerArguments = null,
+    in string[] linkerFiles = null,
+    in string[] linkerArguments = null,
+    in string cppSource = null,
+    in string cxxCompiler = imported!"snakebite.dependencyimage".defaultCxxCompiler,
+    in string[] cxxCompilerArguments = null,
+    in imported!"snakebite.dependencyimage".Optimise optimise
+        = imported!"snakebite.dependencyimage".Optimise.yes,
+) {
+    import snakebite.dependencyimage: dependencyImagePrepareImage = prepareImage;
+
+    return dependencyImagePrepareImage(imageSource(program), cacheDirectory,
+        compiler, imageInputs(program) ~ inputs, importPaths,
+        stringImportPaths, compilerArguments, linkerFiles, linkerArguments,
+        cppSource, cxxCompiler, cxxCompilerArguments, optimise);
 }
 
 

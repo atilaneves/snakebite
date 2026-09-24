@@ -4,15 +4,12 @@ module snakebite.backends.backend;
 private:
 
 
-public alias TestHooks = imported!"snakebite.dependencyimage".TestHooks;
-
-
 // The root modules of the guest program, parsed and semantically analysed by
 // the frontend, and its entry point. A dub project is not special: a
 // dub-aware driver asks dub for import paths and flags and builds one of
 // these.
 public struct Program {
-    import snakebite.dependencyimage: DependencyImage;
+    import snakebite.dependencyimage: DependencyImage, TestHooks;
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
     import dmd.dsymbol: Dsymbol;
