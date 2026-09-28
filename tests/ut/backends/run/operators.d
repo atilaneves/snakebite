@@ -30,6 +30,26 @@ static foreach (backend; Matrix!(
 }
 
 
+static foreach (backend; Matrix!()) {
+    @("functionPointerCastsPreserveCallableAddress." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int twice(int value) { return value * 2; }
+
+            void main() {
+                alias Function = int function(int);
+                Function original = &twice;
+                void* address = cast(void*) original;
+                Function restored = cast(Function) address;
+
+                assert(restored(21) == 42);
+            }
+        });
+    }
+}
+
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read a static array variable in this cast"),
