@@ -3411,10 +3411,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 storeIntegral(_place, answer ? 1 : 0, _facts.size);
                 return;
             }
-            // D does not order complex values, and dmd lowers array
-            // ordering to `__cmp`.
             case complex, dynamicArray, staticArray:
-                assert(0);
+                assert(0, text("`", expression.toString, "` cannot reach ",
+                    "the backend: D does not order complex values, and dmd ",
+                    "lowers array ordering to `__cmp`"));
             case vector:
                 return storeVectorComparison!op(expression, plan);
             case delegate_: {
@@ -3610,10 +3610,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                         : mixin("cast(ulong) x " ~ op ~ " cast(ulong) y");
                     break;
                 }
-                // A vector's lanes are integral or floating.
                 case complex, reference, vector, dynamicArray, staticArray,
                     delegate_:
-                    assert(0);
+                    assert(0, text("`", expression.toString, "` has a ",
+                        "vector lane that is neither integral nor floating"));
             }
             storeIntegral(cast(ubyte*) _place + i * resultLaneSize,
                 answer ? -1 : 0, resultLaneSize);
@@ -3837,7 +3837,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 Timaginary32, Timaginary64, Timaginary80:
                 break;
 
-            // Callers ask only for an operand dmd has typed as floating.
             case Tarray, Tsarray, Taarray, Tpointer, Treference, Tfunction,
                 Tident, Tclass, Tstruct, Tenum, Tdelegate, Tnone, Tvoid,
                 Tint8, Tuns8, Tint16, Tuns16, Tint32, Tuns32, Tint64,
@@ -3845,7 +3844,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 Twchar, Tdchar, Terror, Tinstance, Ttypeof, Ttuple, Tslice,
                 Treturn, Tnull, Tvector, Tint128, Tuns128, Ttraits, Tmixin,
                 Tnoreturn, Ttag:
-                assert(0);
+                assert(0, text("`", expression.toString, "` of type `",
+                    type.toString, "` is not a floating operand"));
         }
 
         const facts = factsOf(type);
@@ -4516,8 +4516,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 knownLength = true;
                 break;
             }
-            // Semantic slices nothing else at run time; it slices a vector
-            // through its `.array`, and an aggregate through `opSlice`.
             case Taarray, Treference, Tfunction, Tident, Tclass, Tstruct,
                 Tenum, Tdelegate, Tnone, Tvoid, Tint8, Tuns8, Tint16,
                 Tuns16, Tint32, Tuns32, Tint64, Tuns64, Tfloat32, Tfloat64,
@@ -4526,7 +4524,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 Tdchar, Terror, Tinstance, Ttypeof, Ttuple, Tslice, Treturn,
                 Tnull, Tvector, Tint128, Tuns128, Ttraits, Tmixin,
                 Tnoreturn, Ttag:
-                assert(0);
+                assert(0, text("`", expression.toString, "` slices a `",
+                    sourceType.toString, "`: semantic slices only a ",
+                    "pointer or an array at run time, a vector through its ",
+                    "`.array` and an aggregate through `opSlice`"));
         }
 
         auto lengthVar = expression.lengthVar;

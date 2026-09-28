@@ -56,6 +56,7 @@ package ComparisonPlan comparisonPlan(
 
 private ComparisonPlan.Kind kindOf(imported!"dmd.mtype".Type type) {
     import dmd.astenums: TY;
+    import std.conv: text;
 
     final switch (type.ty) with (TY) with (ComparisonPlan.Kind) {
         case Tpointer, Tclass, Tnull:
@@ -84,17 +85,16 @@ private ComparisonPlan.Kind kindOf(imported!"dmd.mtype".Type type) {
             Tint32, Tuns32, Tint64, Tuns64:
             return integral;
 
-        // dmd rewrites struct equality to an identity or to a comparison
-        // of the fields, and associative array equality to a call; it
-        // orders neither.
         case Tstruct, Taarray:
-            assert(0);
+            assert(0, text("dmd rewrites every comparison of `",
+                type.toString, "`: a struct's to an identity or to its ",
+                "fields', an associative array's to a call"));
 
-        // Semantic rejects `cent`/`ucent`, and `toBasetype` leaves no
-        // enum; no other kind here is a value.
         case Tint128, Tuns128, Tenum, Tvoid, Tfunction, Tnoreturn,
             Treference, Tident, Tnone, Terror, Tinstance, Ttypeof, Ttuple,
             Tslice, Treturn, Ttraits, Tmixin, Ttag:
-            assert(0);
+            assert(0, text("`", type.toString, "` is not a comparable ",
+                "value: semantic rejects `cent`/`ucent`, and `toBasetype` ",
+                "leaves no enum"));
     }
 }

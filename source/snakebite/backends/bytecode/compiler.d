@@ -4003,6 +4003,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // itself, so it does not need the bounds work of a bounded slice.
     override void visit(SliceExp expression) {
         import dmd.astenums: TY;
+        import std.conv: text;
 
         requireDestination(expression);
 
@@ -4014,8 +4015,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return compileStaticArraySlice(expression, sourceType);
             case Tarray:
                 return compileDynamicArraySlice(expression, sourceType);
-            // Semantic slices nothing else at run time; it slices a vector
-            // through its `.array`, and an aggregate through `opSlice`.
             case Taarray, Treference, Tfunction, Tident, Tclass, Tstruct,
                 Tenum, Tdelegate, Tnone, Tvoid, Tint8, Tuns8, Tint16,
                 Tuns16, Tint32, Tuns32, Tint64, Tuns64, Tfloat32, Tfloat64,
@@ -4024,7 +4023,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 Tdchar, Terror, Tinstance, Ttypeof, Ttuple, Tslice, Treturn,
                 Tnull, Tvector, Tint128, Tuns128, Ttraits, Tmixin,
                 Tnoreturn, Ttag:
-                assert(0);
+                assert(0, text("`", expression.toString, "` slices a `",
+                    sourceType.toString, "`: semantic slices only a ",
+                    "pointer or an array at run time, a vector through its ",
+                    "`.array` and an aggregate through `opSlice`"));
         }
     }
 
@@ -4883,6 +4885,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileComparison(
         BinExp expression, in ComparisonPlan plan, in size_t destOffset,
     ) {
+        import std.conv: text;
+
         const operandFacts = plan.facts;
 
         with (ComparisonPlan.Kind) final switch (plan.kind) {
@@ -4964,10 +4968,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case vector:
                 return compileVectorComparison(expression, plan, destOffset);
 
-            // dmd lowers array ordering to `__cmp`, and equality reaches
-            // `visitUnloweredEqual`'s own byte compares.
             case dynamicArray, staticArray:
-                assert(0);
+                assert(0, text("`", expressionText(expression), "` cannot ",
+                    "reach here: dmd lowers array ordering to `__cmp`, and ",
+                    "array equality is a byte compare"));
 
             case delegate_:
                 return compileDelegateOrdering(expression, destOffset);
@@ -5058,6 +5062,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileVectorComparison(
         BinExp expression, in ComparisonPlan plan, in size_t destOffset,
     ) {
+        import std.conv: text;
+
         const leftOffset = reserveTemp(plan.facts);
         evalInto(expression.e1, leftOffset, plan.facts.size);
         const rightOffset = reserveTemp(plan.facts);
@@ -5072,10 +5078,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 handler = comparisonHandler(
                     expression, plan.laneFacts.isUnsigned);
                 break;
-            // A vector's lanes are integral or floating.
             case complex, reference, vector, dynamicArray, staticArray,
                 delegate_:
-                assert(0);
+                assert(0, text("`", expressionText(expression), "` has a ",
+                    "vector lane that is neither integral nor floating"));
         }
 
         const laneSize = plan.laneFacts.size;

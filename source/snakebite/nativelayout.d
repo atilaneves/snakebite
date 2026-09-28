@@ -287,6 +287,7 @@ public struct TypeFacts {
         public static Truth of(Type type) {
             import dmd.astenums: TY;
             import dmd.typesem: size, toBasetype;
+            import std.conv: text;
 
             type = type.toBasetype;
             final switch (type.ty) with (TY) {
@@ -329,13 +330,13 @@ public struct TypeFacts {
                 case Tnoreturn:
                     return Truth(false, 0, 0);
 
-                // Semantic rejects these as conditions, rejects
-                // `cent`/`ucent`, and `toBasetype` leaves no enum.
                 case Tstruct, Tsarray, Tvector, Tint128, Tuns128, Tenum,
                     Tvoid, Tfunction, Treference, Tident, Tnone, Terror,
                     Tinstance, Ttypeof, Ttuple, Tslice, Treturn, Ttraits,
                     Tmixin, Ttag:
-                    assert(0);
+                    assert(0, text("`", type.toString, "` cannot be a ",
+                        "condition: semantic rejects it, and `toBasetype` ",
+                        "leaves no enum"));
             }
         }
     }
