@@ -386,11 +386,11 @@ public enum delegateValueSize = 2 * (void*).sizeof;
 // modules, so keeping the enum here, DMD-free, is what lets it name
 // the same `CastKind` its own per-kind `opCastAs`/`opCastFixedAs` ops
 // are instantiated over. `applyCastAs` below carries out every kind
-// except `copy`, `classReference`, `zero`, and `unsupported`: each of
+// except `copy`, `classReference`, and `zero`: each of
 // those needs a backend's own control flow (a plain move, a class
-// reference adjustment, a zero fill) or rejection instead, so
-// `applyCast`'s own `final switch` hits `assert(0)` on any of the
-// four - both backends' `compileCast`/`visitUnloweredCast` switches
+// reference adjustment, or a zero fill), so `applyCast`'s own
+// `final switch` hits `assert(0)` on any of the three - both backends'
+// `compileCast`/`visitUnloweredCast` switches
 // handle them directly and never reach `applyCast` with one.
 public enum CastKind {
     // Bit-identical representations: a plain move of the destination's
@@ -404,6 +404,8 @@ public enum CastKind {
     classReference,
     integralToFloat,
     floatToIntegral,
+    floatToPointer,
+    pointerToFloat,
     floatToBool,
     floatWidth,
     complexToBool,
@@ -426,8 +428,6 @@ public enum CastKind {
     widenUnsigned,
     toBool,
     zero,
-    // No kind above applies; the backend rejects the cast itself.
-    unsupported,
 }
 
 // The DMD-free subset of `snakebite.backends.casts.CastPlan` that
@@ -487,6 +487,14 @@ pragma(inline, true) public void applyCastAs(CastKind kind)(
     else static if (kind == floatToIntegral)
         floatingToIntegral(destination, source, layout.destSize,
             layout.sourceSize, layout.destUnsigned);
+
+    else static if (kind == floatToPointer)
+        floatingToIntegral(destination, source, layout.destSize,
+            layout.sourceSize, true);
+
+    else static if (kind == pointerToFloat)
+        integralToFloating(destination, source, layout.destSize,
+            layout.sourceSize, true);
 
     else static if (kind == floatToBool)
         floatingToBool(destination, source, layout.sourceSize);
@@ -649,9 +657,9 @@ pragma(inline, true) public void applyCastAs(CastKind kind)(
 // `snakebite.backends.bytecode.vm`'s per-`CastKind` cast ops - this is
 // their entry point, a plain run-time dispatch to the one arm of
 // `applyCastAs` above that `layout.kind` names. `copy`,
-// `classReference`, `zero`, and `unsupported` never reach here: both
+// `classReference` and `zero` never reach here: both
 // backends' `compileCast`/`visitUnloweredCast` switches handle each of
-// the four with their own control flow or rejection before either one
+// the three with their own control flow before either one
 // ever calls `applyCast`.
 public void applyCast(
     in CastLayout layout,
@@ -667,14 +675,14 @@ public void applyCast(
             ~ "adjustment");
     case zero:
         assert(0, "applyCast: zero needs a backend's own zero fill");
-    case unsupported:
-        assert(0,
-            "applyCast: unsupported casts are rejected before reaching "
-            ~ "applyCast");
     case integralToFloat:
         return applyCastAs!integralToFloat(layout, source, destination);
     case floatToIntegral:
         return applyCastAs!floatToIntegral(layout, source, destination);
+    case floatToPointer:
+        return applyCastAs!floatToPointer(layout, source, destination);
+    case pointerToFloat:
+        return applyCastAs!pointerToFloat(layout, source, destination);
     case floatToBool:
         return applyCastAs!floatToBool(layout, source, destination);
     case floatWidth:

@@ -9,6 +9,69 @@ module ut.backends.run.operators;
 import ut.backends;
 
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast a floating value to a pointer"),
+)) {
+    @("pointerFloatingCastsConvertNumericValues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            double asNumber(int* value) { return cast(double) value; }
+            int* asPointer(double value) { return cast(int*) value; }
+
+            void main() {
+                int* pointer = asPointer(12.0);
+                assert(cast(size_t) pointer == 12);
+                assert(asNumber(pointer) == 12.0);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static array variable in this cast"),
+)) {
+    @("staticArrayToVoidSliceUsesByteLength." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int[2] values;
+
+            void main() {
+                values = [0x01020304, 0x05060708];
+                void[] bytes = cast(void[]) values;
+
+                assert(bytes.length == 2 * int.sizeof);
+                assert(bytes.ptr == cast(void*) values.ptr);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not form a byte-length slice from a static array"),
+)) {
+    @("localStaticArrayToVoidSlicePreservesLengthAndStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[2] values = [0x01020304, 0x05060708];
+                void[] bytes = cast(void[]) values;
+
+                assert(bytes.length == 2 * int.sizeof);
+                assert(bytes.ptr == cast(void*) values.ptr);
+            }
+        });
+    }
+}
+
+
 // Shifting a value into bytes and back reconstructs it, which pins the
 // shift amounts and the truncation each `cast(ubyte)` does.
 static foreach (backend; Matrix!()) {
@@ -65,6 +128,28 @@ static foreach (backend; Matrix!()) {
                 assert(reader.readEnum == MyEnum.bar);
                 assert(reader.readEnum == MyEnum.baz);
                 assert(reader.readEnum == MyEnum.foo);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast an associative array to a class reference"),
+)) {
+    @("associativeArrayClassCastsKeepTheHandle." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C {}
+            C asClass(int[int] value) { return cast(C) value; }
+
+            void main() {
+                int[int] value;
+                value[1] = 2;
+                C object = asClass(value);
+                assert(cast(void*) object == cast(void*) value);
             }
         });
     }

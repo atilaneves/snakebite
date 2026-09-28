@@ -5719,10 +5719,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // ness` packs a signedness bit into one of them for the four
         // kinds that need one, the same way `opCastWidenSigned`'s own
         // `source` field already carries a size rather than an offset.
-        // `copy`, `classReference`, `zero`, and `unsupported` are not:
-        // a plain reinterpret needs no transformation at all, and the
-        // other three each need this compiler's own control flow or
-        // rejection instead, so they still emit their own bytecode
+        // `copy`, `classReference`, and `zero` are not: a plain
+        // reinterpret needs no transformation at all, and the other
+        // two each need this compiler's own control flow, so they still
+        // emit their own bytecode
         // below.
         final switch (plan.kind) with (CastKind) {
         case copy:
@@ -5800,6 +5800,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 ? reserveTemp(plan.sourceFacts) : destOffset;
             evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
             emit(&opCastAs!(CastKind.floatWidth), destOffset, sourceOffset,
+                plan.destFacts.size, plan.sourceFacts.size);
+            return;
+        }
+
+        case floatToPointer:
+        case pointerToFloat: {
+            const sourceOffset = reserveTemp(plan.sourceFacts);
+            evalInto(expression.e1, sourceOffset, plan.sourceFacts.size);
+            emit(castOp(plan.kind), destOffset, sourceOffset,
                 plan.destFacts.size, plan.sourceFacts.size);
             return;
         }
@@ -5901,10 +5910,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        case unsupported:
-            throw rejection(_function, expression.loc,
-                text("a cast from `", sourceType.toString, "` to `",
-                    destType.toString, "`"));
         }
     }
 
@@ -5914,9 +5919,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `CastKind.someKind` literally in a single-kind arm can - this is
     // what turns it back into one, the same `&opCastAs!kind` instance
     // a case arm with only that one label would name directly.
-    // `copy`, `classReference`, `zero`, and `unsupported` never reach
-    // here: `compileCast`'s own arms for them return, or throw,
-    // without ever falling into an arm that calls this.
+    // `copy`, `classReference`, and `zero` never reach here:
+    // `compileCast`'s own arms for them return without falling into an
+    // arm that calls this.
     private Instruction.Handler castOp(in CastKind kind) {
         import std.traits: EnumMembers;
 
@@ -5924,11 +5929,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         case copy:
         case classReference:
         case zero:
-        case unsupported:
             assert(0);
         static foreach (member; EnumMembers!CastKind) {
             static if (member != copy && member != classReference
-                    && member != zero && member != unsupported)
+                    && member != zero)
                 case member:
                     return &opCastAs!member;
         }
