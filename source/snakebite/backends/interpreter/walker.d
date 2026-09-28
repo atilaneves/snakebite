@@ -3323,6 +3323,31 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
+        const kind = expression.e1.type.toBasetype.ty;
+        if (kind == Tfloat32 || kind == Tfloat64 || kind == Tfloat80) {
+            import snakebite.nativevalue: loadFloating, storeFloating;
+
+            auto target = addressOf(expression.e1);
+            const current = loadFloating(target, facts.size);
+            const step = asFloating(expression.e2);
+            real changed;
+            if (kind == Tfloat32)
+                changed = expression.op == EXP.plusPlus
+                    ? cast(float) current + cast(float) step
+                    : cast(float) current - cast(float) step;
+            else if (kind == Tfloat64)
+                changed = expression.op == EXP.plusPlus
+                    ? cast(double) current + cast(double) step
+                    : cast(double) current - cast(double) step;
+            else
+                changed = expression.op == EXP.plusPlus
+                    ? current + step : current - step;
+
+            storeFloating(target, changed, facts.size);
+            storeFloating(_place, current, _facts.size);
+            return;
+        }
+
         if (!facts.isIntegral)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
@@ -3771,6 +3796,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
+        const kind = _type.toBasetype.ty;
+
         // Every operator that can carry a floating type out of dmd's
         // semantic pass: the bitwise and shift operators are rejected by
         // the frontend on floating operands, so the `static if` only
@@ -3783,14 +3810,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // the same single rounding compiled D performs.
         static if (op == "+" || op == "-" || op == "*" || op == "/"
                 || op == "%")
-            if (_type.ty == Tfloat32 || _type.ty == Tfloat64
-                    || _type.ty == Tfloat80) {
+            if (kind == Tfloat32 || kind == Tfloat64
+                    || kind == Tfloat80) {
                 const a = asFloating(expression.e1);
                 const b = asFloating(expression.e2);
-                if (_type.ty == Tfloat32)
+                if (kind == Tfloat32)
                     *cast(float*) _place =
                         mixin("cast(float) a " ~ op ~ " cast(float) b");
-                else if (_type.ty == Tfloat64)
+                else if (kind == Tfloat64)
                     *cast(double*) _place =
                         mixin("cast(double) a " ~ op ~ " cast(double) b");
                 else
@@ -3847,16 +3874,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativelayout: storeIntegral;
         import std.conv: text;
 
+        const kind = _type.toBasetype.ty;
+
         // `~` is rejected by the frontend on floating operands, so the
         // `static if` only keeps its mixin compilable for this operator;
         // only `-` ever reaches here with a floating type.
         static if (op == "-")
-            if (_type.ty == Tfloat32 || _type.ty == Tfloat64
-                    || _type.ty == Tfloat80) {
+            if (kind == Tfloat32 || kind == Tfloat64
+                    || kind == Tfloat80) {
                 const a = asFloating(expression.e1);
-                if (_type.ty == Tfloat32)
+                if (kind == Tfloat32)
                     *cast(float*) _place = -cast(float) a;
-                else if (_type.ty == Tfloat64)
+                else if (kind == Tfloat64)
                     *cast(double*) _place = -cast(double) a;
                 else
                     *cast(real*) _place = -a;

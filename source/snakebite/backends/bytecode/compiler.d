@@ -21,8 +21,10 @@ import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
 // checks all over this compiler.
 private bool isFloatingType(imported!"dmd.mtype".Type type) {
     import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
+    import dmd.typesem: toBasetype;
 
-    return type.ty == Tfloat32 || type.ty == Tfloat64 || type.ty == Tfloat80;
+    const kind = type.toBasetype.ty;
+    return kind == Tfloat32 || kind == Tfloat64 || kind == Tfloat80;
 }
 
 // A pointer-sized temporary's facts: the shape every address this compiler
@@ -3156,8 +3158,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tpointer;
 
         const facts = TypeFacts.of(target.type);
-        if ((!facts.isIntegral && target.type.toBasetype.ty != Tpointer)
-                || !isIntegralSize(facts.size))
+        const scalar = isFloatingType(target.type)
+            || (facts.isIntegral || target.type.toBasetype.ty == Tpointer)
+                && isIntegralSize(facts.size);
+        if (!scalar)
             throw rejection(_function, loc, operation);
 
         if (auto dot = target.isDotVarExp) {
@@ -3336,8 +3340,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const stepOffset = reserveTemp(storage.facts);
         evalInto(expression.e2, stepOffset, storage.facts.size);
+        const floating = isFloatingType(expression.e1.type);
         auto handler = expression.op == EXP.plusPlus
-            ? &opAdd : &opSubtract;
+            ? (floating ? &opFloatAdd : &opAdd)
+            : (floating ? &opFloatSubtract : &opSubtract);
         emit(handler, valueOffset, stepOffset, storage.facts.size);
         writeScalar(storage, valueOffset, storage.facts.size);
     }

@@ -321,3 +321,25 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A postfix `++`/`--` on a floating value yields the old value and steps
+// by one.
+static foreach (backend; Matrix!()) {
+    @("floatingPostfixIncrementDecrement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                double d = 1.5;
+                assert(d++ == 1.5);
+                assert(d == 2.5);
+                float f = 0.25f;
+                assert(f-- == 0.25f);
+                assert(f == -0.75f);
+                real r = 3.0L;
+                r++;
+                assert(r == 4.0L);
+            }
+        });
+    }
+}

@@ -333,3 +333,55 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// Arithmetic on an enum of a floating type has the enum type itself.
+static foreach (backend; Matrix!()) {
+    @("enumOfFloating.arithmetic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum F : double { a = 1.5, b = 2.0 }
+            enum G : float { a = 0.25f, b = 4.0f }
+
+            void main() {
+                F f = F.a;
+                F sum = f + F.b;
+                assert(cast(double) sum == 3.5);
+                F negated = -f;
+                assert(cast(double) negated == -1.5);
+                G product = G.a * G.b;
+                assert(cast(float) product == 1.0f);
+                G negatedFloat = -G.b;
+                assert(cast(float) negatedFloat == -4.0f);
+                assert(F.a < F.b);
+                assert(!(F.b < F.a));
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("enumOfFloating.assignmentOperators." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum F : double { a = 1.5, b = 2.0 }
+            enum G : float { a = 0.25f }
+
+            void main() {
+                F f = F.a;
+                f += F.b;
+                assert(cast(double) f == 3.5);
+                f *= 2;
+                assert(cast(double) f == 7.0);
+                f++;
+                assert(cast(double) f == 8.0);
+                --f;
+                assert(cast(double) f == 7.0);
+                G g = G.a;
+                g++;
+                assert(cast(float) g == 1.25f);
+            }
+        });
+    }
+}
