@@ -3332,6 +3332,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // an expression - goes, captured before the target changes;
     // `discardResult` when a caller at statement level does not want it.
     private void compilePost(PostExp expression, in size_t destOffset) {
+        import dmd.astenums: Tpointer;
+
         auto storage = scalarStorage(
             expression.e1, expression.loc, expressionText(expression));
         const valueOffset = readScalar(storage, storage.facts);
@@ -3340,7 +3342,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opCopy, destOffset, valueOffset, storage.facts.size);
 
         const stepOffset = reserveTemp(storage.facts);
-        evalInto(expression.e2, stepOffset, storage.facts.size);
+        auto sourceType = expression.e1.type.toBasetype;
+        if (sourceType.ty == Tpointer) {
+            // dmd's own AST does not scale a postfix `++`/`--` step for an
+            // enum of a pointer, so the step comes from the pointee size,
+            // not from `e2`.
+            const elementFacts = TypeFacts.of(sourceType.nextOf);
+            emit(&opConstant, stepOffset,
+                addConstant(cast(long) elementFacts.size),
+                storage.facts.size);
+        } else
+            evalInto(expression.e2, stepOffset, storage.facts.size);
         const floating = isFloatingType(expression.e1.type);
         auto handler = expression.op == EXP.plusPlus
             ? (floating ? &opFloatAdd : &opAdd)

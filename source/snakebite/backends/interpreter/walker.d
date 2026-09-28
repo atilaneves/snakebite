@@ -3299,19 +3299,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import std.conv: text;
 
         const facts = factsOf(expression.e1.type);
-        if (expression.e1.type.toBasetype.ty == Tpointer) {
+        auto sourceType = expression.e1.type.toBasetype;
+        if (sourceType.ty == Tpointer) {
             const target = addressOf(expression.e1);
             const current = asPointer(expression.e1);
-            // dmd has already scaled `e2` to bytes for a pointer operand,
-            // but not for an enum of one.
-            const stepFacts = factsOf(expression.e2.type);
-            align(size_t.sizeof) ubyte[size_t.sizeof] step = void;
-            evaluate(expression.e2, expression.e2.type, stepFacts, step.ptr);
-            const bytes = cast(size_t) loadIntegral(
-                step.ptr, stepFacts.size, false);
+            // dmd's own AST does not scale a postfix `++`/`--` step for an
+            // enum of a pointer, so the step comes from the pointee size,
+            // not from `e2`.
+            const elementSize = factsOf(sourceType.nextOf).size;
             const changed = expression.op == EXP.plusPlus
-                ? cast(ubyte*) current + bytes
-                : cast(ubyte*) current - bytes;
+                ? cast(ubyte*) current + elementSize
+                : cast(ubyte*) current - elementSize;
 
             storeIntegral(_place, cast(size_t) current, _facts.size);
             storeIntegral(cast(void*) target, cast(size_t) changed,

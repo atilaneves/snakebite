@@ -283,14 +283,18 @@ static foreach (backend; Matrix!(
     }
 }
 
-// dmd scales the step of a postfix `++`/`--` on a pointer only when the
-// operand's own type is a pointer, not an enum of one, so compiled D
-// moves an `enum : int*` by one byte there. A prefix `--` is `p -= 1`,
-// which dmd scales.
+// `++`/`--` on an enum of a pointer, prefix or postfix, move by the
+// pointee size, the same as a plain pointer - `enum P : int*` moves by
+// `int.sizeof`. dmd's own AST scales a prefix step (rewritten as `p +=
+// 1`/`p -= 1`) but not a postfix one, so `dmd -run` moves a postfix step
+// by one byte instead; that is a dmd bug, not D semantics (`ldc2 -run`
+// scales it). The sibling test below pins dmd's actual, unscaled result.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot interpret the address of a local variable at "
             ~ "compile time"),
+    Omit!(Native, Because.diverges,
+        "dmd does not scale ++/-- on an enum of a pointer; ldc does"),
 )) {
     @("enumOfPointer.incrementDecrement." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -303,12 +307,40 @@ static foreach (backend; Matrix!(
                 P p = cast(P) data.ptr;
                 P before = p++;
                 assert(before == data.ptr);
-                assert(cast(size_t) p - cast(size_t) data.ptr == 1);
+                assert(cast(size_t) p - cast(size_t) data.ptr
+                    == int.sizeof);
                 --p;
-                assert(cast(size_t) data.ptr - cast(size_t) p == 3);
+                assert(cast(size_t) p == cast(size_t) data.ptr);
+                P after = p--;
+                assert(after == data.ptr);
+                assert(cast(size_t) data.ptr - cast(size_t) p
+                    == int.sizeof);
+                ++p;
+                assert(cast(size_t) p == cast(size_t) data.ptr);
             }
         });
     }
+}
+
+// Sibling pinning the divergence above: `dmd -run` itself, real
+// compiled D, moves a postfix `++`/`--` on an enum of a pointer by one
+// byte, because its AST never scales that step for an enum.
+@("enumOfPointer.incrementDecrement.Native")
+@Tags(Native.stringof)
+unittest {
+    0.shouldBeStatusOf!(Native, q{
+        enum P : int* { z = null }
+
+        void main() {
+            int[4] data = [10, 20, 30, 40];
+            P p = cast(P) data.ptr;
+            P before = p++;
+            assert(before == data.ptr);
+            assert(cast(size_t) p - cast(size_t) data.ptr == 1);
+            --p;
+            assert(cast(size_t) data.ptr - cast(size_t) p == 3);
+        }
+    });
 }
 
 static foreach (backend; Matrix!(
