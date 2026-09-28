@@ -2362,7 +2362,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileVariableInitializer(
         VarDeclaration variable,
         Loc loc,
-        in string operation,
+        lazy string operation,
     ) {
         auto expInitializer = variable._init.isExpInitializer;
         if (expInitializer is null)
@@ -6474,10 +6474,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         public size_t storageStaticIndexLength(IndexExp expression) {
+            import dmd.typesem: toBasetype;
+
             const length = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opConstant, length,
                 compiler.addConstant(cast(long) expression.e1.type
-                    .isTypeSArray.dim.toInteger),
+                    .toBasetype.isTypeSArray.dim.toInteger),
                 size_t.sizeof);
             return length;
         }
@@ -6534,9 +6536,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storageDynamicIndex(
             IndexExp expression, size_t base, size_t index,
         ) {
+            import dmd.typesem: toBasetype;
             import snakebite.nativelayout: arrayPointerOffset;
 
-            const stride = TypeFacts.of(expression.e1.type.nextOf).size;
+            const stride =
+                TypeFacts.of(expression.e1.type.toBasetype.nextOf).size;
             const strideOffset = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opConstant, strideOffset,
                 compiler.addConstant(cast(long) stride), size_t.sizeof);
@@ -6555,7 +6559,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storageStaticIndex(
             IndexExp expression, size_t base, size_t index,
         ) {
-            const stride = TypeFacts.of(expression.e1.type.nextOf).size;
+            import dmd.typesem: toBasetype;
+
+            const stride =
+                TypeFacts.of(expression.e1.type.toBasetype.nextOf).size;
             const strideOffset = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opConstant, strideOffset,
                 compiler.addConstant(cast(long) stride), size_t.sizeof);
@@ -6570,7 +6577,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storagePointerIndex(
             IndexExp expression, size_t pointer, size_t index,
         ) {
-            const stride = TypeFacts.of(expression.e1.type.nextOf).size;
+            import dmd.typesem: toBasetype;
+
+            const stride =
+                TypeFacts.of(expression.e1.type.toBasetype.nextOf).size;
             const strideOffset = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opConstant, strideOffset,
                 compiler.addConstant(cast(long) stride), size_t.sizeof);
