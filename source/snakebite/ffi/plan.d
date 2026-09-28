@@ -226,20 +226,28 @@ public struct CallPlan {
         void* returnPlace,
         scope const(void*)[] arguments,
     ) const {
-        // Reuse the register frame inside the full frame. Keeping one local
-        // avoids reserving separate 288-byte and 416-byte frames in the
-        // optimized stack layout.
-        Frame frame = void;
         // Calls without SSE or stack arguments need only the register frame.
         if (_integerOnly) {
-            auto callFrame = &frame.callFrame;
-            auto frameBytes = cast(ubyte*) callFrame;
+            CallFrame frame = void;
+            auto frameBytes = cast(ubyte*) &frame;
             fillIntegerFrame(frameBytes, returnPlace, arguments);
-            _entry(address, callFrame);
+            _entry(address, &frame);
             readResult(frameBytes, returnPlace);
             return;
         }
 
+        callGeneral(address, returnPlace, arguments);
+    }
+
+    // Keep the larger frame for SSE and stack arguments out of the
+    // integer-only call path's stack allocation.
+    pragma(inline, false)
+    private void callGeneral(
+        const(void)* address,
+        void* returnPlace,
+        scope const(void*)[] arguments,
+    ) const {
+        Frame frame = void;
         // Keep small calls on the stack. The overflow storage has word
         // alignment and retains the flat offsets used by the prepared moves.
         auto storage = _stackWordCount <= frame.stackArea.length
