@@ -5101,7 +5101,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        auto structType = _type.isTypeStruct;
+        auto structType = _type.toBasetype.isTypeStruct;
         if (structType is null || structType.sym != expression.sd)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,

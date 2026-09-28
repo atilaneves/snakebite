@@ -580,3 +580,21 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("enumOfStruct.literalWithAddress." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int one() { return 1; }
+            struct Callback { int function() get; double weight; }
+            enum ECallback : Callback { a = Callback(&one, 2.0) }
+
+            void main() {
+                ECallback callback = ECallback.a;
+                assert(callback.get() == 1);
+                assert(callback.weight == 2.0);
+            }
+        });
+    }
+}
