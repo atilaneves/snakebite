@@ -200,39 +200,31 @@ public struct CallSelection {
     // argument of the type its result (or, for `ldexp`'s second
     // argument, an unrelated `int`) shares.
     private static ParameterType parameterTypeOf(FuncDeclaration function_) {
-        import dmd.astenums: Tfloat32, Tfloat64, Tfloat80,
-            Tuns16, Tuns32, Tuns64;
+        import dmd.astenums: TY;
         import dmd.typesem: toBasetype;
-        import snakebite.exception: SnakebiteException;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
-        import std.conv: text;
 
         // `const` fails: `ParameterList.length` and `opIndex` are not
         // `const` methods.
         auto parameterList = typeFunctionOf(function_).parameterList;
-        if (parameterList.length == 0)
-            throw new SnakebiteException(text(
-                "snakebite's builtin table has no entry for `",
-                function_.toString, "`, which takes no parameters"));
+        assert(parameterList.length > 0);
 
-        // Every builtin this table serves declares its first parameter
-        // with a literal basic type in druntime's own source (never an
-        // enum), so this is a no-op today - kept for the same reason
-        // every other type-kind dispatch in this codebase normalises
-        // first, not because a concrete enum case is known to reach it.
         const parameterType = parameterList[0].type.toBasetype;
-        switch (parameterType.ty) {
+        final switch (parameterType.ty) with (TY) {
             case Tfloat32: return ParameterType.float_;
             case Tfloat64: return ParameterType.double_;
             case Tfloat80: return ParameterType.real_;
             case Tuns16: return ParameterType.ushort_;
             case Tuns32: return ParameterType.uint_;
             case Tuns64: return ParameterType.ulong_;
-            default:
-                throw new SnakebiteException(text(
-                    "snakebite's builtin table has no entry for `",
-                    function_.toString, "`'s first parameter type `",
-                    parameterType.toString, "`"));
+            case Tarray, Tsarray, Taarray, Tpointer, Treference, Tfunction,
+                Tident, Tclass, Tstruct, Tenum, Tdelegate, Tnone, Tvoid,
+                Tint8, Tuns8, Tint16, Tint32, Tint64, Timaginary32,
+                Timaginary64, Timaginary80, Tcomplex32, Tcomplex64,
+                Tcomplex80, Tbool, Tchar, Twchar, Tdchar, Terror, Tinstance,
+                Ttypeof, Ttuple, Tslice, Treturn, Tnull, Tvector, Tint128,
+                Tuns128, Ttraits, Tmixin, Tnoreturn, Ttag:
+                assert(0);
         }
     }
 }
