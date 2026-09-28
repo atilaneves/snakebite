@@ -9,6 +9,31 @@ module ut.backends.run.associative;
 import ut.backends;
 
 
+// A module-scope associative array literal whose keys and values are all
+// compile-time constants is its own static initializer: dmd gives it an
+// `AssocArrayLiteralExp.lowering` (a call to `object.
+// _d_assocarrayliteralTX!(K, V)`) the same as a dynamic one, rather than
+// building it at `main`'s first statement. The Ctfe backend cannot read a
+// non-manifest static variable while interpreting `main` at all, the same
+// restriction real dmd CTFE has.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable's value at compile time"),
+)) {
+    @("moduleScopeAssocArrayLiteralIsAStaticInitializer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int[string] table = ["a": 1, "b": 2];
+
+            int main() {
+                return table["b"] == 2 && table["a"] == 1
+                    && table.length == 2 ? 0 : 1;
+            }
+        });
+    }
+}
+
 // An associative array literal evaluates its key expressions and builds
 // the table from those run-time values, rather than from anything fixed
 // at compile time.

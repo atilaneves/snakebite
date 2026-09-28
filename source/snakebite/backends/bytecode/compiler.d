@@ -102,7 +102,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         _nativeData = NativeData(&_program.isRootOwned,
             &constantSymbolAddress,
             (name) => _plans.resolveThreadLocal(name),
-            &classRuntimeInfo);
+            &classRuntimeInfo, &callNative);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
@@ -119,6 +119,17 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             return callableAddress(function_, 0);
 
         return _plans.resolve(nativeSymbolName(symbol));
+    }
+
+    // A static-initializer constant's own druntime call (`NativeData.
+    // callNative`, `storeValue`'s `Taarray` case) - the same plan an
+    // ordinary compiled call to `function_` would use.
+    private void callNative(
+        FuncDeclaration function_,
+        void* returnPlace,
+        scope const(void*)[] arguments,
+    ) {
+        _plans.of(function_).call(returnPlace, arguments);
     }
 
     public override CompilationStatistics compilationStatistics() const {

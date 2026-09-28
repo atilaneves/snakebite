@@ -462,6 +462,7 @@ public struct NativeData {
     private SymbolAddress _symbolAddress;
     private ThreadLocalAddress _threadLocalAddress;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
+    private NativeCall _call;
     // Read and written only under the compiler lock. Key by the object,
     // not a reference expression, to preserve aliases and cycles.
     private void*[StructLiteralExp] _classValues;
@@ -490,12 +491,26 @@ public struct NativeData {
         SymbolAddress symbolAddress,
         ThreadLocalAddress threadLocalAddress,
         TypeInfo_Class delegate(ClassDeclaration) classInfo,
+        NativeCall call,
     ) {
         _isRootOwned = isRootOwned;
         _symbolAddress = symbolAddress;
         _threadLocalAddress = threadLocalAddress;
         _classInfo = classInfo;
+        _call = call;
         _tls = PerThread!(TlsSlots*)(() => new TlsSlots);
+    }
+
+    // A static-initializer constant whose native layout only a druntime
+    // call can build (an associative array - see `storeValue`'s `Taarray`
+    // case): calls `function_` the way any other FFI barrier crossing
+    // does, through the same plan a backend's ordinary calls use.
+    private void callNative(
+        imported!"dmd.func".FuncDeclaration function_,
+        void* returnPlace,
+        scope const(void*)[] arguments,
+    ) {
+        _call(function_, returnPlace, arguments);
     }
 
     public void write(
@@ -768,6 +783,15 @@ private alias SymbolAddress =
     void* delegate(imported!"dmd.declaration".Declaration);
 // This thread's address of a thread-local symbol, by linker name.
 private alias ThreadLocalAddress = void* delegate(in char[] name);
+// Calls an already-compiled function, the way a backend's own FFI plan
+// would: `arguments[i]` is the address of parameter `i`'s own native
+// bytes, and the result lands at `returnPlace` - see `NativeData.
+// callNative`.
+private alias NativeCall = void delegate(
+    imported!"dmd.func".FuncDeclaration function_,
+    void* returnPlace,
+    scope const(void*)[] arguments,
+);
 
 public string nativeSymbolName(imported!"dmd.declaration".Declaration symbol) {
     import dmd.common.outbuffer: OutBuffer;
@@ -1009,7 +1033,63 @@ private void storeValue(
             return;
         }
 
-        case Tarray, Tsarray, Taarray, Tpointer, Treference, Tfunction,
+        // dmd's own static-initializer lowering (`AssocArrayLiteralExp.
+        // lowering`, `dmd.semantic2.lowerStaticAAs`) is always a call to
+        // `object._d_assocarrayliteralTX!(K, V)` on this same literal's own
+        // `keys`/`values` - the native layout of a `Taarray` constant is
+        // that druntime function's own return value, so it is built by
+        // calling it for real, on those pairs' native bytes, the same way
+        // a dynamic associative-array literal is built at run time - not
+        // by hand-laying-out druntime's internal hashtable here.
+        case Taarray: {
+            auto literal = value.isAssocArrayLiteralExp;
+            assert(literal !is null, text("no native layout for the ",
+                "constant `", value.toString, "` of type `",
+                type.toString, "`: an associative-array-typed constant ",
+                "is always an associative-array literal"));
+
+            auto constructor = literal.lowering !is null
+                ? literal.lowering.isCallExp : null;
+            assert(constructor !is null && constructor.f !is null,
+                text("no native layout for the constant `",
+                    value.toString, "` of type `", type.toString,
+                    "`: dmd left it without a static-initializer lowering"));
+            assert(nativeData !is null);
+
+            auto aaType = type.isTypeAArray;
+            const keyElementSize = aaType.index.size;
+            const valueElementSize = aaType.next.size;
+
+            auto keyBytes = new void[literal.keys.length * keyElementSize];
+            auto valueBytes =
+                new void[literal.values.length * valueElementSize];
+            foreach (i, key; *literal.keys)
+                storeValue(aaType.index, key,
+                    cast(ubyte*) keyBytes.ptr + i * keyElementSize,
+                    symbolAddress, nativeData);
+            foreach (i, element; *literal.values)
+                storeValue(aaType.next, element,
+                    cast(ubyte*) valueBytes.ptr + i * valueElementSize,
+                    symbolAddress, nativeData);
+
+            ubyte[size_t.sizeof * 2] keysArgument = void;
+            ubyte[size_t.sizeof * 2] valuesArgument = void;
+            storeIntegral(keysArgument.ptr + arrayLengthOffset,
+                literal.keys.length, size_t.sizeof);
+            *cast(void**) (keysArgument.ptr + arrayPointerOffset) =
+                keyBytes.ptr;
+            storeIntegral(valuesArgument.ptr + arrayLengthOffset,
+                literal.values.length, size_t.sizeof);
+            *cast(void**) (valuesArgument.ptr + arrayPointerOffset) =
+                valueBytes.ptr;
+
+            const(void*)[2] arguments =
+                [keysArgument.ptr, valuesArgument.ptr];
+            nativeData.callNative(constructor.f, place, arguments[]);
+            return;
+        }
+
+        case Tarray, Tsarray, Tpointer, Treference, Tfunction,
             Tident, Tclass, Tstruct, Tenum, Tdelegate, Tnone, Tvoid, Tint8,
             Tuns8, Tint16, Tuns16, Tint32, Tuns32, Tint64, Tuns64, Tbool,
             Tchar, Twchar, Tdchar, Terror, Tinstance, Ttypeof, Ttuple,

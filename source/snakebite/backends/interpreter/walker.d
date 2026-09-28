@@ -243,7 +243,7 @@ private struct Shared {
         nativeData = NativeData(&this.program.isRootOwned,
             &constantSymbolAddress,
             (name) => plans.resolveThreadLocal(name),
-            &classRuntimeInfo);
+            &classRuntimeInfo, &callNative);
         runtimeTypes = RuntimeTypes(&this.program.isRootOwned,
             (name) => plans.resolve(name),
             &classRuntimeInfo,
@@ -257,6 +257,17 @@ private struct Shared {
             return callableAddress(function_, 0);
 
         return plans.resolve(nativeSymbolName(symbol));
+    }
+
+    // A static-initializer constant's own druntime call (`NativeData.
+    // callNative`, `storeValue`'s `Taarray` case) - the same plan an
+    // ordinary compiled call to `function_` would use.
+    private void callNative(
+        FuncDeclaration function_,
+        void* returnPlace,
+        scope const(void*)[] arguments,
+    ) {
+        plans.of(function_).call(returnPlace, arguments);
     }
 
     // A guest class's native metadata. This vtable is real native layout
