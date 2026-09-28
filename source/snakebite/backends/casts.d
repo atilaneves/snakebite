@@ -364,13 +364,18 @@ private CastPlan classifyStaticArray(
     case dynamicArray: {
         const sourceElementSize = sourceType.nextOf.size;
         const destElementSize = destType.nextOf.size;
-        assert(destElementSize != 0
-            && (sourceType.isTypeSArray.dim.toInteger
-                * sourceElementSize) % destElementSize == 0);
         auto plan = CastPlan(CastKind.sarrayToSlice, sourceFacts, destFacts);
-        plan.staticLength = cast(size_t)(
-            sourceType.isTypeSArray.dim.toInteger * sourceElementSize
-                / destElementSize);
+        if (sourceElementSize == destElementSize) {
+            plan.staticLength = cast(size_t) sourceType.isTypeSArray.dim
+                .toInteger;
+        } else {
+            assert(destElementSize != 0
+                && (sourceType.isTypeSArray.dim.toInteger
+                    * sourceElementSize) % destElementSize == 0);
+            plan.staticLength = cast(size_t)(
+                sourceType.isTypeSArray.dim.toInteger * sourceElementSize
+                    / destElementSize);
+        }
         return plan;
     }
     case pointer, functionPointer:

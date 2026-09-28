@@ -1206,8 +1206,11 @@ static foreach (backend; Matrix!()) {
 }
 
 
-static foreach (backend; Matrix!()) {
-    @("review435.zeroSizeArrayElementSlice." ~ backend.stringof)
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a zero-size static array in this cast"),
+)) {
+    @("staticArrayOfZeroSizedElementsRetainsSliceLength." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
@@ -1216,7 +1219,9 @@ static foreach (backend; Matrix!()) {
             }
             void main() {
                 int[0][2] values;
-                assert(asSlice(values).length == 2);
+                auto slice = asSlice(values);
+                assert(slice.length == 2);
+                assert(cast(void*) slice.ptr == cast(void*) &values);
             }
         });
     }
