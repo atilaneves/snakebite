@@ -31,22 +31,6 @@ pragma(inline, true) public bool isIntegralSize(in size_t size) {
     return nativeIsIntegralSize(size);
 }
 
-public bool isNativeBytes(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: Tvector;
-    import dmd.typesem:
-        isIntegral, needsCopyOrPostblit, needsDestruction, needsNested, size,
-        toBasetype;
-
-    type = type.toBasetype;
-    if (type.ty == Tvector)
-        return false;
-    if (type.isIntegral && !isIntegralSize(type.size))
-        return false;
-    return !type.needsCopyOrPostblit
-        && !type.needsDestruction
-        && !type.needsNested;
-}
-
 // Keep the DMD-facing module's historical error behavior while the actual
 // byte operations live in the DMD-free native-value module. Backend code
 // that already validated its widths can call that module directly.

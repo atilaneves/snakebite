@@ -785,6 +785,97 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A `__vector` element fill copies the whole vector into each element. A
+// scalar right side is broadcast into every lane first. The element
+// outside the slice keeps its `float.nan` initial value.
+static foreach (backend; Matrix!()) {
+    @("dynamicSliceScalarFill.vector." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd: float4, int4;
+            void main() {
+                int4[] ints = new int4[3];
+                ints[] = int4([1, 2, 3, 4]);
+                assert(ints[0][0] == 1 && ints[2][3] == 4);
+                ints[0 .. 2] = 7;
+                assert(ints[0][0] == 7 && ints[1][3] == 7 && ints[2][3] == 4);
+                float4[] floats = new float4[3];
+                floats[1 .. 3] = float4([1.5f, 2.5f, 3.5f, 4.5f]);
+                assert(floats[0][0] != floats[0][0]);
+                assert(floats[1][0] == 1.5f && floats[2][3] == 4.5f);
+            }
+        });
+    }
+}
+
+// An enum whose base type is a vector fills the same way as the vector.
+static foreach (backend; Matrix!()) {
+    @("dynamicSliceScalarFill.vectorEnum." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd: float4;
+            enum FV : float4 { one = float4(1), two = float4(2) }
+            void main() {
+                FV[] a = new FV[2];
+                a[] = FV.two;
+                float4 last = a[1];
+                assert(last[0] == 2 && last[3] == 2);
+            }
+        });
+    }
+}
+
+// A nested struct element keeps its context pointer, so a filled
+// element still sees the enclosing function's locals.
+static foreach (backend; Matrix!()) {
+    @("dynamicSliceScalarFill.nestedStruct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int local = 9;
+                struct N {
+                    int x;
+                    int get() { return x + local; }
+                }
+                N[] a = new N[2];
+                a[] = N(1);
+                assert(a[0].get == 10 && a[1].get == 10);
+            }
+        });
+    }
+}
+
+// Compiled D fills an element that has a copy constructor, but not a
+// postblit or destructor, bit by bit: the copy constructor does not run.
+static foreach (backend; Matrix!()) {
+    @("dynamicSliceScalarFill.copyConstructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S {
+                int x;
+                int* copies;
+                this(ref return scope S other) {
+                    x = other.x;
+                    copies = other.copies;
+                    if (copies) ++*copies;
+                }
+            }
+            void main() {
+                int copies;
+                S[] a = new S[3];
+                S v = S(7, &copies);
+                a[] = v;
+                assert(a[0].x == 7 && a[2].x == 7);
+                assert(copies == 0);
+            }
+        });
+    }
+}
+
 
 // An out-of-bounds index into a dynamic array is a `RangeError`, the same
 // as an out-of-bounds slice - both are one contract in compiled D, not

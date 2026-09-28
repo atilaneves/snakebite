@@ -2708,18 +2708,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return target;
     }
 
-    // The shared resolver has already selected the slice-assignment primitive
-    // before this hook runs. The DMD node metadata selects the primitive's
-    // native scalar-fill or array-copy operation; no lvalue classification is
-    // repeated here.
-    private void* assignSliceAt(AssignExp expression, void* target) {
-        if (expression.memset == MemorySet.blockAssign)
-            return assignSliceScalar(expression, target);
-        if (expression.e2.type.ty == Tarray)
-            return assignSlice(expression, target);
-        return assignSliceScalar(expression, target);
-    }
-
     // A scalar slice assignment evaluates the right side once before any
     // destination element is overwritten: `a[] = a[0]` fills every element
     // with the old first value. DMD marks this shape with `blockAssign`,
@@ -2728,38 +2716,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private void* assignSliceScalar(AssignExp expression, void* target) {
         import core.stdc.string: memcpy;
         import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset, isNativeBytes,
-            loadIntegral;
-        import std.conv: text;
+            arrayLengthOffset, arrayPointerOffset, loadIntegral;
 
-        auto elementType = _type.nextOf;
-        if (elementType is null)
-            throw new SnakebiteException(
-                text("interpreter cannot fill `", expression.e1.toString,
-                    "`: it has no element type"),
-            );
-        if (!isNativeBytes(elementType))
-            throw new SnakebiteException(
-                text("interpreter cannot fill `", expression.e1.toString,
-                    "`: its element type is `", elementType.toString, "`"),
-            );
-        const elementFacts = factsOf(elementType);
-        const sourceFacts = factsOf(expression.e2.type);
-        if (sourceFacts.size != elementFacts.size)
-            throw new SnakebiteException(
-                text("interpreter cannot fill `", expression.e1.toString,
-                    "`: source `", expression.e2.type.toString,
-                    "` and element `", elementType.toString,
-                    "` have different sizes"),
-            );
+        const elementFacts = factsOf(_type.nextOf);
 
         auto destination = _frames.push(_facts.size, _facts.alignment);
         // `addressOf` has already evaluated the slice bounds and left its
         // descriptor at `target`. Reuse that value so each bound runs once.
         memcpy(destination.base, target, _facts.size);
-        auto value = _frames.push(sourceFacts.size, sourceFacts.alignment);
+        auto value = _frames.push(elementFacts.size, elementFacts.alignment);
         evaluate(
-            expression.e2, expression.e2.type, sourceFacts, value.base,
+            expression.e2, expression.e2.type, elementFacts, value.base,
         );
 
         const length = loadIntegral(
@@ -2910,7 +2877,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             evaluator.assignAt(expression, target);
         }
 
-        public void storageSliceAssignment(
+        public void storageSliceFill(AssignExp expression, void* target) {
+            sliceAssignment!(Evaluator.assignSliceScalar)(expression, target);
+        }
+
+        public void storageSliceCopy(AssignExp expression, void* target) {
+            sliceAssignment!(Evaluator.assignSlice)(expression, target);
+        }
+
+        private void sliceAssignment(alias assign)(
             AssignExp expression, void* target,
         ) {
             auto savedType = evaluator._type;
@@ -2924,7 +2899,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
             evaluator._type = expression.type;
             evaluator._facts = evaluator.factsOf(expression.type);
-            evaluator.assignSliceAt(expression, target);
+            __traits(child, evaluator, assign)(expression, target);
         }
 
         public void storageCompoundAssignment(

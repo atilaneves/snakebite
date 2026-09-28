@@ -192,10 +192,15 @@ public struct StorageResolver(Result, Adapter) {
         // assignment's left side; the adapter receives its location and can
         // then evaluate and store the right side exactly once.
         auto target = resolve(targetExpression);
-        if (expression.e1.isSliceExp !is null)
-            _adapter.storageSliceAssignment(expression, target);
-        else
+        // dmd marks `a[] = v` with `blockAssign` exactly when it cast `v`
+        // to the element type. Every other slice assignment has an array
+        // on the right side, whose elements are copied.
+        if (expression.e1.isSliceExp is null)
             _adapter.storagePlainAssignment(expression, target);
+        else if (expression.memset == MemorySet.blockAssign)
+            _adapter.storageSliceFill(expression, target);
+        else
+            _adapter.storageSliceCopy(expression, target);
         return target;
     }
 
