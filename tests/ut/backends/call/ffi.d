@@ -1055,6 +1055,18 @@ private extern(C) float snakebite_ut_call_vector4_spilled_callback(
         cast(__vector(float[4])) [1.0f, 2.0f, 3.0f, 4.0f]);
 }
 
+private alias OddWordVectorCallback = extern(C) float function(
+    double, double, double, double, double, double, double, double, double,
+    __vector(float[4]),
+);
+
+private extern(C) float snakebite_ut_call_vector4_after_odd_stack_word(
+    OddWordVectorCallback callback,
+) {
+    return callback(1, 2, 3, 4, 5, 6, 7, 8, 9,
+        cast(__vector(float[4])) [1.0f, 2.0f, 3.0f, 4.0f]);
+}
+
 private extern(C) float snakebite_ut_vector4_after_eight_doubles(
     double a, double b, double c, double d,
     double e, double f, double g, double h,
@@ -3807,7 +3819,7 @@ private extern(C) ReviewVectorUnion snakebite_review_vector_union_return() {
     return value;
 }
 
-private extern(C) float snakebite_review_vector_odd_spill(
+private extern(C) float snakebite_ut_vector4_after_odd_stack_word(
     double a, double b, double c, double d, double e,
     double f, double g, double h, double i, __vector(float[4]) value,
 ) {
@@ -3852,12 +3864,12 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 
-    @("review436.vectorSpillAfterOddWord." ~ backend.stringof)
+    @("ffi.vectorSpillsAfterOddStackWord." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         5.0f.shouldBeRetOf!(backend, q{
             alias Vector = __vector(float[4]);
-            pragma(mangle, "snakebite_review_vector_odd_spill")
+            pragma(mangle, "snakebite_ut_vector4_after_odd_stack_word")
             extern(C) float invoke(
                 double, double, double, double, double,
                 double, double, double, double, Vector);
@@ -3865,6 +3877,28 @@ static foreach (backend; Matrix!(
                 auto value = cast(Vector) [1.0f, 2.0f, 3.0f, 4.0f];
                 return invoke(1, 2, 3, 4, 5, 6, 7, 8, 9, value);
             }
+        }, "answer");
+    }
+
+    @("ffi.callbackVectorSpillsAfterOddStackWord." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        50.0f.shouldBeRetOf!(backend, q{
+            alias Vector4 = __vector(float[4]);
+            alias Callback = extern(C) float function(
+                double, double, double, double, double, double, double, double,
+                double, Vector4,
+            );
+            pragma(mangle, "snakebite_ut_call_vector4_after_odd_stack_word")
+            extern(C) float invoke(Callback);
+            static extern(C) float guest(
+                double a, double b, double c, double d, double e,
+                double f, double g, double h, double i, Vector4 value,
+            ) {
+                return cast(float) (a + b + c + d + e + f + g + h + i)
+                    + value[0] + value[3];
+            }
+            float answer() { return invoke(&guest); }
         }, "answer");
     }
 }

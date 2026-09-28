@@ -918,6 +918,13 @@ public struct CallPlan {
         void addSpilled(in size_t i) {
             const plan = _arguments[i];
 
+            _stackAlignment = _stackAlignment > plan.stackAlignment
+                ? _stackAlignment : plan.stackAlignment;
+            const alignment = plan.stackAlignment / size_t.sizeof;
+            if (alignment > 1)
+                stackCount = (stackCount + alignment - 1)
+                    / alignment * alignment;
+
             // A MEMORY-class argument's eightbytes were never classified
             // into `plan.registers` (there is no register shape to read -
             // see `abi.ArgumentPlan`'s own doc), so each one is built here
@@ -928,12 +935,6 @@ public struct CallPlan {
             // register exactly that load - sized to only the bytes still
             // left, so it never reads past the argument's own storage.
             if (plan.memory) {
-                const alignment = plan.memoryAlignment / size_t.sizeof;
-                _stackAlignment = _stackAlignment > plan.memoryAlignment
-                    ? _stackAlignment : plan.memoryAlignment;
-                if (alignment > 1)
-                    stackCount = (stackCount + alignment - 1)
-                        / alignment * alignment;
                 const words = plan.memoryWords;
                 foreach (j; 0 .. words) {
                     const offset = j * size_t.sizeof;

@@ -137,9 +137,10 @@ public struct ArgumentPlan {
     // the count `snakebite.ffi.plan.CallPlan.buildMoves` places on the
     // stack. Stays `0` unless `memory` is `true`.
     public size_t memoryBytes;
-    // MEMORY-class only: the value's ABI alignment in bytes. The stack
-    // planner uses this to insert padding before an aligned value.
-    public size_t memoryAlignment;
+    // The value's ABI alignment in bytes. The stack planner uses this to
+    // insert padding before an aligned value, including register-class
+    // values that spill after their register file is full.
+    public size_t stackAlignment;
     public bool indirect;
 
     public size_t memoryWords() const @safe @nogc nothrow pure scope {
@@ -288,10 +289,13 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     if (type.ty == Tvoid)
         return plan;
 
+    plan.stackAlignment = type.alignsize;
+
     if (isNonTriviallyCopyable(type)) {
         plan.registers[0] = Register(Register.Kind.pointer, 8);
         plan.count = 1;
         plan.indirect = true;
+        plan.stackAlignment = size_t.sizeof;
         return plan;
     }
 
@@ -327,7 +331,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     if (type.ty == Tfloat80) {
         plan.memory = true;
         plan.memoryBytes = type.size;
-        plan.memoryAlignment = type.alignsize;
+        plan.stackAlignment = type.alignsize;
         return plan;
     }
 
@@ -354,7 +358,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     if (count > 2) {
         plan.memory = true;
         plan.memoryBytes = bytes;
-        plan.memoryAlignment = type.alignsize;
+        plan.stackAlignment = type.alignsize;
         return plan;
     }
 
@@ -394,7 +398,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     if (memory) {
         plan.memory = true;
         plan.memoryBytes = bytes;
-        plan.memoryAlignment = type.alignsize;
+        plan.stackAlignment = type.alignsize;
         return plan;
     }
 
