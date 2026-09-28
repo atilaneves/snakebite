@@ -9,6 +9,17 @@ import snakebite.frontend.dmd.functions: findFunction;
 
 
 static foreach (backend; Matrix!()) {
+    @("nullVoidPointerIdentity." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                void* pointer;
+                assert(pointer is null);
+            }
+        });
+    }
+
     @("pointers.classReference.dereference." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
