@@ -3565,7 +3565,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         import dmd.astenums: Tdelegate;
 
-        if (expression.type.ty != Tdelegate) {
+        if (expression.type.toBasetype.ty != Tdelegate) {
             if (expression.fd is null)
                 return visit(cast(Expression) expression);
 

@@ -598,3 +598,37 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("enumOfFunctionPointer.literalAndAddress." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Getter : int function() { a = () => 7 }
+            int eight() { return 8; }
+
+            void main() {
+                Getter literal = Getter.a;
+                assert(literal() == 7);
+                Getter named = cast(Getter) &eight;
+                assert(named() == 8);
+                assert(named);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("enumOfDelegate.literal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Getter : int delegate() { a = delegate() => 9 }
+
+            void main() {
+                Getter literal = Getter.a;
+                assert(literal() == 9);
+            }
+        });
+    }
+}

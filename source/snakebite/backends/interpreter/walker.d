@@ -2195,9 +2195,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto literal = expression.fd;
 
-        if (_type.ty != Tdelegate) {
+        if (_type.toBasetype.ty != Tdelegate) {
             if (literal is null || literal.isThis() !is null
-                    || expression.type.ty != Tpointer)
+                    || expression.type.toBasetype.ty != Tpointer)
                 throw new SnakebiteException(
                     text("interpreter cannot evaluate `", expression.toString,
                         "` as a `", _type.toString, "`"),

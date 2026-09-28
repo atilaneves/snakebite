@@ -189,5 +189,9 @@ public DelegateTarget delegateTargetOf(
     auto contextOwner = outerFunctionOf(function_);
     if (contextOwner is null && function_.outerVars.length)
         contextOwner = outerFunctionOf(function_.outerVars[0]);
+    // A literal outside every function, such as an enum member's value,
+    // has no frame to point at: compiled D gives it a null context.
+    if (contextOwner is null)
+        return DelegateTarget(function_, false, null);
     return DelegateTarget(function_, true, contextOwner);
 }
