@@ -4588,7 +4588,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto operandType = expression.e1.type.toBasetype;
         auto rightType = expression.e2.type.toBasetype;
-        if (operandType.ty == Tarray && rightType.ty == Tarray) {
+        if (operandType.isStaticOrDynamicArray
+                && rightType.isStaticOrDynamicArray
+                && (operandType.ty == Tarray || rightType.ty == Tarray)) {
             compileMemcmpDynamicArrayEquality(expression, _destination);
             return;
         }
@@ -5070,23 +5072,44 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
-        const arrayFacts = TypeFacts.of(expression.e1.type);
-        auto elementType = expression.e1.type.nextOf;
-        const elementFacts = TypeFacts.of(elementType);
-        if (!arrayFacts.isDynamicArray)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+        const arrayFacts = TypeFacts(
+            arrayValueSize, size_t.alignof, false, false, true, 0);
+        const elementFacts = TypeFacts.of(expression.e1.type.nextOf);
 
         const leftOffset = reserveTemp(arrayFacts);
-        evalInto(expression.e1, leftOffset, arrayValueSize);
+        evalArrayValueInto(expression.e1, leftOffset);
         const rightOffset = reserveTemp(arrayFacts);
-        evalInto(expression.e2, rightOffset, arrayValueSize);
+        evalArrayValueInto(expression.e2, rightOffset);
 
         emit(&opArrayEqual, leftOffset, rightOffset, elementFacts.size);
         if (expression.op == EXP.notEqual)
             emit(&opLogicalNot, leftOffset, 0, 1);
         if (destOffset != leftOffset)
             emit(&opCopy, destOffset, leftOffset, 1);
+    }
+
+    // A static array operand becomes the `{length, ptr}` value of its own
+    // elements, as dmd's `e2ir.d` reads it for a mixed array comparison.
+    private void evalArrayValueInto(Expression operand, in size_t destOffset) {
+        import dmd.astenums: Tarray;
+        import dmd.expressionsem: toInteger;
+        import dmd.typesem: toBasetype;
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset, arrayValueSize;
+
+        auto type = operand.type.toBasetype;
+        if (type.ty == Tarray) {
+            evalInto(operand, destOffset, arrayValueSize);
+            return;
+        }
+
+        const address = compileIdentityArrayStorage(
+            operand, TypeFacts.of(type));
+        emit(&opConstant, destOffset + arrayLengthOffset,
+            addConstant(cast(long) type.isTypeSArray.dim.toInteger),
+            size_t.sizeof);
+        emit(&opCopy, destOffset + arrayPointerOffset, address,
+            size_t.sizeof);
     }
 
     // dmd's semantic pass (`expressionsem.d`'s `shouldUseMemcmp`, guarding

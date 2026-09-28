@@ -823,6 +823,38 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// `int[]` against `uint[3]`: the element types differ only in signedness,
+// so dmd neither unifies the operand types nor lowers to `__equals`. The
+// `EqualExp` keeps one dynamic and one static array operand, and compiled
+// D compares their lengths and then their bytes.
+static foreach (backend; Matrix!()) {
+    @("compare.mixedArrayEquality.dynamicAndStatic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int[] dynamic(int last) {
+                    return [17, 31, last];
+                }
+
+                bool compareMixed() {
+                    uint[3] same = [17, 31, 47];
+                    uint[3] different = [17, 31, 48];
+                    uint[2] shorter = [17, 31];
+                    return dynamic(47) == same
+                        && same == dynamic(47)
+                        && dynamic(47) != different
+                        && different != dynamic(47)
+                        && dynamic(47) != shorter
+                        && shorter != dynamic(47);
+                }
+            },
+            "compareMixed",
+        );
+    }
+}
+
 // The four orderings over `real`, each pinned on both sides of its
 // boundary the same way the integral versions above are. Every operand
 // comes from a call so dmd cannot fold the comparison away.

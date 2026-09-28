@@ -3467,34 +3467,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        if (type.ty == Tarray) {
-            const a = evaluateArray(expression.e1, factsOf(type));
-            const b = evaluateArray(
-                expression.e2, factsOf(expression.e2.type));
+        auto rightType = expression.e2.type.toBasetype;
+        if (type.isStaticOrDynamicArray && rightType.isStaticOrDynamicArray) {
+            const leftFacts = factsOf(type);
+            const rightFacts = factsOf(rightType);
+            auto left = _frames.push(leftFacts.size, leftFacts.alignment);
+            auto right = _frames.push(rightFacts.size, rightFacts.alignment);
+            const a = arrayOperand(expression.e1, left.base);
+            const b = arrayOperand(expression.e2, right.base);
             const bytes = a.length * factsOf(type.nextOf).size;
             const equal = a.length == b.length
                 && (bytes == 0 || memcmp(a.elements, b.elements, bytes) == 0);
-            const answer = expression.op == EXP.equal ? equal : !equal;
-
-            storeIntegral(_place, answer ? 1 : 0, _facts.size);
-            return;
-        }
-
-        // A static array has no length to disagree on - both operands
-        // share the same type and therefore the same element count - so
-        // its whole value, laid out as contiguous elements with no
-        // header, is comparable the same way a dynamic array's elements
-        // are: byte for byte, unless DMD's own lowering says otherwise
-        // for elements needing semantic equality (a `float`/`double`
-        // element's NaN, or one with its own `opEquals`).
-        if (type.ty == Tsarray) {
-            const facts = factsOf(type);
-            auto left = _frames.push(facts.size, facts.alignment);
-            auto right = _frames.push(facts.size, facts.alignment);
-            evaluate(expression.e1, type, facts, left.base);
-            evaluate(expression.e2, type, facts, right.base);
-            const equal = facts.size == 0
-                || memcmp(left.base, right.base, facts.size) == 0;
             const answer = expression.op == EXP.equal ? equal : !equal;
 
             storeIntegral(_place, answer ? 1 : 0, _facts.size);
@@ -3552,6 +3535,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const answer = expression.op == EXP.equal ? equal : !equal;
 
         storeIntegral(_place, answer ? 1 : 0, _facts.size);
+    }
+
+    // A static array operand is its own elements, evaluated into
+    // `storage`, with its length in its type; a dynamic one is its
+    // `{length, ptr}` value.
+    private ArrayValue arrayOperand(Expression expression, ubyte* storage) {
+        import dmd.expressionsem: toInteger;
+
+        auto type = expression.type.toBasetype;
+        if (type.ty == Tarray)
+            return evaluateArray(expression, factsOf(type));
+
+        evaluate(expression, type, factsOf(type), storage);
+        return ArrayValue(
+            cast(size_t) type.isTypeSArray.dim.toInteger, storage);
     }
 
     private bool equalStruct(
