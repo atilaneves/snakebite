@@ -853,6 +853,8 @@ private void storeValue(
         return;
     }
 
+    type = type.toBasetype;
+
     // DMD represents an integer-to-pointer cast as an integer literal. Its
     // low pointer-width bits are the pointer value in the native layout.
     if (type.ty == Tpointer && value.isIntegerExp) {
@@ -860,7 +862,6 @@ private void storeValue(
         return;
     }
 
-    type = type.toBasetype;
     auto bytes = cast(ubyte*) place;
 
     if (auto variable = value.isVarExp) {

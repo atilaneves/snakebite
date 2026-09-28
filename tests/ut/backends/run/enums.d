@@ -194,3 +194,35 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// DMD represents a pointer value built from an integer constant (a
+// fabricated, never-dereferenced address, so no backend needs to read
+// real memory through it) as a plain `IntegerExp`, the same encoding an
+// integral value gets. `nativelayout.storeValue`'s int-to-pointer fast
+// path used to run before its own `toBasetype` normalisation, so
+// initialising an enum-of-pointer local from one fell through to the
+// trailing "no native layout" throw instead. `Bytecode`'s own downstream
+// handling (`compiler.d`) is not yet fixed and crashes the host process,
+// out of this PR's scope.
+static foreach (backend; Matrix!(
+    Omit!(Bytecode, Because.unconfirmed,
+        "crashes: compiler.d's own handling is not yet fixed for an "
+            ~ "enum-of-pointer local initialised from an integer literal "
+            ~ "(issue #441, compiler.d part)"),
+)) {
+    @("enumOfPointer.fromIntegerLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        (cast(size_t) 8).shouldBeRetOf!(
+            backend,
+            q{
+                size_t identity() {
+                    enum EAddr : size_t* { z = null }
+                    EAddr value = cast(EAddr) cast(size_t*) 8;
+                    return cast(size_t) value;
+                }
+            },
+            "identity",
+        );
+    }
+}
