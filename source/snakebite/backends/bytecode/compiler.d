@@ -4002,50 +4002,77 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // A dynamic array's whole slice is the same two words as the array
     // itself, so it does not need the bounds work of a bounded slice.
     override void visit(SliceExp expression) {
-        import dmd.astenums: Tpointer, Tsarray;
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset;
+        import dmd.astenums: TY;
 
         requireDestination(expression);
 
         auto sourceType = expression.e1.type.toBasetype;
-        const facts = TypeFacts.of(sourceType);
-        if (sourceType.ty == Tpointer
-                && expression.upr !is null) {
-            const pointerOffset = reserveTemp(facts);
-            evalInto(expression.e1, pointerOffset, facts.size);
-
-            const lowOffset = reserveTemp(pointerFacts);
-            if (expression.lwr is null)
-                emit(&opConstant, lowOffset, addConstant(0), size_t.sizeof);
-            else
-                evalOperandInto(expression.lwr, lowOffset, size_t.sizeof);
-
-            const highOffset = reserveTemp(pointerFacts);
-            evalOperandInto(expression.upr, highOffset, size_t.sizeof);
-            emit(&opSubtract, highOffset, lowOffset, size_t.sizeof);
-            emit(&opCopy, _destination + arrayLengthOffset, highOffset,
-                size_t.sizeof);
-
-            const elementFacts = TypeFacts.of(sourceType.nextOf);
-            const elementSizeOffset = reserveTemp(pointerFacts);
-            emit(&opConstant, elementSizeOffset,
-                addConstant(cast(long) elementFacts.size), size_t.sizeof);
-            emit(&opMultiply, lowOffset, elementSizeOffset, size_t.sizeof);
-            emit(&opAdd, pointerOffset, lowOffset, size_t.sizeof);
-            emit(&opCopy, _destination + arrayPointerOffset, pointerOffset,
-                size_t.sizeof);
-            return;
+        final switch (sourceType.ty) with (TY) {
+            case Tpointer:
+                return compilePointerSlice(expression, sourceType);
+            case Tsarray:
+                return compileStaticArraySlice(expression, sourceType);
+            case Tarray:
+                return compileDynamicArraySlice(expression, sourceType);
+            // Semantic slices nothing else at run time; it slices a vector
+            // through its `.array`, and an aggregate through `opSlice`.
+            case Taarray, Treference, Tfunction, Tident, Tclass, Tstruct,
+                Tenum, Tdelegate, Tnone, Tvoid, Tint8, Tuns8, Tint16,
+                Tuns16, Tint32, Tuns32, Tint64, Tuns64, Tfloat32, Tfloat64,
+                Tfloat80, Timaginary32, Timaginary64, Timaginary80,
+                Tcomplex32, Tcomplex64, Tcomplex80, Tbool, Tchar, Twchar,
+                Tdchar, Terror, Tinstance, Ttypeof, Ttuple, Tslice, Treturn,
+                Tnull, Tvector, Tint128, Tuns128, Ttraits, Tmixin,
+                Tnoreturn, Ttag:
+                assert(0);
         }
+    }
 
-        // A bounded static-array slice has no length word to read back, but
-        // its result still has the native dynamic-array shape. Use the
+    // Semantic requires both bounds to slice a pointer.
+    private void compilePointerSlice(SliceExp expression, Type sourceType) {
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset;
+
+        assert(expression.upr !is null);
+        const facts = TypeFacts.of(sourceType);
+        const pointerOffset = reserveTemp(facts);
+        evalInto(expression.e1, pointerOffset, facts.size);
+
+        const lowOffset = reserveTemp(pointerFacts);
+        if (expression.lwr is null)
+            emit(&opConstant, lowOffset, addConstant(0), size_t.sizeof);
+        else
+            evalOperandInto(expression.lwr, lowOffset, size_t.sizeof);
+
+        const highOffset = reserveTemp(pointerFacts);
+        evalOperandInto(expression.upr, highOffset, size_t.sizeof);
+        emit(&opSubtract, highOffset, lowOffset, size_t.sizeof);
+        emit(&opCopy, _destination + arrayLengthOffset, highOffset,
+            size_t.sizeof);
+
+        const elementFacts = TypeFacts.of(sourceType.nextOf);
+        const elementSizeOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, elementSizeOffset,
+            addConstant(cast(long) elementFacts.size), size_t.sizeof);
+        emit(&opMultiply, lowOffset, elementSizeOffset, size_t.sizeof);
+        emit(&opAdd, pointerOffset, lowOffset, size_t.sizeof);
+        emit(&opCopy, _destination + arrayPointerOffset, pointerOffset,
+            size_t.sizeof);
+    }
+
+    private void compileStaticArraySlice(
+        SliceExp expression, Type sourceType,
+    ) {
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset;
+
+        const dim = cast(size_t) sourceType.isTypeSArray.dim.toInteger;
+
+        // A bounded static-array slice has no length word to read back,
+        // but its result still has the native dynamic-array shape. Use the
         // dimension from the static type as its source length.
-        if (sourceType.ty == Tsarray
-                && (expression.lwr !is null || expression.upr !is null)) {
+        if (expression.lwr !is null || expression.upr !is null) {
             const sourceLengthOffset = reserveTemp(pointerFacts);
-            const dim = cast(size_t)
-                sourceType.isTypeSArray.dim.toInteger;
             emit(&opConstant, sourceLengthOffset,
                 addConstant(cast(long) dim), size_t.sizeof);
             const addressOffset = compileAddress(expression.e1);
@@ -4061,28 +4088,25 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // of itself - and no separate storage to point into: the result's
         // pointer word is `xs`'s own address, its length word `xs`'s own
         // dimension, known at compile time.
-        if (sourceType.ty == Tsarray) {
-            if (expression.lwr !is null || expression.upr !is null)
-                return visit(cast(Expression) expression);
+        const addressOffset = compileAddress(expression.e1);
+        emit(&opConstant, _destination + arrayLengthOffset,
+            addConstant(cast(long) dim), size_t.sizeof);
+        emit(&opCopy, _destination + arrayPointerOffset,
+            addressOffset, size_t.sizeof);
+    }
 
-            const dim = cast(size_t)
-                sourceType.isTypeSArray.dim.toInteger;
-            const addressOffset = compileAddress(expression.e1);
-            emit(&opConstant, _destination + arrayLengthOffset,
-                addConstant(cast(long) dim), size_t.sizeof);
-            emit(&opCopy, _destination + arrayPointerOffset,
-                addressOffset, size_t.sizeof);
-            return;
-        }
-
-        if (!facts.isDynamicArray)
-            return visit(cast(Expression) expression);
+    private void compileDynamicArraySlice(
+        SliceExp expression, Type sourceType,
+    ) {
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset;
 
         if (expression.lwr is null && expression.upr is null) {
             evalInto(expression.e1, _destination, _width);
             return;
         }
 
+        const facts = TypeFacts.of(sourceType);
         const arrayOffset = reserveTemp(facts);
         evalInto(expression.e1, arrayOffset, facts.size);
 

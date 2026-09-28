@@ -384,7 +384,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import dmd.astenums:
         Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32,
         Tfloat64, Tfloat80, Tnoreturn, Tint64, Tpointer, Tsarray, Ttuple,
-        Tuns32, Tuns8, Tvoid, Twchar, VarArg;
+        Tuns32, Tuns8, Tvoid, Twchar, TY, VarArg;
     import dmd.arraytypes: Expressions;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
@@ -3829,7 +3829,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // caller narrows back when the operation itself is `float`- or
     // `double`-precision.
     private real asFloating(Expression expression) {
-        import dmd.astenums: TY;
         import snakebite.nativevalue: loadFloating;
 
         auto type = expression.type.toBasetype;
@@ -4494,29 +4493,41 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         ubyte* base;
         size_t sourceLength;
         bool knownLength;
-        if (sourceType.ty == Tpointer) {
-            base = cast(ubyte*) asPointer(array);
-        } else if (sourceType.ty == Tarray) {
-            const value = evaluateArray(array, factsOf(sourceType));
-            base = cast(ubyte*) value.elements;
-            sourceLength = value.length;
-            knownLength = true;
-        } else if (sourceType.ty == Tsarray) {
+        final switch (sourceType.ty) with (TY) {
+            case Tpointer:
+                base = cast(ubyte*) asPointer(array);
+                break;
+            case Tarray: {
+                const value = evaluateArray(array, factsOf(sourceType));
+                base = cast(ubyte*) value.elements;
+                sourceLength = value.length;
+                knownLength = true;
+                break;
+            }
             // A static array's elements are the array's own bytes, not a
             // separately allocated block - `addressOf` already finds that
             // storage the same way any other lvalue's address is found,
             // and the length is part of the type itself rather than
             // something to read back from a run-time value.
-            base = cast(ubyte*) addressOf(array);
-            const elementSize = factsOf(sourceType.nextOf).size;
-            sourceLength = factsOf(sourceType).size / elementSize;
-            knownLength = true;
-        } else
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: only slicing a pointer, a dynamic array or a ",
-                    "static array is supported"),
-            );
+            case Tsarray: {
+                base = cast(ubyte*) addressOf(array);
+                const elementSize = factsOf(sourceType.nextOf).size;
+                sourceLength = factsOf(sourceType).size / elementSize;
+                knownLength = true;
+                break;
+            }
+            // Semantic slices nothing else at run time; it slices a vector
+            // through its `.array`, and an aggregate through `opSlice`.
+            case Taarray, Treference, Tfunction, Tident, Tclass, Tstruct,
+                Tenum, Tdelegate, Tnone, Tvoid, Tint8, Tuns8, Tint16,
+                Tuns16, Tint32, Tuns32, Tint64, Tuns64, Tfloat32, Tfloat64,
+                Tfloat80, Timaginary32, Timaginary64, Timaginary80,
+                Tcomplex32, Tcomplex64, Tcomplex80, Tbool, Tchar, Twchar,
+                Tdchar, Terror, Tinstance, Ttypeof, Ttuple, Tslice, Treturn,
+                Tnull, Tvector, Tint128, Tuns128, Ttraits, Tmixin,
+                Tnoreturn, Ttag:
+                assert(0);
+        }
 
         auto lengthVar = expression.lengthVar;
         auto outerDollar = _dollar;
