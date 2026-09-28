@@ -56,7 +56,7 @@
 druntime is not be emulated or reimplemented. It is either interpreted,
 compiled, or called via FFI.
 
-# DMD lowerings
+# Shared layer
 
 All runtime AST visitors, including those for new backends, must inherit
 `LoweringVisitor`. Its final overrides own lowering dispatch.
@@ -64,6 +64,14 @@ All runtime AST visitors, including those for new backends, must inherit
 Any exception to executing a lowering belongs in `LoweringVisitor` and
 applies to all backends. Its compile-time check requires a final shared
 policy for each frontend expression type with a `lowering` field.
+
+The shared layer owns every backend-independent decision: what dmd
+lowers (a `lowering` field) and what dmd decides instead in its own
+glue layer (`e2ir.d`: casts, truth, invariants, closure frames, unwind
+order, and so on). Put the decision in one shared module (for example
+`casts.d`, `aggregateinit.d`, `druntimehooks.d`); each backend only
+executes that plan. A second backend that reimplements the same
+decision is a bug, not a parallel feature.
 
 All backends use native layout in memory as normal compiled D would.
 For instance, a dynamic array is `struct { size_t length; T* ptr; }`:
@@ -80,6 +88,28 @@ This means there is no need to marshall or unmarshall when doing FFI.
 - Never delete test code to make tests pass.
 - Do not comment code explaining *what* it does. If it's not clear what
   the code does, rewrite it, don't comment.
+- Do not add a rejection site: a run-time throw for a construct the
+  backend has not implemented. A construct that compiled D accepts
+  must be implemented, not refused at run time. A user-facing error
+  for genuinely invalid input (for example, bad CLI arguments) is not
+  a rejection site.
+- Do not add `unsupported` (or similarly named) to a plan enum. Every
+  member must be a real outcome, or a `final switch` over it proves
+  nothing.
+- Do not throw from a catch-all visit. Make it `assert(0)`:
+  ```d
+  // wrong
+  override void visit(Expression e) {
+      throw new Exception("interpreter cannot ...");
+  }
+  // right
+  override void visit(Expression) { assert(0); }
+  ```
+  Unreachable: the closed dispatch handles every node.
+
+A new rejection site, `unsupported` member, throwing catch-all, or
+per-backend copy of a decision that belongs in the shared layer is a
+review must-fix.
 
 # Do
 
@@ -87,6 +117,14 @@ This means there is no need to marshall or unmarshall when doing FFI.
   language semantics. If necessary, you are allowed to refer to dmd
   internal implementation details.
 - Code comments are for *why*.
+- Dispatch on a closed set with `final switch` over the full enum,
+  after `toBasetype`. A missing case then fails the build instead of
+  hiding behind a `default`.
+- Call `toBasetype` before any `.ty` test, not only before a
+  `switch`. A `.ty ==` check in an `if` on an un-normalised type
+  misses enums and typedef-like base types.
+- Fix the full concept: cover every case the same reasoning applies
+  to, not only the case that made a project fail.
 
 # Tests
 - Use `shouldThrowWithMessage`, not `shouldThrow`.
