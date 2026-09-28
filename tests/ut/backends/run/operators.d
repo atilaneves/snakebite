@@ -606,6 +606,83 @@ static foreach (backend; Matrix!(
     }
 }
 
+// Vector arithmetic applies the operator lane by lane, and each lane wraps
+// or rounds as its element type does. `++` and `--` add or subtract one in
+// every lane.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot do vector arithmetic"),
+)) {
+    @("vectorArithmetic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd:
+                double2, float4, int4, long2, short8, ubyte16, uint4;
+
+            void main() {
+                int4 a = [1, 2, 3, 4];
+                int4 b = [10, -20, 30, -40];
+                assert((a + b).array == [11, -18, 33, -36]);
+                assert((a - b).array == [-9, 22, -27, 44]);
+                assert((a & b).array == [0, 0, 2, 0]);
+                assert((a | b).array == [11, -18, 31, -36]);
+                assert((a ^ b).array == [11, -18, 29, -36]);
+                assert((-a).array == [-1, -2, -3, -4]);
+                assert((~a).array == [-2, -3, -4, -5]);
+                assert((a + 1).array == [2, 3, 4, 5]);
+                a += b;
+                assert(a.array == [11, -18, 33, -36]);
+                a -= 1;
+                assert(a.array == [10, -19, 32, -37]);
+                a &= 0xff;
+                assert(a.array == [10, 237, 32, 219]);
+                a |= 256;
+                assert(a.array == [266, 493, 288, 475]);
+                a ^= 1;
+                assert(a.array == [267, 492, 289, 474]);
+                ubyte16 u = 200;
+                ubyte16 v = 100;
+                assert((u + v).array[0] == 44);
+                uint4 w = [0, 1, 2, 3];
+                assert((w - 1).array == [uint.max, 0, 1, 2]);
+                short8 s = [1, -2, 3, -4, 5, -6, 7, 300];
+                short8 t = 300;
+                assert((s * t).array
+                    == [300, -600, 900, -1200, 1500, -1800, 2100, 24464]);
+                s *= t;
+                assert(s.array[7] == 24464);
+                long2 l = [long.max, -1];
+                assert((l + 1).array == [long.min, 0]);
+                float4 x = [1.0f, 2.0f, 3.0f, 4.0f];
+                float4 y = [0.5f, 4.0f, -1.0f, 8.0f];
+                assert((x + y).array == [1.5f, 6.0f, 2.0f, 12.0f]);
+                assert((x - y).array == [0.5f, -2.0f, 4.0f, -4.0f]);
+                assert((x * y).array == [0.5f, 8.0f, -3.0f, 32.0f]);
+                assert((x / y).array == [2.0f, 0.5f, -3.0f, 0.5f]);
+                assert((-x).array == [-1.0f, -2.0f, -3.0f, -4.0f]);
+                x *= 2.0f;
+                assert(x.array == [2.0f, 4.0f, 6.0f, 8.0f]);
+                x /= y;
+                assert(x.array == [4.0f, 1.0f, -6.0f, 1.0f]);
+                double2 d = [1.5, -2.5];
+                double2 e = [0.5, 0.5];
+                assert((d + e).array == [2.0, -2.0]);
+                assert((d / e).array == [3.0, -5.0]);
+                d -= e;
+                assert(d.array == [1.0, -3.0]);
+                int4 old = b++;
+                assert(old.array == [10, -20, 30, -40]);
+                assert(b.array == [11, -19, 31, -39]);
+                --b;
+                float4 z = 1.0f;
+                z--;
+                assert(z.array == [0.0f, 0.0f, 0.0f, 0.0f]);
+            }
+        });
+    }
+}
+
 // Delegates order as one unsigned integer whose high word is the function
 // pointer and whose low word is the context.
 static foreach (backend; Matrix!(

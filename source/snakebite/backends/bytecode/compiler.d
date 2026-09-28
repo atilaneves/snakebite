@@ -3122,8 +3122,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 operands = plan.operands.packed;
                 break;
             case vector:
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+                return compileVectorCompoundAssign(
+                    expression, plan, targetOffset, destOffset);
             case pointerDifference:
                 assert(0, text("`", expressionText(expression), "`: `-=` ",
                     "cannot store a pointer difference in a pointer"));
@@ -3154,6 +3154,26 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (destOffset != discardResult)
             emit(&opCopy, destOffset, valueOffset, storage.facts.size);
+    }
+
+    // A vector target has the operation's own type: dmd promotes no lane.
+    private void compileVectorCompoundAssign(
+        BinAssignExp expression,
+        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        in size_t targetOffset, in size_t destOffset,
+    ) {
+        auto storage = ScalarStorage(ScalarStorage.Kind.indirect, plan.facts,
+            targetOffset, null, plan.kind);
+        const rightOffset = reserveTemp(plan.facts);
+        evalInto(expression.e2, rightOffset, plan.facts.size);
+        auto valueOffset = readScalar(storage, plan.facts);
+        const laneHandler = laneHandler(expression, plan, compoundHandler(
+            expression, plan.laneFacts.isUnsigned, false));
+        emitLanes(laneHandler, plan, valueOffset, rightOffset);
+        valueOffset = writeScalar(storage, valueOffset, plan.facts.size);
+
+        if (destOffset != discardResult)
+            emit(&opCopy, destOffset, valueOffset, plan.facts.size);
     }
 
     // The complex operation for a binary, compound or postfix operator.
@@ -3461,8 +3481,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 break;
 
             case vector:
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+                evalInto(expression.e2, stepOffset, storage.facts.size);
+                emitLanes(laneHandler(expression, plan,
+                    increment ? &opAdd : &opSubtract), plan, valueOffset,
+                    stepOffset);
+                writeScalar(storage, valueOffset, storage.facts.size);
+                return;
 
             case pointerDifference:
                 assert(0, text("`", expressionText(expression), "`: a ",
@@ -4900,9 +4924,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return copyResult(destOffset, leftOffset, width);
             }
 
-            case vector:
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+            case vector: {
+                const leftOffset = reserveTemp(plan.facts);
+                evalInto(expression.e1, leftOffset, plan.facts.size);
+                const rightOffset = reserveTemp(plan.facts);
+                evalInto(expression.e2, rightOffset, plan.facts.size);
+                emitLanes(laneHandler(expression, plan, handler), plan,
+                    leftOffset, rightOffset);
+                return copyResult(destOffset, leftOffset, width);
+            }
 
             case pointerOffset: {
                 assert(handler is &opAdd || handler is &opSubtract,
@@ -4939,6 +4969,40 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    // The operation on one lane of a vector: `handler` for an integral
+    // lane, the floating operation for a floating one.
+    private Instruction.Handler laneHandler(
+        BinExp expression,
+        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        Instruction.Handler integralHandler,
+    ) {
+        import snakebite.backends.arithmetic: ArithmeticPlan;
+        import std.conv: text;
+
+        with (ArithmeticPlan.Kind) final switch (plan.laneKind) {
+            case integral:
+                return integralHandler;
+            case floating:
+                return floatingBinaryHandler(expression);
+            case complex, pointerOffset, pointerDifference, vector:
+                assert(0, text("`", expressionText(expression), "` has a ",
+                    "lane that is neither integral nor floating"));
+        }
+    }
+
+    // Applies `handler` to each lane of the vectors at `left` and `right`,
+    // leaving the answer at `left`.
+    private void emitLanes(
+        Instruction.Handler handler,
+        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        in size_t left, in size_t right,
+    ) {
+        const laneSize = plan.laneFacts.size;
+        foreach (i; 0 .. plan.facts.size / laneSize)
+            emit(handler, left + i * laneSize, right + i * laneSize,
+                laneSize);
+    }
+
     private void copyResult(
         in size_t destOffset, in size_t resultOffset, in size_t width,
     ) {
@@ -4950,11 +5014,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import std.conv: text;
 
         with (EXP) switch (expression.op) {
-            case add: return &opFloatAdd;
-            case min: return &opFloatSubtract;
-            case mul: return &opFloatMultiply;
-            case div: return &opFloatDivide;
-            case mod: return &opFloatModulo;
+            case add, addAssign, plusPlus: return &opFloatAdd;
+            case min, minAssign, minusMinus: return &opFloatSubtract;
+            case mul, mulAssign: return &opFloatMultiply;
+            case div, divAssign: return &opFloatDivide;
+            case mod, modAssign: return &opFloatModulo;
             default:
                 assert(0, text("`", expressionText(expression), "`: dmd ",
                     "rejects bitwise and shift operators on floating ",
@@ -5431,9 +5495,29 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 emit(&opComplexNegate, destOffset, 0, width / 2);
                 return;
 
-            case vector:
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+            case vector: {
+                evalInto(expression.e1, destOffset, width);
+                const laneSize = plan.laneFacts.size;
+                Instruction.Handler laneHandler;
+                final switch (plan.laneKind) {
+                    case integral:
+                        laneHandler = handler;
+                        break;
+                    case floating:
+                        assert(handler is &opNegate, text("`",
+                            expressionText(expression), "`: dmd rejects ",
+                            "`~` on floating lanes"));
+                        laneHandler = &opFloatNegate;
+                        break;
+                    case complex, pointerOffset, pointerDifference, vector:
+                        assert(0, text("`", expressionText(expression),
+                            "` has a lane that is neither integral nor ",
+                            "floating"));
+                }
+                foreach (i; 0 .. plan.facts.size / laneSize)
+                    emit(laneHandler, destOffset + i * laneSize, 0, laneSize);
+                return;
+            }
 
             case pointerOffset, pointerDifference:
                 assert(0, text("`", expressionText(expression), "`: D has ",

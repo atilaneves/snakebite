@@ -3190,6 +3190,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private extern(D) void storeAssignExp(string op)(
         BinAssignExp expression, void* resolvedTarget = null,
     ) {
+        import core.stdc.string: memcpy;
         import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
         import std.conv: text;
 
@@ -3217,12 +3218,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                         "rejects bitwise and shift operators on complex ",
                         "operands"));
 
-            case vector:
-                throw new SnakebiteException(
-                    text("interpreter cannot assign to `",
-                        expression.e1.toString, "`: `", expression.toString,
-                        "`"),
-                );
+            case vector: {
+                auto target = resolvedTarget is null
+                    ? addressOf(expression.e1) : resolvedTarget;
+                auto step = _frames.push(plan.facts.size, plan.facts.alignment);
+                evaluate(expression.e2, expression.e2.type, plan.facts,
+                    step.base);
+                vectorLanes!op(target, target, step.base, plan, expression);
+                memcpy(_place, target, plan.facts.size);
+                return;
+            }
 
             case pointerDifference:
                 assert(0, text("`", expression.toString, "`: `-=` cannot ",
@@ -3364,11 +3369,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             case complex:
                 return storeComplexPost(expression, plan);
             case vector:
-                throw new SnakebiteException(
-                    text("interpreter cannot evaluate `", expression.toString,
-                        "`: `", expression.e1.toString,
-                        "` is not an integral lvalue"),
-                );
+                return storeVectorPost(expression, plan);
             case pointerDifference:
                 assert(0, text("`", expression.toString, "`: a postfix ",
                     "`++`/`--` has the type of its operand"));
@@ -3425,6 +3426,65 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         else
             applyComplex!(ComplexOperation.subtract)(target, target, step.ptr,
                 plan.operands, partSize);
+    }
+
+    private void storeVectorPost(
+        PostExp expression,
+        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+    ) {
+        import core.stdc.string: memcpy;
+
+        auto target = addressOf(expression.e1);
+        auto step = _frames.push(plan.facts.size, plan.facts.alignment);
+        evaluate(expression.e2, expression.e2.type, plan.facts, step.base);
+        memcpy(_place, target, plan.facts.size);
+        if (expression.op == EXP.plusPlus)
+            vectorLanes!"+"(target, target, step.base, plan, expression);
+        else
+            vectorLanes!"-"(target, target, step.base, plan, expression);
+    }
+
+    // `left op right` lane by lane into `result`, which may be `left`.
+    private extern(D) void vectorLanes(string op)(
+        void* result, in void* left, in void* right,
+        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        Expression expression,
+    ) {
+        import snakebite.backends.arithmetic: ArithmeticPlan;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+        import snakebite.nativevalue: loadFloating, storeFloating;
+        import std.conv: text;
+
+        const laneSize = plan.laneFacts.size;
+        foreach (i; 0 .. plan.facts.size / laneSize) {
+            const offset = i * laneSize;
+            auto a = cast(const(ubyte)*) left + offset;
+            auto b = cast(const(ubyte)*) right + offset;
+            auto lane = cast(ubyte*) result + offset;
+            with (ArithmeticPlan.Kind) final switch (plan.laneKind) {
+                case integral: {
+                    const signed = !plan.laneFacts.isUnsigned;
+                    const x = loadIntegral(a, laneSize, signed);
+                    const y = loadIntegral(b, laneSize, signed);
+                    storeIntegral(lane, combine!op(x, y, plan.laneFacts,
+                        plan.laneFacts, expression), laneSize);
+                    break;
+                }
+                case floating:
+                    static if (op == "+" || op == "-" || op == "*"
+                            || op == "/" || op == "%")
+                        storeFloating(lane, floatingResult!op(
+                            loadFloating(a, laneSize),
+                            loadFloating(b, laneSize), laneSize), laneSize);
+                    else
+                        assert(0, text("`", expression.toString, "`: dmd ",
+                            "rejects bitwise operators on floating lanes"));
+                    break;
+                case complex, pointerOffset, pointerDifference, vector:
+                    assert(0, text("`", expression.toString, "` has a lane ",
+                        "that is neither integral nor floating"));
+            }
+        }
     }
 
     private void storeIntegralPost(PostExp expression, in TypeFacts facts) {
@@ -3861,11 +3921,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                         "rejects bitwise and shift operators on complex ",
                         "operands"));
 
-            case vector:
-                throw new SnakebiteException(
-                    text("interpreter cannot evaluate `", expression.toString,
-                        "`: its type is `", expression.type.toString, "`"),
-                );
+            case vector: {
+                auto left = _frames.push(plan.facts.size, plan.facts.alignment);
+                auto right = _frames.push(
+                    plan.facts.size, plan.facts.alignment);
+                evaluate(expression.e1, expression.e1.type, plan.facts,
+                    left.base);
+                evaluate(expression.e2, expression.e2.type, plan.facts,
+                    right.base);
+                vectorLanes!op(_place, left.base, right.base, plan,
+                    expression);
+                return;
+            }
 
             case pointerOffset:
                 static if (op == "+" || op == "-") {
@@ -3963,11 +4030,39 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     assert(0, text("`", expression.toString, "`: dmd ",
                         "rejects `~` on a complex operand"));
 
-            case vector:
-                throw new SnakebiteException(
-                    text("interpreter cannot evaluate `", expression.toString,
-                        "`: its type is `", expression.type.toString, "`"),
-                );
+            case vector: {
+                import snakebite.nativelayout: loadIntegral;
+                import snakebite.nativevalue: loadFloating;
+
+                evaluate(expression.e1, expression.e1.type, plan.facts,
+                    _place);
+                const laneSize = plan.laneFacts.size;
+                foreach (i; 0 .. plan.facts.size / laneSize) {
+                    auto lane = cast(ubyte*) _place + i * laneSize;
+                    with (ArithmeticPlan.Kind) final switch (plan.laneKind) {
+                        case integral: {
+                            const a = loadIntegral(lane, laneSize, false);
+                            storeIntegral(lane, cast(ulong) mixin(op ~ "a"),
+                                laneSize);
+                            break;
+                        }
+                        case floating:
+                            static if (op == "-")
+                                storeFloating(lane,
+                                    -loadFloating(lane, laneSize), laneSize);
+                            else
+                                assert(0, text("`", expression.toString,
+                                    "`: dmd rejects `~` on floating lanes"));
+                            break;
+                        case complex, pointerOffset, pointerDifference,
+                            vector:
+                            assert(0, text("`", expression.toString, "` has ",
+                                "a lane that is neither integral nor ",
+                                "floating"));
+                    }
+                }
+                return;
+            }
 
             case pointerOffset, pointerDifference:
                 assert(0, text("`", expression.toString, "`: D has no ",

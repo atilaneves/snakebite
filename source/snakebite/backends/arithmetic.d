@@ -28,6 +28,10 @@ package struct ArithmeticPlan {
     TypeFacts facts;
     // `complex` only: what each operand holds.
     ComplexOperands operands;
+    // `vector` only: how one lane combines, and its facts. Semantic gives
+    // both operands the vector type, so the operator applies lane by lane.
+    Kind laneKind;
+    TypeFacts laneFacts;
 }
 
 package ArithmeticPlan arithmeticPlan(
@@ -45,7 +49,7 @@ package ArithmeticPlan arithmeticPlan(
     if (kind == ArithmeticPlan.Kind.integral
             && expression.e1.type.toBasetype.ty == Tpointer)
         kind = ArithmeticPlan.Kind.pointerDifference;
-    auto plan = ArithmeticPlan(kind, TypeFacts.of(type));
+    auto plan = planOf(type, kind);
     if (kind == ArithmeticPlan.Kind.complex)
         plan.operands = ComplexOperands(complexOperand(expression.e1.type),
             complexOperand(expression.e2.type));
@@ -62,7 +66,19 @@ package ArithmeticPlan arithmeticPlan(
     const kind = arithmeticKind(type);
     assert(kind != ArithmeticPlan.Kind.pointerOffset, text("`",
         expression.toString, "`: D has no unary arithmetic on a pointer"));
-    return ArithmeticPlan(kind, TypeFacts.of(type));
+    return planOf(type, kind);
+}
+
+private ArithmeticPlan planOf(
+    imported!"dmd.mtype".Type type, in ArithmeticPlan.Kind kind,
+) {
+    auto plan = ArithmeticPlan(kind, TypeFacts.of(type));
+    if (kind == ArithmeticPlan.Kind.vector) {
+        auto lane = type.isTypeVector.elementType;
+        plan.laneKind = arithmeticKind(lane);
+        plan.laneFacts = TypeFacts.of(lane);
+    }
+    return plan;
 }
 
 // How arithmetic in `type` combines its operands.
