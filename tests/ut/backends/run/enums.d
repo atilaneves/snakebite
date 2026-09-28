@@ -89,16 +89,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// An enum whose base type is a static array has the array's own layout -
-// indexing it must read through the base type, not stop at the enum's own
-// kind. `frontend.storage`'s index resolver used to test the index target's
-// raw `.ty` against `Tsarray`, which an enum's own `.ty` (`Tenum`) never
-// matches. `frontend.storage` is shared; `Interpreter`'s and `Bytecode`'s
-// own downstream handling of an enum-of-static-array index target
-// (`walker.d`'s `storageStaticIndexLength`, `compiler.d`'s own copy) had
-// the same raw-`.ty`-shaped bug: each tested `expression.e1.type
-// .isTypeSArray` directly, so an enum base type never matched and both
-// crashed the host process reading through a null `TypeSArray`.
 static foreach (backend; Matrix!()) {
     @("enumOfStaticArray.indexing." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -119,15 +109,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// An enum whose base type is a dynamic array (here `string`) has the
-// array's own two-word layout - `.length` and indexing must read through
-// the base type. `frontend.storage`'s `.length` and index resolvers used to
-// test the raw `.ty` against `Tarray`, missing an enum base the same way.
-// `Interpreter`'s and `Bytecode`'s own element-stride lookups
-// (`walker.d`/`compiler.d`) also matter here: `expression.e1.type.nextOf`
-// already unwraps an enum base by itself (`dmd.typesem.nextOf` forwards
-// through `TypeEnum.memType`), so this case worked once the shared
-// resolver's own normalisation reached it.
 static foreach (backend; Matrix!()) {
     @("enumOfDynamicArray.lengthAndIndexing." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -148,11 +129,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// An enum whose base type is a pointer indexes exactly like the pointer
-// itself. `frontend.storage`'s index resolver used to test the raw `.ty`
-// against `Tpointer`, missing an enum base the same way as the array cases
-// above. CTFE cannot take the address of a local variable at compile time
-// at all, regardless of enum normalisation.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot interpret the address of a local variable at "
@@ -174,22 +150,8 @@ static foreach (backend; Matrix!(
     }
 }
 
-// DMD represents a pointer value built from an integer constant (a
-// fabricated, never-dereferenced address, so no backend needs to read
-// real memory through it) as a plain `IntegerExp`, the same encoding an
-// integral value gets. `nativelayout.storeValue`'s int-to-pointer fast
-// path used to run before its own `toBasetype` normalisation, so
-// initialising an enum-of-pointer local from one fell through to the
-// trailing "no native layout" throw instead. That is fixed; `Bytecode`'s
-// `compileVariableInitializer` had a separate bug this snippet also
-// reaches: it built its rejection-path error text eagerly, for every
-// declared variable, by printing the guest declaration through dmd's own
-// `Expression.toString`. Printing this particular declaration - a cast to
-// an enum whose only member is a pointer literal `null`, not an
-// `IntegerExp` - crashes inside dmd's own pretty-printer
-// (`hdrgen.expressionPrettyPrint`'s enum-member lookup dereferences a
-// null `isIntegerExp`). `operation` is now `lazy`, so it is only rendered
-// when a rejection actually happens.
+// dmd encodes a pointer built from an integer constant as an
+// `IntegerExp`, the same as an integral value.
 static foreach (backend; Matrix!()) {
     @("enumOfPointer.fromIntegerLiteral." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -208,20 +170,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// An enum whose base type is a struct has the struct's own layout and
-// members - calling one of the base struct's methods on it must read and
-// write through the base type's own fields, the same way a plain struct
-// value would. This is a regression-locking test, not a red/green one: a
-// direct method call like this one resolves `expression.f` during
-// semantic analysis and never reaches `frontend.dmd.delegates.
-// delegateTargetOf`'s own receiver-type check, so it already passed
-// before that function's fix. The one guest construct that does reach
-// `delegateTargetOf` - taking a bound method's address, `&receiver.
-// method` - is itself unsupported by both `Interpreter` and `Bytecode`
-// today, regardless of enum normalisation, so that fix has no test of
-// its own here; it is still correct by the same reasoning as the other
-// sites in this file, and matches `isIndirectDelegateCall`'s own
-// idiom (`enumOfDelegate.indirectCall` below).
 static foreach (backend; Matrix!()) {
     @("enumOfStruct.methodCall." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -247,15 +195,8 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// An enum whose base type is a delegate calls exactly like the delegate
-// itself. `backends.calls.isIndirectDelegateCall` and `frontend.dmd.
-// functions.typeFunctionOf` both used to test the callee's raw `.ty`
-// against `Tdelegate`, missing an enum base the same way. The delegate
-// itself is built field by field (`.funcptr`/`.ptr`), the same idiom
-// `assignDelegateFieldsBeforeNestedCall` (`delegates.d`) uses - taking a
-// bound method's address directly (`&counter.read`) is a separate, already
-// unsupported construct on both `Interpreter` and `Bytecode`, nothing to
-// do with type normalisation.
+// The delegate is built field by field: taking a bound method's
+// address (`&counter.read`) is a separate construct.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot access delegate function pointers"),

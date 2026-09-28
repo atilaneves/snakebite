@@ -3073,26 +3073,6 @@ static foreach (backend; Matrix!(
         );
     }
 
-    // An enum whose base type is a function pointer or delegate must be
-    // recognised as a callback extra argument the same way its base type
-    // is: `ffi.plan.prepareCommon`'s extra-argument loop used to test the
-    // call site's own raw `extraType` against `Tdelegate`/`isTypePointer`,
-    // missing an enum base the same way the declared-parameter loop 30
-    // lines above it (already normalised) does not. This is a
-    // regression-locking test, not a red/green one, the same as
-    // `enumOfStruct.methodCall` (`tests/ut/backends/run/enums.d`): both
-    // `Interpreter` and `Bytecode` resolve a closure's function word to
-    // its real, host-callable pool entry at the point the closure is
-    // created (`walker.d`'s `visitDelegateWord`, `compiler.d`'s
-    // equivalent), before it ever reaches this call site, so the swap
-    // this classification would enable (`CallPlan.callWithCallbacks`)
-    // never fires either way for a freshly built callback - confirmed by
-    // instrumenting `bridge.entryOf` for the already-normalised
-    // `functionPointer`/`delegate` cases above, which return `null` there
-    // too. The fix still matters: `Type.ty`/`isTypePointer` are `final
-    // switch`/closed-dispatch idioms (`ai/CODING.md`), and a raw test on
-    // an un-normalised type is wrong on its own terms even where this
-    // particular call chain happens not to expose it today.
     @("variadic.callbackExtraArgument.enumOfFunctionPointer."
         ~ backend.stringof)
     @Tags(backend.stringof)

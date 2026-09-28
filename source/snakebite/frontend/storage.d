@@ -128,9 +128,8 @@ public struct StorageResolver(Result, Adapter) {
         }
 
         if (auto index = expression.isIndexExp) {
-            // An enum's own base type has the same layout as the enum
-            // itself, so indexing reads through it: `enum E : int[3]`
-            // indexes exactly like a plain `int[3]`.
+            // An enum has its base type's layout: `enum E : int[3]`
+            // indexes like `int[3]`.
             auto indexBase = index.e1.type.toBasetype;
 
             // Static-array code generation evaluates the rightmost index

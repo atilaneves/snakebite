@@ -2852,14 +2852,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             metadata);
     }
 
-    // `arr[] = value;` where `value` is an array (another static array's
-    // own whole slice, or a dynamic array) of the same element type: every
-    // one of its elements is copied into the matching element of `arr` in
-    // turn. Only `arr` a static array's own whole slice is unrolled here.
-    // `destOffset` gets `arr[]` itself once the copy is done - the same
-    // `{dim, &arr}` pair `visit(SliceExp)`'s whole-slice case already
-    // builds for a bare `arr[]` - since the assignment's own value is that
-    // slice (`int[] s = (a[] = b[]);` is legal D).
+    // The assignment's value is the slice itself:
+    // `int[] s = (a[] = b[]);` is legal D.
     private void compileSliceAssign(
         AssignExp expression, SliceExp target, in size_t destOffset,
         in size_t resolvedTarget = size_t.max,
@@ -2985,31 +2979,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return pointer;
     }
 
-    // `p[0 .. n] = q[];`/`a[] = b[];` (array-to-array) for a
-    // dynamic-length target: a pointer sliced to a run-time length (`_d_newclassT`'s own
-    // `p[0 .. init.length] = init[];`, `core/lifetime.d`) or a dynamic
-    // array's own whole slice. Neither side has a compile-time element
-    // count the way a static array's own whole-slice assignment
-    // (`compileSliceAssign` above) does, so this reads both sides'
-    // lengths at run time and copies through `opSliceCopy`. Druntime owns
-    // the equal-length and overlap checks for that copy.
-    //
-    // Only a plain-bytes element is supported: `void` (a class `.init`
-    // image's own element type, and every element type this reaches
-    // through, since `isSupportedElementType` never accepts `void`) or
-    // anything `isSupportedElementType` already lays out elsewhere. dmd's
-    // own semantic pass already rewrites an assignment whose element has
-    // a postblit or destructor into a call to
-    // `_d_arrayassign_l`/`_d_arrayassign_r` before this compiler ever
-    // sees it (`expressionsem.d`'s `lowerArrayAssign`), so a plain
-    // `AssignExp` reaching here is already safe to treat as a raw byte
-    // copy.
-    //
-    // `target.e1` is a static array here whenever `compileSliceAssign`
-    // routed a bounded sub-slice of it this way instead of unrolling it
-    // as a whole-slice copy; `target.type` (this function's own
-    // `Tarray`/`Tvoid` checks below look at that, not `target.e1.type`)
-    // is the dynamic shape the slice itself has either way.
+    // dmd lowers elements with a postblit or destructor to
+    // `_d_arrayassign_*`, so a raw byte copy is safe here. Druntime owns
+    // the equal-length and overlap checks.
     private void compileDynamicSliceAssign(
         AssignExp expression, SliceExp target, in size_t destOffset,
         in size_t resolvedTarget = size_t.max,
@@ -3061,10 +3033,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
-    // `a[] = v;`, which dmd marks with `blockAssign`: `v` has the element
-    // type, even when the element is itself an array. The target's bounds
-    // are already resolved; `v` is evaluated once, then copied into every
-    // element through `opSliceFill`.
+    // dmd's `blockAssign` gives `v` the element type, even when the
+    // element is itself an array.
     private void compileSliceFill(
         AssignExp expression, SliceExp target, in size_t resolvedTarget,
     ) {
@@ -4387,10 +4357,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emitRuntimeTypeInfoConstant(type);
     }
 
-    // Shared tail of `visit(TypeidExp)` and `visit(SymOffExp)`'s
-    // `TypeInfoDeclaration` case: resolve `type`'s run-time `TypeInfo`
-    // through `_runtimeTypes.get` and emit its address into the current
-    // destination.
     private void emitRuntimeTypeInfoConstant(
         Type type,
         in size_t destination = size_t.max,
