@@ -3358,18 +3358,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     protected override void visitComparison(
         CmpExp expression, in ComparisonPlan plan,
     ) {
-        import std.conv: text;
-
         with (EXP) switch (expression.op) {
             case lessThan: return storeCmpExp!"<"(expression, plan);
             case lessOrEqual: return storeCmpExp!"<="(expression, plan);
             case greaterThan: return storeCmpExp!">"(expression, plan);
             case greaterOrEqual: return storeCmpExp!">="(expression, plan);
-            default:
-                throw new SnakebiteException(
-                    text("interpreter cannot evaluate a `", expression.op,
-                        "` expression: `", expression.toString, "`"),
-                );
+            default: assert(0);
         }
     }
 
@@ -3441,12 +3435,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativelayout: storeIntegral;
         import dmd.typesem: toBasetype;
         import std.conv: text;
-
-        if (expression.op != EXP.equal && expression.op != EXP.notEqual)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate a `", expression.op,
-                    "` expression: `", expression.toString, "`"),
-            );
 
         // DMD's `Type.nextOf` is not const-correct, so this cannot be const.
         auto type = expression.e1.type.toBasetype;
@@ -3623,13 +3611,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     ) {
         import core.stdc.string: memcmp;
         import snakebite.nativelayout: arrayValueSize, storeIntegral;
-        import std.conv: text;
-
-        if (expression.op != EXP.identity && expression.op != EXP.notIdentity)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate a `", expression.op,
-                    "` expression: `", expression.toString, "`"),
-            );
 
         if (plan.skipCompare) {
             const answer = expression.op == EXP.identity;
