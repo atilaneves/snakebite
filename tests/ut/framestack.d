@@ -3,6 +3,25 @@ module ut.framestack;
 
 import ut;
 import snakebite.framestack: FrameStack;
+import core.memory: pageSize;
+
+
+@("push.alignedAfterOddSizedFrame")
+unittest {
+    auto stack = FrameStack(1);
+    for (uint alignment = 1; alignment <= pageSize; alignment *= 2) {
+        auto outer = stack.push(3, 1);
+        outer.base[0 .. 3] = 42;
+        {
+            auto inner = stack.push(alignment, alignment);
+            (cast(size_t) inner.base % alignment).should == 0;
+            inner.base[0 .. alignment] = 7;
+        }
+        outer.base[0 .. 3].should == [42, 42, 42];
+        auto next = stack.push(1, 1);
+        (next.base == outer.base + 3).should == true;
+    }
+}
 
 
 // `push`'s return value is a non-copyable `Frame` that frees its bytes in

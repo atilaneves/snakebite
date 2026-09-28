@@ -289,6 +289,27 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot convert a local variable's address to an integer"),
+)) {
+    @("call.alignedRealLocal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42L.shouldBeRetOf!(backend, q{
+            long read(ubyte prefix, long input) {
+                real value = input;
+                assert(cast(size_t) &value % real.alignof == 0);
+                return prefix + cast(long) value;
+            }
+
+            long answer() {
+                return read(2, 40);
+            }
+        }, "answer");
+    }
+}
+
 // Every D integral width, both signednesses, `bool` and a character type,
 // all in one parameter list - a backend that got any one parameter's
 // offset, width or signedness wrong reads back a different value for it.
