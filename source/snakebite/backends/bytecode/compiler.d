@@ -576,7 +576,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opCastAs, opCastFixedAs,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
         opArrayEqual, opComplex, opComplexNegate, opConstant, opCopy,
-        opCopyFixed,
+        opCopyFixed, opThenReturn,
         opDivideSigned, opDivideUnsigned,
         opEqual, opEqualBranch, opGreaterOrEqualSignedBranch,
         opGreaterOrEqualUnsignedBranch, opGreaterThanSignedBranch,
@@ -897,6 +897,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         optimizeStaticLoads;
+        fuseReturns;
 
         foreach (ref site; _callSites)
             if (site.cleanupStartIndex != size_t.max) {
@@ -985,6 +986,36 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 static foreach (width; 1 .. 17)
                     if (instruction.width == width)
                         instruction.handler = &opCopyFixed!(width, true);
+            }
+        }
+    }
+
+    private void fuseReturns() {
+        import std.meta: AliasSeq;
+
+        foreach (index, ref instruction; _instructions) {
+            if (index + 1 == _instructions.length)
+                break;
+            const next = &_instructions[index + 1];
+            if (next.handler !is &opReturn
+                    || next.source != instruction.destination
+                    || next.width != instruction.width)
+                continue;
+
+            // Keep the separate return as a possible branch target. The
+            // fused path must still write the producer's destination.
+            static foreach (operation; AliasSeq!(
+                opConstant, opCopy, opLoadIndirect, opFrameAddress,
+                opCopyFixed!1, opCopyFixed!2, opCopyFixed!4,
+                opCopyFixed!8, opCopyFixed!16,
+            )) {
+                if (instruction.handler is &operation)
+                    instruction.handler = &opThenReturn!operation;
+            }
+            static foreach (width; 1 .. 17) {
+                if (instruction.handler is &opCopyFixed!(width, true))
+                    instruction.handler = &opThenReturn!(
+                        opCopyFixed!(width, true));
             }
         }
     }
