@@ -3808,3 +3808,91 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+private union ReviewVectorUnion {
+    __vector(float[4]) vector;
+    ulong[2] words;
+}
+
+private extern(C) ulong snakebite_review_vector_union(ReviewVectorUnion value) {
+    return value.words[0] + value.words[1];
+}
+
+private extern(C) float snakebite_review_vector_odd_spill(
+    double a, double b, double c, double d, double e,
+    double f, double g, double h, double i, __vector(float[4]) value,
+) {
+    return value[0] + value[3];
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("review436.vectorUnionIntegerWins." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42UL.shouldBeRetOf!(backend, q{
+            union Value {
+                __vector(float[4]) vector;
+                ulong[2] words;
+            }
+            pragma(mangle, "snakebite_review_vector_union")
+            extern(C) ulong invoke(Value);
+            ulong answer() {
+                Value value;
+                value.words = [17UL, 25UL];
+                return invoke(value);
+            }
+        }, "answer");
+    }
+
+    @("review436.vectorSpillAfterOddWord." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        5.0f.shouldBeRetOf!(backend, q{
+            alias Vector = __vector(float[4]);
+            pragma(mangle, "snakebite_review_vector_odd_spill")
+            extern(C) float invoke(
+                double, double, double, double, double,
+                double, double, double, double, Vector);
+            float answer() {
+                auto value = cast(Vector) [1.0f, 2.0f, 3.0f, 4.0f];
+                return invoke(1, 2, 3, 4, 5, 6, 7, 8, 9, value);
+            }
+        }, "answer");
+    }
+}
+
+private extern(C) creal snakebite_review_complex_return() {
+    return 17.0L + 25.0Li;
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("review436.complexRealReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            pragma(mangle, "snakebite_review_complex_return")
+            extern(C) creal invoke();
+            int answer() {
+                const value = invoke();
+                return cast(int) (value.re + value.im);
+            }
+        }, "answer");
+    }
+
+    @("review436.hostVariadicFunctionPointer." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            pragma(mangle, "snakebite_ut_variadic_count_sum_backend")
+            extern(C) int invoke(int, ...);
+            int answer() {
+                auto function_ = &invoke;
+                return function_(2, 16, 13);
+            }
+        }, "answer");
+    }
+}
