@@ -81,13 +81,14 @@ public imported!"dmd.mtype".TypeFunction typeFunctionOf(
     imported!"dmd.expression".CallExp expression,
 ) {
     import dmd.astenums: Tdelegate, Tpointer;
-    import dmd.typesem: nextOf;
+    import dmd.typesem: nextOf, toBasetype;
 
     if (expression.f !is null)
         return typeFunctionOf(expression.f);
     auto type = expression.e1.type;
     if (type is null)
         return null;
+    type = type.toBasetype;
     if (type.ty == Tdelegate || type.ty == Tpointer)
         type = type.nextOf;
     return type.isTypeFunction;

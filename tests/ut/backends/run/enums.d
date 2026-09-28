@@ -226,3 +226,81 @@ static foreach (backend; Matrix!(
         );
     }
 }
+
+// An enum whose base type is a struct has the struct's own layout and
+// members - calling one of the base struct's methods on it must read and
+// write through the base type's own fields, the same way a plain struct
+// value would. This is a regression-locking test, not a red/green one: a
+// direct method call like this one resolves `expression.f` during
+// semantic analysis and never reaches `frontend.dmd.delegates.
+// delegateTargetOf`'s own receiver-type check, so it already passed
+// before that function's fix. The one guest construct that does reach
+// `delegateTargetOf` - taking a bound method's address, `&receiver.
+// method` - is itself unsupported by both `Interpreter` and `Bytecode`
+// today, regardless of enum normalisation, so that fix has no test of
+// its own here; it is still correct by the same reasoning as the other
+// sites in this file, and matches `isIndirectDelegateCall`'s own
+// idiom (`enumOfDelegate.indirectCall` below).
+static foreach (backend; Matrix!()) {
+    @("enumOfStruct.methodCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        11.shouldBeRetOf!(
+            backend,
+            q{
+                struct Counter {
+                    int value;
+                    int read() { return value; }
+                    void increment() { value++; }
+                }
+                enum ECounter : Counter { a = Counter(10) }
+
+                int callMethod() {
+                    ECounter c = ECounter.a;
+                    c.increment();
+                    return c.read();
+                }
+            },
+            "callMethod",
+        );
+    }
+}
+
+// An enum whose base type is a delegate calls exactly like the delegate
+// itself. `backends.calls.isIndirectDelegateCall` and `frontend.dmd.
+// functions.typeFunctionOf` both used to test the callee's raw `.ty`
+// against `Tdelegate`, missing an enum base the same way. The delegate
+// itself is built field by field (`.funcptr`/`.ptr`), the same idiom
+// `assignDelegateFieldsBeforeNestedCall` (`delegates.d`) uses - taking a
+// bound method's address directly (`&counter.read`) is a separate, already
+// unsupported construct on both `Interpreter` and `Bytecode`, nothing to
+// do with type normalisation.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot access delegate function pointers"),
+)) {
+    @("enumOfDelegate.indirectCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                struct Counter {
+                    int value;
+                    int read() { return value; }
+                }
+                enum ECallback : int delegate() { z = null }
+
+                int callThroughEnumDelegate() {
+                    Counter counter = Counter(42);
+                    int delegate() plain;
+                    plain.funcptr = &Counter.read;
+                    plain.ptr = &counter;
+                    ECallback cb = cast(ECallback) plain;
+                    return cb();
+                }
+            },
+            "callThroughEnumDelegate",
+        );
+    }
+}

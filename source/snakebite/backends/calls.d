@@ -289,6 +289,7 @@ public bool isIndirectDelegateCall(
     imported!"dmd.mtype".Type calleeType,
 ) {
     import dmd.astenums: Tdelegate;
+    import dmd.typesem: toBasetype;
 
-    return calleeType !is null && calleeType.ty == Tdelegate;
+    return calleeType !is null && calleeType.toBasetype.ty == Tdelegate;
 }
