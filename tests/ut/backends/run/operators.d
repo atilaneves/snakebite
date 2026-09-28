@@ -1184,3 +1184,40 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+static foreach (backend; Matrix!()) {
+    @("review435.pointerImaginaryComplexCasts." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void* fromImaginary(idouble value) { return cast(void*) value; }
+            void* fromComplex(cdouble value) { return cast(void*) value; }
+            idouble toImaginary(void* value) { return cast(idouble) value; }
+            cdouble toComplex(void* value) { return cast(cdouble) value; }
+            void main() {
+                assert(fromImaginary(3.0i) == null);
+                assert(fromComplex(12.0 + 3.0i) == cast(void*) 12);
+                assert(toImaginary(cast(void*) 12) == 0.0i);
+                assert(toComplex(cast(void*) 12) == 12.0 + 0.0i);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("review435.zeroSizeArrayElementSlice." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int[0][] asSlice(ref int[0][2] values) {
+                return cast(int[0][]) values;
+            }
+            void main() {
+                int[0][2] values;
+                assert(asSlice(values).length == 2);
+            }
+        });
+    }
+}
