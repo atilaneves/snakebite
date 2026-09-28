@@ -742,9 +742,7 @@ static foreach (backend; Matrix!(
 // dmd wraps a narrow compound-assignment target in the `CastExp` its own
 // integral promotion adds. The load and the store must still use the
 // target's own width, not the promoted `int`'s, or a neighbouring array
-// element is read or written by mistake. A signed narrow target's own
-// `>>>=` is a separate, already-tracked Bytecode bug, so it is not
-// covered here.
+// element is read or written by mistake.
 static foreach (backend; Matrix!()) {
     @("narrowCompoundAssignUsesTargetWidth." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -788,6 +786,10 @@ static foreach (backend; Matrix!()) {
                     arr[1] = -66;
                     arr[1] >>= 2;
                     assert(arr[1] == -17 && arr[0] == -10 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] = -1;
+                    arr[1] >>>= 1;
+                    assert(arr[1] == 127 && arr[0] == -10 && arr[2] == 55
                         && arr[3] == 4);
 
                     byte b = -10;
@@ -879,6 +881,10 @@ static foreach (backend; Matrix!()) {
                     arr[1] = -6600;
                     arr[1] >>= 2;
                     assert(arr[1] == -1650 && arr[0] == -1000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] = -1;
+                    arr[1] >>>= 1;
+                    assert(arr[1] == 32767 && arr[0] == -1000
                         && arr[2] == 555 && arr[3] == 4);
 
                     short s2 = -9;

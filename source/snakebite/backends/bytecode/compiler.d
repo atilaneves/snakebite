@@ -3147,6 +3147,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             targetFacts, targetOffset, fieldDeclaration,
             arithmeticKind(target.type),
         );
+        // `>>>=` shifts the target's own unsigned bit pattern. Reading it
+        // through the promoted target's own (possibly signed) facts would
+        // sign-extend a negative narrow target, and the vacated high bits
+        // would then leak into the truncated result.
+        if (expression.isUshrAssignExp)
+            storage.facts.isUnsigned = true;
         const promotedFirst = storage.promotesBeforeOperand
             && operationFacts.size != storage.facts.size;
         size_t valueOffset;
