@@ -38,10 +38,10 @@ public struct CallFrame {
     public size_t[2] integerResult;
     // `%xmm0`, then `%xmm1`, as left by the call.
     align(16) public ubyte[16][2] sseResult;
-    // A scalar `real` result is returned in x87 ST0. The assembly stub
-    // stores and pops it here when `realResultUsed` is set.
-    align(16) public real realResult;
-    public bool realResultUsed;
+    // `real` uses ST0. `creal` uses ST0 and ST1. The assembly stub stores
+    // and pops this many values when `realResultCount` is non-zero.
+    align(16) public real[2] realResult;
+    public ubyte realResultCount;
 }
 
 static assert(CallFrame.integer.offsetof == 0);
@@ -53,8 +53,8 @@ static assert(CallFrame.stackAlignment.offsetof == 200);
 static assert(CallFrame.integerResult.offsetof == 208);
 static assert(CallFrame.sseResult.offsetof == 224);
 static assert(CallFrame.realResult.offsetof == 256);
-static assert(CallFrame.realResultUsed.offsetof == 272);
-static assert(CallFrame.sizeof == 288);
+static assert(CallFrame.realResultCount.offsetof == 288);
+static assert(CallFrame.sizeof == 304);
 
 // `snakebite_ffi_call_sysv_amd64`, the general entry, in `sysv_amd64.S`.
 // One of two entry points that make a forward call across the barrier

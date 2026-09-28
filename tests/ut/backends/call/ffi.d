@@ -3907,19 +3907,62 @@ private extern(C) creal snakebite_review_complex_return() {
     return 17.0L + 25.0Li;
 }
 
+private alias ComplexRealCallback = extern(C) creal function();
+
+private extern(C) creal snakebite_ut_call_complex_real_callback(
+    ComplexRealCallback callback,
+) {
+    return callback();
+}
+
+private extern(C) int snakebite_ut_complex_real_argument(creal value) {
+    return cast(int) (value.re + value.im);
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
 )) {
-    @("review436.complexRealReturn." ~ backend.stringof)
+    @("complexRealReturn." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        42.shouldBeRetOf!(backend, q{
+        84.shouldBeRetOf!(backend, q{
             pragma(mangle, "snakebite_review_complex_return")
             extern(C) creal invoke();
             int answer() {
-                const value = invoke();
-                return cast(int) (value.re + value.im);
+                const first = invoke();
+                const second = invoke();
+                return cast(int) (first.re + first.im
+                    + second.re + second.im);
             }
+        }, "answer");
+    }
+
+    @("complexRealCallbackReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        84.shouldBeRetOf!(backend, q{
+            alias Callback = extern(C) creal function();
+            pragma(mangle, "snakebite_ut_call_complex_real_callback")
+            extern(C) creal callCallback(Callback callback);
+            int answer() {
+                extern(C) creal guest() {
+                    return 17.0L + 25.0Li;
+                }
+                const first = callCallback(&guest);
+                const second = callCallback(&guest);
+                return cast(int) (first.re + first.im
+                    + second.re + second.im);
+            }
+        }, "answer");
+    }
+
+    @("complexRealArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            pragma(mangle, "snakebite_ut_complex_real_argument")
+            extern(C) int invoke(creal value);
+            int answer() { return invoke(17.0L + 25.0Li); }
         }, "answer");
     }
 

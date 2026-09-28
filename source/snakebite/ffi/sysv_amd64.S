@@ -48,7 +48,7 @@
 #define CF_INTEGER_RESULT   208 /* size_t[2] integerResult */
 #define CF_SSE_RESULT       224 /* ubyte[16][2] sseResult */
 #define CF_REAL_RESULT      256 /* real realResult */
-#define CF_REAL_RESULT_USED 272 /* bool realResultUsed */
+#define CF_REAL_RESULT_COUNT 288 /* ubyte realResultCount */
 
     .text
     .globl  snakebite_ffi_call_sysv_amd64
@@ -185,9 +185,12 @@ snakebite_ffi_call_sysv_amd64:
     movq    %rdx, CF_INTEGER_RESULT+8(%r12)
     movdqu  %xmm0, CF_SSE_RESULT+0(%r12)
     movdqu  %xmm1, CF_SSE_RESULT+16(%r12)
-    cmpb    $0, CF_REAL_RESULT_USED(%r12)
+    cmpb    $0, CF_REAL_RESULT_COUNT(%r12)
     je      2f
     fstpt   CF_REAL_RESULT(%r12)
+    cmpb    $2, CF_REAL_RESULT_COUNT(%r12)
+    jne     2f
+    fstpt   CF_REAL_RESULT+16(%r12)
 2:
 
     /* `%rbp` itself does not move until the final pop below, so the
@@ -333,8 +336,8 @@ snakebite_ffi_call_sysv_amd64_integer:
 
 #define CB_ENTRIES_PER_CHUNK 254
 #define CB_ENTRY_BYTES       16
-/* `CallFrame` is 288 bytes, already rounded for 16-byte alignment. */
-#define CB_FRAME_BYTES       288
+/* `CallFrame` is 304 bytes, already rounded for 16-byte alignment. */
+#define CB_FRAME_BYTES       304
 
     .globl  snakebite_ffi_callback_chunk
     .type   snakebite_ffi_callback_chunk, @function
@@ -431,8 +434,14 @@ snakebite_ffi_callback_common:
     movq    CF_INTEGER_RESULT+8(%rsp), %rdx
     movdqu  CF_SSE_RESULT+0(%rsp), %xmm0
     movdqu  CF_SSE_RESULT+16(%rsp), %xmm1
-    cmpb    $0, CF_REAL_RESULT_USED(%rsp)
+    cmpb    $0, CF_REAL_RESULT_COUNT(%rsp)
     je      3f
+    cmpb    $1, CF_REAL_RESULT_COUNT(%rsp)
+    jne     4f
+    fldt    CF_REAL_RESULT(%rsp)
+    jmp     3f
+4:
+    fldt    CF_REAL_RESULT+16(%rsp)
     fldt    CF_REAL_RESULT(%rsp)
 3:
 

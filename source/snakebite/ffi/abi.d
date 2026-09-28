@@ -106,7 +106,8 @@ public struct Register {
 }
 
 // How a value travels. A regular value has at most two eightbytes after
-// the SysV cleanup rule. A MEMORY value - larger than two eightbytes, or
+// the SysV cleanup rule; bare `creal` returns use two x87 registers. A
+// MEMORY value - larger than two eightbytes, or
 // with an unaligned field - travels as `memoryWords` whole eightbytes on
 // the stack, in declaration position, a plain "copy bytes" load each
 // (issue #334 step 3): `registers`/`count` above are meaningless for it.
@@ -160,7 +161,19 @@ public struct ArgumentPlan {
     }
 
     public static ArgumentPlan ofReturn(Type type) {
-        import dmd.typesem: size;
+        import dmd.typesem: size, toBasetype;
+        import dmd.astenums: Tcomplex80;
+
+        auto baseType = type.toBasetype;
+        // SysV returns `creal` in ST0 and ST1. Its argument form is
+        // MEMORY-class, and an aggregate that contains it stays that way.
+        if (baseType.ty == Tcomplex80)
+            return ArgumentPlan(
+                [Register(Register.Kind.x87, 16),
+                    Register(Register.Kind.x87, 16)],
+                2,
+                false,
+            );
 
         // A bare `real` return and a struct (or union) return that,
         // once classified, is nothing but the two eightbytes a `real`
@@ -195,6 +208,7 @@ public struct ArgumentPlan {
 // places on the stack, so `ArgumentPlan.of`'s alignment limit does not
 // apply to it.
 public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type unbasedType) {
+    import dmd.astenums: Tcomplex80;
     import dmd.typesem: toBasetype;
 
     // An enum has its base type's native layout and classification -
@@ -203,6 +217,11 @@ public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type unbasedType) {
     // this only has to happen once more here, for `aggregatePlan`'s own
     // fallback below.
     auto type = unbasedType.toBasetype;
+
+    // The bare complex value returns in ST0/ST1; aggregate planning still
+    // classifies a struct that contains it as MEMORY.
+    if (type.ty == Tcomplex80)
+        return false;
 
     // A clean X87 return (`isX87OnlyAggregate`'s own doc) crosses in
     // `%st0`, never through a hidden pointer.
@@ -481,9 +500,9 @@ private void classify(
     // field (`Tcomplex80`) never reaches this function at all: it is
     // always 32 bytes, so the `offset + bytes > 16` check above this
     // function's entry already forces MEMORY for it before any
-    // type-specific case runs, the same route a `creal` return or
-    // parameter already takes through `aggregatePlan`'s own
-    // `count > 2` branch.
+    // type-specific case runs. A `creal` parameter and any aggregate
+    // containing one take `aggregatePlan`'s own `count > 2` branch;
+    // `ofReturn` handles bare `creal` before this route.
     case Tfloat80, Timaginary80:
         merge(classes, offset, 8, ArgumentPlan.ValueClass.x87, memory);
         merge(classes, offset + 8, 8, ArgumentPlan.ValueClass.x87up,

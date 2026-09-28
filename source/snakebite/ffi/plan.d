@@ -152,7 +152,7 @@ public struct CallPlan {
     // pair when the return classifies to two eightbytes.
     private ResultMove[2] _resultMoves;
     private size_t _resultCount;
-    private bool _realResult;
+    private ubyte _realResultCount;
     // The stub entry this plan calls through - `snakebite_ffi_call_sysv_
     // amd64` or `snakebite_ffi_call_sysv_amd64_integer`, chosen once in
     // `buildMoves` from `_sseCount`/`_stackWordCount`. This is a
@@ -444,7 +444,7 @@ public struct CallPlan {
         if (_hiddenReturnPointer)
             return *cast(void**)
                 (cast(const(ubyte)*) frame + _returnPointerOffset);
-        if (_resultCount == 0 && !_realResult)
+        if (_resultCount == 0 && _realResultCount == 0)
             return null;
         return scratch + _returnOffset;
     }
@@ -458,11 +458,12 @@ public struct CallPlan {
     ) const {
         import core.stdc.string: memcpy;
 
-        frame.realResultUsed = _realResult;
-        if (_realResult) {
-            import core.stdc.string: memcpy;
-
-            memcpy(&frame.realResult, returnPlace, real.sizeof);
+        frame.realResultCount = _realResultCount;
+        if (_realResultCount != 0) {
+            foreach (i; 0 .. _realResultCount)
+                memcpy(&frame.realResult[i],
+                    cast(const(ubyte)*) returnPlace + i * real.sizeof,
+                    real.sizeof);
             return;
         }
         if (_hiddenReturnPointer) {
@@ -549,8 +550,8 @@ public struct CallPlan {
         scope const(void*)[] arguments,
     ) const {
         if (!_integerOnly)
-            *cast(bool*) (frameBytes + CallFrame.realResultUsed.offsetof) =
-                _realResult;
+            *cast(ubyte*) (frameBytes + CallFrame.realResultCount.offsetof) =
+                _realResultCount;
         if (_hiddenReturnPointer)
             *cast(size_t*) (frameBytes + _returnPointerOffset) =
                 cast(size_t) returnPlace;
@@ -600,15 +601,15 @@ public struct CallPlan {
     // address, not the result.
     pragma(inline, true)
     private void readResult(ubyte* frameBytes, void* returnPlace) const {
-        if (_realResult) {
+        if (_realResultCount != 0) {
             if (returnPlace !is null) {
                 import core.stdc.string: memcpy;
 
-                memcpy(
-                    returnPlace,
-                    frameBytes + CallFrame.realResult.offsetof,
-                    real.sizeof,
-                );
+                foreach (i; 0 .. _realResultCount)
+                    memcpy(cast(ubyte*) returnPlace + i * real.sizeof,
+                        frameBytes + CallFrame.realResult.offsetof
+                            + i * real.sizeof,
+                        real.sizeof);
             }
             return;
         }
@@ -992,11 +993,13 @@ public struct CallPlan {
         _sseCount = floatingCount;
         _integerArgumentCount = integerCount;
         _stackWordCount = stackCount;
-        _realResult = _return.count == 1
-            && _return.registers[0].kind == Register.Kind.x87;
+        _realResultCount = 0;
+        foreach (register; _return.registers[0 .. _return.count])
+            if (register.kind == Register.Kind.x87)
+                ++_realResultCount;
         // The leaner entry is safe exactly when this plan fills no SSE
         // register and spills no stack word - see `_entry`'s own doc.
-        _integerOnly = !_realResult
+        _integerOnly = _realResultCount == 0
             && _sseCount == 0 && _stackWordCount == 0;
         _entry = _integerOnly
             ? &snakebite_ffi_call_sysv_amd64_integer
@@ -1006,7 +1009,7 @@ public struct CallPlan {
         // its own register file's next result slot - see `callAt`.
         size_t integerResultIndex;
         size_t floatingResultIndex;
-        if (!_realResult)
+        if (_realResultCount == 0)
             foreach (i; 0 .. _return.count) {
                 const fromSse = _return.registers[i].kind
                     == Register.Kind.sse;
@@ -1020,7 +1023,7 @@ public struct CallPlan {
                     storeOf(_return.registers[i].size),
                 );
             }
-        _resultCount = _realResult ? 0 : _return.count;
+        _resultCount = _realResultCount != 0 ? 0 : _return.count;
     }
 
     // `register`'s source bytes, as a `Load` tag - see `Load` and
