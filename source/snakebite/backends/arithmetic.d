@@ -39,6 +39,7 @@ package ArithmeticPlan arithmeticPlan(
 ) {
     import dmd.astenums: Tpointer;
     import dmd.typesem: toBasetype;
+    import snakebite.nativevalue: ComplexOperand;
 
     // DMD represents a compound assignment's operation at its target's
     // promoted type, which the assignment's own type does not show.
@@ -51,8 +52,14 @@ package ArithmeticPlan arithmeticPlan(
         kind = ArithmeticPlan.Kind.pointerDifference;
     auto plan = planOf(type, kind);
     if (kind == ArithmeticPlan.Kind.complex)
+        // A postfix `++`/`--` means `(tmp = e, e += 1, tmp)`: its step is
+        // the real value `1`. dmd's own AST casts that step to `e1`'s
+        // full complex type instead of leaving it real, so reading the
+        // operand kind from `e2.type` here would add an explicit `+ 0i`
+        // that a compound assignment's step never adds.
         plan.operands = ComplexOperands(complexOperand(expression.e1.type),
-            complexOperand(expression.e2.type));
+            expression.isPostExp
+                ? ComplexOperand.real_ : complexOperand(expression.e2.type));
     return plan;
 }
 

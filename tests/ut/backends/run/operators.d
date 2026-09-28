@@ -548,13 +548,30 @@ static foreach (backend; Matrix!(
                 assert(!negative(r.re));
                 r = i - c;
                 assert(!negative(r.im));
+                cdouble y = 1.0 + d * 1.0i;
+                assert(negative(y.im));
+                cdouble a = y; a++;
+                assert(negative(a.im));
+                cdouble b = y; b += 1;
+                assert(negative(b.im));
+                cdouble e = y; ++e;
+                assert(negative(e.im));
+                cdouble f = y; f--;
+                assert(negative(f.im));
+                cdouble g = y; g -= 1;
+                assert(negative(g.im));
+                cdouble h = y; --h;
+                assert(negative(h.im));
             }
         });
     }
 }
 
 // Sibling pinning the divergence above: `dmd -g`, which builds this test,
-// gives `c + d` and `d + c` a positive zero imaginary half.
+// gives `c + d` and `d + c` a positive zero imaginary half. The same `+`
+// bug reaches a postfix/compound/prefix `++` on a complex target, because
+// each one adds a real step to the target's imaginary half; `--` does not
+// diverge, since dmd's `-` keeps the sign dmd's own `+` loses.
 @("complexArithmeticKeepsSignedZeros.Native")
 @Tags(Native.stringof)
 unittest {
@@ -568,6 +585,13 @@ unittest {
             assert(!negative(r.im));
             r = d + c;
             assert(!negative(r.im));
+            cdouble y = 1.0 + d * 1.0i;
+            cdouble a = y; a++;
+            assert(!negative(a.im));
+            cdouble b = y; b += 1;
+            assert(!negative(b.im));
+            cdouble e = y; ++e;
+            assert(!negative(e.im));
         }
     });
 }
