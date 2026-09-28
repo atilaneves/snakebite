@@ -492,6 +492,62 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A static array of arrays constructed from one scalar fills every
+// innermost element, not only the first of each row. A row value fills
+// every row.
+static foreach (backend; Matrix!()) {
+    @("staticArray.nestedFill." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int[2] makePair(int first) { return [first, first + 1]; }
+            void main() {
+                int[2][3] a = 7;
+                assert(a[0][0] == 7 && a[0][1] == 7);
+                assert(a[2][0] == 7 && a[2][1] == 7);
+                byte[3][2][2] b = -4;
+                assert(b[0][0][0] == -4 && b[1][1][2] == -4);
+                a[] = [1, 2];
+                assert(a[0][0] == 1 && a[1][0] == 1 && a[2][1] == 2);
+                int[2] pair = [3, 4];
+                a[] = pair;
+                assert(a[0][0] == 3 && a[1][1] == 4 && a[2][0] == 3);
+                a[] = makePair(5);
+                assert(a[0][0] == 5 && a[1][1] == 6 && a[2][0] == 5);
+            }
+        });
+    }
+}
+
+// A `__vector` element fill of a static array, from a vector value and
+// from an enum whose base type is a vector.
+static foreach (backend; Matrix!()) {
+    @("staticArray.sliceScalarFill.vector." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd: float4, int4;
+            enum FV : float4 { one = float4(1), two = float4(2) }
+            void main() {
+                int4[2] ints;
+                ints[] = int4([1, 2, 3, 4]);
+                assert(ints[0][0] == 1 && ints[1][3] == 4);
+                ints[] = 3;
+                assert(ints[0][0] == 3 && ints[1][3] == 3);
+                int4[2] constructed = 5;
+                assert(constructed[0][0] == 5 && constructed[1][3] == 5);
+                float4[2] floats;
+                floats[] = float4([1.5f, 2.5f, 3.5f, 4.5f]);
+                assert(floats[0][1] == 2.5f && floats[1][3] == 4.5f);
+                FV[2] named;
+                named[] = FV.two;
+                float4 last = named[1];
+                assert(last[0] == 2 && last[3] == 2);
+            }
+        });
+    }
+}
+
 // A static-array local initialized from an `ArrayLiteralExp` whose elements
 // are runtime values (not folded at compile time, since they come from a
 // function's parameters): the literal is typed `int[3]`, not `int[]`, so

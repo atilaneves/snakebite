@@ -1614,13 +1614,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 type.toString, "`",
             ));
 
-        auto info = cast(TypeInfo_Class) cast() _bytecode._runtimeTypes.get(type);
-        if (info is null)
-            throw new SnakebiteException(text(
-                "bytecode compiler cannot resolve catch type `",
-                type.toString, "`",
-            ));
-        return info;
+        return cast(TypeInfo_Class) cast() _bytecode._runtimeTypes.get(type);
     }
 
     private void compileReturn(ReturnStatement statement) {
@@ -2362,7 +2356,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileVariableInitializer(
         VarDeclaration variable,
         Loc loc,
-        in string operation,
+        lazy string operation,
     ) {
         auto expInitializer = variable._init.isExpInitializer;
         if (expInitializer is null)
@@ -2858,17 +2852,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             metadata);
     }
 
-    // `arr[] = value;`, only for `arr` a static array's own whole slice - a
-    // bounded slice or a dynamic array's own runtime fill are both out of
-    // scope. When `value` is itself an array (another static array's own
-    // whole slice, or a dynamic array) of the same element type, every one
-    // of its elements is copied into the matching element of `arr` in
-    // turn; otherwise `value` is a scalar, evaluated once and copied into
-    // every element. `destOffset` gets `arr[]` itself once the fill or
-    // copy is done - the same `{dim, &arr}` pair `visit(SliceExp)`'s
-    // whole-slice case already builds for a bare `arr[]` - since the
-    // assignment's own value is that slice (`int[] s = (a[] = 5);` is
-    // legal D).
+    // The assignment's value is the slice itself:
+    // `int[] s = (a[] = b[]);` is legal D.
     private void compileSliceAssign(
         AssignExp expression, SliceExp target, in size_t destOffset,
         in size_t resolvedTarget = size_t.max,
@@ -2926,7 +2911,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const valueOffset = reserveTemp(facts);
             evalInto(expression.e2, valueOffset, facts.size, sarrayType);
             emit(&opStoreIndirect, baseOffset, valueOffset, facts.size);
-        } else if (rightTy == Tsarray || rightTy == Tarray) {
+        } else {
             size_t sourceOffset;
             if (rightTy == Tsarray) {
                 sourceOffset = compileAddress(expression.e2);
@@ -2963,16 +2948,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             emit(&opSliceCopy, destSliceOffset, sourceSliceOffset,
                 elementFacts.size);
-        } else {
-            const valueOffset = reserveTemp(elementFacts);
-            evalInto(expression.e2, valueOffset, elementFacts.size);
-
-            foreach (i; 0 .. dim) {
-                const addressOffset =
-                    elementAddress(baseOffset, i, elementFacts.size);
-                emit(&opStoreIndirect, addressOffset, valueOffset,
-                    elementFacts.size);
-            }
         }
 
         if (destOffset != discardResult && destOffset != targetOffset) {
@@ -3004,44 +2979,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return pointer;
     }
 
-    // `p[0 .. n] = q[];`/`a[] = b[];` (array-to-array) or
-    // `p[a .. b] = v;` (scalar fill) for a dynamic-length target: a
-    // pointer sliced to a run-time length (`_d_newclassT`'s own
-    // `p[0 .. init.length] = init[];`, `core/lifetime.d`) or a dynamic
-    // array's own whole slice. Neither side has a compile-time element
-    // count the way a static array's own whole-slice assignment
-    // (`compileSliceAssign` above) does, so this reads both sides'
-    // lengths at run time and copies through `opSliceCopy`. Druntime owns
-    // the equal-length and overlap checks for that copy.
-    //
-    // Only a plain-bytes element is supported: `void` (a class `.init`
-    // image's own element type, and every element type this reaches
-    // through, since `isSupportedElementType` never accepts `void`) or
-    // anything `isSupportedElementType` already lays out elsewhere. dmd's
-    // own semantic pass already rewrites an assignment whose element has
-    // a postblit or destructor into a call to
-    // `_d_arrayassign_l`/`_d_arrayassign_r` before this compiler ever
-    // sees it (`expressionsem.d`'s `lowerArrayAssign`), so a plain
-    // `AssignExp` reaching here is already safe to treat as a raw byte
-    // copy.
-    //
-    // DMD's `blockAssign` marks `p[a .. b] = v;` as a scalar fill,
-    // even when the element is itself an array. The value `v` is
-    // evaluated once, then copied into every element through
-    // `opSliceFill`, the run-time counterpart to `compileSliceAssign`'s
-    // own compile-time-unrolled scalar fill for a static array.
-    //
-    // `target.e1` is a static array here whenever `compileSliceAssign`
-    // routed a bounded sub-slice of it this way instead of unrolling it
-    // as a whole-slice fill or copy; `target.type` (this function's own
-    // `Tarray`/`Tvoid` checks below look at that, not `target.e1.type`)
-    // is the dynamic shape the slice itself has either way.
+    // dmd lowers elements with a postblit or destructor to
+    // `_d_arrayassign_*`, so a raw byte copy is safe here. Druntime owns
+    // the equal-length and overlap checks.
     private void compileDynamicSliceAssign(
         AssignExp expression, SliceExp target, in size_t destOffset,
         in size_t resolvedTarget = size_t.max,
     ) {
         import dmd.astenums: Tarray, Tpointer, Tsarray, Tvoid;
-        import dmd.expression: MemorySet;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
         if (target.e1.type.ty != Tarray && target.e1.type.ty != Tpointer
@@ -3063,40 +3008,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (resolvedTarget == size_t.max)
             evalInto(target, destSliceOffset, arrayFacts.size);
 
-        if (expression.memset == MemorySet.blockAssign
-                || expression.e2.type.ty != Tarray) {
-            if (elementType.ty == Tvoid)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+        auto sourceElementType = expression.e2.type.nextOf;
+        if (sourceElementType is null)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
 
-            const elementFacts = TypeFacts.of(elementType);
-            const sourceFacts = TypeFacts.of(expression.e2.type);
-            if (sourceFacts.size != elementFacts.size)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+        const sourceElementSize = sourceElementType.ty == Tvoid
+            ? 1 : TypeFacts.of(sourceElementType).size;
+        if (elementSize != sourceElementSize)
+            throw rejection(_function, expression.loc,
+                expressionText(expression));
 
-            const valueOffset = reserveTemp(elementFacts);
-            evalInto(expression.e2, valueOffset, elementFacts.size);
-            emit(&opSliceFill, destSliceOffset, valueOffset, elementSize);
-        } else {
-            auto sourceElementType = expression.e2.type.nextOf;
-            if (sourceElementType is null)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+        const sourceFacts = TypeFacts.of(expression.e2.type);
+        const sourceSliceOffset = reserveTemp(sourceFacts);
+        evalInto(expression.e2, sourceSliceOffset, sourceFacts.size);
 
-            const sourceElementSize = sourceElementType.ty == Tvoid
-                ? 1 : TypeFacts.of(sourceElementType).size;
-            if (elementSize != sourceElementSize)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            const sourceFacts = TypeFacts.of(expression.e2.type);
-            const sourceSliceOffset = reserveTemp(sourceFacts);
-            evalInto(expression.e2, sourceSliceOffset, sourceFacts.size);
-
-            emit(&opSliceCopy, destSliceOffset, sourceSliceOffset,
-                elementSize);
-        }
+        emit(&opSliceCopy, destSliceOffset, sourceSliceOffset, elementSize);
 
         if (destOffset != discardResult) {
             emit(&opCopy, destOffset + arrayLengthOffset,
@@ -3106,24 +3033,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
-    // The address of the element at `index` within an array whose own
-    // address is `baseOffset` - `compileSliceAssign`'s own scalar-fill
-    // loop, which advances a fresh temporary from the same base rather
-    // than mutating it in place, since `baseOffset` is read again on
-    // every iteration.
-    private size_t elementAddress(
-        in size_t baseOffset, in size_t index, in size_t elementSize,
+    // dmd's `blockAssign` gives `v` the element type, even when the
+    // element is itself an array.
+    private void compileSliceFill(
+        AssignExp expression, SliceExp target, in size_t resolvedTarget,
     ) {
-        const addressOffset = reserveTemp(pointerFacts);
-        emit(&opCopy, addressOffset, baseOffset, size_t.sizeof);
-        if (index != 0) {
-            const byteOffsetOffset = reserveTemp(pointerFacts);
-            emit(&opConstant, byteOffsetOffset,
-                addConstant(cast(long) (index * elementSize)),
-                size_t.sizeof);
-            emit(&opAdd, addressOffset, byteOffsetOffset, size_t.sizeof);
-        }
-        return addressOffset;
+        const elementFacts = TypeFacts.of(target.type.nextOf);
+        const destSliceOffset =
+            loadSliceDescriptor(resolvedTarget, TypeFacts.of(target.type));
+        const valueOffset = reserveTemp(elementFacts);
+        evalInto(expression.e2, valueOffset, elementFacts.size);
+        emit(&opSliceFill, destSliceOffset, valueOffset, elementFacts.size);
     }
 
     // Resolve the target before evaluating the right operand. DMD's
@@ -4434,27 +4354,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 text("`", expression.toString,
                     "` without resolved type information"));
 
-        emitRuntimeTypeInfoConstant(expression, type);
+        emitRuntimeTypeInfoConstant(type);
     }
 
-    // Shared tail of `visit(TypeidExp)` and `visit(SymOffExp)`'s
-    // `TypeInfoDeclaration` case: resolve `type`'s run-time `TypeInfo`
-    // through `_runtimeTypes.get` and emit its address into the current
-    // destination. A null result is a rejection, not a fallback to
-    // another compilation path - `RuntimeTypes.get` returning null means
-    // there is no such run-time type to read.
     private void emitRuntimeTypeInfoConstant(
-        Expression expression,
         Type type,
         in size_t destination = size_t.max,
         in size_t width = size_t.max,
     ) {
-        import std.conv: text;
-
         auto address = cast(void*) _bytecode._runtimeTypes.get(type);
-        if (address is null)
-            throw rejection(_function, expression.loc,
-                text("unresolved ", expressionText(expression)));
 
         emit(&opConstant,
             destination == size_t.max ? _destination : destination,
@@ -6414,7 +6322,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             compiler.compileAssignmentAt(expression, target);
         }
 
-        public void storageSliceAssignment(
+        public void storageSliceFill(AssignExp expression, size_t target) {
+            compiler.compileSliceFill(
+                expression, cast() expression.e1.isSliceExp, target);
+        }
+
+        public void storageSliceCopy(
             AssignExp expression, size_t target,
         ) {
             compiler.compileSliceAssign(
@@ -6474,10 +6387,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         public size_t storageStaticIndexLength(IndexExp expression) {
+            import dmd.typesem: toBasetype;
+
             const length = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opConstant, length,
                 compiler.addConstant(cast(long) expression.e1.type
-                    .isTypeSArray.dim.toInteger),
+                    .toBasetype.isTypeSArray.dim.toInteger),
                 size_t.sizeof);
             return length;
         }
@@ -6534,9 +6449,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storageDynamicIndex(
             IndexExp expression, size_t base, size_t index,
         ) {
+            import dmd.typesem: toBasetype;
             import snakebite.nativelayout: arrayPointerOffset;
 
-            const stride = TypeFacts.of(expression.e1.type.nextOf).size;
+            const stride =
+                TypeFacts.of(expression.e1.type.toBasetype.nextOf).size;
             const strideOffset = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opConstant, strideOffset,
                 compiler.addConstant(cast(long) stride), size_t.sizeof);
@@ -6555,7 +6472,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storageStaticIndex(
             IndexExp expression, size_t base, size_t index,
         ) {
-            const stride = TypeFacts.of(expression.e1.type.nextOf).size;
+            import dmd.typesem: toBasetype;
+
+            const stride =
+                TypeFacts.of(expression.e1.type.toBasetype.nextOf).size;
             const strideOffset = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opConstant, strideOffset,
                 compiler.addConstant(cast(long) stride), size_t.sizeof);
@@ -6570,7 +6490,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storagePointerIndex(
             IndexExp expression, size_t pointer, size_t index,
         ) {
-            const stride = TypeFacts.of(expression.e1.type.nextOf).size;
+            import dmd.typesem: toBasetype;
+
+            const stride =
+                TypeFacts.of(expression.e1.type.toBasetype.nextOf).size;
             const strideOffset = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opConstant, strideOffset,
                 compiler.addConstant(cast(long) stride), size_t.sizeof);
@@ -6623,7 +6546,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (auto typeInfo = expression.var.isTypeInfoDeclaration) {
                 const result = compiler.reserveTemp(compiler.pointerFacts);
                 compiler.emitRuntimeTypeInfoConstant(
-                    expression, typeInfo.tinfo, result, size_t.sizeof,
+                    typeInfo.tinfo, result, size_t.sizeof,
                 );
                 return result;
             }

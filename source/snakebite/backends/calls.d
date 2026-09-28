@@ -161,14 +161,11 @@ public struct CallSelection {
     // function dmd does not classify (`BUILTIN.unimp`) - every ordinary
     // bodiless native declaration, and also, today, `core.math.rint` and
     // `core.math.rndtol`, which dmd's own `BUILTIN` enum has no member
-    // for - keeps the native route FFI already handles. A function dmd
-    // does classify but this table has no wrapper for fails loudly here,
-    // at decision time, rather than at the call's first execution.
+    // for - keeps the native route FFI already handles. Every bodiless
+    // declaration dmd does classify has a wrapper in the table.
     private static Decision builtinDecision(FuncDeclaration function_) {
         import dmd.builtin: isBuiltin;
         import snakebite.backends.builtins: entryOf;
-        import snakebite.exception: SnakebiteException;
-        import std.conv: text;
 
         const kind = isBuiltin(function_);
         if (kind == BUILTIN.unimp)
@@ -182,11 +179,7 @@ public struct CallSelection {
         // ident`) - so `function_.ident` is the lookup key, not `kind`.
         auto entry = entryOf(
             function_.ident.toString.idup, parameterTypeOf(function_));
-        if (entry is null)
-            throw new SnakebiteException(text(
-                "snakebite has no builtin wrapper for `",
-                function_.toString, "`, which dmd classifies as `",
-                kind, "`"));
+        assert(entry !is null);
 
         return Decision(Route.builtin, entry);
     }
@@ -200,33 +193,31 @@ public struct CallSelection {
     // argument of the type its result (or, for `ldexp`'s second
     // argument, an unrelated `int`) shares.
     private static ParameterType parameterTypeOf(FuncDeclaration function_) {
-        import dmd.astenums: Tfloat32, Tfloat64, Tfloat80,
-            Tuns16, Tuns32, Tuns64;
-        import snakebite.exception: SnakebiteException;
+        import dmd.astenums: TY;
+        import dmd.typesem: toBasetype;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
-        import std.conv: text;
 
         // `const` fails: `ParameterList.length` and `opIndex` are not
         // `const` methods.
         auto parameterList = typeFunctionOf(function_).parameterList;
-        if (parameterList.length == 0)
-            throw new SnakebiteException(text(
-                "snakebite's builtin table has no entry for `",
-                function_.toString, "`, which takes no parameters"));
+        assert(parameterList.length > 0);
 
-        const parameterType = parameterList[0].type;
-        switch (parameterType.ty) {
+        const parameterType = parameterList[0].type.toBasetype;
+        final switch (parameterType.ty) with (TY) {
             case Tfloat32: return ParameterType.float_;
             case Tfloat64: return ParameterType.double_;
             case Tfloat80: return ParameterType.real_;
             case Tuns16: return ParameterType.ushort_;
             case Tuns32: return ParameterType.uint_;
             case Tuns64: return ParameterType.ulong_;
-            default:
-                throw new SnakebiteException(text(
-                    "snakebite's builtin table has no entry for `",
-                    function_.toString, "`'s first parameter type `",
-                    parameterType.toString, "`"));
+            case Tarray, Tsarray, Taarray, Tpointer, Treference, Tfunction,
+                Tident, Tclass, Tstruct, Tenum, Tdelegate, Tnone, Tvoid,
+                Tint8, Tuns8, Tint16, Tint32, Tint64, Timaginary32,
+                Timaginary64, Timaginary80, Tcomplex32, Tcomplex64,
+                Tcomplex80, Tbool, Tchar, Twchar, Tdchar, Terror, Tinstance,
+                Ttypeof, Ttuple, Tslice, Treturn, Tnull, Tvector, Tint128,
+                Tuns128, Ttraits, Tmixin, Tnoreturn, Ttag:
+                assert(0);
         }
     }
 }
@@ -289,6 +280,7 @@ public bool isIndirectDelegateCall(
     imported!"dmd.mtype".Type calleeType,
 ) {
     import dmd.astenums: Tdelegate;
+    import dmd.typesem: toBasetype;
 
-    return calleeType !is null && calleeType.ty == Tdelegate;
+    return calleeType !is null && calleeType.toBasetype.ty == Tdelegate;
 }

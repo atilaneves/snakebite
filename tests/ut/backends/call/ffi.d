@@ -3072,6 +3072,53 @@ static foreach (backend; Matrix!(
             "answer",
         );
     }
+
+    @("variadic.callbackExtraArgument.enumOfFunctionPointer."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_call_function_backend")
+                extern(C) int nativeCall(int first, ...);
+
+                enum ECallback : int function(int) { z = null }
+
+                static int twice(int x) {
+                    return x * 2;
+                }
+
+                int answer() {
+                    ECallback callback = cast(ECallback) &twice;
+                    return nativeCall(21, callback);
+                }
+            },
+            "answer",
+        );
+    }
+
+    @("variadic.callbackExtraArgument.enumOfDelegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        45.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_call_delegate_backend")
+                extern(C) int nativeCall(int first, ...);
+
+                enum ECallback : int delegate(int) { z = null }
+
+                int answer() {
+                    int offset = 3;
+                    int delegate(int) plain = (int x) => x * 2 + offset;
+                    ECallback callback = cast(ECallback) plain;
+                    return nativeCall(21, callback);
+                }
+            },
+            "answer",
+        );
+    }
 }
 
 

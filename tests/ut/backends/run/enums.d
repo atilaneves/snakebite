@@ -88,3 +88,141 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("enumOfStaticArray.indexing." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Bytes : ubyte[3] {
+                a = [9, 9, 9],
+            }
+
+            void main() {
+                ubyte[3] raw = [1, 2, 3];
+                Bytes value = cast(Bytes) raw;
+                assert(value[0] == 1);
+                assert(value[1] == 2);
+                assert(value[2] == 3);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("enumOfDynamicArray.lengthAndIndexing." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Greeting : string {
+                a = "xx",
+            }
+
+            void main() {
+                string raw = "hi";
+                Greeting value = cast(Greeting) raw;
+                assert(value.length == 2);
+                assert(value[0] == 'h');
+                assert(value[1] == 'i');
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret the address of a local variable at "
+            ~ "compile time"),
+)) {
+    @("enumOfPointer.indexing." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3] data = [10, 20, 30];
+                enum Ptr : int* { z = null }
+                Ptr p = cast(Ptr) data.ptr;
+                assert(p[0] == 10);
+                assert(p[1] == 20);
+                assert(p[2] == 30);
+            }
+        });
+    }
+}
+
+// dmd encodes a pointer built from an integer constant as an
+// `IntegerExp`, the same as an integral value.
+static foreach (backend; Matrix!()) {
+    @("enumOfPointer.fromIntegerLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        (cast(size_t) 8).shouldBeRetOf!(
+            backend,
+            q{
+                size_t identity() {
+                    enum EAddr : size_t* { z = null }
+                    EAddr value = cast(EAddr) cast(size_t*) 8;
+                    return cast(size_t) value;
+                }
+            },
+            "identity",
+        );
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("enumOfStruct.methodCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        11.shouldBeRetOf!(
+            backend,
+            q{
+                struct Counter {
+                    int value;
+                    int read() { return value; }
+                    void increment() { value++; }
+                }
+                enum ECounter : Counter { a = Counter(10) }
+
+                int callMethod() {
+                    ECounter c = ECounter.a;
+                    c.increment();
+                    return c.read();
+                }
+            },
+            "callMethod",
+        );
+    }
+}
+
+// The delegate is built field by field: taking a bound method's
+// address (`&counter.read`) is a separate construct.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot access delegate function pointers"),
+)) {
+    @("enumOfDelegate.indirectCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                struct Counter {
+                    int value;
+                    int read() { return value; }
+                }
+                enum ECallback : int delegate() { z = null }
+
+                int callThroughEnumDelegate() {
+                    Counter counter = Counter(42);
+                    int delegate() plain;
+                    plain.funcptr = &Counter.read;
+                    plain.ptr = &counter;
+                    ECallback cb = cast(ECallback) plain;
+                    return cb();
+                }
+            },
+            "callThroughEnumDelegate",
+        );
+    }
+}

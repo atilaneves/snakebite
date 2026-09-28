@@ -172,13 +172,14 @@ public DelegateTarget delegateTargetOf(
 ) {
     import dmd.astenums: Tdelegate, Tstruct;
     import dmd.funcsem: isVirtualMethod;
+    import dmd.typesem: toBasetype;
 
-    if (function_ is null || type.ty != Tdelegate)
+    if (function_ is null || type.toBasetype.ty != Tdelegate)
         return DelegateTarget.init;
 
     if (function_.isThis !is null)
         return DelegateTarget(function_, false, null, receiver,
-            receiver !is null && receiver.type.ty == Tstruct,
+            receiver !is null && receiver.type.toBasetype.ty == Tstruct,
             receiver !is null && receiver.isSuperExp is null
                 && function_.isVirtualMethod);
 

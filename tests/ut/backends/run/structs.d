@@ -236,6 +236,45 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A guest enum's `TypeInfo_Enum.base` is its base type's TypeInfo, for
+// every base type D accepts: `typeof(null)`, a pointer to `noreturn`, and
+// the deprecated complex and imaginary types too.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read runtime TypeInfo"),
+)) {
+    @("runtimeTypeInfoEnumBaseOfEveryType." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Nothing : typeof(null) { none = null }
+            enum NeverPointer : noreturn* { none = null }
+            enum ComplexFloat : cfloat { unit = 1.0f + 0.0fi }
+            enum ComplexDouble : cdouble { unit = 1.0 + 0.0i }
+            enum ComplexReal : creal { unit = 1.0L + 0.0Li }
+            enum ImaginaryFloat : ifloat { unit = 1.0fi }
+            enum ImaginaryDouble : idouble { unit = 1.0i }
+            enum ImaginaryReal : ireal { unit = 1.0Li }
+            TypeInfo base(TypeInfo info) {
+                return (cast(TypeInfo_Enum) info).base;
+            }
+            void main() {
+                assert(base(typeid(Nothing)).toString == "typeof(null)");
+                assert(base(typeid(Nothing)).tsize == (void*).sizeof);
+                auto never = (cast(TypeInfo_Pointer) base(typeid(NeverPointer))).next;
+                assert(never.toString == "object.TypeInfo");
+                assert(never.tsize == 0);
+                assert(base(typeid(ComplexFloat)).toString == "cfloat");
+                assert(base(typeid(ComplexDouble)).toString == "cdouble");
+                assert(base(typeid(ComplexReal)).toString == "creal");
+                assert(base(typeid(ImaginaryFloat)).toString == "ifloat");
+                assert(base(typeid(ImaginaryDouble)).toString == "idouble");
+                assert(base(typeid(ImaginaryReal)).toString == "ireal");
+                assert(base(typeid(ComplexDouble)).tsize == 16);
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read guest typeid metadata"),

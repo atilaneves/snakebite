@@ -121,18 +121,22 @@ public struct StorageResolver(Result, Adapter) {
         }
 
         if (auto length = expression.isArrayLengthExp) {
-            if (length.e1.type.ty != Tarray)
+            if (length.e1.type.toBasetype.ty != Tarray)
                 return _adapter.storageValue(length);
             auto base = resolve(length.e1);
             return _adapter.storageArrayLength(length, base);
         }
 
         if (auto index = expression.isIndexExp) {
+            // An enum has its base type's layout: `enum E : int[3]`
+            // indexes like `int[3]`.
+            auto indexBase = index.e1.type.toBasetype;
+
             // Static-array code generation evaluates the rightmost index
             // before recursing into the outer array expression. Keep that
             // language-defined order in the shared resolver; all other
             // index kinds evaluate the base before the index.
-            if (index.e1.type.ty == Tsarray) {
+            if (indexBase.ty == Tsarray) {
                 auto length = _adapter.storageStaticIndexLength(index);
                 auto indexValue = _adapter.storageIndexValue(index, length);
                 _adapter.storageIndexBounds(index, indexValue, length);
@@ -141,7 +145,7 @@ public struct StorageResolver(Result, Adapter) {
                     index, base, indexValue);
             }
 
-            if (index.e1.type.ty == Tarray) {
+            if (indexBase.ty == Tarray) {
                 // A normal dynamic-array index evaluates its index before
                 // the array expression. `$` needs the descriptor captured
                 // first, so that special form keeps the extra early step.
@@ -161,7 +165,7 @@ public struct StorageResolver(Result, Adapter) {
                 return _adapter.storageDynamicIndex(
                     index, base, indexValue);
             }
-            if (index.e1.type.ty == Tpointer) {
+            if (indexBase.ty == Tpointer) {
                 auto base = resolve(index.e1);
                 auto pointer = _adapter.storagePointerIndexBase(index, base);
                 auto indexValue = _adapter.storagePointerIndexValue(index);
@@ -187,10 +191,15 @@ public struct StorageResolver(Result, Adapter) {
         // assignment's left side; the adapter receives its location and can
         // then evaluate and store the right side exactly once.
         auto target = resolve(targetExpression);
-        if (expression.e1.isSliceExp !is null)
-            _adapter.storageSliceAssignment(expression, target);
-        else
+        // dmd marks `a[] = v` with `blockAssign` exactly when it cast `v`
+        // to the element type. Every other slice assignment has an array
+        // on the right side, whose elements are copied.
+        if (expression.e1.isSliceExp is null)
             _adapter.storagePlainAssignment(expression, target);
+        else if (expression.memset == MemorySet.blockAssign)
+            _adapter.storageSliceFill(expression, target);
+        else
+            _adapter.storageSliceCopy(expression, target);
         return target;
     }
 
