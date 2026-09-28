@@ -363,6 +363,17 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     ];
     bool memory;
     classify(type, 0, classes, memory);
+    // The psABI post-merge cleanup turns an SSEUP into SSE when its
+    // preceding eightbyte is not SSE or SSEUP. A union can leave that
+    // shape after fields merge into different classes.
+    if (!memory)
+        foreach (i; 0 .. count)
+            if (classes[i] == ArgumentPlan.ValueClass.sseup
+                    && (i == 0
+                        || (classes[i - 1] != ArgumentPlan.ValueClass.sse
+                            && classes[i - 1]
+                                != ArgumentPlan.ValueClass.sseup)))
+                classes[i] = ArgumentPlan.ValueClass.sse;
     // No argument register exists for an X87/X87UP eightbyte - only a
     // *return* value can cross in `%st0` (`isX87OnlyAggregate`'s own
     // doc, checked by `ofReturn` before this function ever runs for a
@@ -599,9 +610,6 @@ private void merge(
             classes[i] = incoming;
         } else if (existing == incoming) {
             // Nothing to merge - both fields already agree.
-        } else if (existing == ArgumentPlan.ValueClass.sseup
-                || incoming == ArgumentPlan.ValueClass.sseup) {
-            classes[i] = ArgumentPlan.ValueClass.sse;
         } else if (existing == ArgumentPlan.ValueClass.integer
                 || incoming == ArgumentPlan.ValueClass.integer) {
             classes[i] = ArgumentPlan.ValueClass.integer;

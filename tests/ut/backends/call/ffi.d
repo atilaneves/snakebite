@@ -3818,6 +3818,12 @@ private extern(C) ulong snakebite_review_vector_union(ReviewVectorUnion value) {
     return value.words[0] + value.words[1];
 }
 
+private extern(C) ReviewVectorUnion snakebite_review_vector_union_return() {
+    ReviewVectorUnion value;
+    value.words = [17UL, 25UL];
+    return value;
+}
+
 private extern(C) float snakebite_review_vector_odd_spill(
     double a, double b, double c, double d, double e,
     double f, double g, double h, double i, __vector(float[4]) value,
@@ -3828,7 +3834,7 @@ private extern(C) float snakebite_review_vector_odd_spill(
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
 )) {
-    @("review436.vectorUnionIntegerWins." ~ backend.stringof)
+    @("ffi.vectorUnionUsesIntegerRegistersForArguments." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         42UL.shouldBeRetOf!(backend, q{
@@ -3842,6 +3848,23 @@ static foreach (backend; Matrix!(
                 Value value;
                 value.words = [17UL, 25UL];
                 return invoke(value);
+            }
+        }, "answer");
+    }
+
+    @("ffi.vectorUnionUsesIntegerRegistersForReturns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42UL.shouldBeRetOf!(backend, q{
+            union Value {
+                __vector(float[4]) vector;
+                ulong[2] words;
+            }
+            pragma(mangle, "snakebite_review_vector_union_return")
+            extern(C) Value invoke();
+            ulong answer() {
+                auto value = invoke();
+                return value.words[0] + value.words[1];
             }
         }, "answer");
     }
