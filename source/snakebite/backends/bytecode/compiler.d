@@ -5186,6 +5186,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private Instruction.Handler floatComparisonHandler(BinExp expression) {
+        import std.conv: text;
+
         with (EXP) switch (expression.op) {
             case lessThan: return &opFloatLessThan;
             case lessOrEqual: return &opFloatLessOrEqual;
@@ -5193,7 +5195,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case greaterOrEqual: return &opFloatGreaterOrEqual;
             case equal: return &opFloatEqual;
             case notEqual: return &opFloatNotEqual;
-            default: assert(0);
+            default:
+                assert(0, text("`", expressionText(expression), "`: dmd ",
+                    "builds a `CmpExp` or `EqualExp` only for these ",
+                    "operators"));
         }
     }
 
@@ -5205,6 +5210,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset;
+        import std.conv: text;
 
         const facts = TypeFacts.delegateValue;
         const left = reserveTemp(facts);
@@ -5221,8 +5227,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 strict = &opGreaterThanUnsigned;
                 break;
             default:
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+                assert(0, text("`", expressionText(expression), "`: dmd ",
+                    "builds a `CmpExp` only for the four orderings"));
         }
         auto low = comparisonHandler(expression, true);
 
