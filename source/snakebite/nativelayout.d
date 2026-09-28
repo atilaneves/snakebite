@@ -34,8 +34,10 @@ pragma(inline, true) public bool isIntegralSize(in size_t size) {
 public bool isNativeBytes(imported!"dmd.mtype".Type type) {
     import dmd.astenums: Tvector;
     import dmd.typesem:
-        isIntegral, needsCopyOrPostblit, needsDestruction, needsNested, size;
+        isIntegral, needsCopyOrPostblit, needsDestruction, needsNested, size,
+        toBasetype;
 
+    type = type.toBasetype;
     if (type.ty == Tvector)
         return false;
     if (type.isIntegral && !isIntegralSize(type.size))
