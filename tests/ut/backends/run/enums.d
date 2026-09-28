@@ -226,3 +226,110 @@ static foreach (backend; Matrix!(
         );
     }
 }
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret the address of a local variable at "
+            ~ "compile time"),
+)) {
+    @("enumOfPointer.dereference." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Pair { int x; int y; }
+            enum P : int* { z = null }
+            enum PairP : Pair* { z = null }
+
+            void main() {
+                int[3] data = [10, 20, 30];
+                P p = cast(P) data.ptr;
+                assert(*p == 10);
+                *p = 11;
+                assert(data[0] == 11);
+
+                Pair pair = Pair(1, 2);
+                PairP pp = cast(PairP) &pair;
+                assert((*pp).y == 2);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret the address of a local variable at "
+            ~ "compile time"),
+)) {
+    @("enumOfPointer.arithmetic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum P : int* { z = null }
+
+            void main() {
+                int[4] data = [10, 20, 30, 40];
+                P p = cast(P) data.ptr;
+                P q = cast(P) (p + 2);
+                assert(*q == 30);
+                assert(q - p == 2);
+                assert(*(q - 1) == 20);
+                assert(p < q);
+                p += 3;
+                assert(*p == 40);
+                p -= 2;
+                assert(*p == 20);
+            }
+        });
+    }
+}
+
+// dmd scales the step of a postfix `++`/`--` on a pointer only when the
+// operand's own type is a pointer, not an enum of one, so compiled D
+// moves an `enum : int*` by one byte there. A prefix `--` is `p -= 1`,
+// which dmd scales.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret the address of a local variable at "
+            ~ "compile time"),
+)) {
+    @("enumOfPointer.incrementDecrement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum P : int* { z = null }
+
+            void main() {
+                int[4] data = [10, 20, 30, 40];
+                P p = cast(P) data.ptr;
+                P before = p++;
+                assert(before == data.ptr);
+                assert(cast(size_t) p - cast(size_t) data.ptr == 1);
+                --p;
+                assert(cast(size_t) data.ptr - cast(size_t) p == 3);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret the address of a local variable at "
+            ~ "compile time"),
+)) {
+    @("enumOfPointer.slicing." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum P : int* { z = null }
+
+            void main() {
+                int[4] data = [10, 20, 30, 40];
+                P p = cast(P) data.ptr;
+                int[] middle = p[1 .. 3];
+                assert(middle.length == 2);
+                assert(middle[0] == 20);
+                assert(middle[1] == 30);
+            }
+        });
+    }
+}

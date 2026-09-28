@@ -603,7 +603,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero,
         opTlsAddress, opTlsLoad, opTlsStore;
     import dmd.expressionsem: toInteger;
-    import dmd.typesem: nextOf;
+    import dmd.typesem: nextOf, toBasetype;
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, delegateTargetOf, functionNeedsClosure,
         outerFunctionOf;
@@ -3156,7 +3156,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tpointer;
 
         const facts = TypeFacts.of(target.type);
-        if ((!facts.isIntegral && target.type.ty != Tpointer)
+        if ((!facts.isIntegral && target.type.toBasetype.ty != Tpointer)
                 || !isIntegralSize(facts.size))
             throw rejection(_function, loc, operation);
 
@@ -4000,8 +4000,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         requireDestination(expression);
 
-        const facts = TypeFacts.of(expression.e1.type);
-        if (expression.e1.type.ty == Tpointer
+        auto sourceType = expression.e1.type.toBasetype;
+        const facts = TypeFacts.of(sourceType);
+        if (sourceType.ty == Tpointer
                 && expression.upr !is null) {
             const pointerOffset = reserveTemp(facts);
             evalInto(expression.e1, pointerOffset, facts.size);
@@ -4018,7 +4019,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opCopy, _destination + arrayLengthOffset, highOffset,
                 size_t.sizeof);
 
-            const elementFacts = TypeFacts.of(expression.e1.type.nextOf);
+            const elementFacts = TypeFacts.of(sourceType.nextOf);
             const elementSizeOffset = reserveTemp(pointerFacts);
             emit(&opConstant, elementSizeOffset,
                 addConstant(cast(long) elementFacts.size), size_t.sizeof);
@@ -4032,11 +4033,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // A bounded static-array slice has no length word to read back, but
         // its result still has the native dynamic-array shape. Use the
         // dimension from the static type as its source length.
-        if (expression.e1.type.ty == Tsarray
+        if (sourceType.ty == Tsarray
                 && (expression.lwr !is null || expression.upr !is null)) {
             const sourceLengthOffset = reserveTemp(pointerFacts);
             const dim = cast(size_t)
-                expression.e1.type.isTypeSArray.dim.toInteger;
+                sourceType.isTypeSArray.dim.toInteger;
             emit(&opConstant, sourceLengthOffset,
                 addConstant(cast(long) dim), size_t.sizeof);
             const addressOffset = compileAddress(expression.e1);
@@ -4052,12 +4053,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // of itself - and no separate storage to point into: the result's
         // pointer word is `xs`'s own address, its length word `xs`'s own
         // dimension, known at compile time.
-        if (expression.e1.type.ty == Tsarray) {
+        if (sourceType.ty == Tsarray) {
             if (expression.lwr !is null || expression.upr !is null)
                 return visit(cast(Expression) expression);
 
             const dim = cast(size_t)
-                expression.e1.type.isTypeSArray.dim.toInteger;
+                sourceType.isTypeSArray.dim.toInteger;
             const addressOffset = compileAddress(expression.e1);
             emit(&opConstant, _destination + arrayLengthOffset,
                 addConstant(cast(long) dim), size_t.sizeof);
@@ -4720,16 +4721,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import dmd.astenums: Tpointer;
 
-        if (expression.type.ty == Tpointer) {
+        if (expression.type.toBasetype.ty == Tpointer) {
             if (handler !is &opAdd && handler !is &opSubtract)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
-            Expression pointerOperand = expression.e1.type.ty == Tpointer
-                ? expression.e1 : expression.e2;
+            Expression pointerOperand =
+                expression.e1.type.toBasetype.ty == Tpointer
+                    ? expression.e1 : expression.e2;
             Expression integralOperand = pointerOperand is expression.e1
                 ? expression.e2 : expression.e1;
-            if (pointerOperand.type.ty != Tpointer) {
+            if (pointerOperand.type.toBasetype.ty != Tpointer) {
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
             }
@@ -4762,8 +4764,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // the raw byte count this leaves behind, the same way it divides
         // any other pair of integers.
         if (handler is &opSubtract
-                && expression.e1.type.ty == Tpointer
-                && expression.e2.type.ty == Tpointer) {
+                && expression.e1.type.toBasetype.ty == Tpointer
+                && expression.e2.type.toBasetype.ty == Tpointer) {
             const leftOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, leftOffset, pointerFacts.size);
             const rightOffset = reserveTemp(pointerFacts);

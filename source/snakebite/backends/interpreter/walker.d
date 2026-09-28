@@ -2085,7 +2085,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import std.conv: text;
 
         auto type = expression.type;
-        if (type.ty != Tpointer && type.ty != Tclass)
+        const kind = type.toBasetype.ty;
+        if (kind != Tpointer && kind != Tclass)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "` as a pointer: its type is `", type.toString, "`"),
@@ -3246,7 +3247,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         const targetFacts = factsOf(expression.e1.type);
-        if (!targetFacts.isIntegral && expression.e1.type.ty != Tpointer)
+        if (!targetFacts.isIntegral && operationType.ty != Tpointer)
             throw new SnakebiteException(
                 text("interpreter cannot assign to `",
                     expression.e1.toString, "`: `", expression.toString,
@@ -3302,13 +3303,19 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import std.conv: text;
 
         const facts = factsOf(expression.e1.type);
-        if (expression.e1.type.ty == Tpointer) {
+        if (expression.e1.type.toBasetype.ty == Tpointer) {
             const target = addressOf(expression.e1);
             const current = asPointer(expression.e1);
-            const elementSize = factsOf(expression.e1.type.nextOf).size;
+            // dmd has already scaled `e2` to bytes for a pointer operand,
+            // but not for an enum of one.
+            const stepFacts = factsOf(expression.e2.type);
+            align(size_t.sizeof) ubyte[size_t.sizeof] step = void;
+            evaluate(expression.e2, expression.e2.type, stepFacts, step.ptr);
+            const bytes = cast(size_t) loadIntegral(
+                step.ptr, stepFacts.size, false);
             const changed = expression.op == EXP.plusPlus
-                ? cast(ubyte*) current + elementSize
-                : cast(ubyte*) current - elementSize;
+                ? cast(ubyte*) current + bytes
+                : cast(ubyte*) current - bytes;
 
             storeIntegral(_place, cast(size_t) current, _facts.size);
             storeIntegral(cast(void*) target, cast(size_t) changed,
@@ -3663,9 +3670,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     override void visit(AddExp expression) {
         import snakebite.nativelayout: storeIntegral;
 
-        const lhsPointer = expression.e1.type.ty == Tpointer;
-        const rhsPointer = expression.e2.type.ty == Tpointer;
-        if (expression.type.ty == Tpointer
+        const lhsPointer = expression.e1.type.toBasetype.ty == Tpointer;
+        const rhsPointer = expression.e2.type.toBasetype.ty == Tpointer;
+        if (expression.type.toBasetype.ty == Tpointer
                 && ((lhsPointer && factsOf(expression.e2.type).isIntegral)
                     || (rhsPointer && factsOf(expression.e1.type).isIntegral))) {
             void* pointer;
@@ -3689,15 +3696,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     override void visit(MinExp expression) {
         import snakebite.nativelayout: storeIntegral;
 
-        if (expression.type.ty == Tpointer) {
+        if (expression.type.toBasetype.ty == Tpointer) {
             const pointer = cast(ubyte*) asPointer(expression.e1);
             const offset = asIntegral(expression.e2);
             storeIntegral(_place, cast(size_t)(pointer - offset), _facts.size);
             return;
         }
 
-        if (expression.e1.type.ty == Tpointer
-                && expression.e2.type.ty == Tpointer) {
+        if (expression.e1.type.toBasetype.ty == Tpointer
+                && expression.e2.type.toBasetype.ty == Tpointer) {
             const left = cast(ubyte*) asPointer(expression.e1);
             const right = cast(ubyte*) asPointer(expression.e2);
             const difference = left - right;
@@ -4465,7 +4472,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import std.conv: text;
 
         auto array = expression.e1;
-        auto sourceType = array.type;
+        auto sourceType = array.type.toBasetype;
 
         ubyte* base;
         size_t sourceLength;
