@@ -285,10 +285,8 @@ static foreach (backend; Matrix!(
 }
 
 
-// A static (thread-local) variable initialized from a non-capturing
-// lambda has a null context word: dmd's `FuncExp` lowering for a static
-// initializer stores only the function address, at offset 0 of the
-// delegate's own two words - the context word, not `funcptr`.
+// A static delegate initialized from a lambda outside any frame has a
+// null context and the lambda as its function.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read a static variable's value at compile time"),
@@ -308,14 +306,8 @@ static foreach (backend; Matrix!(
     }
 }
 
-// The same module-scope `FuncExp` initializer, but through an enum of a
-// delegate. dmd's own runtime codegen for this case is a compiler bug:
-// it stores the function address in `funcptr`'s slot, but reads `ptr` as
-// nonzero and `funcptr` as null when the enum member is fetched, so
-// calling it dereferences a null function pointer and crashes - the
-// sibling test below pins those (non-crashing) field values without
-// calling through them. `ldc2 -run`, the interpreter and the bytecode
-// backend all agree with the D spec.
+// The same through an enum of a delegate. dmd swaps the two words and
+// the call crashes; ldc follows the spec.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read a static variable's value at compile time"),
@@ -340,10 +332,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-// Sibling pinning the divergence above: `dmd -run` itself, real compiled
-// D, gives an enum-of-delegate module initializer's fields swapped
-// (`ptr` nonzero, `funcptr` null) and never calls through them, since
-// calling crashes.
+// dmd's swapped words, pinned without the call that crashes.
 @("enumOfDelegateModuleInitializerHasNullContext.Native")
 @Tags(Native.stringof)
 unittest {
