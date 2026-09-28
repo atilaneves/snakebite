@@ -3317,7 +3317,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import std.conv: text;
 
         auto target_ = compoundTarget(expression);
-        const targetFacts = factsOf(expression.e1.type);
+        const targetFacts = factsOf(target_.type);
+        // dmd's own integral promotion always widens a narrow target to a
+        // signed `int` for the operation itself; a bitwise-width-preserving
+        // combination of the target's own storage width and that
+        // operation's signedness is what a shift or a division needs -
+        // `targetFacts.isUnsigned` alone would compare an unsigned narrow
+        // target's own signedness against its always-signed promoted right
+        // operand and refuse a division that dmd allows.
+        const operationFacts = factsOf(expression.e1.type);
+        const arithmeticFacts = TypeFacts(targetFacts.size,
+            targetFacts.alignment, true, operationFacts.isUnsigned);
         auto target = resolvedTarget;
         if (target is null)
             try {
@@ -3340,7 +3350,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 const step = asIntegral(expression.e2, stepFacts);
                 const current = bitfieldValueAtPlace(field, target);
                 const result = combine!op(
-                    current, step, targetFacts, stepFacts, expression);
+                    current, step, arithmeticFacts, stepFacts, expression);
                 storeBitfieldAt(field, target, result);
                 storeIntegral(_place, result, _facts.size);
                 return;
@@ -3352,7 +3362,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const current =
             loadIntegral(target, targetFacts.size, !targetFacts.isUnsigned);
         const result =
-            combine!op(current, step, targetFacts, stepFacts, expression);
+            combine!op(current, step, arithmeticFacts, stepFacts, expression);
 
         storeIntegral(target, result, targetFacts.size);
         storeIntegral(

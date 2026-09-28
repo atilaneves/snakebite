@@ -738,3 +738,299 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// dmd wraps a narrow compound-assignment target in the `CastExp` its own
+// integral promotion adds. The load and the store must still use the
+// target's own width, not the promoted `int`'s, or a neighbouring array
+// element is read or written by mistake. A signed narrow target's own
+// `>>>=` is a separate, already-tracked Bytecode bug, so it is not
+// covered here.
+static foreach (backend; Matrix!()) {
+    @("narrowCompoundAssignUsesTargetWidth." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                {
+                    byte[4] arr = [-10, -66, 55, 4];
+                    ubyte step = 3;
+                    arr[1] += step;
+                    assert(arr[1] == -63 && arr[0] == -10 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] -= step;
+                    assert(arr[1] == -66 && arr[0] == -10 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] *= step;
+                    assert(arr[1] == 58 && arr[0] == -10 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] /= step;
+                    assert(arr[1] == 19 && arr[0] == -10 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] %= step;
+                    assert(arr[1] == 1 && arr[0] == -10 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] = -66;
+                    arr[1] &= step;
+                    assert(arr[1] == 2 && arr[0] == -10 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] = -66;
+                    arr[1] |= step;
+                    assert(arr[1] == -65 && arr[0] == -10 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] = -66;
+                    arr[1] ^= step;
+                    assert(arr[1] == -67 && arr[0] == -10 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] = -66;
+                    arr[1] <<= 2;
+                    assert(arr[1] == -8 && arr[0] == -10 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] = -66;
+                    arr[1] >>= 2;
+                    assert(arr[1] == -17 && arr[0] == -10 && arr[2] == 55
+                        && arr[3] == 4);
+
+                    byte b = -10;
+                    ubyte ub = 3;
+                    b /= ub;
+                    assert(b == -3);
+                }
+                {
+                    ubyte[4] arr = [200, 100, 55, 4];
+                    ubyte step = 3;
+                    arr[1] += step;
+                    assert(arr[1] == 103 && arr[0] == 200 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] -= step;
+                    assert(arr[1] == 100 && arr[0] == 200 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] *= step;
+                    assert(arr[1] == 44 && arr[0] == 200 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] /= step;
+                    assert(arr[1] == 14 && arr[0] == 200 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] %= step;
+                    assert(arr[1] == 2 && arr[0] == 200 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] = 100;
+                    arr[1] &= step;
+                    assert(arr[1] == 0 && arr[0] == 200 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] = 100;
+                    arr[1] |= step;
+                    assert(arr[1] == 103 && arr[0] == 200 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] = 100;
+                    arr[1] ^= step;
+                    assert(arr[1] == 103 && arr[0] == 200 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] = 100;
+                    arr[1] <<= 2;
+                    assert(arr[1] == 144 && arr[0] == 200 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] = 100;
+                    arr[1] >>= 2;
+                    assert(arr[1] == 25 && arr[0] == 200 && arr[2] == 55
+                        && arr[3] == 4);
+                    arr[1] = 255;
+                    arr[1] >>>= 1;
+                    assert(arr[1] == 127 && arr[0] == 200 && arr[2] == 55
+                        && arr[3] == 4);
+
+                    ubyte u2 = 2;
+                    u2 -= step;
+                    assert(u2 == 255);
+                }
+                {
+                    short[4] arr = [-1000, -6600, 555, 4];
+                    ushort step = 30;
+                    arr[1] += step;
+                    assert(arr[1] == -6570 && arr[0] == -1000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] -= step;
+                    assert(arr[1] == -6600 && arr[0] == -1000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] *= step;
+                    assert(arr[1] == -1392 && arr[0] == -1000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] /= step;
+                    assert(arr[1] == -46 && arr[0] == -1000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] %= step;
+                    assert(arr[1] == -16 && arr[0] == -1000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] = -6600;
+                    arr[1] &= step;
+                    assert(arr[1] == 24 && arr[0] == -1000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] = -6600;
+                    arr[1] |= step;
+                    assert(arr[1] == -6594 && arr[0] == -1000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] = -6600;
+                    arr[1] ^= step;
+                    assert(arr[1] == -6618 && arr[0] == -1000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] = -6600;
+                    arr[1] <<= 2;
+                    assert(arr[1] == -26400 && arr[0] == -1000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] = -6600;
+                    arr[1] >>= 2;
+                    assert(arr[1] == -1650 && arr[0] == -1000
+                        && arr[2] == 555 && arr[3] == 4);
+
+                    short s2 = -9;
+                    ushort u2 = 2;
+                    s2 %= u2;
+                    assert(s2 == -1);
+                }
+                {
+                    ushort[4] arr = [60000, 6600, 555, 4];
+                    ushort step = 30;
+                    arr[1] += step;
+                    assert(arr[1] == 6630 && arr[0] == 60000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] -= step;
+                    assert(arr[1] == 6600 && arr[0] == 60000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] *= step;
+                    assert(arr[1] == 1392 && arr[0] == 60000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] /= step;
+                    assert(arr[1] == 46 && arr[0] == 60000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] %= step;
+                    assert(arr[1] == 16 && arr[0] == 60000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] = 6600;
+                    arr[1] &= step;
+                    assert(arr[1] == 8 && arr[0] == 60000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] = 6600;
+                    arr[1] |= step;
+                    assert(arr[1] == 6622 && arr[0] == 60000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] = 6600;
+                    arr[1] ^= step;
+                    assert(arr[1] == 6614 && arr[0] == 60000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] = 6600;
+                    arr[1] <<= 2;
+                    assert(arr[1] == 26400 && arr[0] == 60000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] = 6600;
+                    arr[1] >>= 2;
+                    assert(arr[1] == 1650 && arr[0] == 60000
+                        && arr[2] == 555 && arr[3] == 4);
+                    arr[1] = 65535;
+                    arr[1] >>>= 1;
+                    assert(arr[1] == 32767 && arr[0] == 60000
+                        && arr[2] == 555 && arr[3] == 4);
+                }
+                {
+                    char[4] arr = ['a', 'z', 'm', 'q'];
+                    ubyte step = 3;
+                    arr[1] += step;
+                    assert(arr[1] == 125 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] -= step;
+                    assert(arr[1] == 122 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] *= step;
+                    assert(arr[1] == 110 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] /= step;
+                    assert(arr[1] == 36 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] %= step;
+                    assert(arr[1] == 0 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] = 'z';
+                    arr[1] &= step;
+                    assert(arr[1] == 2 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] = 'z';
+                    arr[1] |= step;
+                    assert(arr[1] == 123 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] = 'z';
+                    arr[1] ^= step;
+                    assert(arr[1] == 121 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] = 'z';
+                    arr[1] <<= 2;
+                    assert(arr[1] == 232 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] = 'z';
+                    arr[1] >>= 2;
+                    assert(arr[1] == 30 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] = 255;
+                    arr[1] >>>= 1;
+                    assert(arr[1] == 127 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                }
+                {
+                    wchar[4] arr = ['a', 'z', 'm', 'q'];
+                    ushort step = 30;
+                    arr[1] += step;
+                    assert(arr[1] == 152 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] -= step;
+                    assert(arr[1] == 122 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] *= step;
+                    assert(arr[1] == 3660 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] /= step;
+                    assert(arr[1] == 122 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] %= step;
+                    assert(arr[1] == 2 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] = 'z';
+                    arr[1] &= step;
+                    assert(arr[1] == 26 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] = 'z';
+                    arr[1] |= step;
+                    assert(arr[1] == 126 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] = 'z';
+                    arr[1] ^= step;
+                    assert(arr[1] == 100 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] = 'z';
+                    arr[1] <<= 2;
+                    assert(arr[1] == 488 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] = 'z';
+                    arr[1] >>= 2;
+                    assert(arr[1] == 30 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                    arr[1] = 65535;
+                    arr[1] >>>= 1;
+                    assert(arr[1] == 32767 && arr[0] == 'a' && arr[2] == 'm'
+                        && arr[3] == 'q');
+                }
+                {
+                    bool[4] arr = [true, true, false, true];
+                    bool step = true;
+                    arr[1] &= step;
+                    assert(arr[1] == true && arr[0] == true
+                        && arr[2] == false && arr[3] == true);
+                    arr[1] = true;
+                    arr[1] |= step;
+                    assert(arr[1] == true && arr[0] == true
+                        && arr[2] == false && arr[3] == true);
+                    arr[1] = true;
+                    arr[1] ^= step;
+                    assert(arr[1] == false && arr[0] == true
+                        && arr[2] == false && arr[3] == true);
+                }
+            }
+        });
+    }
+}
