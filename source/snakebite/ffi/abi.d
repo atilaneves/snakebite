@@ -82,6 +82,21 @@ public enum dVariadicArgumentsIsSlice = () {
         return false;
 }();
 
+// Convert the host compiler's callback argument shape to the tuple pointer
+// the frontend inserts for a guest `extern(D)` variadic call. LDC passes
+// the tuple's `elements` as a slice; dmd passes the tuple object itself.
+public const(void)* callbackVariadicTypes(const(void)* argument) {
+    import object: TypeInfo, TypeInfo_Tuple;
+
+    static if (dVariadicArgumentsIsSlice) {
+        auto elements = *cast(TypeInfo[]*) argument;
+        auto tuple = new TypeInfo_Tuple;
+        tuple.elements = elements;
+        return cast(const(void)*) tuple;
+    } else
+        return *cast(const(void)**) argument;
+}
+
 // What one value's bytes have to become to travel in one argument or
 // return register. `integer` is used for an aggregate eightbyte; the
 // scalar kinds retain their widening rules.

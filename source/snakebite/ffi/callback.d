@@ -375,7 +375,9 @@ private void invoke(ref Slot slot, CallFrame* frame) {
     const(void)* variadicTypes;
     void*[] guestAddresses = addresses;
     if (typesIndex != size_t.max) {
-        variadicTypes = *cast(const(void)**) addresses[typesIndex];
+        import snakebite.ffi.abi: callbackVariadicTypes;
+
+        variadicTypes = callbackVariadicTypes(addresses[typesIndex]);
         guestAddresses = new void*[count - 1];
         foreach (i; 0 .. count)
             if (i != typesIndex)
