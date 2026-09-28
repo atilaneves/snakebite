@@ -213,8 +213,10 @@ private CastPlan classifyImaginary(
         );
     case complex:
         return CastPlan(CastKind.imaginaryToComplex, sourceFacts, destFacts);
-    case dynamicArray, staticArray, associativeArray, pointer,
-        functionPointer, classReference, structure, delegateValue,
+    case pointer, functionPointer:
+        return CastPlan(CastKind.zero, sourceFacts, destFacts);
+    case dynamicArray, staticArray, associativeArray, classReference,
+        structure, delegateValue,
         nullValue, vector, other:
         return rejectedCastPair;
     }
@@ -245,8 +247,11 @@ private CastPlan classifyComplex(
                 ? CastKind.copy : CastKind.complexWidth,
             sourceFacts, destFacts,
         );
-    case dynamicArray, staticArray, associativeArray, pointer,
-        functionPointer, classReference, structure, delegateValue,
+    case pointer, functionPointer:
+        return CastPlan(
+            CastKind.complexToIntegral, sourceFacts, destFacts);
+    case dynamicArray, staticArray, associativeArray, classReference,
+        structure, delegateValue,
         nullValue, vector, other:
         return rejectedCastPair;
     }
@@ -271,10 +276,13 @@ private CastPlan classifyPointer(
         return CastPlan(CastKind.pointerToFloat, sourceFacts, destFacts);
     case dynamicArray:
         return CastPlan(CastKind.pointerToArray, sourceFacts, destFacts);
+    case imaginary:
+        return CastPlan(CastKind.zero, sourceFacts, destFacts);
+    case complex:
+        return CastPlan(CastKind.integralToComplex, sourceFacts, destFacts);
     case pointer, functionPointer, classReference, associativeArray:
         return CastPlan(CastKind.copy, sourceFacts, destFacts);
-    case staticArray, structure, delegateValue, imaginary, complex,
-        nullValue, vector, other:
+    case staticArray, structure, delegateValue, nullValue, vector, other:
         return rejectedCastPair;
     }
 }

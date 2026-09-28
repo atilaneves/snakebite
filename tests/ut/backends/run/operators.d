@@ -1186,20 +1186,39 @@ static foreach (backend; Matrix!()) {
 }
 
 
-static foreach (backend; Matrix!()) {
-    @("review435.pointerImaginaryComplexCasts." ~ backend.stringof)
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast an imaginary value to a pointer"),
+)) {
+    @("imaginaryAndComplexPointerCasts." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            void* fromImaginary(idouble value) { return cast(void*) value; }
-            void* fromComplex(cdouble value) { return cast(void*) value; }
-            idouble toImaginary(void* value) { return cast(idouble) value; }
-            cdouble toComplex(void* value) { return cast(cdouble) value; }
+            void* fromIfloat(ifloat value) { return cast(void*) value; }
+            void* fromIdouble(idouble value) { return cast(void*) value; }
+            void* fromIreal(ireal value) { return cast(void*) value; }
+            void* fromCfloat(cfloat value) { return cast(void*) value; }
+            void* fromCdouble(cdouble value) { return cast(void*) value; }
+            void* fromCreal(creal value) { return cast(void*) value; }
+            ifloat toIfloat(void* value) { return cast(ifloat) value; }
+            idouble toIdouble(void* value) { return cast(idouble) value; }
+            ireal toIreal(void* value) { return cast(ireal) value; }
+            cfloat toCfloat(void* value) { return cast(cfloat) value; }
+            cdouble toCdouble(void* value) { return cast(cdouble) value; }
+            creal toCreal(void* value) { return cast(creal) value; }
             void main() {
-                assert(fromImaginary(3.0i) == null);
-                assert(fromComplex(12.0 + 3.0i) == cast(void*) 12);
-                assert(toImaginary(cast(void*) 12) == 0.0i);
-                assert(toComplex(cast(void*) 12) == 12.0 + 0.0i);
+                assert(fromIfloat(3.0i) == null);
+                assert(fromIdouble(3.0i) == null);
+                assert(fromIreal(3.0Li) == null);
+                assert(fromCfloat(12.0f + 3.0fi) == cast(void*) 12);
+                assert(fromCdouble(12.0 + 3.0i) == cast(void*) 12);
+                assert(fromCreal(12.0L + 3.0Li) == cast(void*) 12);
+                assert(toIfloat(cast(void*) 12) == 0.0fi);
+                assert(toIdouble(cast(void*) 12) == 0.0i);
+                assert(toIreal(cast(void*) 12) == 0.0Li);
+                assert(toCfloat(cast(void*) 12) == 12.0f + 0.0fi);
+                assert(toCdouble(cast(void*) 12) == 12.0 + 0.0i);
+                assert(toCreal(cast(void*) 12) == 12.0L + 0.0Li);
             }
         });
     }
