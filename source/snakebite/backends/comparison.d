@@ -13,6 +13,14 @@ package struct ComparisonPlan {
         reference,
         // One comparison per lane, each leaving all-ones or zero bits.
         vector,
+        // Equal element by element; dmd lowers ordering to `__cmp`. At
+        // least one operand is dynamic; the other may be static.
+        dynamicArray,
+        // Both operands are static; their lengths may differ.
+        staticArray,
+        // Equal when both words are; ordered as one unsigned integer whose
+        // high word is the function pointer.
+        delegate_,
     }
 
     Kind kind;
@@ -28,10 +36,16 @@ package struct ComparisonPlan {
 package ComparisonPlan comparisonPlan(
     imported!"dmd.expression".BinExp expression,
 ) {
+    import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
 
     auto type = expression.e1.type.toBasetype;
     auto plan = ComparisonPlan(kindOf(type), TypeFacts.of(type));
+    // dmd's `e2ir.d` compares a static array with a dynamic one as two
+    // `{length, ptr}` values.
+    if (plan.kind == ComparisonPlan.Kind.staticArray
+            && expression.e2.type.toBasetype.ty == TY.Tarray)
+        plan.kind = ComparisonPlan.Kind.dynamicArray;
     if (plan.kind == ComparisonPlan.Kind.vector) {
         auto lane = type.isTypeVector.elementType;
         plan.laneKind = kindOf(lane);
@@ -57,13 +71,23 @@ private ComparisonPlan.Kind kindOf(imported!"dmd.mtype".Type type) {
         case Tvector:
             return vector;
 
+        case Tarray:
+            return dynamicArray;
+
+        case Tsarray:
+            return staticArray;
+
+        case Tdelegate:
+            return delegate_;
+
         case Tbool, Tchar, Twchar, Tdchar, Tint8, Tuns8, Tint16, Tuns16,
             Tint32, Tuns32, Tint64, Tuns64:
             return integral;
 
-        // The backends compare these before they ask for a plan, and dmd
-        // lowers every other comparison of them to a call or an identity.
-        case Tstruct, Tarray, Tsarray, Tdelegate, Taarray:
+        // dmd rewrites struct equality to an identity or to a comparison
+        // of the fields, and associative array equality to a call; it
+        // orders neither.
+        case Tstruct, Taarray:
             assert(0);
 
         // Semantic rejects `cent`/`ucent`, and `toBasetype` leaves no

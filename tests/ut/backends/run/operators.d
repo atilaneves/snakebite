@@ -400,3 +400,35 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// Delegates order as one unsigned integer whose high word is the function
+// pointer and whose low word is the context.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot access delegate function pointers"),
+)) {
+    @("delegateOrdering." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                void delegate() a, b;
+                a.ptr = cast(void*) 1;
+                a.funcptr = cast(void function()) 5;
+                b.ptr = cast(void*) 2;
+                b.funcptr = cast(void function()) 3;
+                assert(a > b);
+                assert(!(a < b));
+                assert(b <= a);
+                a.funcptr = cast(void function()) 3;
+                assert(a < b);
+                assert(a <= b);
+                assert(!(a >= b));
+                a.ptr = cast(void*) 2;
+                assert(a <= b);
+                assert(a >= b);
+                assert(!(a < b));
+            }
+        });
+    }
+}

@@ -4591,37 +4591,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     protected override void visitUnloweredEqual(EqualExp expression) {
-        import dmd.astenums: Tarray, Tdelegate, Tsarray;
-        import dmd.typesem: toBasetype;
-
         requireDestination(expression);
 
-        auto operandType = expression.e1.type.toBasetype;
-        auto rightType = expression.e2.type.toBasetype;
-        if (operandType.isStaticOrDynamicArray
-                && rightType.isStaticOrDynamicArray
-                && (operandType.ty == Tarray || rightType.ty == Tarray)) {
-            compileMemcmpDynamicArrayEquality(expression, _destination);
-            return;
+        const plan = comparisonPlan(expression);
+        with (ComparisonPlan.Kind) final switch (plan.kind) {
+            case dynamicArray:
+                return compileMemcmpDynamicArrayEquality(
+                    expression, _destination);
+            // A delegate is a plain `{context, function}` pair - dmd's own
+            // native equality for it, like a static array's, is exactly its
+            // bytes compared whole. `compileStaticArrayEquality` does
+            // nothing but that byte compare, sizing each operand from its
+            // own type, so operands of different sizes compare unequal.
+            case staticArray, delegate_:
+                return compileStaticArrayEquality(expression, _destination);
+            case integral, floating, complex, reference, vector:
+                return compileComparison(expression, plan, _destination);
         }
-
-        if (operandType.ty == Tsarray && rightType.ty == Tsarray) {
-            compileStaticArrayEquality(expression, _destination);
-            return;
-        }
-
-        // A delegate is a plain `{context, function}` pair - dmd's own
-        // native equality for it, like a static array's, is exactly its
-        // bytes compared whole, never a guest-visible `opEquals` call (a
-        // delegate is not an aggregate with one). `compileStaticArrayEquality`
-        // already does nothing but that byte compare, keyed off `facts.size`
-        // rather than anything array-specific, so it serves here unchanged.
-        if (operandType.ty == Tdelegate && rightType.ty == Tdelegate) {
-            compileStaticArrayEquality(expression, _destination);
-            return;
-        }
-
-        compileComparison(expression, comparisonPlan(expression), _destination);
     }
 
     override protected void visitIdentity(
@@ -4954,6 +4940,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case vector:
                 return compileVectorComparison(expression, plan, destOffset);
 
+            // dmd lowers array ordering to `__cmp`, and equality reaches
+            // `visitUnloweredEqual`'s own byte compares.
+            case dynamicArray, staticArray:
+                assert(0);
+
+            case delegate_:
+                return compileDelegateOrdering(expression, destOffset);
+
             case integral: {
                 if (!operandFacts.isIntegral || !isIntegralSize(operandFacts.size))
                     throw rejection(_function, expression.loc,
@@ -4986,6 +4980,55 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    // A delegate orders as one unsigned integer whose high word is its
+    // function pointer: `a < b` is `fa < fb || fa == fb && pa < pb`, and
+    // likewise for the other orderings.
+    private void compileDelegateOrdering(
+        BinExp expression, in size_t destOffset,
+    ) {
+        import snakebite.nativelayout:
+            delegateContextOffset, delegateFunctionOffset;
+
+        const facts = TypeFacts.delegateValue;
+        const left = reserveTemp(facts);
+        evalInto(expression.e1, left, facts.size);
+        const right = reserveTemp(facts);
+        evalInto(expression.e2, right, facts.size);
+
+        Instruction.Handler strict;
+        with (EXP) switch (expression.op) {
+            case lessThan, lessOrEqual:
+                strict = &opLessThanUnsigned;
+                break;
+            case greaterThan, greaterOrEqual:
+                strict = &opGreaterThanUnsigned;
+                break;
+            default:
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+        }
+        auto low = comparisonHandler(expression, true);
+
+        const highOrdered = reserveTemp(pointerFacts);
+        emit(&opCopy, highOrdered, left + delegateFunctionOffset,
+            size_t.sizeof);
+        emit(strict, highOrdered, right + delegateFunctionOffset,
+            size_t.sizeof);
+        const highEqual = reserveTemp(pointerFacts);
+        emit(&opCopy, highEqual, left + delegateFunctionOffset,
+            size_t.sizeof);
+        emit(&opEqual, highEqual, right + delegateFunctionOffset,
+            size_t.sizeof);
+        const lowOrdered = reserveTemp(pointerFacts);
+        emit(&opCopy, lowOrdered, left + delegateContextOffset,
+            size_t.sizeof);
+        emit(low, lowOrdered, right + delegateContextOffset, size_t.sizeof);
+
+        emit(&opBitAnd, highEqual, lowOrdered, 1);
+        emit(&opBitOr, highOrdered, highEqual, 1);
+        emit(&opCopy, destOffset, highOrdered, 1);
+    }
+
     // Each result lane is all-ones where the operands' lanes compare true:
     // the one-byte answer widens to the lane and negates.
     private void compileVectorComparison(
@@ -5006,7 +5049,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     expression, plan.laneFacts.isUnsigned);
                 break;
             // A vector's lanes are integral or floating.
-            case complex, reference, vector:
+            case complex, reference, vector, dynamicArray, staticArray,
+                delegate_:
                 assert(0);
         }
 

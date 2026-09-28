@@ -3411,11 +3411,35 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 storeIntegral(_place, answer ? 1 : 0, _facts.size);
                 return;
             }
-            // D does not order complex values.
-            case complex:
+            // D does not order complex values, and dmd lowers array
+            // ordering to `__cmp`.
+            case complex, dynamicArray, staticArray:
                 assert(0);
             case vector:
                 return storeVectorComparison!op(expression, plan);
+            case delegate_: {
+                import snakebite.nativelayout: delegateContextOffset,
+                    delegateFunctionOffset, delegateValueSize, loadIntegral;
+
+                align(size_t.sizeof) ubyte[delegateValueSize] left = void;
+                align(size_t.sizeof) ubyte[delegateValueSize] right = void;
+                evaluate(expression.e1, expression.e1.type, plan.facts,
+                    left.ptr);
+                evaluate(expression.e2, expression.e2.type, plan.facts,
+                    right.ptr);
+                ulong word(in ubyte[] value, in size_t offset) {
+                    return loadIntegral(value.ptr + offset, size_t.sizeof,
+                        false);
+                }
+                const a = word(left, delegateFunctionOffset);
+                const b = word(right, delegateFunctionOffset);
+                const answer = a != b
+                    ? mixin("a " ~ op ~ " b")
+                    : mixin("word(left, delegateContextOffset) " ~ op
+                        ~ " word(right, delegateContextOffset)");
+                storeIntegral(_place, answer ? 1 : 0, _facts.size);
+                return;
+            }
             case reference: {
                 const a = cast(size_t) asReference(expression.e1, plan.facts);
                 const b = cast(size_t) asReference(expression.e2, plan.facts);
@@ -3465,81 +3489,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // zero have different representations but compare equal in D.
     protected override void visitUnloweredEqual(EqualExp expression) {
         import core.stdc.string: memcmp;
-        import snakebite.nativelayout: storeIntegral;
-        import dmd.typesem: toBasetype;
-        import std.conv: text;
-
-        // DMD's `Type.nextOf` is not const-correct, so this cannot be const.
-        auto type = expression.e1.type.toBasetype;
-        auto structType = type.isTypeStruct;
-        if (structType !is null) {
-            const facts = factsOf(type);
-            auto left = _frames.push(facts.size, facts.alignment);
-            auto right = _frames.push(facts.size, facts.alignment);
-            evaluate(expression.e1, type, facts, left.base);
-            evaluate(expression.e2, type, facts, right.base);
-            const equal = equalStruct(
-                structType.sym,
-                cast(const ubyte*) left.base,
-                cast(const ubyte*) right.base,
-            );
-            const answer = expression.op == EXP.equal ? equal : !equal;
-            storeIntegral(_place, answer ? 1 : 0, _facts.size);
-            return;
-        }
-
-        auto rightType = expression.e2.type.toBasetype;
-        if (type.isStaticOrDynamicArray && rightType.isStaticOrDynamicArray) {
-            const leftFacts = factsOf(type);
-            const rightFacts = factsOf(rightType);
-            auto left = _frames.push(leftFacts.size, leftFacts.alignment);
-            auto right = _frames.push(rightFacts.size, rightFacts.alignment);
-            const a = arrayOperand(expression.e1, left.base);
-            const b = arrayOperand(expression.e2, right.base);
-            const bytes = a.length * factsOf(type.nextOf).size;
-            const equal = a.length == b.length
-                && (bytes == 0 || memcmp(a.elements, b.elements, bytes) == 0);
-            const answer = expression.op == EXP.equal ? equal : !equal;
-
-            storeIntegral(_place, answer ? 1 : 0, _facts.size);
-            return;
-        }
-
-        if (type.ty == Tdelegate) {
-            import snakebite.nativelayout:
-                delegateContextOffset, delegateFunctionOffset,
-                delegateValueSize, loadIntegral;
-
-            align(size_t.sizeof) ubyte[delegateValueSize] left = void;
-            align(size_t.sizeof) ubyte[delegateValueSize] right = void;
-            const facts = factsOf(type);
-            evaluate(expression.e1, type, facts, left.ptr);
-            evaluate(expression.e2, type, facts, right.ptr);
-            const sameContext = loadIntegral(
-                left.ptr + delegateContextOffset,
-                size_t.sizeof,
-                false,
-            ) == loadIntegral(
-                right.ptr + delegateContextOffset,
-                size_t.sizeof,
-                false,
-            );
-            const sameFunction = loadIntegral(
-                left.ptr + delegateFunctionOffset,
-                size_t.sizeof,
-                false,
-            ) == loadIntegral(
-                right.ptr + delegateFunctionOffset,
-                size_t.sizeof,
-                false,
-            );
-            const equal = sameContext && sameFunction;
-            const answer = expression.op == EXP.equal ? equal : !equal;
-            storeIntegral(_place, answer ? 1 : 0, _facts.size);
-            return;
-        }
-
         import snakebite.backends.comparison: comparisonPlan;
+        import snakebite.nativelayout: storeIntegral;
 
         const plan = comparisonPlan(expression);
         bool equal;
@@ -3562,6 +3513,35 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return expression.op == EXP.equal
                     ? storeVectorComparison!"=="(expression, plan)
                     : storeVectorComparison!"!="(expression, plan);
+            // Either operand may be static: each one's own length decides,
+            // so two static arrays of different lengths are unequal.
+            case dynamicArray, staticArray: {
+                auto leftType = expression.e1.type.toBasetype;
+                const leftFacts = factsOf(leftType);
+                const rightFacts = factsOf(expression.e2.type);
+                auto left = _frames.push(leftFacts.size, leftFacts.alignment);
+                auto right = _frames.push(
+                    rightFacts.size, rightFacts.alignment);
+                const a = arrayOperand(expression.e1, left.base);
+                const b = arrayOperand(expression.e2, right.base);
+                const bytes = a.length * factsOf(leftType.nextOf).size;
+                equal = a.length == b.length
+                    && (bytes == 0
+                        || memcmp(a.elements, b.elements, bytes) == 0);
+                break;
+            }
+            // A delegate is its two words, so it compares byte for byte.
+            case delegate_: {
+                auto left = _frames.push(plan.facts.size, plan.facts.alignment);
+                auto right = _frames.push(
+                    plan.facts.size, plan.facts.alignment);
+                evaluate(expression.e1, expression.e1.type, plan.facts,
+                    left.base);
+                evaluate(expression.e2, expression.e2.type, plan.facts,
+                    right.base);
+                equal = memcmp(left.base, right.base, plan.facts.size) == 0;
+                break;
+            }
         }
 
         const answer = expression.op == EXP.equal ? equal : !equal;
@@ -3631,77 +3611,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     break;
                 }
                 // A vector's lanes are integral or floating.
-                case complex, reference, vector:
+                case complex, reference, vector, dynamicArray, staticArray,
+                    delegate_:
                     assert(0);
             }
             storeIntegral(cast(ubyte*) _place + i * resultLaneSize,
                 answer ? -1 : 0, resultLaneSize);
         }
-    }
-
-    private bool equalStruct(
-        StructDeclaration declaration,
-        const ubyte* left,
-        const ubyte* right,
-    ) {
-        import core.stdc.string: memcmp;
-        import snakebite.nativelayout: arrayLengthOffset,
-            arrayPointerOffset, loadIntegral;
-
-        foreach (field; declaration.fields) {
-            auto fieldType = field.type;
-            auto a = left + field.offset;
-            auto b = right + field.offset;
-            if (fieldType.ty == Tarray) {
-                const length = cast(size_t) loadIntegral(
-                    a + arrayLengthOffset, size_t.sizeof, false);
-                const otherLength = cast(size_t) loadIntegral(
-                    b + arrayLengthOffset, size_t.sizeof, false);
-                if (length != otherLength)
-                    return false;
-
-                const elements = *cast(const ubyte**)
-                    (a + arrayPointerOffset);
-                const otherElements = *cast(const ubyte**)
-                    (b + arrayPointerOffset);
-                const bytes = length * factsOf(fieldType.nextOf).size;
-                if (bytes != 0 && memcmp(
-                        elements, otherElements, bytes) != 0)
-                    return false;
-                continue;
-            }
-
-            auto nested = fieldType.isTypeStruct;
-            if (nested !is null) {
-                if (!equalStruct(
-                        nested.sym,
-                        a,
-                        b,
-                    ))
-                    return false;
-                continue;
-            }
-
-            // `==` on a float follows IEEE 754: `-0.0` equals `0.0`, and
-            // `nan` never equals itself. `memcmp`, comparing raw bits,
-            // disagrees with both, so a float field needs its own read
-            // and its own `==` rather than a byte compare.
-            if (fieldType.ty == Tfloat32) {
-                if (*cast(const float*) a != *cast(const float*) b)
-                    return false;
-                continue;
-            }
-            if (fieldType.ty == Tfloat64) {
-                if (*cast(const double*) a != *cast(const double*) b)
-                    return false;
-                continue;
-            }
-            const facts = factsOf(fieldType);
-            if (memcmp(a, b, facts.size) != 0)
-                return false;
-        }
-
-        return true;
     }
 
     // The shared identity plan has already resolved DMD's native operation.
