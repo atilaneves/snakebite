@@ -225,16 +225,14 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
     private ubyte* _frame;
 
     public this(
-        const(Instruction)* pc, ubyte* frame, void* returnPlace,
-        const(long)[] constants, const(CallSite)[] callSites,
-        const(AssertSite)[] assertSites, DispatchState* state,
+        const(Instruction)* pc, Activation* activation, DispatchState* state,
     ) pure nothrow @nogc {
         _pc = pc;
-        _frame = frame;
-        this.returnPlace = returnPlace;
-        this.constants = constants;
-        this.callSites = callSites;
-        this.assertSites = assertSites;
+        _frame = activation.frame;
+        this.returnPlace = activation.returnPlace;
+        this.constants = activation.constants;
+        this.callSites = activation.callSites;
+        this.assertSites = activation.assertSites;
         this.frames = state.frames;
         _dispatch = state;
         destination = decode!destinationKind(pc.destination);
@@ -279,16 +277,12 @@ private const(Instruction)* execute(
     Parameters...,
 )(
     const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
+    Activation* activation,
     DispatchState* state,
 ) {
     // const would prevent operations from writing through storage pointers.
     auto execution = Execution!(destinationKind, sourceKind)(
-        pc, frame, returnPlace, constants, callSites, assertSites, state,
+        pc, activation, state,
     );
     return operation!Parameters(execution);
 }
@@ -297,11 +291,7 @@ private const(Instruction)* execute(
 public struct Instruction {
     public alias Handler = const(Instruction)* function(
         const(Instruction)* pc,
-        ubyte* frame,
-        void* returnPlace,
-        scope const long[] constants,
-        scope const CallSite[] callSites,
-        scope const AssertSite[] assertSites,
+        Activation* activation,
         DispatchState* state,
     );
 
@@ -534,8 +524,8 @@ private void dispatch(
     root.assertSites = assertSites;
     root.exceptionHandlers = exceptionHandlers;
     root.cleanupMark = frames.cleanupMark;
-    auto active = &root;
     auto state = DispatchState(frames);
+    auto active = &root;
 
     while (true) {
         try {
@@ -548,15 +538,18 @@ private void dispatch(
                 continue;
             }
 
-            state.current = active;
-            const next = active.pc.handler(
-                active.pc, active.frame, active.returnPlace,
-                active.constants, active.callSites, active.assertSites, &state);
-            if (state.pending !is null) {
-                active = state.pending;
-                state.pending = null;
+            const instruction = active.pc;
+            const handler = instruction.handler;
+            if (handler is &opCall) {
+                state.current = active;
+                const next = handler(instruction, active, &state);
+                if (state.pending !is null) {
+                    active = state.pending;
+                    state.pending = null;
+                } else
+                    active.pc = next;
             } else
-                active.pc = next;
+                active.pc = handler(instruction, active, &state);
         } catch (Throwable throwable) {
             size_t firstHandler;
             while (true) {
@@ -924,10 +917,10 @@ public alias opCall =
 private const(Instruction)* runCall(Decoded)(
     ref Decoded execution,
 ) {
-    const site = execution.callSites[execution.source];
+    const site = &execution.callSites[execution.source];
     final switch (site.kind) with (CallSite.Kind) {
     case guest:
-        return callFunction(execution, site,
+        return callFunction(execution, *site,
             site.callee !is null ? site.callee : site.prepareGuest());
     case indirect:
         auto callee =
@@ -941,7 +934,7 @@ private const(Instruction)* runCall(Decoded)(
                     contextAdjustment))
                 return execution.next;
         }
-        return callFunction(execution, site, cast(const(Function)*) callee,
+        return callFunction(execution, *site, cast(const(Function)*) callee,
             contextAdjustment);
     case native:
         auto arguments = gatherArguments(execution, site.args);

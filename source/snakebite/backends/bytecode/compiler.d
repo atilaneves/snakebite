@@ -875,6 +875,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, _function.loc,
                 "a `case` this compiler never reached");
 
+        removeEmptyLifetimes;
         resolveBranches();
 
         ExceptionHandler[] exceptionHandlers;
@@ -986,6 +987,38 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                         instruction.handler = &opCopyFixed!(width, true);
             }
         }
+    }
+
+    // Empty lifetimes have no runtime work. Remove their placeholders
+    // before indices become pointers, including exception and cleanup bounds.
+    private void removeEmptyLifetimes() {
+        auto offsets = new size_t[_instructions.length + 1];
+        size_t count;
+        foreach (index, instruction; _instructions) {
+            offsets[index] = count;
+            if (instruction.handler !is null)
+                _instructions[count++] = instruction;
+        }
+        offsets[$ - 1] = count;
+        _instructions.length = count;
+
+        foreach (ref instruction; _instructions) {
+            auto target = branchTargetField(instruction);
+            if (target !is null)
+                *target = offsets[*target];
+        }
+        foreach (ref handler; _exceptionHandlers) {
+            handler._bodyStart = offsets[handler._bodyStart];
+            handler._bodyEnd = offsets[handler._bodyEnd];
+            handler._handler = offsets[handler._handler];
+            if (handler._cleanupEnd != size_t.max)
+                handler._cleanupEnd = offsets[handler._cleanupEnd];
+        }
+        foreach (ref site; _callSites)
+            if (site.cleanupStartIndex != size_t.max) {
+                site.cleanupStartIndex = offsets[site.cleanupStartIndex];
+                site.cleanupEndIndex = offsets[site.cleanupEndIndex];
+            }
     }
 
     // Grows this compiled function's own frame past whatever `_layout`
@@ -2244,9 +2277,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private void beginLifetime() {
-        const marker = reserveTemp(pointerFacts);
-        emit(&opTemporaryBegin, marker, 0, 0);
-        _lifetimeMarkers ~= marker;
+        _lifetimeMarkers ~= _instructions.length;
+        emit(null, 0, 0, 0);
         _lifetimeFirstTemporaries ~= _temporaries.length;
     }
 
@@ -2255,7 +2287,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const firstTemporary = _lifetimeFirstTemporaries[$ - 1];
         _lifetimeMarkers.length -= 1;
         _lifetimeFirstTemporaries.length -= 1;
-        finishLifetime(marker, firstTemporary);
+        if (_temporaries.length == firstTemporary)
+            return;
+
+        const slot = reserveTemp(pointerFacts);
+        _instructions[marker] = Instruction(&opTemporaryBegin, slot, 0, 0);
+        finishLifetime(slot, firstTemporary);
     }
 
     private void finishLifetime(

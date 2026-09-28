@@ -213,7 +213,8 @@ public struct FrameStack {
             return _base + alignedUsed;
 
         const end = alignedUsed + size;
-        commit(end);
+        if (end > _committed)
+            commit(end);
         _used = end;
         return _base + alignedUsed;
     }
@@ -262,8 +263,6 @@ public struct FrameStack {
         import core.sys.posix.sys.mman: PROT_READ, PROT_WRITE, mprotect;
 
         const needed = roundUpToPage(end);
-        if (needed <= _committed)
-            return;
 
         // Double what is committed so far until it covers `end`, capped
         // at `_reservation` (`push` already checked `end` fits there).
