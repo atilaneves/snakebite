@@ -912,6 +912,9 @@ static foreach (backend; Matrix!(
 // of different lengths; ldc2 gives a different answer for the same code.
 // This pins what native dmd actually returns, the divergence
 // `Because.diverges` names above.
+//
+// Only `a() == b()` is pinned: `b() == a()` sizes its read from the
+// 12-byte right operand, so it reads past the 8-byte left one and is flaky.
 @("compare.staticArrayEquality.differentLengths.Native.diverges")
 @Tags("Native")
 unittest {
@@ -928,9 +931,7 @@ unittest {
 
             bool compareStatic() {
                 return (a() == b())
-                    && !(b() == a())
-                    && !(a() != b())
-                    && (b() != a());
+                    && !(a() != b());
             }
         },
         "compareStatic",
