@@ -385,3 +385,138 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast a class reference to an enum of that class"),
+)) {
+    @("enumOfClass.fieldsAndMethods." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Counter {
+                int value = 7;
+                int read() { return value; }
+            }
+            class Doubling : Counter {
+                override int read() { return 2 * value; }
+            }
+            enum ECounter : Counter { z = null }
+
+            void main() {
+                ECounter doubling = cast(ECounter) new Doubling;
+                assert(doubling.read() == 14);
+
+                ECounter counter = cast(ECounter) new Counter;
+                assert(counter.value == 7);
+                counter.value = 8;
+                assert(counter.read() == 8);
+                assert(counter);
+                Object upcast = counter;
+                assert((cast(Counter) upcast).value == 8);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast a class reference to an enum of that class"),
+)) {
+    @("enumOfClass.typeidIsDynamic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {}
+            class Derived : Base {}
+            enum EBase : Base { z = null }
+
+            void main() {
+                EBase value = cast(EBase) new Derived;
+                assert(typeid(value) is typeid(Derived));
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not match a catch of an enum of a class, and "
+            ~ "casts a class reference to an enum of it to null"),
+)) {
+    @("enumOfClass.throwAndCatch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Failure : Exception {
+                this() { super("failure"); }
+            }
+            enum EFailure : Failure { z = null }
+
+            void main() {
+                bool caught;
+                try
+                    throw cast(EFailure) new Failure;
+                catch (Failure failure)
+                    caught = failure.msg == "failure";
+                assert(caught);
+
+                bool caughtAsEnum;
+                try
+                    throw new Failure;
+                catch (EFailure failure)
+                    caughtAsEnum = failure.msg == "failure";
+                assert(caughtAsEnum);
+            }
+        });
+    }
+}
+
+// A cast to an enum of the class repaints the `new` expression's own
+// type; the constructor still runs.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast a class reference to an enum of that class"),
+)) {
+    @("enumOfClass.newRunsTheConstructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Failure : Exception {
+                this() { super("failure"); }
+            }
+            enum EFailure : Failure { z = null }
+
+            void main() {
+                EFailure failure = cast(EFailure) new Failure;
+                assert(failure.msg == "failure");
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("newOfEnum." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Pair { int x = 4; int y = 5; }
+            enum EPair : Pair { a = Pair(1, 2) }
+            enum Small : int { a = 3 }
+            enum P : int* { z = null }
+
+            void main() {
+                EPair* built = new EPair(3, 4);
+                assert(built.x == 3);
+                assert(built.y == 4);
+                EPair* defaulted = new EPair;
+                assert(defaulted.x == 4);
+                assert(defaulted.y == 5);
+                Small* small = new Small(Small.a);
+                assert(*small == Small.a);
+                P pointer = cast(P) new int(9);
+                assert(*pointer == 9);
+            }
+        });
+    }
+}

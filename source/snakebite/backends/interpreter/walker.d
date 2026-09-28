@@ -1476,7 +1476,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // compares by identity, in place of the name string this used to
     // compare instead.
     private bool matchesThrowable(Catch catch_, GuestException exception) {
-        auto typeClass = catch_.type.isTypeClass;
+        auto typeClass = catch_.type.toBasetype.isTypeClass;
         if (typeClass is null)
             return false;
 
@@ -1496,7 +1496,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return *cached;
 
         return *_catchTypes.build(catch_,
-            () => cast(TypeInfo_Class) _runtimeTypes.get(catch_.type));
+            () => cast(TypeInfo_Class) _runtimeTypes.get(
+                catch_.type.toBasetype));
     }
 
     private void bindCatchVariable(Catch catch_, Throwable guest) {
@@ -4209,7 +4210,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private void* fieldBaseAddress(Expression aggregate) {
-        if (aggregate.type.ty != Tclass)
+        if (aggregate.type.toBasetype.ty != Tclass)
             return addressOf(aggregate);
 
         const facts = factsOf(aggregate.type);
@@ -4277,7 +4278,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (auto value = isExpression(expression.obj)) {
             auto address = classReferenceOf(value);
             const indirections = 2
-                + (value.type.isTypeClass.sym.isInterfaceDeclaration !is null);
+                + (value.type.toBasetype.isTypeClass.sym
+                    .isInterfaceDeclaration !is null);
             foreach (i; 0 .. indirections)
                 address = *cast(void**) address;
             storeIntegral(_place, cast(size_t) address, _facts.size);
@@ -4435,7 +4437,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativelayout: loadIntegral;
         import std.conv: text;
 
-        if (expression.type.ty != Tclass)
+        if (expression.type.toBasetype.ty != Tclass)
             throw new SnakebiteException(
                 text("interpreter cannot throw `", expression.toString,
                     "`: it is not a class reference"),
@@ -4775,8 +4777,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import core.stdc.string: memcpy;
         import snakebite.nativelayout: loadIntegral;
 
-        auto structType = expression.newtype.isTypeStruct;
-        if (expression.type.ty == Tclass || structType !is null) {
+        auto structType = expression.newtype.toBasetype.isTypeStruct;
+        const resultKind = expression.type.toBasetype.ty;
+        if (resultKind == Tclass || structType !is null) {
             auto object = cast(ubyte*) loadIntegral(
                 _place, size_t.sizeof, false);
             if (object is null)
@@ -4786,7 +4789,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 );
 
             finishNew(expression, object);
-        } else if (expression.type.ty == Tpointer
+        } else if (resultKind == Tpointer
                 && expression.arguments !is null
                 && expression.arguments.length != 0) {
             if (expression.arguments.length != 1)
@@ -4829,7 +4832,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.backends.aggregateinit:
             driveInit, planClassContext, planPositionalFields;
 
-        auto structType = expression.newtype.isTypeStruct;
+        auto structType = expression.newtype.toBasetype.isTypeStruct;
         auto plan = structType is null
             ? planClassContext(expression)
             : planPositionalFields(structType.sym,
@@ -5508,7 +5511,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativelayout: loadIntegral;
         import std.conv: text;
 
-        if (expression.type.ty != Tclass)
+        if (expression.type.toBasetype.ty != Tclass)
             throw new SnakebiteException(
                 text("interpreter cannot use `", expression.toString,
                     "` as a class receiver"),

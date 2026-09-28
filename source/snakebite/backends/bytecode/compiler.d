@@ -1402,7 +1402,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileThrow(Expression expression, in Loc loc) {
         import dmd.astenums: Tclass;
 
-        if (expression is null || expression.type.ty != Tclass)
+        if (expression is null || expression.type.toBasetype.ty != Tclass)
             throw rejection(_function, loc, expression is null
                 ? "a null throw expression" : expressionText(expression));
 
@@ -1639,10 +1639,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     extern(D):
 
-    private TypeInfo_Class runtimeClassInfo(Type type) {
+    private TypeInfo_Class runtimeClassInfo(Type declared) {
         import dmd.astenums: Tclass;
         import std.conv: text;
 
+        auto type = declared.toBasetype;
         if (type.ty != Tclass)
             throw new SnakebiteException(text(
                 "bytecode compiler cannot compile a non-class catch type `",
@@ -2838,11 +2839,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 expressionText(expression));
 
         size_t addressOffset;
-        if (expression.e1.type.ty == Tclass) {
+        auto aggregateType = expression.e1.type.toBasetype;
+        if (aggregateType.ty == Tclass) {
             addressOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, addressOffset, size_t.sizeof);
         } else {
-            if (expression.e1.type.isTypeStruct is null)
+            if (aggregateType.isTypeStruct is null)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
             addressOffset = compileAddress(expression.e1);
@@ -3756,7 +3758,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         import dmd.astenums: Tclass;
-        if (expression.e1.type.ty == Tclass) {
+        auto aggregateType = expression.e1.type.toBasetype;
+        if (aggregateType.ty == Tclass) {
             const facts = TypeFacts.of(field.type);
             const objectOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, objectOffset, size_t.sizeof);
@@ -3768,7 +3771,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        if (expression.e1.type.isTypeStruct is null)
+        if (aggregateType.isTypeStruct is null)
             return visit(cast(Expression) expression);
 
         const baseFacts = TypeFacts.of(expression.e1.type);
@@ -4296,10 +4299,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     protected override void visitLoweredNew(NewExp expression) {
         import dmd.astenums: Tpointer;
-        if (expression.newtype.isTypeClass !is null
-                || expression.newtype.isTypeStruct !is null)
+        auto newType = expression.newtype.toBasetype;
+        if (newType.isTypeClass !is null || newType.isTypeStruct !is null)
             compileNew(expression);
-        else if (expression.type.ty == Tpointer
+        else if (expression.type.toBasetype.ty == Tpointer
                 && expression.arguments !is null
                 && expression.arguments.length != 0) {
             if (expression.arguments.length != 1)
@@ -4330,7 +4333,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.backends.aggregateinit:
             driveInit, planClassContext, planPositionalFields;
 
-        auto structType = expression.newtype.isTypeStruct;
+        auto structType = expression.newtype.toBasetype.isTypeStruct;
         const objectOffset = _destination;
         const storage = indirectStorage(objectOffset);
 
@@ -4386,7 +4389,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (auto value = isExpression(expression.obj)) {
             evalInto(value, _destination, size_t.sizeof);
             const indirections = 2
-                + (value.type.isTypeClass.sym.isInterfaceDeclaration !is null);
+                + (value.type.toBasetype.isTypeClass.sym
+                    .isInterfaceDeclaration !is null);
             foreach (i; 0 .. indirections)
                 emit(&opLoadIndirect, _destination, _destination, size_t.sizeof);
             return;
@@ -5531,7 +5535,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return false;
 
         auto dot = expression.e1.isDotVarExp;
-        return dot !is null && dot.e1.type.ty == Tclass;
+        return dot !is null && dot.e1.type.toBasetype.ty == Tclass;
     }
 
     // A call reached through the receiver's own dynamic type: `callee`
@@ -5722,7 +5726,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto dot = expression.e1.isDotVarExp;
         auto receiver = dot is null ? expression.e1 : dot.e1;
 
-        if (receiver.type.isTypeClass !is null) {
+        if (receiver.type.toBasetype.isTypeClass !is null) {
             const object = reserveTemp(pointerFacts);
             evalInto(receiver, object, size_t.sizeof);
             return object;
