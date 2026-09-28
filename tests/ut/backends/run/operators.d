@@ -367,6 +367,48 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// Imaginary values add, subtract and take a remainder as imaginary values.
+// A real times or over an imaginary is imaginary, and an imaginary times or
+// over an imaginary is real: `2i * 3i` is `-6`.
+static foreach (backend; Matrix!()) {
+    @("imaginaryArithmetic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                idouble i = 3.0i;
+                idouble two = 2.0i;
+                double d = 2.0;
+                assert(i + two == 5.0i);
+                assert(i - two == 1.0i);
+                assert(i % two == 1.0i);
+                assert(i * d == 6.0i);
+                assert(d * i == 6.0i);
+                assert(i / d == 1.5i);
+                assert(d / two == -1.0i);
+                assert(i * two == -6.0);
+                assert(i / two == 1.5);
+                assert(-i == -3.0i);
+                assert(7.0 % two == 1.0);
+                i *= d;
+                assert(i == 6.0i);
+                i /= d;
+                assert(i == 3.0i);
+                i += two;
+                assert(i == 5.0i);
+                i -= two;
+                assert(i == 3.0i);
+                ifloat f = 1.5fi;
+                f *= 2.0f;
+                assert(f + 1.0fi == 4.0fi);
+                ireal r = 2.0Li;
+                assert(r * r == -4.0L);
+                assert(-r == -2.0Li);
+            }
+        });
+    }
+}
+
 // A vector comparison gives a vector: each lane is all-ones where it
 // compares true.
 static foreach (backend; Matrix!(

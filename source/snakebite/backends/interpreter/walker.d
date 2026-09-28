@@ -382,9 +382,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         TypeInfo_Tuple;
     import dmd.root.string: toDString;
     import dmd.astenums:
-        Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tfloat32,
-        Tfloat64, Tfloat80, Tnoreturn, Tint64, Tpointer, Tsarray, Ttuple,
-        Tuns32, Tuns8, Tvoid, Twchar, TY, VarArg;
+        Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Tnoreturn, Tint64,
+        Tpointer, Tsarray, Ttuple, Tuns32, Tuns8, Tvoid, Twchar, TY, VarArg;
     import dmd.arraytypes: Expressions;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
@@ -3191,65 +3190,81 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private extern(D) void storeAssignExp(string op)(
         BinAssignExp expression, void* resolvedTarget = null,
     ) {
+        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+        import std.conv: text;
+
+        const plan = arithmeticPlan(expression);
+        with (ArithmeticPlan.Kind) final switch (plan.kind) {
+            case integral, pointerOffset:
+                return storeIntegralAssign!op(expression, resolvedTarget);
+
+            case floating:
+                static if (op == "+" || op == "-" || op == "*" || op == "/"
+                        || op == "%")
+                    return storeFloatingAssign!op(expression, resolvedTarget);
+                else
+                    assert(0, text("`", expression.toString, "`: dmd ",
+                        "rejects bitwise and shift operators on floating ",
+                        "operands"));
+
+            case complex, vector:
+                throw new SnakebiteException(
+                    text("interpreter cannot assign to `",
+                        expression.e1.toString, "`: `", expression.toString,
+                        "`"),
+                );
+
+            case pointerDifference:
+                assert(0, text("`", expression.toString, "`: `-=` cannot ",
+                    "store a pointer difference in a pointer"));
+        }
+    }
+
+    private extern(D) void storeFloatingAssign(string op)(
+        BinAssignExp expression, void* resolvedTarget,
+    ) {
         import snakebite.frontend.storage: compoundTarget;
         import snakebite.nativevalue: loadFloating, storeFloating;
+        import std.conv: text;
+
+        auto target_ = compoundTarget(expression);
+        auto target = resolvedTarget;
+        if (target is null)
+            try {
+                target = addressOf(target_);
+            } catch (SnakebiteException) {
+                throw new SnakebiteException(
+                    text("interpreter cannot assign to `",
+                        expression.e1.toString, "`: ",
+                        expression.toString),
+                );
+            }
+
+        const targetFacts = factsOf(target_.type);
+        const operationFacts = factsOf(expression.e1.type);
+        const mixedPromotion = targetFacts.size != operationFacts.size;
+        real current;
+        if (mixedPromotion)
+            current = loadFloating(target, targetFacts.size);
+        const step = asFloating(expression.e2);
+        if (!mixedPromotion)
+            current = loadFloating(target, targetFacts.size);
+        const result = floatingResult!op(current, step, operationFacts.size);
+
+        storeFloating(target, result, targetFacts.size);
+        storeFloating(_place, loadFloating(target, targetFacts.size),
+            _facts.size);
+    }
+
+    private extern(D) void storeIntegralAssign(string op)(
+        BinAssignExp expression, void* resolvedTarget,
+    ) {
+        import snakebite.frontend.storage: compoundTarget;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
         import std.conv: text;
 
         auto target_ = compoundTarget(expression);
-        const operationType = expression.e1.type.toBasetype;
-        static if (op == "+" || op == "-" || op == "*" || op == "/"
-                || op == "%")
-        if (operationType.ty == Tfloat32 || operationType.ty == Tfloat64
-                || operationType.ty == Tfloat80) {
-            auto target = resolvedTarget;
-            if (target is null)
-                try {
-                    target = addressOf(target_);
-                } catch (SnakebiteException) {
-                    throw new SnakebiteException(
-                        text("interpreter cannot assign to `",
-                            expression.e1.toString, "`: ",
-                            expression.toString),
-                    );
-                }
-
-            const targetFacts = factsOf(target_.type);
-            const operationFacts = factsOf(expression.e1.type);
-            const mixedPromotion = targetFacts.size != operationFacts.size;
-            real current;
-            if (mixedPromotion)
-                current = loadFloating(target, targetFacts.size);
-            const step = asFloating(expression.e2);
-            if (!mixedPromotion)
-                current = loadFloating(target, targetFacts.size);
-            real result;
-            if (operationType.ty == Tfloat32)
-                result = cast(real) mixin(
-                    "cast(float) current " ~ op ~ " cast(float) step");
-            else if (operationType.ty == Tfloat64)
-                result = cast(real) mixin(
-                    "cast(double) current " ~ op ~ " cast(double) step");
-            else
-                result = mixin("current " ~ op ~ " step");
-
-            storeFloating(target, result, targetFacts.size);
-            storeFloating(
-                _place,
-                loadFloating(target, targetFacts.size),
-                _facts.size,
-            );
-            return;
-        }
-
         const targetFacts = factsOf(expression.e1.type);
-        if (!targetFacts.isIntegral && operationType.ty != Tpointer)
-            throw new SnakebiteException(
-                text("interpreter cannot assign to `",
-                    expression.e1.toString, "`: `", expression.toString,
-                    "`"),
-            );
-
         auto target = resolvedTarget;
         if (target is null)
             try {
@@ -3295,59 +3310,63 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(PostExp expression) {
-        import snakebite.nativelayout: loadIntegral, storeIntegral;
+        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
         import std.conv: text;
 
-        const facts = factsOf(expression.e1.type);
-        auto sourceType = expression.e1.type.toBasetype;
-        if (sourceType.ty == Tpointer) {
-            const target = addressOf(expression.e1);
-            const current = asPointer(expression.e1);
-            // dmd's own AST does not scale a postfix `++`/`--` step for an
-            // enum of a pointer, so the step comes from the pointee size,
-            // not from `e2`.
-            const elementSize = factsOf(sourceType.nextOf).size;
-            const changed = expression.op == EXP.plusPlus
-                ? cast(ubyte*) current + elementSize
-                : cast(ubyte*) current - elementSize;
-
-            storeIntegral(_place, cast(size_t) current, _facts.size);
-            storeIntegral(cast(void*) target, cast(size_t) changed,
-                facts.size);
-            return;
+        const plan = arithmeticPlan(expression);
+        with (ArithmeticPlan.Kind) final switch (plan.kind) {
+            case integral:
+                return storeIntegralPost(expression, plan.facts);
+            case floating:
+                return storeFloatingPost(expression, plan.facts);
+            case pointerOffset:
+                return storePointerPost(expression, plan.facts);
+            case complex, vector:
+                throw new SnakebiteException(
+                    text("interpreter cannot evaluate `", expression.toString,
+                        "`: `", expression.e1.toString,
+                        "` is not an integral lvalue"),
+                );
+            case pointerDifference:
+                assert(0, text("`", expression.toString, "`: a postfix ",
+                    "`++`/`--` has the type of its operand"));
         }
+    }
 
-        const kind = expression.e1.type.toBasetype.ty;
-        if (kind == Tfloat32 || kind == Tfloat64 || kind == Tfloat80) {
-            import snakebite.nativevalue: loadFloating, storeFloating;
+    private void storePointerPost(PostExp expression, in TypeFacts facts) {
+        import snakebite.nativelayout: storeIntegral;
 
-            auto target = addressOf(expression.e1);
-            const current = loadFloating(target, facts.size);
-            const step = asFloating(expression.e2);
-            real changed;
-            if (kind == Tfloat32)
-                changed = expression.op == EXP.plusPlus
-                    ? cast(float) current + cast(float) step
-                    : cast(float) current - cast(float) step;
-            else if (kind == Tfloat64)
-                changed = expression.op == EXP.plusPlus
-                    ? cast(double) current + cast(double) step
-                    : cast(double) current - cast(double) step;
-            else
-                changed = expression.op == EXP.plusPlus
-                    ? current + step : current - step;
+        const target = addressOf(expression.e1);
+        const current = asPointer(expression.e1);
+        // dmd's own AST does not scale a postfix `++`/`--` step for an
+        // enum of a pointer, so the step comes from the pointee size, not
+        // from `e2`.
+        const elementSize =
+            factsOf(expression.e1.type.toBasetype.nextOf).size;
+        const changed = expression.op == EXP.plusPlus
+            ? cast(ubyte*) current + elementSize
+            : cast(ubyte*) current - elementSize;
 
-            storeFloating(target, changed, facts.size);
-            storeFloating(_place, current, _facts.size);
-            return;
-        }
+        storeIntegral(_place, cast(size_t) current, _facts.size);
+        storeIntegral(cast(void*) target, cast(size_t) changed, facts.size);
+    }
 
-        if (!facts.isIntegral)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: `", expression.e1.toString,
-                    "` is not an integral lvalue"),
-            );
+    private void storeFloatingPost(PostExp expression, in TypeFacts facts) {
+        import snakebite.nativevalue: loadFloating, storeFloating;
+
+        auto target = addressOf(expression.e1);
+        const current = loadFloating(target, facts.size);
+        const step = asFloating(expression.e2);
+        const changed = expression.op == EXP.plusPlus
+            ? floatingResult!"+"(current, step, facts.size)
+            : floatingResult!"-"(current, step, facts.size);
+
+        storeFloating(target, changed, facts.size);
+        storeFloating(_place, current, _facts.size);
+    }
+
+    private void storeIntegralPost(PostExp expression, in TypeFacts facts) {
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
 
         if (auto dot = expression.e1.isDotVarExp) {
             auto field = dot.var.isVarDeclaration;
@@ -3674,50 +3693,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(AddExp expression) {
-        import snakebite.nativelayout: storeIntegral;
-
-        const lhsPointer = expression.e1.type.toBasetype.ty == Tpointer;
-        const rhsPointer = expression.e2.type.toBasetype.ty == Tpointer;
-        if (expression.type.toBasetype.ty == Tpointer
-                && ((lhsPointer && factsOf(expression.e2.type).isIntegral)
-                    || (rhsPointer && factsOf(expression.e1.type).isIntegral))) {
-            void* pointer;
-            long offset;
-            if (lhsPointer) {
-                pointer = asPointer(expression.e1);
-                offset = asIntegral(expression.e2);
-            } else {
-                offset = asIntegral(expression.e1);
-                pointer = asPointer(expression.e2);
-            }
-            const result = cast(ubyte*) pointer + cast(long) offset;
-
-            storeIntegral(_place, cast(size_t) result, _facts.size);
-            return;
-        }
-
         storeBinaryExp!"+"(expression);
     }
 
     override void visit(MinExp expression) {
-        import snakebite.nativelayout: storeIntegral;
-
-        if (expression.type.toBasetype.ty == Tpointer) {
-            const pointer = cast(ubyte*) asPointer(expression.e1);
-            const offset = asIntegral(expression.e2);
-            storeIntegral(_place, cast(size_t)(pointer - offset), _facts.size);
-            return;
-        }
-
-        if (expression.e1.type.toBasetype.ty == Tpointer
-                && expression.e2.type.toBasetype.ty == Tpointer) {
-            const left = cast(ubyte*) asPointer(expression.e1);
-            const right = cast(ubyte*) asPointer(expression.e2);
-            const difference = left - right;
-            storeIntegral(_place, cast(ulong) difference, _facts.size);
-            return;
-        }
-
         storeBinaryExp!"-"(expression);
     }
 
@@ -3765,60 +3744,77 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         storeUnaryExp!"~"(expression);
     }
 
-    // Each operand widens to 64 bits with the signedness its own type
-    // gives, `combine` reduces the two to one 64-bit result, and the store
-    // keeps only the bits the destination holds - which is what D promises
-    // on overflow. The destination is as wide as the left operand because
-    // any width change arrives as a `CastExp`, which the interpreter
-    // refuses by name.
-    //
     // `extern(D)`: a string template parameter has no C++ mangling.
     private extern(D) void storeBinaryExp(string op)(BinExp expression) {
+        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
         import snakebite.nativelayout: storeIntegral;
+        import snakebite.nativevalue: storeFloating;
         import std.conv: text;
 
-        const kind = _type.toBasetype.ty;
-
-        // Every operator that can carry a floating type out of dmd's
-        // semantic pass: the bitwise and shift operators are rejected by
-        // the frontend on floating operands, so the `static if` only
-        // keeps their mixins compilable, it refuses nothing. Both
-        // operands already share the expression's own type - dmd's usual
-        // arithmetic conversions convert them before any backend runs -
-        // and every narrower width widens to `real` exactly, so narrowing
-        // each operand back to the expression's own width recovers it
-        // exactly and the operation then rounds once, in that precision,
-        // the same single rounding compiled D performs.
-        static if (op == "+" || op == "-" || op == "*" || op == "/"
-                || op == "%")
-            if (kind == Tfloat32 || kind == Tfloat64
-                    || kind == Tfloat80) {
-                const a = asFloating(expression.e1);
-                const b = asFloating(expression.e2);
-                if (kind == Tfloat32)
-                    *cast(float*) _place =
-                        mixin("cast(float) a " ~ op ~ " cast(float) b");
-                else if (kind == Tfloat64)
-                    *cast(double*) _place =
-                        mixin("cast(double) a " ~ op ~ " cast(double) b");
-                else
-                    *cast(real*) _place = mixin("a " ~ op ~ " b");
+        enum floatingOperator = op == "+" || op == "-" || op == "*"
+            || op == "/" || op == "%";
+        const plan = arithmeticPlan(expression);
+        with (ArithmeticPlan.Kind) final switch (plan.kind) {
+            // Each operand widens to 64 bits with the signedness its own
+            // type gives, `combine` reduces the two to one 64-bit result,
+            // and the store keeps only the bits the destination holds -
+            // which is what D promises on overflow.
+            case integral: {
+                const aFacts = factsOf(expression.e1.type);
+                const bFacts = factsOf(expression.e2.type);
+                const a = asIntegral(expression.e1, aFacts);
+                const b = asIntegral(expression.e2, bFacts);
+                storeIntegral(_place,
+                    combine!op(a, b, aFacts, bFacts, expression),
+                    _facts.size);
                 return;
             }
 
-        if (!_facts.isIntegral)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: its type is `", expression.type.toString, "`"),
-            );
+            case floating:
+                static if (floatingOperator) {
+                    const a = asFloating(expression.e1);
+                    const b = asFloating(expression.e2);
+                    storeFloating(_place,
+                        floatingResult!op(a, b, plan.facts.size),
+                        _facts.size);
+                    return;
+                } else
+                    assert(0, text("`", expression.toString, "`: dmd ",
+                        "rejects bitwise and shift operators on floating ",
+                        "operands"));
 
-        const aFacts = factsOf(expression.e1.type);
-        const bFacts = factsOf(expression.e2.type);
-        const a = asIntegral(expression.e1, aFacts);
-        const b = asIntegral(expression.e2, bFacts);
+            case complex, vector:
+                throw new SnakebiteException(
+                    text("interpreter cannot evaluate `", expression.toString,
+                        "`: its type is `", expression.type.toString, "`"),
+                );
 
-        storeIntegral(
-            _place, combine!op(a, b, aFacts, bFacts, expression), _facts.size);
+            case pointerOffset:
+                static if (op == "+" || op == "-") {
+                    const pointerLeft =
+                        expression.e1.type.toBasetype.ty == Tpointer;
+                    auto pointer = cast(ubyte*) asPointer(pointerLeft
+                        ? expression.e1 : expression.e2);
+                    const offset = asIntegral(pointerLeft
+                        ? expression.e2 : expression.e1);
+                    const result = mixin("pointer " ~ op ~ " offset");
+                    storeIntegral(_place, cast(size_t) result, _facts.size);
+                    return;
+                } else
+                    assert(0, text("`", expression.toString, "`: D only ",
+                        "adds an offset to a pointer or subtracts one"));
+
+            case pointerDifference:
+                static if (op == "-") {
+                    const left = cast(ubyte*) asPointer(expression.e1);
+                    const right = cast(ubyte*) asPointer(expression.e2);
+                    storeIntegral(_place, cast(ulong)(left - right),
+                        _facts.size);
+                    return;
+                } else
+                    assert(0, text("`", expression.toString, "`: D only ",
+                        "subtracts one pointer from another"));
+        }
     }
 
     // As `asIntegral`, for a floating operand. The value comes back as a
@@ -3855,36 +3851,39 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // `-x` and `~x` leave the same low bits whether the operand was read as
     // signed or unsigned, so neither needs the operand's own facts.
     private extern(D) void storeUnaryExp(string op)(UnaExp expression) {
+        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
         import snakebite.nativelayout: storeIntegral;
+        import snakebite.nativevalue: storeFloating;
         import std.conv: text;
 
-        const kind = _type.toBasetype.ty;
-
-        // `~` is rejected by the frontend on floating operands, so the
-        // `static if` only keeps its mixin compilable for this operator;
-        // only `-` ever reaches here with a floating type.
-        static if (op == "-")
-            if (kind == Tfloat32 || kind == Tfloat64
-                    || kind == Tfloat80) {
-                const a = asFloating(expression.e1);
-                if (kind == Tfloat32)
-                    *cast(float*) _place = -cast(float) a;
-                else if (kind == Tfloat64)
-                    *cast(double*) _place = -cast(double) a;
-                else
-                    *cast(real*) _place = -a;
+        const plan = arithmeticPlan(expression);
+        with (ArithmeticPlan.Kind) final switch (plan.kind) {
+            case integral: {
+                const a = asIntegral(expression.e1);
+                storeIntegral(_place, cast(ulong) mixin(op ~ "a"),
+                    _facts.size);
                 return;
             }
 
-        if (!_facts.isIntegral)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: its type is `", expression.type.toString, "`"),
-            );
+            case floating:
+                static if (op == "-") {
+                    storeFloating(_place, -asFloating(expression.e1),
+                        _facts.size);
+                    return;
+                } else
+                    assert(0, text("`", expression.toString, "`: dmd ",
+                        "rejects `~` on a floating operand"));
 
-        const a = asIntegral(expression.e1);
+            case complex, vector:
+                throw new SnakebiteException(
+                    text("interpreter cannot evaluate `", expression.toString,
+                        "`: its type is `", expression.type.toString, "`"),
+                );
 
-        storeIntegral(_place, cast(ulong) mixin(op ~ "a"), _facts.size);
+            case pointerOffset, pointerDifference:
+                assert(0, text("`", expression.toString, "`: D has no ",
+                    "unary arithmetic on a pointer"));
+        }
     }
 
     // `snakebite.backends.casts.classify` has already turned the source
@@ -5725,6 +5724,19 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _place = place;
         expression.accept(this);
     }
+}
+
+// Both operands already have the operation's own type, and every narrower
+// width widens to `real` exactly, so narrowing each operand back recovers
+// it and the operation then rounds once, in that precision, as compiled D
+// does.
+private real floatingResult(string op)(in real a, in real b, in size_t size) {
+    if (size == float.sizeof)
+        return mixin("cast(float) a " ~ op ~ " cast(float) b");
+    if (size == double.sizeof)
+        return mixin("cast(double) a " ~ op ~ " cast(double) b");
+    assert(size == real.sizeof, "no native layout for this floating width");
+    return mixin("a " ~ op ~ " b");
 }
 
 private ulong combine(string op)(

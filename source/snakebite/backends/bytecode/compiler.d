@@ -16,17 +16,6 @@ import snakebite.backends.druntimehooks: DruntimeHook, planOf, specOf;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
 
 
-// Whether `type` is `float`/`double`/`real` - `TypeFacts` has no notion of
-// its own for this, unlike `isIntegral`/`isDynamicArray`, which drive
-// checks all over this compiler.
-private bool isFloatingType(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
-    import dmd.typesem: toBasetype;
-
-    const kind = type.toBasetype.ty;
-    return kind == Tfloat32 || kind == Tfloat64 || kind == Tfloat80;
-}
-
 // A pointer-sized temporary's facts: the shape every address this compiler
 // computes at run time - a `ref` binding, an array element's, an
 // allocation's result - shares, whatever the value living behind it
@@ -3102,18 +3091,27 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         BinAssignExp expression, in size_t targetOffset,
         in size_t destOffset = discardResult,
     ) {
+        import snakebite.backends.arithmetic:
+            ArithmeticPlan, arithmeticKind, arithmeticPlan;
         import snakebite.frontend.storage: compoundTarget;
+        import std.conv: text;
 
         auto target = compoundTarget(expression);
         const targetFacts = TypeFacts.of(target.type);
         const operationFacts = TypeFacts.of(expression.e1.type);
-        auto handler = compoundHandler(
-            expression, operationFacts.isUnsigned,
-            isFloatingType(expression.e1.type),
-        );
-        if (handler is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+        const plan = arithmeticPlan(expression);
+        with (ArithmeticPlan.Kind) final switch (plan.kind) {
+            case integral, floating, pointerOffset:
+                break;
+            case complex, vector:
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+            case pointerDifference:
+                assert(0, text("`", expressionText(expression), "`: `-=` ",
+                    "cannot store a pointer difference in a pointer"));
+        }
+        auto handler = compoundHandler(expression, operationFacts.isUnsigned,
+            plan.kind == ArithmeticPlan.Kind.floating);
 
         auto field = target.isDotVarExp;
         auto fieldDeclaration = field is null
@@ -3123,7 +3121,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || fieldDeclaration.isBitFieldDeclaration is null
                 ? ScalarStorage.Kind.indirect : ScalarStorage.Kind.bitfield,
             targetFacts, targetOffset, fieldDeclaration,
-            isFloatingType(target.type),
+            arithmeticKind(target.type) == ArithmeticPlan.Kind.floating,
         );
         const mixedFloating = storage.isFloating
             && operationFacts.size != storage.facts.size;
@@ -3156,14 +3154,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression target, in Loc loc,
         in string operation,
     ) {
-        import dmd.astenums: Tpointer;
-
         const facts = TypeFacts.of(target.type);
-        const scalar = isFloatingType(target.type)
-            || (facts.isIntegral || target.type.toBasetype.ty == Tpointer)
-                && isIntegralSize(facts.size);
-        if (!scalar)
-            throw rejection(_function, loc, operation);
 
         if (auto dot = target.isDotVarExp) {
             auto field = dot.var.isVarDeclaration;
@@ -3300,6 +3291,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private Instruction.Handler compoundHandler(
         BinAssignExp expression, in bool unsigned, in bool floating,
     ) {
+        import std.conv: text;
+
         if (expression.isAddAssignExp)
             return floating ? &opFloatAdd : &opAdd;
         if (expression.isMinAssignExp)
@@ -3322,7 +3315,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 ? &opFloatModulo
                 : (unsigned ? &opModuloUnsigned : &opModuloSigned);
 
-        return null;
+        assert(0, text("`", expressionText(expression), "`: dmd lowers ",
+            "every other compound assignment"));
     }
 
     // `x++`/`x--`, dmd's own node for the postfix forms alone - the
@@ -3332,8 +3326,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // an expression - goes, captured before the target changes;
     // `discardResult` when a caller at statement level does not want it.
     private void compilePost(PostExp expression, in size_t destOffset) {
-        import dmd.astenums: Tpointer;
+        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+        import std.conv: text;
 
+        const plan = arithmeticPlan(expression);
         auto storage = scalarStorage(
             expression.e1, expression.loc, expressionText(expression));
         const valueOffset = readScalar(storage, storage.facts);
@@ -3341,22 +3337,41 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (destOffset != discardResult)
             emit(&opCopy, destOffset, valueOffset, storage.facts.size);
 
+        const increment = expression.op == EXP.plusPlus;
         const stepOffset = reserveTemp(storage.facts);
-        auto sourceType = expression.e1.type.toBasetype;
-        if (sourceType.ty == Tpointer) {
+        Instruction.Handler handler;
+        with (ArithmeticPlan.Kind) final switch (plan.kind) {
+            case integral:
+                evalInto(expression.e2, stepOffset, storage.facts.size);
+                handler = increment ? &opAdd : &opSubtract;
+                break;
+
+            case floating:
+                evalInto(expression.e2, stepOffset, storage.facts.size);
+                handler = increment ? &opFloatAdd : &opFloatSubtract;
+                break;
+
             // dmd's own AST does not scale a postfix `++`/`--` step for an
             // enum of a pointer, so the step comes from the pointee size,
             // not from `e2`.
-            const elementFacts = TypeFacts.of(sourceType.nextOf);
-            emit(&opConstant, stepOffset,
-                addConstant(cast(long) elementFacts.size),
-                storage.facts.size);
-        } else
-            evalInto(expression.e2, stepOffset, storage.facts.size);
-        const floating = isFloatingType(expression.e1.type);
-        auto handler = expression.op == EXP.plusPlus
-            ? (floating ? &opFloatAdd : &opAdd)
-            : (floating ? &opFloatSubtract : &opSubtract);
+            case pointerOffset: {
+                const elementFacts =
+                    TypeFacts.of(expression.e1.type.toBasetype.nextOf);
+                emit(&opConstant, stepOffset,
+                    addConstant(cast(long) elementFacts.size),
+                    storage.facts.size);
+                handler = increment ? &opAdd : &opSubtract;
+                break;
+            }
+
+            case complex, vector:
+                throw rejection(_function, expression.loc,
+                    expressionText(expression));
+
+            case pointerDifference:
+                assert(0, text("`", expressionText(expression), "`: a ",
+                    "postfix `++`/`--` has the type of its operand"));
+        }
         emit(handler, valueOffset, stepOffset, storage.facts.size);
         writeScalar(storage, valueOffset, storage.facts.size);
     }
@@ -4752,100 +4767,90 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         BinExp expression, in size_t destOffset, in size_t width,
         Instruction.Handler handler,
     ) {
-        import dmd.astenums: Tpointer;
+        import snakebite.backends.arithmetic:
+            ArithmeticPlan, arithmeticKind, arithmeticPlan;
+        import std.conv: text;
 
-        if (expression.type.toBasetype.ty == Tpointer) {
-            if (handler !is &opAdd && handler !is &opSubtract)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            Expression pointerOperand =
-                expression.e1.type.toBasetype.ty == Tpointer
-                    ? expression.e1 : expression.e2;
-            Expression integralOperand = pointerOperand is expression.e1
-                ? expression.e2 : expression.e1;
-            if (pointerOperand.type.toBasetype.ty != Tpointer) {
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+        const plan = arithmeticPlan(expression);
+        with (ArithmeticPlan.Kind) final switch (plan.kind) {
+            case integral: {
+                const leftOffset = reserveTemp(plan.facts);
+                evalOperandInto(expression.e1, leftOffset, width);
+                const rightOffset = reserveTemp(plan.facts);
+                evalOperandInto(expression.e2, rightOffset, width);
+                emit(handler, leftOffset, rightOffset, width);
+                return copyResult(destOffset, leftOffset, width);
             }
 
-            const pointerFacts = TypeFacts.of(pointerOperand.type);
-            const integralFacts = TypeFacts.of(integralOperand.type);
-            if (!integralFacts.isIntegral
-                    || !isIntegralSize(integralFacts.size))
+            case floating: {
+                const leftOffset = reserveTemp(plan.facts);
+                evalInto(expression.e1, leftOffset, plan.facts.size);
+                const rightOffset = reserveTemp(plan.facts);
+                evalInto(expression.e2, rightOffset, plan.facts.size);
+                emit(floatingBinaryHandler(expression), leftOffset,
+                    rightOffset, plan.facts.size);
+                return copyResult(destOffset, leftOffset, width);
+            }
+
+            case complex, vector:
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
-            const leftOffset = reserveTemp(pointerFacts);
-            evalInto(pointerOperand, leftOffset, pointerFacts.size);
-            const rightOffset = reserveTemp(pointerFacts);
-            evalOperandInto(integralOperand, rightOffset,
-                pointerFacts.size);
-            emit(handler, leftOffset, rightOffset, pointerFacts.size);
+            case pointerOffset: {
+                assert(handler is &opAdd || handler is &opSubtract,
+                    text("`", expressionText(expression), "`: D only adds ",
+                        "an offset to a pointer or subtracts one"));
+                const pointerLeft =
+                    arithmeticKind(expression.e1.type) == pointerOffset;
+                auto pointerOperand =
+                    pointerLeft ? expression.e1 : expression.e2;
+                auto offsetOperand =
+                    pointerLeft ? expression.e2 : expression.e1;
+                const leftOffset = reserveTemp(plan.facts);
+                evalInto(pointerOperand, leftOffset, plan.facts.size);
+                const rightOffset = reserveTemp(plan.facts);
+                evalOperandInto(offsetOperand, rightOffset, plan.facts.size);
+                emit(handler, leftOffset, rightOffset, plan.facts.size);
+                return copyResult(destOffset, leftOffset, width);
+            }
 
-            if (destOffset != leftOffset)
-                emit(&opCopy, destOffset, leftOffset, width);
-            return;
+            // `p2 - p1`: dmd's own semantic pass (`MinExp::semantic`)
+            // already wraps the subtraction in a `DivExp` by the pointee's
+            // size, so this leaves the raw byte count for that division.
+            case pointerDifference: {
+                assert(handler is &opSubtract, text("`",
+                    expressionText(expression), "`: D only subtracts one ",
+                    "pointer from another"));
+                const leftOffset = reserveTemp(pointerFacts);
+                evalInto(expression.e1, leftOffset, pointerFacts.size);
+                const rightOffset = reserveTemp(pointerFacts);
+                evalInto(expression.e2, rightOffset, pointerFacts.size);
+                emit(&opSubtract, leftOffset, rightOffset, pointerFacts.size);
+                return copyResult(destOffset, leftOffset, width);
+            }
         }
+    }
 
-        // `p2 - p1`: dmd's own semantic pass for this (`MinExp::semantic`,
-        // `expressionsem.d`) already wraps the whole subtraction in a
-        // `DivExp` by the pointee's size, so this node's own `type` is
-        // `ptrdiff_t`, not a pointer, even though both operands still
-        // are. Nothing here needs to know the pointee's size at all: the
-        // outer `DivExp` this compiler visits next does that division on
-        // the raw byte count this leaves behind, the same way it divides
-        // any other pair of integers.
-        if (handler is &opSubtract
-                && expression.e1.type.toBasetype.ty == Tpointer
-                && expression.e2.type.toBasetype.ty == Tpointer) {
-            const leftOffset = reserveTemp(pointerFacts);
-            evalInto(expression.e1, leftOffset, pointerFacts.size);
-            const rightOffset = reserveTemp(pointerFacts);
-            evalInto(expression.e2, rightOffset, pointerFacts.size);
-            emit(&opSubtract, leftOffset, rightOffset, pointerFacts.size);
-
-            if (destOffset != leftOffset)
-                emit(&opCopy, destOffset, leftOffset, width);
-            return;
-        }
-
-        const facts = TypeFacts.of(expression.type);
-        if (isFloatingType(expression.type)) {
-            const leftOffset = reserveTemp(facts);
-            evalInto(expression.e1, leftOffset, facts.size);
-            const rightOffset = reserveTemp(facts);
-            evalInto(expression.e2, rightOffset, facts.size);
-            emit(floatingBinaryHandler(expression), leftOffset, rightOffset,
-                facts.size);
-
-            if (destOffset != leftOffset)
-                emit(&opCopy, destOffset, leftOffset, width);
-            return;
-        }
-
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        const leftOffset = reserveTemp(facts);
-        evalOperandInto(expression.e1, leftOffset, width);
-        const rightOffset = reserveTemp(facts);
-        evalOperandInto(expression.e2, rightOffset, width);
-        emit(handler, leftOffset, rightOffset, width);
-
-        if (destOffset != leftOffset)
-            emit(&opCopy, destOffset, leftOffset, width);
+    private void copyResult(
+        in size_t destOffset, in size_t resultOffset, in size_t width,
+    ) {
+        if (destOffset != resultOffset)
+            emit(&opCopy, destOffset, resultOffset, width);
     }
 
     private Instruction.Handler floatingBinaryHandler(BinExp expression) {
+        import std.conv: text;
+
         with (EXP) switch (expression.op) {
             case add: return &opFloatAdd;
             case min: return &opFloatSubtract;
             case mul: return &opFloatMultiply;
             case div: return &opFloatDivide;
             case mod: return &opFloatModulo;
-            default: assert(0);
+            default:
+                assert(0, text("`", expressionText(expression), "`: dmd ",
+                    "rejects bitwise and shift operators on floating ",
+                    "operands"));
         }
     }
 
@@ -5292,23 +5297,32 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         UnaExp expression, in size_t destOffset, in size_t width,
         Instruction.Handler handler,
     ) {
-        const facts = TypeFacts.of(expression.type);
-        if (isFloatingType(expression.type)) {
-            if (handler !is &opNegate)
+        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+        import std.conv: text;
+
+        const plan = arithmeticPlan(expression);
+        with (ArithmeticPlan.Kind) final switch (plan.kind) {
+            case integral:
+                evalInto(expression.e1, destOffset, width);
+                emit(handler, destOffset, 0, width);
+                return;
+
+            case floating:
+                assert(handler is &opNegate, text("`",
+                    expressionText(expression), "`: dmd rejects `~` on a ",
+                    "floating operand"));
+                evalInto(expression.e1, destOffset, width);
+                emit(&opFloatNegate, destOffset, 0, width);
+                return;
+
+            case complex, vector:
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
-            evalInto(expression.e1, destOffset, width);
-            emit(&opFloatNegate, destOffset, 0, width);
-            return;
+            case pointerOffset, pointerDifference:
+                assert(0, text("`", expressionText(expression), "`: D has ",
+                    "no unary arithmetic on a pointer"));
         }
-
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        evalInto(expression.e1, destOffset, width);
-        emit(handler, destOffset, 0, width);
     }
 
     // `!x`: evaluated the same way any other condition is - `compileCondition`
