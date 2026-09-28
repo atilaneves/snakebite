@@ -161,14 +161,11 @@ public struct CallSelection {
     // function dmd does not classify (`BUILTIN.unimp`) - every ordinary
     // bodiless native declaration, and also, today, `core.math.rint` and
     // `core.math.rndtol`, which dmd's own `BUILTIN` enum has no member
-    // for - keeps the native route FFI already handles. A function dmd
-    // does classify but this table has no wrapper for fails loudly here,
-    // at decision time, rather than at the call's first execution.
+    // for - keeps the native route FFI already handles. Every bodiless
+    // declaration dmd does classify has a wrapper in the table.
     private static Decision builtinDecision(FuncDeclaration function_) {
         import dmd.builtin: isBuiltin;
         import snakebite.backends.builtins: entryOf;
-        import snakebite.exception: SnakebiteException;
-        import std.conv: text;
 
         const kind = isBuiltin(function_);
         if (kind == BUILTIN.unimp)
@@ -182,11 +179,7 @@ public struct CallSelection {
         // ident`) - so `function_.ident` is the lookup key, not `kind`.
         auto entry = entryOf(
             function_.ident.toString.idup, parameterTypeOf(function_));
-        if (entry is null)
-            throw new SnakebiteException(text(
-                "snakebite has no builtin wrapper for `",
-                function_.toString, "`, which dmd classifies as `",
-                kind, "`"));
+        assert(entry !is null);
 
         return Decision(Route.builtin, entry);
     }

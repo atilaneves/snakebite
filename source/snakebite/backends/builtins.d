@@ -26,10 +26,8 @@ public enum ParameterType { float_, double_, real_, ushort_, uint_, ulong_ }
 
 // `name` is a string key, not dmd's `BUILTIN` enum value, so this
 // module and the bytecode VM that calls into it need no DMD frontend
-// import path (CODING.md, "Code organisation"). `null` means snakebite
-// has no wrapper for a builtin dmd itself classifies;
-// `CallSelection.buildDecision` turns that into a refusal at decision
-// time, never at the call's first execution.
+// import path (CODING.md, "Code organisation"). `null` means the pair
+// is not a bodiless declaration dmd classifies as a builtin.
 public BuiltinCall entryOf(in string name, in ParameterType type)
 @safe pure nothrow @nogc {
     final switch (type) with (ParameterType) {
