@@ -318,6 +318,9 @@ public struct FrameStack {
         in size_t offset,
         in uint alignment,
     ) @safe @nogc nothrow pure {
+        const mask = size_t(alignment) - 1;
+        if ((alignment & mask) == 0)
+            return (offset + mask) & ~mask;
         const remainder = offset % alignment;
         return remainder == 0 ? offset : offset + alignment - remainder;
     }
