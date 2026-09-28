@@ -271,11 +271,6 @@ public struct TypeFacts {
     // condition, so neither special-cases an associative array or a
     // delegate on its own.
     public struct Truth {
-        // `false` when `type` cannot be used as a condition at all (for
-        // instance an integral width with no native layout); every
-        // other field is meaningless then, and the caller reports its
-        // own rejection.
-        public bool supported;
         public bool isFloat;
         // Offset, from the value's own start, and width, of the bytes
         // that decide truth on their own (the only bytes there are,
@@ -290,58 +285,58 @@ public struct TypeFacts {
         public enum noSecondWord = size_t.max;
 
         public static Truth of(Type type) {
-            import dmd.astenums:
-                Taarray, Tarray, Tclass, Tcomplex32, Tcomplex64, Tcomplex80,
-                Tdelegate, Tfloat32, Tfloat64, Tfloat80, Timaginary32,
-                Timaginary64, Timaginary80, Tnull, Tpointer;
-            import dmd.typesem: isIntegral, size, toBasetype;
+            import dmd.astenums: TY;
+            import dmd.typesem: size, toBasetype;
 
             type = type.toBasetype;
+            final switch (type.ty) with (TY) {
+                // An imaginary value is one `float`/`double`/`real`-shaped
+                // component on its own - the same nonzero test a real one
+                // gets, just at its own (imaginary) type's size.
+                case Tfloat32, Tfloat64, Tfloat80,
+                    Timaginary32, Timaginary64, Timaginary80:
+                    return Truth(true, 0, type.size);
 
-            // An imaginary value is one `float`/`double`/`real`-shaped
-            // component on its own - the same nonzero test a real one
-            // gets, just at its own (imaginary) type's size.
-            if (type.ty == Tfloat32 || type.ty == Tfloat64
-                    || type.ty == Tfloat80
-                    || type.ty == Timaginary32 || type.ty == Timaginary64
-                    || type.ty == Timaginary80)
-                return Truth(true, true, 0, type.size);
+                // A complex value is true when either of its two
+                // `float`/`double`/`real`-shaped components (`re`, `im`,
+                // each exactly half `type.size` - `nativevalue.
+                // loadComplexRe`/`loadComplexIm`'s own layout) is nonzero.
+                case Tcomplex32, Tcomplex64, Tcomplex80: {
+                    const half = type.size / 2;
+                    return Truth(true, 0, half, half);
+                }
 
-            // A complex value is true when either of its two
-            // `float`/`double`/`real`-shaped components (`re`, `im`,
-            // each exactly half `type.size` - `nativevalue.
-            // loadComplexRe`/`loadComplexIm`'s own layout) is nonzero -
-            // `isFloat` picks the same per-word nonzero test the single-
-            // component case above does, applied twice by `secondOffset`
-            // the way a delegate's two integral words already are.
-            if (type.ty == Tcomplex32 || type.ty == Tcomplex64
-                    || type.ty == Tcomplex80) {
-                const half = type.size / 2;
-                return Truth(true, true, 0, half, half);
+                case Tarray:
+                    return Truth(false, arrayPointerOffset, size_t.sizeof);
+
+                case Tdelegate:
+                    return Truth(
+                        false, delegateContextOffset, size_t.sizeof,
+                        delegateFunctionOffset,
+                    );
+
+                // `typeof(null)` has only ever the one value - always zero
+                // bits, so `if (x)` on it is always false - but that is
+                // still the same one-word nonzero test a pointer's own
+                // `Truth` already is.
+                case Tpointer, Tclass, Taarray, Tnull,
+                    Tbool, Tchar, Twchar, Tdchar, Tint8, Tuns8, Tint16,
+                    Tuns16, Tint32, Tuns32, Tint64, Tuns64:
+                    return Truth(false, 0, type.size);
+
+                // Evaluating the condition never finishes, so no byte of
+                // it is ever tested.
+                case Tnoreturn:
+                    return Truth(false, 0, 0);
+
+                // Semantic rejects these as conditions, rejects
+                // `cent`/`ucent`, and `toBasetype` leaves no enum.
+                case Tstruct, Tsarray, Tvector, Tint128, Tuns128, Tenum,
+                    Tvoid, Tfunction, Treference, Tident, Tnone, Terror,
+                    Tinstance, Ttypeof, Ttuple, Tslice, Treturn, Ttraits,
+                    Tmixin, Ttag:
+                    assert(0);
             }
-
-            if (type.ty == Tarray)
-                return Truth(
-                    true, false, arrayPointerOffset, size_t.sizeof);
-
-            if (type.ty == Tdelegate)
-                return Truth(
-                    true, false, delegateContextOffset, size_t.sizeof,
-                    delegateFunctionOffset,
-                );
-
-            // `typeof(null)` has only ever the one value - always zero
-            // bits, so `if (x)` on it is always false - but that is
-            // still the same one-word nonzero test a pointer's own
-            // `Truth` already is, not a rejection of its own.
-            if (type.ty == Tpointer || type.ty == Tclass
-                    || type.ty == Taarray || type.ty == Tnull)
-                return Truth(true, false, 0, type.size);
-
-            if (type.isIntegral && isIntegralSize(type.size))
-                return Truth(true, false, 0, type.size);
-
-            return Truth(false);
         }
     }
 }
@@ -357,6 +352,10 @@ public struct TypeFacts {
 public size_t alignUp(in size_t offset, in uint alignment) {
     import dmd.aggregate: alignmember;
 
+    // `noreturn.alignof` is 0: a value that never exists needs no
+    // alignment, and `alignmember` requires a power of 2.
+    if (alignment == 0)
+        return offset;
     return alignmember(defaultAlignment, alignment, cast(uint) offset);
 }
 

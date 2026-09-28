@@ -1979,11 +1979,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto type = expression.type;
         const truth = TypeFacts.Truth.of(type);
-        if (!truth.supported)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "` as a condition: its type is `", type.toString, "`"),
-            );
 
         // Sized to `creal`, the widest condition value `Truth.of` ever
         // answers `supported` for - a plain real, an imaginary, or one

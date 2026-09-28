@@ -1753,9 +1753,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.nativelayout: TypeFacts;
 
         const truth = TypeFacts.Truth.of(condition.type);
-        if (!truth.supported)
-            throw rejection(_function, condition.loc,
-                expressionText(condition));
 
         const facts = TypeFacts.of(condition.type);
         const valueOffset = reserveTemp(facts);
