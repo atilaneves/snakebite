@@ -3207,7 +3207,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                         "rejects bitwise and shift operators on floating ",
                         "operands"));
 
-            case complex, vector:
+            case complex:
+                static if (op == "+" || op == "-" || op == "*" || op == "/"
+                        || op == "%")
+                    return storeComplexAssign!op(
+                        expression, plan, resolvedTarget);
+                else
+                    assert(0, text("`", expression.toString, "`: dmd ",
+                        "rejects bitwise and shift operators on complex ",
+                        "operands"));
+
+            case vector:
                 throw new SnakebiteException(
                     text("interpreter cannot assign to `",
                         expression.e1.toString, "`: `", expression.toString,
@@ -3254,6 +3264,36 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         storeFloating(target, result, targetFacts.size);
         storeFloating(_place, loadFloating(target, targetFacts.size),
             _facts.size);
+    }
+
+    // As `storeFloatingAssign`, for both halves of a complex target.
+    private extern(D) void storeComplexAssign(string op)(
+        BinAssignExp expression,
+        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        void* resolvedTarget,
+    ) {
+        import snakebite.frontend.storage: compoundTarget;
+        import snakebite.nativevalue: applyComplex;
+
+        auto target_ = compoundTarget(expression);
+        auto target = resolvedTarget is null
+            ? addressOf(target_) : resolvedTarget;
+        const targetFacts = factsOf(target_.type);
+        const partSize = plan.facts.size / 2;
+        align(real.alignof) ubyte[2 * real.sizeof] current = void;
+        align(real.alignof) ubyte[2 * real.sizeof] step = void;
+        const mixedPromotion = targetFacts.size != plan.facts.size;
+        if (mixedPromotion)
+            convertComplex(current.ptr, partSize, target, targetFacts.size / 2);
+        evaluate(expression.e2, expression.e2.type,
+            factsOf(expression.e2.type), step.ptr);
+        if (!mixedPromotion)
+            convertComplex(current.ptr, partSize, target, targetFacts.size / 2);
+        applyComplex!(complexOperation!op)(current.ptr, current.ptr, step.ptr,
+            plan.operands, partSize);
+
+        convertComplex(target, targetFacts.size / 2, current.ptr, partSize);
+        convertComplex(_place, _facts.size / 2, target, targetFacts.size / 2);
     }
 
     private extern(D) void storeIntegralAssign(string op)(
@@ -3321,7 +3361,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return storeFloatingPost(expression, plan.facts);
             case pointerOffset:
                 return storePointerPost(expression, plan.facts);
-            case complex, vector:
+            case complex:
+                return storeComplexPost(expression, plan);
+            case vector:
                 throw new SnakebiteException(
                     text("interpreter cannot evaluate `", expression.toString,
                         "`: `", expression.e1.toString,
@@ -3363,6 +3405,26 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         storeFloating(target, changed, facts.size);
         storeFloating(_place, current, _facts.size);
+    }
+
+    private void storeComplexPost(
+        PostExp expression,
+        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+    ) {
+        import core.stdc.string: memcpy;
+        import snakebite.nativevalue: applyComplex, ComplexOperation;
+
+        auto target = addressOf(expression.e1);
+        align(real.alignof) ubyte[2 * real.sizeof] step = void;
+        evaluate(expression.e2, expression.e2.type, plan.facts, step.ptr);
+        memcpy(_place, target, plan.facts.size);
+        const partSize = plan.facts.size / 2;
+        if (expression.op == EXP.plusPlus)
+            applyComplex!(ComplexOperation.add)(target, target, step.ptr,
+                plan.operands, partSize);
+        else
+            applyComplex!(ComplexOperation.subtract)(target, target, step.ptr,
+                plan.operands, partSize);
     }
 
     private void storeIntegralPost(PostExp expression, in TypeFacts facts) {
@@ -3748,7 +3810,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private extern(D) void storeBinaryExp(string op)(BinExp expression) {
         import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
         import snakebite.nativelayout: storeIntegral;
-        import snakebite.nativevalue: storeFloating;
+        import snakebite.nativevalue: applyComplex, storeFloating;
         import std.conv: text;
 
         enum floatingOperator = op == "+" || op == "-" || op == "*"
@@ -3783,7 +3845,23 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                         "rejects bitwise and shift operators on floating ",
                         "operands"));
 
-            case complex, vector:
+            case complex:
+                static if (floatingOperator) {
+                    align(real.alignof) ubyte[2 * real.sizeof] a = void;
+                    align(real.alignof) ubyte[2 * real.sizeof] b = void;
+                    evaluate(expression.e1, expression.e1.type,
+                        factsOf(expression.e1.type), a.ptr);
+                    evaluate(expression.e2, expression.e2.type,
+                        factsOf(expression.e2.type), b.ptr);
+                    applyComplex!(complexOperation!op)(_place, a.ptr, b.ptr,
+                        plan.operands, plan.facts.size / 2);
+                    return;
+                } else
+                    assert(0, text("`", expression.toString, "`: dmd ",
+                        "rejects bitwise and shift operators on complex ",
+                        "operands"));
+
+            case vector:
                 throw new SnakebiteException(
                     text("interpreter cannot evaluate `", expression.toString,
                         "`: its type is `", expression.type.toString, "`"),
@@ -3853,7 +3931,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private extern(D) void storeUnaryExp(string op)(UnaExp expression) {
         import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
         import snakebite.nativelayout: storeIntegral;
-        import snakebite.nativevalue: storeFloating;
+        import snakebite.nativevalue: negateComplex, storeFloating;
         import std.conv: text;
 
         const plan = arithmeticPlan(expression);
@@ -3874,7 +3952,18 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     assert(0, text("`", expression.toString, "`: dmd ",
                         "rejects `~` on a floating operand"));
 
-            case complex, vector:
+            case complex:
+                static if (op == "-") {
+                    align(real.alignof) ubyte[2 * real.sizeof] value = void;
+                    evaluate(expression.e1, expression.e1.type, plan.facts,
+                        value.ptr);
+                    negateComplex(_place, value.ptr, plan.facts.size / 2);
+                    return;
+                } else
+                    assert(0, text("`", expression.toString, "`: dmd ",
+                        "rejects `~` on a complex operand"));
+
+            case vector:
                 throw new SnakebiteException(
                     text("interpreter cannot evaluate `", expression.toString,
                         "`: its type is `", expression.type.toString, "`"),
@@ -5724,6 +5813,38 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _place = place;
         expression.accept(this);
     }
+}
+
+private template complexOperation(string op) {
+    import snakebite.nativevalue: ComplexOperation;
+
+    static if (op == "+")
+        enum complexOperation = ComplexOperation.add;
+    else static if (op == "-")
+        enum complexOperation = ComplexOperation.subtract;
+    else static if (op == "*")
+        enum complexOperation = ComplexOperation.multiply;
+    else static if (op == "/")
+        enum complexOperation = ComplexOperation.divide;
+    else static if (op == "%")
+        enum complexOperation = ComplexOperation.modulo;
+    else
+        static assert(0, "`" ~ op ~ "` is not a complex operator");
+}
+
+// Copies both halves of a complex value between part widths.
+private void convertComplex(
+    void* destination, in size_t destinationPart,
+    in void* source, in size_t sourcePart,
+) {
+    import snakebite.nativevalue: loadFloating, storeFloating;
+
+    const re = loadFloating(source, sourcePart);
+    const im = loadFloating(cast(const(ubyte)*) source + sourcePart,
+        sourcePart);
+    storeFloating(destination, re, destinationPart);
+    storeFloating(cast(ubyte*) destination + destinationPart, im,
+        destinationPart);
 }
 
 // Both operands already have the operation's own type, and every narrower

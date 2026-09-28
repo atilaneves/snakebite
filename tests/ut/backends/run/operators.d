@@ -409,6 +409,169 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// Complex arithmetic mixes complex, real and imaginary operands: a real or
+// imaginary operand has no other half, so `c + d` adds `d` to the real
+// half alone, and `c * i` swaps the halves. Each product and quotient of
+// two complex operands is a function of its own that takes and returns
+// values: around dmd's calls to druntime's `_Cmul` and `_Cdiv`, a caller's
+// live registers are clobbered, and a `ref` parameter misaligns the stack.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE drops the imaginary half of a complex plus a real: "
+        ~ "`(1 + 2i) + 2.0` is `3 + 0i`"),
+)) {
+    @("complexArithmetic." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            cdouble times(cdouble a, cdouble b) { return a * b; }
+            cdouble over(cdouble a, cdouble b) { return a / b; }
+            cdouble realOver(double a, cdouble b) { return a / b; }
+            cdouble imaginaryOver(idouble a, cdouble b) { return a / b; }
+            cdouble timesAssign(cdouble a, cdouble b) { a *= b; return a; }
+            cdouble overAssign(cdouble a, cdouble b) { a /= b; return a; }
+            cfloat timesFloat(cfloat a, cfloat b) { return a * b; }
+            cfloat overAssignFloat(cfloat a, cfloat b) { a /= b; return a; }
+            creal timesAssignReal(creal a, creal b) { a *= b; return a; }
+
+            void main() {
+                cdouble c = 1.0 + 2.0i;
+                cdouble e = 3.0 + 4.0i;
+                cdouble f = 1.0 + 1.0i;
+                double d = 2.0;
+                idouble i = 2.0i;
+                assert(c + e == 4.0 + 6.0i);
+                assert(c - e == -2.0 - 2.0i);
+                assert(times(c, e) == -5.0 + 10.0i);
+                assert(over(-5.0 + 10.0i, e) == c);
+                assert(c + d == 3.0 + 2.0i);
+                assert(d + c == 3.0 + 2.0i);
+                assert(c - d == -1.0 + 2.0i);
+                assert(d - c == 1.0 - 2.0i);
+                assert(c + i == 1.0 + 4.0i);
+                assert(i + c == 1.0 + 4.0i);
+                assert(c - i == 1.0 + 0.0i);
+                assert(i - c == -1.0 + 0.0i);
+                assert(d + i == 2.0 + 2.0i);
+                assert(i + d == 2.0 + 2.0i);
+                assert(d - i == 2.0 - 2.0i);
+                assert(i - d == -2.0 + 2.0i);
+                assert(c * d == 2.0 + 4.0i);
+                assert(d * c == 2.0 + 4.0i);
+                assert(c * i == -4.0 + 2.0i);
+                assert(i * c == -4.0 + 2.0i);
+                assert(c / d == 0.5 + 1.0i);
+                assert(c / i == 1.0 - 0.5i);
+                assert(realOver(d, f) == 1.0 - 1.0i);
+                assert(imaginaryOver(i, f) == 1.0 + 1.0i);
+                cdouble m = 7.5 - 5.5i;
+                assert(m % d == 1.5 - 1.5i);
+                assert(m % i == 1.5 - 1.5i);
+                assert(-c == -1.0 - 2.0i);
+                cdouble x = c;
+                x += e;
+                assert(x == 4.0 + 6.0i);
+                x -= i;
+                assert(x == 4.0 + 4.0i);
+                x = timesAssign(x, f);
+                assert(x == 0.0 + 8.0i);
+                x /= i;
+                assert(x == 4.0 + 0.0i);
+                x += d;
+                assert(x == 6.0 + 0.0i);
+                x *= i;
+                assert(x == 0.0 + 12.0i);
+                x = overAssign(x, f);
+                assert(x == 6.0 + 6.0i);
+                x %= 4.0;
+                assert(x == 2.0 + 2.0i);
+                x /= d;
+                assert(x == 1.0 + 1.0i);
+                x -= d;
+                assert(x == -1.0 + 1.0i);
+                cdouble y = 1.5 + 2.0i;
+                assert(y++ == 1.5 + 2.0i);
+                assert(y == 2.5 + 2.0i);
+                assert(y-- == 2.5 + 2.0i);
+                assert(y == 1.5 + 2.0i);
+                ++y;
+                assert(y == 2.5 + 2.0i);
+                cfloat g = 1.0f + 2.0fi;
+                assert(timesFloat(g, g) == -3.0f + 4.0fi);
+                g = overAssignFloat(g, 1.0f + 2.0fi);
+                assert(g == 1.0f + 0.0fi);
+                creal r = 1.0L + 2.0Li;
+                r = timesAssignReal(r, 3.0L + 4.0Li);
+                assert(r == -5.0L + 10.0Li);
+                assert(-r == 5.0L - 10.0Li);
+                cfloat narrow = 1.0f + 2.0fi;
+                narrow += e;
+                assert(narrow == 4.0f + 6.0fi);
+            }
+        });
+    }
+}
+
+// The D spec gives imaginary types so that an operation does not "perform
+// extra operations on the implied 0 real part": an absent half is never
+// added to or subtracted from, so it cannot change the sign of a zero.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd adds a zero imaginary half to a real operand of `+`, and "
+        ~ "which zeros keep their sign changes with -O; ldc follows the spec"),
+    Omit!(Ctfe, Because.diverges,
+        "dmd's CTFE drops the imaginary half of a complex plus a real"),
+)) {
+    @("complexArithmeticKeepsSignedZeros." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            bool negative(double value) { return 1.0 / value < 0; }
+
+            void main() {
+                cdouble c = -0.0 - 0.0i;
+                double d = -0.0;
+                idouble i = -0.0i;
+                cdouble r = c + d;
+                assert(negative(r.im));
+                r = d + c;
+                assert(negative(r.im));
+                r = c + i;
+                assert(negative(r.re));
+                r = i + c;
+                assert(negative(r.re));
+                r = c - d;
+                assert(negative(r.im));
+                r = c - i;
+                assert(negative(r.re));
+                r = d - c;
+                assert(!negative(r.re));
+                r = i - c;
+                assert(!negative(r.im));
+            }
+        });
+    }
+}
+
+// Sibling pinning the divergence above: `dmd -g`, which builds this test,
+// gives `c + d` and `d + c` a positive zero imaginary half.
+@("complexArithmeticKeepsSignedZeros.Native")
+@Tags(Native.stringof)
+unittest {
+    0.shouldBeStatusOf!(Native, q{
+        bool negative(double value) { return 1.0 / value < 0; }
+
+        void main() {
+            cdouble c = -0.0 - 0.0i;
+            double d = -0.0;
+            cdouble r = c + d;
+            assert(!negative(r.im));
+            r = d + c;
+            assert(!negative(r.im));
+        }
+    });
+}
+
 // A vector comparison gives a vector: each lane is all-ones where it
 // compares true.
 static foreach (backend; Matrix!(

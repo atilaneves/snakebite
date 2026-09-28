@@ -161,6 +161,200 @@ pragma(inline, true) public void storeComplex(
     storeFloating(cast(ubyte*) place + size / 2, im, size / 2);
 }
 
+// What one operand of a complex operation holds. The D spec gives
+// imaginary types so that no operation touches the implied zero half of a
+// real or an imaginary operand: that half is absent, not zero, and so it
+// cannot change the sign of a zero in the result.
+public enum ComplexOperand {
+    real_,
+    imaginary,
+    complex,
+}
+
+public enum ComplexOperation {
+    add,
+    subtract,
+    multiply,
+    divide,
+    modulo,
+}
+
+// Both operands of a complex operation, packed into one instruction field.
+public struct ComplexOperands {
+    public ComplexOperand left;
+    public ComplexOperand right;
+
+    public size_t packed() const @safe @nogc nothrow pure {
+        return left << 8 | right;
+    }
+
+    public static ComplexOperands unpack(in size_t packed)
+        @safe @nogc nothrow pure
+    {
+        return ComplexOperands(cast(ComplexOperand)(packed >> 8),
+            cast(ComplexOperand)(packed & 0xff));
+    }
+}
+
+// `left op right` into `result`, which may be `left`. Every part is
+// computed in `real` and rounded once to `partSize`, as dmd's x87 code
+// and druntime's `_Cmul` and `_Cdiv` do.
+public void applyComplex(ComplexOperation operation)(
+    void* result,
+    in void* left,
+    in void* right,
+    in ComplexOperands operands,
+    in size_t partSize,
+) @nogc nothrow {
+    const a = ComplexParts(left, operands.left, partSize);
+    const b = ComplexParts(right, operands.right, partSize);
+    static if (operation == ComplexOperation.add)
+        const answer = ComplexParts.sum(a, b);
+    else static if (operation == ComplexOperation.subtract)
+        const answer = ComplexParts.sum(a, b.negated);
+    else static if (operation == ComplexOperation.multiply)
+        const answer = ComplexParts.product(a, b);
+    else static if (operation == ComplexOperation.divide)
+        const answer = ComplexParts.quotient(a, b);
+    else static if (operation == ComplexOperation.modulo)
+        const answer = ComplexParts.remainder(a, b);
+    else
+        static assert(0, "no complex operation " ~ operation.stringof);
+    storeFloating(result, answer.re, partSize);
+    storeFloating(cast(ubyte*) result + partSize, answer.im, partSize);
+}
+
+// `-value` into `result`, which may be `value`.
+public void negateComplex(void* result, in void* value, in size_t partSize)
+    @nogc nothrow
+{
+    const re = loadFloating(value, partSize);
+    const im = loadFloating(cast(const(ubyte)*) value + partSize, partSize);
+    storeFloating(result, -re, partSize);
+    storeFloating(cast(ubyte*) result + partSize, -im, partSize);
+}
+
+// A complex, real or imaginary operand as its two halves, either of which
+// may be absent.
+private struct ComplexParts {
+    real re = 0;
+    real im = 0;
+    bool hasRe;
+    bool hasIm;
+
+    this(in void* place, in ComplexOperand operand, in size_t partSize)
+        @nogc nothrow
+    {
+        final switch (operand) with (ComplexOperand) {
+            case real_:
+                re = loadFloating(place, partSize);
+                hasRe = true;
+                break;
+            case imaginary:
+                im = loadFloating(place, partSize);
+                hasIm = true;
+                break;
+            case complex:
+                re = loadFloating(place, partSize);
+                im = loadFloating(cast(const(ubyte)*) place + partSize,
+                    partSize);
+                hasRe = hasIm = true;
+                break;
+        }
+    }
+
+    this(in real re, in bool hasRe, in real im, in bool hasIm)
+        @nogc nothrow pure
+    {
+        this.re = re;
+        this.hasRe = hasRe;
+        this.im = im;
+        this.hasIm = hasIm;
+    }
+
+    ComplexParts negated() const @nogc nothrow pure {
+        return ComplexParts(-re, hasRe, -im, hasIm);
+    }
+
+    static ComplexParts sum(in ComplexParts a, in ComplexParts b)
+        @nogc nothrow pure
+    {
+        return ComplexParts(
+            combined(a.re, a.hasRe, b.re, b.hasRe), true,
+            combined(a.im, a.hasIm, b.im, b.hasIm), true,
+        );
+    }
+
+    // `(a.re + a.im i)(b.re + b.im i)`, with no term for an absent half.
+    // With both operands complex this is druntime's `_Cmul`.
+    static ComplexParts product(in ComplexParts a, in ComplexParts b)
+        @nogc nothrow pure
+    {
+        return ComplexParts(
+            combined(a.re * b.re, a.hasRe && b.hasRe,
+                -(a.im * b.im), a.hasIm && b.hasIm), true,
+            combined(a.im * b.re, a.hasIm && b.hasRe,
+                a.re * b.im, a.hasRe && b.hasIm), true,
+        );
+    }
+
+    // By a real or an imaginary divisor, each half of the complex dividend
+    // divides on its own. By a complex divisor this is druntime's `_Cdiv`:
+    // Smith's algorithm, which scales by the ratio of the divisor's halves
+    // so that no intermediate overflows first. `_Cdiv` compares the halves'
+    // magnitudes as `double`s.
+    static ComplexParts quotient(in ComplexParts a, in ComplexParts b)
+        @nogc nothrow pure
+    {
+        import core.math: fabs;
+
+        if (b.hasRe != b.hasIm) {
+            assert(a.hasRe && a.hasIm,
+                "semantic types a quotient by a real or imaginary of a "
+                ~ "real or imaginary as real or imaginary");
+            return b.hasRe
+                ? ComplexParts(a.re / b.re, true, a.im / b.re, true)
+                : ComplexParts(a.im / b.im, true, -(a.re / b.im), true);
+        }
+
+        if (fabs(cast(double) b.re) < fabs(cast(double) b.im)) {
+            const r = b.re / b.im;
+            const den = b.im + r * b.re;
+            return ComplexParts(
+                combined(a.re * r, a.hasRe, a.im, a.hasIm) / den, true,
+                combined(a.im * r, a.hasIm, -a.re, a.hasRe) / den, true,
+            );
+        }
+        const r = b.im / b.re;
+        const den = b.re + r * b.im;
+        return ComplexParts(
+            combined(a.re, a.hasRe, r * a.im, a.hasIm) / den, true,
+            combined(a.im, a.hasIm, -(r * a.re), a.hasRe) / den, true,
+        );
+    }
+
+    // Semantic rejects a complex divisor, so each half of the complex
+    // dividend takes its remainder by the one divisor value.
+    static ComplexParts remainder(in ComplexParts a, in ComplexParts b)
+        @nogc nothrow pure
+    {
+        assert(a.hasRe && a.hasIm && b.hasRe != b.hasIm,
+            "semantic takes a complex remainder by a real or imaginary");
+        const divisor = b.hasRe ? b.re : b.im;
+        return ComplexParts(a.re % divisor, true, a.im % divisor, true);
+    }
+}
+
+// `a + b` where both terms are present, else the one that is.
+private real combined(in real a, in bool hasA, in real b, in bool hasB)
+    @nogc nothrow pure
+{
+    assert(hasA || hasB, "each half of a complex result has a term");
+    if (hasA && hasB)
+        return a + b;
+    return hasA ? a : b;
+}
+
 pragma(inline, true) public bool complexTruth(
     in void* place,
     in size_t size,

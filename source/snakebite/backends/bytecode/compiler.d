@@ -567,7 +567,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opBranchTrue, opCall,
         opCastAs, opCastFixedAs,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
-        opArrayEqual, opConstant, opCopy, opCopyFixed,
+        opArrayEqual, opComplex, opComplexNegate, opConstant, opCopy,
+        opCopyFixed,
         opDivideSigned, opDivideUnsigned,
         opEqual, opEqualBranch, opGreaterOrEqualSignedBranch,
         opGreaterOrEqualUnsignedBranch, opGreaterThanSignedBranch,
@@ -3100,18 +3101,33 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const targetFacts = TypeFacts.of(target.type);
         const operationFacts = TypeFacts.of(expression.e1.type);
         const plan = arithmeticPlan(expression);
+        Instruction.Handler handler;
+        // Explicit types: `auto` would copy `const` from the facts.
+        TypeFacts rightFacts = operationFacts;
+        size_t operationWidth = operationFacts.size;
+        size_t operands;
         with (ArithmeticPlan.Kind) final switch (plan.kind) {
-            case integral, floating, pointerOffset:
+            case integral, pointerOffset:
+                handler = compoundHandler(
+                    expression, operationFacts.isUnsigned, false);
                 break;
-            case complex, vector:
+            case floating:
+                handler = compoundHandler(
+                    expression, operationFacts.isUnsigned, true);
+                break;
+            case complex:
+                handler = complexHandler(expression);
+                rightFacts = TypeFacts.of(expression.e2.type);
+                operationWidth = operationFacts.size / 2;
+                operands = plan.operands.packed;
+                break;
+            case vector:
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
             case pointerDifference:
                 assert(0, text("`", expressionText(expression), "`: `-=` ",
                     "cannot store a pointer difference in a pointer"));
         }
-        auto handler = compoundHandler(expression, operationFacts.isUnsigned,
-            plan.kind == ArithmeticPlan.Kind.floating);
 
         auto field = target.isDotVarExp;
         auto fieldDeclaration = field is null
@@ -3121,23 +3137,46 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || fieldDeclaration.isBitFieldDeclaration is null
                 ? ScalarStorage.Kind.indirect : ScalarStorage.Kind.bitfield,
             targetFacts, targetOffset, fieldDeclaration,
-            arithmeticKind(target.type) == ArithmeticPlan.Kind.floating,
+            arithmeticKind(target.type),
         );
-        const mixedFloating = storage.isFloating
+        const promotedFirst = storage.promotesBeforeOperand
             && operationFacts.size != storage.facts.size;
         size_t valueOffset;
-        if (mixedFloating)
+        if (promotedFirst)
             valueOffset = readScalar(storage, operationFacts);
 
-        const rightOffset = reserveTemp(operationFacts);
-        evalInto(expression.e2, rightOffset, operationFacts.size);
-        if (!mixedFloating)
+        const rightOffset = reserveTemp(rightFacts);
+        evalInto(expression.e2, rightOffset, rightFacts.size);
+        if (!promotedFirst)
             valueOffset = readScalar(storage, operationFacts);
-        emit(handler, valueOffset, rightOffset, operationFacts.size);
+        emit(handler, valueOffset, rightOffset, operationWidth, operands);
         valueOffset = writeScalar(storage, valueOffset, operationFacts.size);
 
         if (destOffset != discardResult)
             emit(&opCopy, destOffset, valueOffset, storage.facts.size);
+    }
+
+    // The complex operation for a binary, compound or postfix operator.
+    private Instruction.Handler complexHandler(Expression expression) {
+        import snakebite.nativevalue: ComplexOperation;
+        import std.conv: text;
+
+        with (EXP) switch (expression.op) {
+            case add, addAssign, plusPlus:
+                return &opComplex!(ComplexOperation.add);
+            case min, minAssign, minusMinus:
+                return &opComplex!(ComplexOperation.subtract);
+            case mul, mulAssign:
+                return &opComplex!(ComplexOperation.multiply);
+            case div, divAssign:
+                return &opComplex!(ComplexOperation.divide);
+            case mod, modAssign:
+                return &opComplex!(ComplexOperation.modulo);
+            default:
+                assert(0, text("`", expressionText(expression), "`: dmd ",
+                    "rejects bitwise and shift operators on complex ",
+                    "operands"));
+        }
     }
 
     private struct ScalarStorage {
@@ -3147,14 +3186,31 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         TypeFacts facts;
         size_t offset;
         VarDeclaration variable;
-        bool isFloating;
+        imported!"snakebite.backends.arithmetic".ArithmeticPlan.Kind
+            arithmetic;
+
+        // DMD reads a promoted floating or complex target before its right
+        // side; integral targets keep the ordinary right-side-first order.
+        bool promotesBeforeOperand() const {
+            import snakebite.backends.arithmetic: ArithmeticPlan;
+
+            with (ArithmeticPlan.Kind) final switch (arithmetic) {
+                case floating, complex:
+                    return true;
+                case integral, pointerOffset, pointerDifference, vector:
+                    return false;
+            }
+        }
     }
 
     private ScalarStorage scalarStorage(
         Expression target, in Loc loc,
         in string operation,
     ) {
+        import snakebite.backends.arithmetic: arithmeticKind;
+
         const facts = TypeFacts.of(target.type);
+        const arithmetic = arithmeticKind(target.type);
 
         if (auto dot = target.isDotVarExp) {
             auto field = dot.var.isVarDeclaration;
@@ -3166,6 +3222,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     ? ScalarStorage.Kind.indirect
                     : ScalarStorage.Kind.bitfield,
                 facts, address, field,
+                arithmetic,
             );
         }
 
@@ -3177,26 +3234,31 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return ScalarStorage(
                     ScalarStorage.Kind.indirect, facts,
                     compileAddress(target), null,
+                    arithmetic,
                 );
             if (variable.isDataseg)
                 return ScalarStorage(
                     ScalarStorage.Kind.staticData, facts, 0, variable,
+                    arithmetic,
                 );
             if (_layout.hasSlot(variable) && !isClosureVariable(variable)
                     && !_layout.isRef(variable))
                 return ScalarStorage(
                     ScalarStorage.Kind.frame, facts,
                     _layout.offsetOf(variable), null,
+                    arithmetic,
                 );
             return ScalarStorage(
                 ScalarStorage.Kind.indirect, facts,
                 addressOfVariable(variable), null,
+                arithmetic,
             );
         }
 
         return ScalarStorage(
             ScalarStorage.Kind.indirect, facts,
             compileAddress(target), null,
+            arithmetic,
         );
     }
 
@@ -3214,16 +3276,40 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         loadScalar(storage, valueOffset, storage.facts.size);
-        if (storage.isFloating && !resultFacts.isIntegral)
-            emit(&opFloatWidthCast, valueOffset, valueOffset,
-                resultFacts.size, storage.facts.size);
-        else
-            emit(
-                storage.facts.isUnsigned
-                    ? &opCastWidenUnsigned : &opCastWidenSigned,
-                valueOffset, storage.facts.size, resultFacts.size,
-            );
+        emitWidthChange(storage.arithmetic, storage.facts, valueOffset,
+            valueOffset, resultFacts.size, storage.facts.size);
         return valueOffset;
+    }
+
+    // Converts a target's value between its own width and the width of a
+    // compound assignment's promoted operation.
+    private void emitWidthChange(
+        imported!"snakebite.backends.arithmetic".ArithmeticPlan.Kind kind,
+        in TypeFacts facts, in size_t destination, in size_t source,
+        in size_t width, in size_t sourceWidth,
+    ) {
+        import snakebite.backends.arithmetic: ArithmeticPlan;
+        import snakebite.nativevalue: CastKind;
+
+        with (ArithmeticPlan.Kind) final switch (kind) {
+            case floating:
+                emit(&opFloatWidthCast, destination, source, width,
+                    sourceWidth);
+                return;
+            case complex:
+                emit(&opCastAs!(CastKind.complexWidth), destination, source,
+                    width, sourceWidth);
+                return;
+            case integral, pointerOffset:
+                assert(destination == source,
+                    "an integral target widens in place");
+                emit(facts.isUnsigned
+                        ? &opCastWidenUnsigned : &opCastWidenSigned,
+                    destination, sourceWidth, width);
+                return;
+            case vector, pointerDifference:
+                assert(0, "a vector or pointer target is never promoted");
+        }
     }
 
     private void loadScalar(
@@ -3253,10 +3339,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t valueWidth,
     ) {
         size_t storedOffset = valueOffset;
-        if (storage.isFloating && valueWidth != storage.facts.size) {
+        if (valueWidth != storage.facts.size
+                && storage.promotesBeforeOperand) {
             storedOffset = reserveTemp(storage.facts);
-            emit(&opFloatWidthCast, storedOffset, valueOffset,
-                storage.facts.size, valueWidth);
+            emitWidthChange(storage.arithmetic, storage.facts, storedOffset,
+                valueOffset, storage.facts.size, valueWidth);
         }
 
         final switch (storage.kind) with (ScalarStorage.Kind) {
@@ -3340,6 +3427,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const increment = expression.op == EXP.plusPlus;
         const stepOffset = reserveTemp(storage.facts);
         Instruction.Handler handler;
+        size_t operationWidth = storage.facts.size;
+        size_t operands;
         with (ArithmeticPlan.Kind) final switch (plan.kind) {
             case integral:
                 evalInto(expression.e2, stepOffset, storage.facts.size);
@@ -3364,7 +3453,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 break;
             }
 
-            case complex, vector:
+            case complex:
+                evalInto(expression.e2, stepOffset, storage.facts.size);
+                handler = complexHandler(expression);
+                operationWidth = storage.facts.size / 2;
+                operands = plan.operands.packed;
+                break;
+
+            case vector:
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
@@ -3372,7 +3468,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 assert(0, text("`", expressionText(expression), "`: a ",
                     "postfix `++`/`--` has the type of its operand"));
         }
-        emit(handler, valueOffset, stepOffset, storage.facts.size);
+        emit(handler, valueOffset, stepOffset, operationWidth, operands);
         writeScalar(storage, valueOffset, storage.facts.size);
     }
 
@@ -4792,7 +4888,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return copyResult(destOffset, leftOffset, width);
             }
 
-            case complex, vector:
+            case complex: {
+                const leftFacts = TypeFacts.of(expression.e1.type);
+                const leftOffset = reserveTemp(plan.facts);
+                evalInto(expression.e1, leftOffset, leftFacts.size);
+                const rightFacts = TypeFacts.of(expression.e2.type);
+                const rightOffset = reserveTemp(rightFacts);
+                evalInto(expression.e2, rightOffset, rightFacts.size);
+                emit(complexHandler(expression), leftOffset, rightOffset,
+                    plan.facts.size / 2, plan.operands.packed);
+                return copyResult(destOffset, leftOffset, width);
+            }
+
+            case vector:
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
@@ -5315,7 +5423,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 emit(&opFloatNegate, destOffset, 0, width);
                 return;
 
-            case complex, vector:
+            case complex:
+                assert(handler is &opNegate, text("`",
+                    expressionText(expression), "`: dmd rejects `~` on a ",
+                    "complex operand"));
+                evalInto(expression.e1, destOffset, width);
+                emit(&opComplexNegate, destOffset, 0, width / 2);
+                return;
+
+            case vector:
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
 
