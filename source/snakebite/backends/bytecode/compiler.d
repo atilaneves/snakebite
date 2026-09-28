@@ -4588,7 +4588,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto operandType = expression.e1.type.toBasetype;
         auto rightType = expression.e2.type.toBasetype;
-        if (operandType.ty == Tarray && rightType.ty == Tarray) {
+        if (operandType.isStaticOrDynamicArray
+                && rightType.isStaticOrDynamicArray
+                && (operandType.ty == Tarray || rightType.ty == Tarray)) {
             compileMemcmpDynamicArrayEquality(expression, _destination);
             return;
         }
@@ -4808,9 +4810,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case mul: return &opFloatMultiply;
             case div: return &opFloatDivide;
             case mod: return &opFloatModulo;
-            default:
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+            default: assert(0);
         }
     }
 
@@ -4862,42 +4862,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileComparison(
         BinExp expression, in ComparisonPlan plan, in size_t destOffset,
     ) {
-        import dmd.astenums: Tarray, Tclass, Tpointer, Tstruct;
-        import dmd.typesem: toBasetype;
-
-        auto operandType = expression.e1.type.toBasetype;
         const operandFacts = plan.facts;
-
-        // `is`/`!is` on a struct or a dynamic array is always a raw byte
-        // compare, over the operand's own native layout - dmd rewrites a
-        // field-less `==` (bitwise-comparable struct, no `opEquals`) into
-        // this same `IdentityExp`, and for two dynamic arrays folds `is`
-        // itself into a compare of the whole two-word `{length, ptr}` pair
-        // (dmd's own `e2ir.d`, `visitIdentity`), not just the pointer -
-        // both arrive here needing exactly what `opStaticArrayEqual`
-        // already does for a static array or a delegate: `operandFacts.size`
-        // bytes at each operand's offset, memcmp'd whole. `==`/`!=` on two
-        // dynamic arrays never reach here: `visitUnloweredEqual` routes
-        // those to `compileMemcmpDynamicArrayEquality`'s per-element
-        // compare first.
-        if (operandType.ty == Tstruct || operandType.ty == Tarray) {
-            if (expression.op != EXP.identity && expression.op != EXP.notIdentity)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            const leftOffset = reserveTemp(operandFacts);
-            evalInto(expression.e1, leftOffset, operandFacts.size);
-            const rightOffset = reserveTemp(operandFacts);
-            evalInto(expression.e2, rightOffset, operandFacts.size);
-            emit(&opStaticArrayEqual, leftOffset, rightOffset,
-                operandFacts.size);
-            if (expression.op == EXP.notIdentity)
-                emit(&opLogicalNot, leftOffset, 0, 1);
-
-            if (destOffset != leftOffset)
-                emit(&opCopy, destOffset, leftOffset, 1);
-            return;
-        }
 
         with (ComparisonPlan.Kind) final switch (plan.kind) {
             // A class reference compares the same way a pointer does - `is`/
@@ -4923,9 +4888,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     case equal, identity: pointerHandler = &opEqual; break;
                     case notEqual, notIdentity: pointerHandler = &opNotEqual;
                         break;
-                    default:
-                        throw rejection(_function, expression.loc,
-                            expressionText(expression));
+                    default: assert(0);
                 }
 
                 const leftOffset = reserveTemp(operandFacts);
@@ -4953,9 +4916,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                         floatHandler = &opFloatGreaterOrEqual; break;
                     case equal: floatHandler = &opFloatEqual; break;
                     case notEqual: floatHandler = &opFloatNotEqual; break;
-                    default:
-                        throw rejection(_function, expression.loc,
-                            expressionText(expression));
+                    default: assert(0);
                 }
 
                 const floatLeftOffset = reserveTemp(operandFacts);
@@ -4997,10 +4958,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import dmd.tokens: EXP;
         import snakebite.nativelayout: arrayValueSize;
-
-        if (expression.op != EXP.identity && expression.op != EXP.notIdentity)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
 
         if (plan.skipCompare) {
             emit(&opConstant, destOffset,
@@ -5066,27 +5023,44 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         assert(expression.lowering is null);
 
-        if (expression.op != EXP.equal && expression.op != EXP.notEqual)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        const arrayFacts = TypeFacts.of(expression.e1.type);
-        auto elementType = expression.e1.type.nextOf;
-        const elementFacts = TypeFacts.of(elementType);
-        if (!arrayFacts.isDynamicArray)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+        const arrayFacts = TypeFacts(
+            arrayValueSize, size_t.alignof, false, false, true, 0);
+        const elementFacts = TypeFacts.of(expression.e1.type.nextOf);
 
         const leftOffset = reserveTemp(arrayFacts);
-        evalInto(expression.e1, leftOffset, arrayValueSize);
+        evalArrayValueInto(expression.e1, leftOffset);
         const rightOffset = reserveTemp(arrayFacts);
-        evalInto(expression.e2, rightOffset, arrayValueSize);
+        evalArrayValueInto(expression.e2, rightOffset);
 
         emit(&opArrayEqual, leftOffset, rightOffset, elementFacts.size);
         if (expression.op == EXP.notEqual)
             emit(&opLogicalNot, leftOffset, 0, 1);
         if (destOffset != leftOffset)
             emit(&opCopy, destOffset, leftOffset, 1);
+    }
+
+    // A static array operand becomes the `{length, ptr}` value of its own
+    // elements, as dmd's `e2ir.d` reads it for a mixed array comparison.
+    private void evalArrayValueInto(Expression operand, in size_t destOffset) {
+        import dmd.astenums: Tarray;
+        import dmd.expressionsem: toInteger;
+        import dmd.typesem: toBasetype;
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset, arrayValueSize;
+
+        auto type = operand.type.toBasetype;
+        if (type.ty == Tarray) {
+            evalInto(operand, destOffset, arrayValueSize);
+            return;
+        }
+
+        const address = compileIdentityArrayStorage(
+            operand, TypeFacts.of(type));
+        emit(&opConstant, destOffset + arrayLengthOffset,
+            addConstant(cast(long) type.isTypeSArray.dim.toInteger),
+            size_t.sizeof);
+        emit(&opCopy, destOffset + arrayPointerOffset, address,
+            size_t.sizeof);
     }
 
     // dmd's semantic pass (`expressionsem.d`'s `shouldUseMemcmp`, guarding
@@ -5110,18 +5084,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         assert(expression.lowering is null);
 
-        if (expression.op != EXP.equal && expression.op != EXP.notEqual)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+        const leftFacts = TypeFacts.of(expression.e1.type);
+        const rightFacts = TypeFacts.of(expression.e2.type);
 
-        const facts = TypeFacts.of(expression.e1.type);
+        const leftOffset = reserveTemp(leftFacts);
+        evalInto(expression.e1, leftOffset, leftFacts.size);
+        const rightOffset = reserveTemp(rightFacts);
+        evalInto(expression.e2, rightOffset, rightFacts.size);
 
-        const leftOffset = reserveTemp(facts);
-        evalInto(expression.e1, leftOffset, facts.size);
-        const rightOffset = reserveTemp(facts);
-        evalInto(expression.e2, rightOffset, facts.size);
+        if (leftFacts.size != rightFacts.size) {
+            emit(&opConstant, destOffset,
+                addConstant(expression.op == EXP.notEqual), 1);
+            return;
+        }
 
-        emit(&opStaticArrayEqual, leftOffset, rightOffset, facts.size);
+        emit(&opStaticArrayEqual, leftOffset, rightOffset, leftFacts.size);
         if (expression.op == EXP.notEqual)
             emit(&opLogicalNot, leftOffset, 0, 1);
         if (destOffset != leftOffset)
@@ -5147,9 +5124,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return &opEqual;
             case notEqual:
                 return &opNotEqual;
-            default:
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+            default: assert(0);
         }
     }
 
