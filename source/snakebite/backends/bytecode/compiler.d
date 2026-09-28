@@ -5057,8 +5057,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, destOffset, highOrdered, 1);
     }
 
-    // Each result lane is all-ones where the operands' lanes compare true:
-    // the one-byte answer widens to the lane and negates.
+    // Each result lane is all-ones where the operands' lanes compare true.
     private void compileVectorComparison(
         BinExp expression, in ComparisonPlan plan, in size_t destOffset,
     ) {
