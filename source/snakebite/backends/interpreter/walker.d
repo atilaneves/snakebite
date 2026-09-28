@@ -4277,11 +4277,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
 
         auto info = _runtimeTypes.get(type);
-        if (info is null)
-            throw new SnakebiteException(
-                text("interpreter cannot resolve `", expression.toString,
-                    "`: its type information is not in this process"),
-            );
         storeIntegral(_place, cast(size_t) cast(void*) info, _facts.size);
     }
 

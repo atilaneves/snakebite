@@ -84,11 +84,8 @@ public struct RuntimeTypes {
         withCompilerLock({
             if (auto cached = type in _types)
                 info = *cached;
-            else {
-                info = build(type);
-                if (info !is null)
-                    info = *_types.insert(type, info);
-            }
+            else
+                info = *_types.insert(type, build(type));
         });
         return info;
     }
@@ -134,56 +131,37 @@ public struct RuntimeTypes {
         else if (auto enumType = type.isTypeEnum)
             info = enumInfo(enumType.sym);
         else if (auto functionType = type.isTypeFunction) {
-            auto result = get(functionType.next);
-            if (result is null)
-                return null;
             auto functionInfo = new TypeInfo_Function;
-            functionInfo.next = result;
+            functionInfo.next = get(functionType.next);
             functionInfo.deco = type.deco.toDString.idup;
             info = functionInfo;
         }
         else if (auto delegateType = type.isTypeDelegate) {
-            auto result = get(delegateType.next.nextOf);
-            if (result is null)
-                return null;
             auto delegateInfo = new TypeInfo_Delegate;
-            delegateInfo.next = result;
+            delegateInfo.next = get(delegateType.next.nextOf);
             delegateInfo.deco = type.deco.toDString.idup;
             info = delegateInfo;
         }
         else if (auto pointer = type.isTypePointer) {
-            auto next = get(pointer.next);
-            if (next is null)
-                return null;
             auto pointerInfo = new TypeInfo_Pointer;
-            pointerInfo.m_next = next;
+            pointerInfo.m_next = get(pointer.next);
             info = pointerInfo;
         }
         else if (auto staticArray = type.isTypeSArray) {
-            auto element = get(staticArray.next);
-            if (element is null)
-                return null;
             auto staticArrayInfo = new TypeInfo_StaticArray;
-            staticArrayInfo.value = element;
+            staticArrayInfo.value = get(staticArray.next);
             staticArrayInfo.len = staticArray.dim.isIntegerExp.getInteger;
             info = staticArrayInfo;
         }
         else if (auto associativeArray = type.isTypeAArray) {
-            auto key = get(associativeArray.index);
-            auto value = get(associativeArray.next);
-            if (key is null || value is null)
-                return null;
             auto associativeArrayInfo = new TypeInfo_AssociativeArray;
-            associativeArrayInfo.key = key;
-            associativeArrayInfo.value = value;
+            associativeArrayInfo.key = get(associativeArray.index);
+            associativeArrayInfo.value = get(associativeArray.next);
             info = associativeArrayInfo;
         }
         else if (auto vector = type.isTypeVector) {
-            auto base = get(vector.basetype);
-            if (base is null)
-                return null;
             auto vectorInfo = new TypeInfo_Vector;
-            vectorInfo.base = base;
+            vectorInfo.base = get(vector.basetype);
             info = vectorInfo;
         }
         else if (auto tuple = type.isTypeTuple) {
@@ -194,28 +172,12 @@ public struct RuntimeTypes {
         }
 
         if (info is null && type.ty == Tarray) {
-            auto element = get(type.nextOf);
-            if (element is null)
-                return null;
             auto arrayInfo = new TypeInfo_Array;
-            arrayInfo.value = element;
+            arrayInfo.value = get(type.nextOf);
             info = arrayInfo;
         }
 
         if (info is null) {
-            // Every basic scalar kind builds a `typeid` of its native D
-            // counterpart. `Tclass`/`Tstruct`/`Tenum`/`Tfunction`/
-            // `Tdelegate`/`Tpointer`/`Tsarray`/`Taarray`/`Tvector`/
-            // `Ttuple`/`Tarray` can never reach here with `info` still
-            // null: each either sets `info` unconditionally above (the
-            // three aggregate kinds) or returns out of `build` entirely
-            // on failure (the six kinds that recurse into a component
-            // type, plus the outer `Tarray` check just above) - a
-            // `final switch` catches a new `TY` member at compile time
-            // instead of silently returning `null` for it. Every other
-            // kind - `Timaginary*`/`Tcomplex*` (deprecated basic types
-            // with no `TypeInfo` builder here), and the placeholder,
-            // c-import, and semantic-only kinds - keeps today's `null`.
             final switch (type.ty) {
                 case Tvoid: info = typeid(void); break;
                 case Tbool: info = typeid(bool); break;
@@ -233,12 +195,20 @@ public struct RuntimeTypes {
                 case Tfloat32: info = typeid(float); break;
                 case Tfloat64: info = typeid(double); break;
                 case Tfloat80: info = typeid(real); break;
+                case Timaginary32: info = typeid(ifloat); break;
+                case Timaginary64: info = typeid(idouble); break;
+                case Timaginary80: info = typeid(ireal); break;
+                case Tcomplex32: info = typeid(cfloat); break;
+                case Tcomplex64: info = typeid(cdouble); break;
+                case Tcomplex80: info = typeid(creal); break;
+                case Tnull: info = typeid(typeof(null)); break;
+                case Tnoreturn: info = typeid(noreturn); break;
 
-                case Treference, Tident, Tnone, Timaginary32, Timaginary64,
-                    Timaginary80, Tcomplex32, Tcomplex64, Tcomplex80,
-                    Terror, Tinstance, Ttypeof, Tslice, Treturn, Tnull,
-                    Tint128, Tuns128, Ttraits, Tmixin, Tnoreturn, Ttag:
-                    return null;
+                // Semantic rejects `cent`/`ucent`; no other kind here outlives it.
+                case Tint128, Tuns128, Treference, Tident, Tnone, Terror,
+                    Tinstance, Ttypeof, Tslice, Treturn, Ttraits, Tmixin,
+                    Ttag:
+                    assert(0);
 
                 case Tclass, Tstruct, Tenum, Tfunction, Tdelegate,
                     Tpointer, Tsarray, Taarray, Tvector, Ttuple, Tarray:

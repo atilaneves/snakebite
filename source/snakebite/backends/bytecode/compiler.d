@@ -1614,13 +1614,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 type.toString, "`",
             ));
 
-        auto info = cast(TypeInfo_Class) cast() _bytecode._runtimeTypes.get(type);
-        if (info is null)
-            throw new SnakebiteException(text(
-                "bytecode compiler cannot resolve catch type `",
-                type.toString, "`",
-            ));
-        return info;
+        return cast(TypeInfo_Class) cast() _bytecode._runtimeTypes.get(type);
     }
 
     private void compileReturn(ReturnStatement statement) {
@@ -4390,27 +4384,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 text("`", expression.toString,
                     "` without resolved type information"));
 
-        emitRuntimeTypeInfoConstant(expression, type);
+        emitRuntimeTypeInfoConstant(type);
     }
 
     // Shared tail of `visit(TypeidExp)` and `visit(SymOffExp)`'s
     // `TypeInfoDeclaration` case: resolve `type`'s run-time `TypeInfo`
     // through `_runtimeTypes.get` and emit its address into the current
-    // destination. A null result is a rejection, not a fallback to
-    // another compilation path - `RuntimeTypes.get` returning null means
-    // there is no such run-time type to read.
+    // destination.
     private void emitRuntimeTypeInfoConstant(
-        Expression expression,
         Type type,
         in size_t destination = size_t.max,
         in size_t width = size_t.max,
     ) {
-        import std.conv: text;
-
         auto address = cast(void*) _bytecode._runtimeTypes.get(type);
-        if (address is null)
-            throw rejection(_function, expression.loc,
-                text("unresolved ", expressionText(expression)));
 
         emit(&opConstant,
             destination == size_t.max ? _destination : destination,
@@ -6594,7 +6580,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (auto typeInfo = expression.var.isTypeInfoDeclaration) {
                 const result = compiler.reserveTemp(compiler.pointerFacts);
                 compiler.emitRuntimeTypeInfoConstant(
-                    expression, typeInfo.tinfo, result, size_t.sizeof,
+                    typeInfo.tinfo, result, size_t.sizeof,
                 );
                 return result;
             }
