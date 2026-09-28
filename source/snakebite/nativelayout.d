@@ -823,10 +823,7 @@ private void storeValue(
     NativeData* nativeData = null,
 ) {
     import core.stdc.string: memcpy, memset;
-    import dmd.astenums:
-        Tarray, Tcomplex32, Tcomplex64, Tcomplex80, Tfloat32, Tfloat64,
-        Tfloat80, Timaginary32, Timaginary64, Timaginary80, Tpointer,
-        Tsarray;
+    import dmd.astenums: TY, Tarray, Tpointer, Tsarray;
     import dmd.expressionsem: toComplex, toImaginary, toInteger, toReal;
     import dmd.typesem: mutableOf, nextOf, size, toBasetype;
     import std.conv: text;
@@ -962,61 +959,64 @@ private void storeValue(
         return;
     }
 
-    if (type.ty == Tfloat32) {
-        *cast(float*) place = cast(float) value.toReal;
-        return;
-    }
+    final switch (type.ty) with (TY) {
+        case Tfloat32:
+            *cast(float*) place = cast(float) value.toReal;
+            return;
 
-    if (type.ty == Tfloat64) {
-        *cast(double*) place = cast(double) value.toReal;
-        return;
-    }
+        case Tfloat64:
+            *cast(double*) place = cast(double) value.toReal;
+            return;
 
-    if (type.ty == Tfloat80) {
-        *cast(real*) place = value.toReal;
-        return;
-    }
+        case Tfloat80:
+            *cast(real*) place = value.toReal;
+            return;
 
-    // A complex value's native layout is its `{re, im}` pair, each
-    // exactly half of `facts.size` - `dmd.expressionsem.toComplex`
-    // already answers `re`/`im` for an `IntegerExp`/`RealExp` (an
-    // implicit real-to-complex promotion, `im` zero) as well as a
-    // `ComplexExp` literal, so this one case covers every constant
-    // source a `complex`-typed constant declaration can have.
-    if (type.ty == Tcomplex32 || type.ty == Tcomplex64
-            || type.ty == Tcomplex80) {
-        const parts = value.toComplex;
-        const half = facts.size / 2;
-        if (half == float.sizeof) {
-            *cast(float*) bytes = cast(float) parts.re;
-            *cast(float*) (bytes + half) = cast(float) parts.im;
-        } else if (half == double.sizeof) {
-            *cast(double*) bytes = cast(double) parts.re;
-            *cast(double*) (bytes + half) = cast(double) parts.im;
-        } else {
-            *cast(real*) bytes = parts.re;
-            *cast(real*) (bytes + half) = parts.im;
+        // A complex value's native layout is its `{re, im}` pair, each
+        // exactly half of `facts.size` - `dmd.expressionsem.toComplex`
+        // already answers `re`/`im` for an `IntegerExp`/`RealExp` (an
+        // implicit real-to-complex promotion, `im` zero) as well as a
+        // `ComplexExp` literal, so this one case covers every constant
+        // source a `complex`-typed constant declaration can have.
+        case Tcomplex32, Tcomplex64, Tcomplex80: {
+            const parts = value.toComplex;
+            const half = facts.size / 2;
+            if (half == float.sizeof) {
+                *cast(float*) bytes = cast(float) parts.re;
+                *cast(float*) (bytes + half) = cast(float) parts.im;
+            } else if (half == double.sizeof) {
+                *cast(double*) bytes = cast(double) parts.re;
+                *cast(double*) (bytes + half) = cast(double) parts.im;
+            } else {
+                *cast(real*) bytes = parts.re;
+                *cast(real*) (bytes + half) = parts.im;
+            }
+            return;
         }
-        return;
-    }
 
-    // An imaginary value is one component on its own - `toImaginary`
-    // answers `0` for any source with no imaginary axis (an `Integer`/
-    // real-typed `RealExp`), the same way `toReal` above answers `0`
-    // for an imaginary-typed one.
-    if (type.ty == Timaginary32 || type.ty == Timaginary64
-            || type.ty == Timaginary80) {
-        const im = value.toImaginary;
-        if (facts.size == float.sizeof)
-            *cast(float*) place = cast(float) im;
-        else if (facts.size == double.sizeof)
-            *cast(double*) place = cast(double) im;
-        else
-            *cast(real*) place = im;
-        return;
-    }
+        // An imaginary value is one component on its own - `toImaginary`
+        // answers `0` for any source with no imaginary axis (an `Integer`/
+        // real-typed `RealExp`), the same way `toReal` above answers `0`
+        // for an imaginary-typed one.
+        case Timaginary32, Timaginary64, Timaginary80: {
+            const im = value.toImaginary;
+            if (facts.size == float.sizeof)
+                *cast(float*) place = cast(float) im;
+            else if (facts.size == double.sizeof)
+                *cast(double*) place = cast(double) im;
+            else
+                *cast(real*) place = im;
+            return;
+        }
 
-    throw new Exception(
-        text("no native layout for a value of type `", type.toString, "`"),
-    );
+        case Tarray, Tsarray, Taarray, Tpointer, Treference, Tfunction,
+            Tident, Tclass, Tstruct, Tenum, Tdelegate, Tnone, Tvoid, Tint8,
+            Tuns8, Tint16, Tuns16, Tint32, Tuns32, Tint64, Tuns64, Tbool,
+            Tchar, Twchar, Tdchar, Terror, Tinstance, Ttypeof, Ttuple,
+            Tslice, Treturn, Tnull, Tvector, Tint128, Tuns128, Ttraits,
+            Tmixin, Tnoreturn, Ttag:
+            assert(0, text("no native layout for the constant `",
+                value.toString, "` of type `", type.toString, "`: the ",
+                "cases above handle every constant dmd folds to"));
+    }
 }
