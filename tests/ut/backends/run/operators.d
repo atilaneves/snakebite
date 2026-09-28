@@ -707,6 +707,65 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A write through a vector element changes the vector: plain assignment,
+// compound assignment, `++`/`--`, and a write through the element's
+// address all reach the same storage, whether indexed as `v[i]` or as
+// `v.array[i]`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot write through a vector element"),
+)) {
+    @("vectorElementWriteChangesTheVector." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd: float4, int4;
+
+            void main() {
+                int4 v = [1, 2, 3, 4];
+                v[0] = 10;
+                assert(v.array == [10, 2, 3, 4]);
+                v.array[1] = 20;
+                assert(v.array == [10, 20, 3, 4]);
+                v[0] += 5;
+                assert(v.array == [15, 20, 3, 4]);
+                v.array[1] += 5;
+                assert(v.array == [15, 25, 3, 4]);
+                v[2]++;
+                assert(v.array == [15, 25, 4, 4]);
+                v.array[3]++;
+                assert(v.array == [15, 25, 4, 5]);
+                --v[2];
+                assert(v.array == [15, 25, 3, 5]);
+                --v.array[3];
+                assert(v.array == [15, 25, 3, 4]);
+                *(&v[0]) = 100;
+                assert(v.array == [100, 25, 3, 4]);
+                *(&v.array[1]) = 200;
+                assert(v.array == [100, 200, 3, 4]);
+
+                float4 f = [1.0f, 2.0f, 3.0f, 4.0f];
+                f[0] = 10.0f;
+                assert(f.array == [10.0f, 2.0f, 3.0f, 4.0f]);
+                f.array[1] = 20.0f;
+                assert(f.array == [10.0f, 20.0f, 3.0f, 4.0f]);
+                f[0] += 5.0f;
+                assert(f.array == [15.0f, 20.0f, 3.0f, 4.0f]);
+                f.array[1] *= 2.0f;
+                assert(f.array == [15.0f, 40.0f, 3.0f, 4.0f]);
+                f[2]++;
+                assert(f.array == [15.0f, 40.0f, 4.0f, 4.0f]);
+                f.array[3]--;
+                assert(f.array == [15.0f, 40.0f, 4.0f, 3.0f]);
+                *(&f[0]) = 100.0f;
+                assert(f.array == [100.0f, 40.0f, 4.0f, 3.0f]);
+                *(&f.array[1]) = 200.0f;
+                assert(f.array == [100.0f, 200.0f, 4.0f, 3.0f]);
+            }
+        });
+    }
+}
+
 // Delegates order as one unsigned integer whose high word is the function
 // pointer and whose low word is the context.
 static foreach (backend; Matrix!(

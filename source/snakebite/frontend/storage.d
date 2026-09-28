@@ -6,7 +6,7 @@ private:
 import dmd.expression:
     AssignExp, BinAssignExp, CatAssignExp, Expression, IndexExp, MemorySet,
     SymOffExp;
-import dmd.astenums: Tarray;
+import dmd.astenums: Tarray, Tsarray, Tvector;
 import dmd.typesem: isIntegral, toBasetype;
 
 // DMD represents the target of a compound assignment at its promoted
@@ -49,7 +49,18 @@ public struct StorageResolver(Result, Adapter) {
         if (auto cast_ = expression.isCastExp) {
             if (isIntegral(cast_.e1.type) && isIntegral(expression.type))
                 return resolve(cast_.e1);
+            // dmd represents `v[i]` on a vector `v` by indexing a cast of
+            // `v` to its element static array type; the cast shares `v`'s
+            // storage, so index into `v` directly.
+            if (cast_.e1.type.toBasetype.ty == Tvector
+                    && expression.type.toBasetype.ty == Tsarray)
+                return resolve(cast_.e1);
         }
+
+        // `v.array[i]` indexes the same storage through the `.array`
+        // property instead of a cast.
+        if (auto vectorArray = expression.isVectorArrayExp)
+            return resolve(vectorArray.e1);
 
         if (auto ptrExp = expression.isPtrExp)
             return _adapter.storagePointer(ptrExp);
