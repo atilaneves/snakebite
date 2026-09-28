@@ -5042,9 +5042,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void evalOperandInto(
         Expression operand, in size_t destOffset, in size_t width,
     ) {
+        import std.conv: text;
+
         const operandFacts = TypeFacts.of(operand.type);
-        if (!operandFacts.isIntegral || !isIntegralSize(operandFacts.size))
-            throw rejection(_function, operand.loc, expressionText(operand));
+        assert(operandFacts.isIntegral && isIntegralSize(operandFacts.size),
+            text("`", expressionText(operand), "`: semantic types every ",
+                "index, slice bound and integral operand as an integer"));
 
         if (operandFacts.size == width) {
             evalInto(operand, destOffset, width);
@@ -5166,9 +5169,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return compileDelegateOrdering(expression, destOffset);
 
             case integral: {
-                if (!operandFacts.isIntegral || !isIntegralSize(operandFacts.size))
-                    throw rejection(_function, expression.loc,
-                        expressionText(expression));
+                assert(operandFacts.isIntegral
+                        && isIntegralSize(operandFacts.size),
+                    text("`", expressionText(expression), "`: `kindOf` ",
+                        "gives `integral` only to 1, 2, 4 and 8 byte ",
+                        "integers"));
 
                 auto handler = comparisonHandler(expression, operandFacts.isUnsigned);
 
