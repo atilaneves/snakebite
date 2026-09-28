@@ -3072,6 +3072,73 @@ static foreach (backend; Matrix!(
             "answer",
         );
     }
+
+    // An enum whose base type is a function pointer or delegate must be
+    // recognised as a callback extra argument the same way its base type
+    // is: `ffi.plan.prepareCommon`'s extra-argument loop used to test the
+    // call site's own raw `extraType` against `Tdelegate`/`isTypePointer`,
+    // missing an enum base the same way the declared-parameter loop 30
+    // lines above it (already normalised) does not. This is a
+    // regression-locking test, not a red/green one, the same as
+    // `enumOfStruct.methodCall` (`tests/ut/backends/run/enums.d`): both
+    // `Interpreter` and `Bytecode` resolve a closure's function word to
+    // its real, host-callable pool entry at the point the closure is
+    // created (`walker.d`'s `visitDelegateWord`, `compiler.d`'s
+    // equivalent), before it ever reaches this call site, so the swap
+    // this classification would enable (`CallPlan.callWithCallbacks`)
+    // never fires either way for a freshly built callback - confirmed by
+    // instrumenting `bridge.entryOf` for the already-normalised
+    // `functionPointer`/`delegate` cases above, which return `null` there
+    // too. The fix still matters: `Type.ty`/`isTypePointer` are `final
+    // switch`/closed-dispatch idioms (`ai/CODING.md`), and a raw test on
+    // an un-normalised type is wrong on its own terms even where this
+    // particular call chain happens not to expose it today.
+    @("variadic.callbackExtraArgument.enumOfFunctionPointer."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_call_function_backend")
+                extern(C) int nativeCall(int first, ...);
+
+                enum ECallback : int function(int) { z = null }
+
+                static int twice(int x) {
+                    return x * 2;
+                }
+
+                int answer() {
+                    ECallback callback = cast(ECallback) &twice;
+                    return nativeCall(21, callback);
+                }
+            },
+            "answer",
+        );
+    }
+
+    @("variadic.callbackExtraArgument.enumOfDelegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        45.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_call_delegate_backend")
+                extern(C) int nativeCall(int first, ...);
+
+                enum ECallback : int delegate(int) { z = null }
+
+                int answer() {
+                    int offset = 3;
+                    int delegate(int) plain = (int x) => x * 2 + offset;
+                    ECallback callback = cast(ECallback) plain;
+                    return nativeCall(21, callback);
+                }
+            },
+            "answer",
+        );
+    }
 }
 
 

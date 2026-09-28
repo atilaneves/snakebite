@@ -1688,10 +1688,11 @@ private CallPlan _shapeOf(
         // that shape gets: its type is known at this call site, which is
         // all the swap needs.
         foreach (extraType; extraArgumentTypes) {
-            auto pointer = extraType.isTypePointer;
+            auto base = extraType.toBasetype;
+            auto pointer = base.isTypePointer;
             const isFunctionPointer =
                 pointer !is null && pointer.nextOf.isTypeFunction !is null;
-            const isDelegate = extraType.ty == Tdelegate;
+            const isDelegate = base.ty == Tdelegate;
             if (isFunctionPointer || isDelegate)
                 plan._callbackArguments ~= CallPlan.CallbackArgument(
                     argumentIndex, false, isDelegate);
