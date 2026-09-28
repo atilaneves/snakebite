@@ -314,17 +314,15 @@ private struct Shared {
             return null;
 
         const(void)* word;
+        const hasNativeSymbol = plans.hasNativeSymbol(method);
         const isVariadicGuest =
             typeFunctionOf(method).parameterList.varargs == VarArg.variadic
-            && method.fbody !is null && !plans.hasNativeSymbol(method);
-        if (word is null
-                && typeFunctionOf(method).parameterList.varargs
-                    == VarArg.variadic
-                && plans.hasNativeSymbol(method))
+            && method.fbody !is null && !hasNativeSymbol;
+        if (callSelection.usesNativeVariadicAddress(method, hasNativeSymbol))
             return plans.addressOf(method);
         if (isVariadicGuest || callSelection.usesGuestBody(method,
                 (callee) => program.isInterpreted(callee),
-                plans.hasNativeSymbol(method),
+                hasNativeSymbol,
                 plans.hasIndependentNativeSymbol(method))) {
             plans.registerGuestFunction(cast(void*) method, method);
             word = cast(void*) method;

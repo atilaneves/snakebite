@@ -201,6 +201,11 @@ public struct CallAdapter {
                 emit(Value(expression, TypeFacts.of(expression.type)));
         }
 
+        public void eachExtra(scope void delegate(Value) emit) {
+            foreach (expression; _expressions[extraOffset .. $])
+                emit(Value(expression, TypeFacts.of(expression.type)));
+        }
+
         private Declared declaredValue(in size_t i) {
             import dmd.astenums: STC;
 

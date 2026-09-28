@@ -3332,27 +3332,10 @@ static foreach (Backend; AliasSeq!(Interpreter, Bytecode)) {
 }
 
 
-// A variadic callee reached through a function pointer parameter, not a
-// name: the interpreter resolves it dynamically (`calleeOf`), exactly as
-// it would a direct call, so this reuses the same weighted-sum callee
-// and expected total as `variadic.tenIntsFourSpillToTheStack` above.
-// `compileIndirectCall` never opts `arityMismatches` into `allowExtra`
-// the way `compileNativeCall` does for a statically resolved callee
-// (`snakebite.backends.calls`'s own doc - only the two variadic-aware
-// call sites opt in, and an indirect call cannot know at compile time
-// whether its own runtime target will turn out to be one): a call
-// through a function pointer with more arguments than the pointer
-// type's own declared parameter list is refused there as an ordinary
-// arity mismatch, the same as any other indirect call with too many
-// arguments (issue #334 step 5 review, function-pointer scenario).
+// The pointer type gives the fixed parameter prefix. C variadic calls
+// also take extra arguments, whose types shape the host call plan.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "compileIndirectCall's own arityMismatches check never opts "
-            ~ "into allowExtra, so a call through a function pointer "
-            ~ "with more arguments than the pointer type's own declared "
-            ~ "parameter list is refused there as an ordinary arity "
-            ~ "mismatch, not routed to a native plan"),
 )) {
     @("variadic.calledThroughFunctionPointer." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -3906,15 +3889,15 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 
-    @("review436.hostVariadicFunctionPointer." ~ backend.stringof)
+    @("variadic.hostFunctionPointerCallSitePlan." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        42.shouldBeRetOf!(backend, q{
+        55.shouldBeRetOf!(backend, q{
             pragma(mangle, "snakebite_ut_variadic_count_sum_backend")
             extern(C) int invoke(int, ...);
             int answer() {
                 auto function_ = &invoke;
-                return function_(2, 16, 13);
+                return function_(1, 41) + function_(3, 1, 2, 3);
             }
         }, "answer");
     }

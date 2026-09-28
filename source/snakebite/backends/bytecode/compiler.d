@@ -370,11 +370,15 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         if (method.isAbstract)
             return null;
         const(void)* word;
+        const hasNativeSymbol = _plans.hasNativeSymbol(method);
         const isVariadicGuest =
             typeFunctionOf(method).parameterList.varargs == VarArg.variadic
-            && method.fbody !is null && !hasNativeSymbol(method);
+            && method.fbody !is null && !hasNativeSymbol;
+        if (_callSelection.usesNativeVariadicAddress(
+                method, hasNativeSymbol))
+            return _plans.addressOf(method);
         if (isVariadicGuest || _callSelection.usesGuestBody(method, &isGuestFunction,
-                hasNativeSymbol(method), hasIndependentNativeSymbol(method))) {
+                hasNativeSymbol, hasIndependentNativeSymbol(method))) {
             word = compileFunction(method);
             registerGuestWord(method, cast(const(Function)*) word);
             _callbackRoots ~= cast(const(Function)*) word;
@@ -6546,7 +6550,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `this` before its declared parameters (see `ofParameters`'s own
     // `hasContext` doc).
     private void compileIndirectCall(CallExp expression, in size_t destOffset) {
-        import dmd.astenums: STC;
+        import dmd.astenums: STC, VarArg;
         import snakebite.backends.calls: arityMismatches, isIndirectDelegateCall;
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize;
@@ -6590,7 +6594,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         if (arityMismatches(functionType.parameterList, expression.arguments,
-                functionType.isDstyleVariadic))
+                functionType.parameterList.varargs == VarArg.variadic))
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -6622,11 +6626,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (functionType.isDstyleVariadic)
             args ~= compileVariadicArguments(expression.arguments, calleeLayout);
+        else if (functionType.parameterList.varargs == VarArg.variadic)
+            preparation.eachExtra((value) {
+                args ~= compileBarrierArgument(value);
+            });
 
         const siteIndex = _callSites.length;
+        const nativePlan = functionType.parameterList.varargs
+                == VarArg.variadic
+            ? preparation.prepareAtAddress(
+                _bytecode._plans, null, isDelegateCall,
+            )
+            : null;
         _callSites ~= CallSite.indirect(
             calleeOffset, args, isVoidCallee ? 0 : returnShape.returnFacts.size,
-            functionType.isDstyleVariadic ? null
+            functionType.parameterList.varargs == VarArg.variadic
+                ? cast(const(void)*) nativePlan
                 : _bytecode._plans.signatureOf(functionType, isDelegateCall),
             isDelegateCall,
         );
