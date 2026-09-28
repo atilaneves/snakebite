@@ -188,6 +188,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         FuncDeclaration function_,
         void* returnPlace,
         scope const(void*)[] args,
+        void* variadicCursor = null,
+        const(void)* variadicTypes = null,
     ) {
         initializeThread;
         const layout = hostLayoutOf(function_);
@@ -195,7 +197,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
         Vm.HostArgument[16] inlineArguments = void;
         const count = layout.parameters.length
-            + (layout.hiddenThis.variable !is null);
+            + (layout.hiddenThis.variable !is null)
+            + (variadicCursor !is null)
+            + (variadicTypes !is null);
         auto arguments = count <= inlineArguments.length
             ? inlineArguments[0 .. count] : new Vm.HostArgument[count];
         size_t filled;
@@ -213,6 +217,17 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             arguments[filled++] = Vm.HostArgument(
                 parameter.offset, declaredArguments[i],
                 parameter.facts.size);
+
+        if (variadicCursor !is null) {
+            assert(layout.variadicCursor != size_t.max);
+            arguments[filled++] = Vm.HostArgument(
+                layout.variadicCursor, &variadicCursor, size_t.sizeof);
+        }
+        if (variadicTypes !is null) {
+            assert(layout.variadicTypes != size_t.max);
+            arguments[filled++] = Vm.HostArgument(
+                layout.variadicTypes, &variadicTypes, size_t.sizeof);
+        }
 
         _vms.current.call(*compiled, returnPlace, arguments[0 .. filled]);
     }
@@ -285,7 +300,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // the host frames untouched (ADR-0004).
     private void callGuestFromHost(CallbackCall* call) {
         runHostToGuest(cast(const(Function)*) call.function_,
-            call.declaration, call.returnPlace, call.arguments);
+            call.declaration, call.returnPlace, call.arguments,
+            call.variadicCursor, call.variadicTypes);
     }
 
     // The prepared FFI plan for druntime's own `gc_malloc`, the real
@@ -345,28 +361,27 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // Function pointers can reach host code inside aggregates or through
     // pointers to guest data, where the call barrier cannot replace them.
     private void* callableAddress(FuncDeclaration method, ptrdiff_t adjustment) {
-        import dmd.dsymbolsem: isAbstract;
         import dmd.astenums: VarArg;
+        import dmd.dsymbolsem: isAbstract;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         // getOverloads can leave an alias in a function-pointer constant.
         method = method.toAliasFunc;
         if (method.isAbstract)
             return null;
-        // Untyped variadic calls require the argument types at each call
-        // site, so they cannot use a fixed callback entry.
-        if (typeFunctionOf(method).parameterList.varargs == VarArg.variadic
-                && adjustment == 0)
-            return cast(void*) compileFunction(method);
-
         const(void)* word;
-        if (_callSelection.usesGuestBody(method, &isGuestFunction,
+        const isVariadicGuest =
+            typeFunctionOf(method).parameterList.varargs == VarArg.variadic
+            && method.fbody !is null && !hasNativeSymbol(method);
+        if (isVariadicGuest || _callSelection.usesGuestBody(method, &isGuestFunction,
                 hasNativeSymbol(method), hasIndependentNativeSymbol(method))) {
             word = compileFunction(method);
             registerGuestWord(method, cast(const(Function)*) word);
             _callbackRoots ~= cast(const(Function)*) word;
             if (_compilationDepth == 0)
                 prepareCallbackBodies;
+            if (isVariadicGuest)
+                return cast(void*) word;
         }
         return _plans.callableAddress(word, method, adjustment);
     }

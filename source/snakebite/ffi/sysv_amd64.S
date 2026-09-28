@@ -41,13 +41,14 @@
  * `static assert`s for the definitions these must match. */
 #define CF_INTEGER         0   /* size_t[6] integer */
 #define CF_SSE              48  /* double[8] sse */
-#define CF_SSE_COUNT        112 /* size_t sseCount */
-#define CF_STACK            120 /* const(size_t)* stack */
-#define CF_STACK_WORDS      128 /* size_t stackWords */
-#define CF_INTEGER_RESULT   136 /* size_t[2] integerResult */
-#define CF_SSE_RESULT       152 /* double[2] sseResult */
-#define CF_REAL_RESULT      176 /* real realResult */
-#define CF_REAL_RESULT_USED 192 /* bool realResultUsed */
+#define CF_SSE_COUNT        176 /* size_t sseCount */
+#define CF_STACK            184 /* const(size_t)* stack */
+#define CF_STACK_WORDS      192 /* size_t stackWords */
+#define CF_STACK_ALIGNMENT  200 /* size_t stackAlignment */
+#define CF_INTEGER_RESULT   208 /* size_t[2] integerResult */
+#define CF_SSE_RESULT       224 /* ubyte[16][2] sseResult */
+#define CF_REAL_RESULT      256 /* real realResult */
+#define CF_REAL_RESULT_USED 272 /* bool realResultUsed */
 
     .text
     .globl  snakebite_ffi_call_sysv_amd64
@@ -110,16 +111,20 @@ snakebite_ffi_call_sysv_amd64:
     testq   %rcx, %rcx
     jz      1f
 
-    /* Allocate frame.stackWords words, rounded so %rsp is 16-byte
-     * aligned at the `call` below. `%rsp` is already 16-byte aligned
-     * here (three 8-byte pushes since entry, entry itself guaranteed
-     * 8 mod 16 by the SysV ABI), so rounding the byte count up to a
-     * multiple of 16 keeps it aligned after the subtraction. */
+    /* Reserve enough extra space to align the outgoing stack area to
+     * the strictest argument alignment in the plan. */
     movq    %rcx, %rax
     shlq    $3, %rax
-    addq    $15, %rax
-    andq    $-16, %rax
     subq    %rax, %rsp
+    movq    CF_STACK_ALIGNMENT(%r12), %rax
+    cmpq    $16, %rax
+    movq    $16, %rdx
+    cmovbq  %rdx, %rax
+    decq    %rax
+    subq    %rax, %rsp
+    incq    %rax
+    negq    %rax
+    andq    %rax, %rsp
 
     movq    CF_STACK(%r12), %rsi
     movq    %rsp, %rdi
@@ -156,14 +161,14 @@ snakebite_ffi_call_sysv_amd64:
      * resolving. Unlike the stack-word copy, an all-zero-register
      * `movsd` here is not paying a fixed microcode startup cost the way
      * `rep movsq` did, so there was nothing expensive here to skip. */
-    movsd   CF_SSE+0(%r12), %xmm0
-    movsd   CF_SSE+8(%r12), %xmm1
-    movsd   CF_SSE+16(%r12), %xmm2
-    movsd   CF_SSE+24(%r12), %xmm3
-    movsd   CF_SSE+32(%r12), %xmm4
-    movsd   CF_SSE+40(%r12), %xmm5
-    movsd   CF_SSE+48(%r12), %xmm6
-    movsd   CF_SSE+56(%r12), %xmm7
+    movdqu  CF_SSE+0(%r12), %xmm0
+    movdqu  CF_SSE+16(%r12), %xmm1
+    movdqu  CF_SSE+32(%r12), %xmm2
+    movdqu  CF_SSE+48(%r12), %xmm3
+    movdqu  CF_SSE+64(%r12), %xmm4
+    movdqu  CF_SSE+80(%r12), %xmm5
+    movdqu  CF_SSE+96(%r12), %xmm6
+    movdqu  CF_SSE+112(%r12), %xmm7
 
     /* `%al` reports the SSE register count to a variadic callee; a
      * non-variadic callee ignores it. A full-register load, not `movb`,
@@ -178,8 +183,8 @@ snakebite_ffi_call_sysv_amd64:
      * `sysv.d`/`plan.d` reads only the ones its own return shape needs. */
     movq    %rax, CF_INTEGER_RESULT+0(%r12)
     movq    %rdx, CF_INTEGER_RESULT+8(%r12)
-    movsd   %xmm0, CF_SSE_RESULT+0(%r12)
-    movsd   %xmm1, CF_SSE_RESULT+8(%r12)
+    movdqu  %xmm0, CF_SSE_RESULT+0(%r12)
+    movdqu  %xmm1, CF_SSE_RESULT+16(%r12)
     cmpb    $0, CF_REAL_RESULT_USED(%r12)
     je      2f
     fstpt   CF_REAL_RESULT(%r12)
@@ -266,8 +271,8 @@ snakebite_ffi_call_sysv_amd64_integer:
      * SSE arguments itself - `double f(long)`, for example. */
     movq    %rax, CF_INTEGER_RESULT+0(%rbx)
     movq    %rdx, CF_INTEGER_RESULT+8(%rbx)
-    movsd   %xmm0, CF_SSE_RESULT+0(%rbx)
-    movsd   %xmm1, CF_SSE_RESULT+8(%rbx)
+    movdqu  %xmm0, CF_SSE_RESULT+0(%rbx)
+    movdqu  %xmm1, CF_SSE_RESULT+16(%rbx)
 
     popq    %rbx
     .cfi_def_cfa_offset 8
@@ -277,6 +282,7 @@ snakebite_ffi_call_sysv_amd64_integer:
 
     .cfi_endproc
     .size   snakebite_ffi_call_sysv_amd64_integer, . - snakebite_ffi_call_sysv_amd64_integer
+
 
 
 
@@ -327,8 +333,8 @@ snakebite_ffi_call_sysv_amd64_integer:
 
 #define CB_ENTRIES_PER_CHUNK 254
 #define CB_ENTRY_BYTES       16
-/* `CallFrame` is 208 bytes, already rounded for 16-byte alignment. */
-#define CB_FRAME_BYTES       208
+/* `CallFrame` is 288 bytes, already rounded for 16-byte alignment. */
+#define CB_FRAME_BYTES       288
 
     .globl  snakebite_ffi_callback_chunk
     .type   snakebite_ffi_callback_chunk, @function
@@ -402,14 +408,14 @@ snakebite_ffi_callback_common:
     movq    %r8, CF_INTEGER+32(%rsp)
     movq    %r9, CF_INTEGER+40(%rsp)
 
-    movsd   %xmm0, CF_SSE+0(%rsp)
-    movsd   %xmm1, CF_SSE+8(%rsp)
-    movsd   %xmm2, CF_SSE+16(%rsp)
-    movsd   %xmm3, CF_SSE+24(%rsp)
-    movsd   %xmm4, CF_SSE+32(%rsp)
-    movsd   %xmm5, CF_SSE+40(%rsp)
-    movsd   %xmm6, CF_SSE+48(%rsp)
-    movsd   %xmm7, CF_SSE+56(%rsp)
+    movdqu  %xmm0, CF_SSE+0(%rsp)
+    movdqu  %xmm1, CF_SSE+16(%rsp)
+    movdqu  %xmm2, CF_SSE+32(%rsp)
+    movdqu  %xmm3, CF_SSE+48(%rsp)
+    movdqu  %xmm4, CF_SSE+64(%rsp)
+    movdqu  %xmm5, CF_SSE+80(%rsp)
+    movdqu  %xmm6, CF_SSE+96(%rsp)
+    movdqu  %xmm7, CF_SSE+112(%rsp)
 
     /* The caller's stack arguments start right above its return address:
      * `[%rbp]` is the saved `%rbp`, `[%rbp + 8]` the return address. */
@@ -423,8 +429,8 @@ snakebite_ffi_callback_common:
 
     movq    CF_INTEGER_RESULT+0(%rsp), %rax
     movq    CF_INTEGER_RESULT+8(%rsp), %rdx
-    movsd   CF_SSE_RESULT+0(%rsp), %xmm0
-    movsd   CF_SSE_RESULT+8(%rsp), %xmm1
+    movdqu  CF_SSE_RESULT+0(%rsp), %xmm0
+    movdqu  CF_SSE_RESULT+16(%rsp), %xmm1
     cmpb    $0, CF_REAL_RESULT_USED(%rsp)
     je      3f
     fldt    CF_REAL_RESULT(%rsp)

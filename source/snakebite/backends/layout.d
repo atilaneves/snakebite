@@ -160,6 +160,7 @@ package struct FrameLayout {
         }
 
         layout.reserveVariadic(typeFunctionOf(function_));
+        layout.reserveNativeCursor(typeFunctionOf(function_));
         if (function_.v_arguments !is null)
             layout._slotOf[function_.v_arguments] =
                 VariableSlot(layout.variadicTypes, false);
@@ -231,6 +232,14 @@ package struct FrameLayout {
             return;
         variadicTypes = reserveSlot(TypeFacts.pointer).offset;
         variadicCursor = reserveSlot(TypeFacts.pointer).offset;
+    }
+
+    private void reserveNativeCursor(TypeFunction type) {
+        import dmd.astenums: VarArg;
+
+        if (type.parameterList.varargs == VarArg.variadic
+                && variadicCursor == size_t.max)
+            variadicCursor = reserveSlot(TypeFacts.pointer).offset;
     }
 
     // One slot `reserveSlot` just reserved: its offset into the frame,

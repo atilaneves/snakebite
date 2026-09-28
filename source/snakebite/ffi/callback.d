@@ -48,6 +48,12 @@ public struct CallbackCall {
     public FuncDeclaration declaration;
     public void* returnPlace;
     public const(void*)[] arguments;
+    // A native SysV `va_list` cursor for a C or D variadic callback.
+    // It points into this invocation's scratch storage.
+    public void* variadicCursor;
+    // The host's D `_arguments` TypeInfo_Tuple, for an extern(D) untyped
+    // variadic callback.
+    public const(void)* variadicTypes;
 }
 
 
@@ -365,6 +371,17 @@ private void invoke(ref Slot slot, CallFrame* frame) {
         ? inlineAddresses[0 .. count] : new void*[count];
     plan.unpackArguments(frame, scratch, addresses);
 
+    const typesIndex = plan.callbackVariadicTypesIndex;
+    const(void)* variadicTypes;
+    void*[] guestAddresses = addresses;
+    if (typesIndex != size_t.max) {
+        variadicTypes = *cast(const(void)**) addresses[typesIndex];
+        guestAddresses = new void*[count - 1];
+        foreach (i; 0 .. count)
+            if (i != typesIndex)
+                guestAddresses[i - (i > typesIndex)] = addresses[i];
+    }
+
     // The context word lives at `addresses[0]`, in the same shape as any
     // other argument - the address of its own pointer-sized storage
     // (here, a slot in `scratch`). Adjusting it in place, rather than
@@ -380,8 +397,10 @@ private void invoke(ref Slot slot, CallFrame* frame) {
     CallbackCall call;
     call.function_ = slot.function_;
     call.declaration = slot.declaration;
-    call.arguments = cast(const(void*)[]) addresses;
+    call.arguments = cast(const(void*)[]) guestAddresses;
     call.returnPlace = plan.callbackReturnPlace(frame, scratch);
+    call.variadicCursor = plan.callbackVariadicCursor(frame, scratch);
+    call.variadicTypes = variadicTypes;
 
     if (slot.nativeAddress is null)
         slot.handler(slot.owner, &call);

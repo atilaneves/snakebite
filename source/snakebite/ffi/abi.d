@@ -92,6 +92,7 @@ public struct Register {
         pointer,
         integer,
         sse,
+        sseup,
         x87,
         none, // nothing travels: a `void` return
     }
@@ -118,6 +119,7 @@ public struct ArgumentPlan {
         none,
         integer,
         sse,
+        sseup,
         // The two eightbytes a scalar `real` (`long double`) always
         // spans together (`classify`'s own `Tfloat80` case) - never
         // produced alone, since `real`'s own 16-byte size and alignment
@@ -153,10 +155,7 @@ public struct ArgumentPlan {
     // review, finding 12: a parameter-only `ofParameter` wrapper stayed
     // behind after that unification with nothing left to add).
     public static ArgumentPlan of(Type type) {
-        auto plan = aggregatePlan(type);
-        if (plan.memory)
-            validateMemoryParameter(type);
-        return plan;
+        return aggregatePlan(type);
     }
 
     public static ArgumentPlan ofReturn(Type type) {
@@ -182,25 +181,6 @@ public struct ArgumentPlan {
             );
         return of(type);
     }
-}
-
-// Only explicit MEMORY-class parameters need the stack alignment check.
-// A MEMORY-class return travels through a hidden pointer instead.
-private void validateMemoryParameter(
-    imported!"dmd.mtype".Type type,
-) {
-    import dmd.typesem: alignsize;
-    import std.conv: text;
-
-    // The assembly stub aligns the stack argument area to 16 bytes. It
-    // cannot satisfy a greater alignment without a dynamic stack base.
-    if (type.alignsize > 16)
-        throw new Exception(
-            text("ffi cannot pass a value of type `", type.toString,
-                "`: its ABI alignment is ", type.alignsize, " bytes, and " ~
-                "only 16-byte-aligned MEMORY-class arguments are " ~
-                "supported"),
-        );
 }
 
 // The SysV ABI classifies a MEMORY result as a hidden return pointer, and
@@ -293,7 +273,7 @@ private bool isNonTriviallyCopyable(imported!"dmd.mtype".Type type) {
 private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     import dmd.astenums:
         Taarray, Tclass, Tfloat32, Tfloat64, Tfloat80, Tnull, Tpointer,
-        Tvoid;
+        Tvector, Tvoid;
     import dmd.typesem: alignsize, isIntegral, isUnsigned, size, toBasetype;
     import std.algorithm: min;
 
@@ -312,6 +292,19 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
         plan.registers[0] = Register(Register.Kind.pointer, 8);
         plan.count = 1;
         plan.indirect = true;
+        return plan;
+    }
+
+    if (type.ty == Tvector) {
+        if (type.size <= 16) {
+            plan.registers[0] = Register(
+                Register.Kind.sse, cast(ubyte) type.size);
+            plan.count = 1;
+        } else {
+            plan.registers[0] = Register(Register.Kind.sse, 16);
+            plan.registers[1] = Register(Register.Kind.sse, 16);
+            plan.count = 2;
+        }
         return plan;
     }
 
@@ -406,11 +399,19 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
                 ++plan.count;
                 break;
             case sse:
+                if (i + 1 < count
+                        && classes[i + 1] == ArgumentPlan.ValueClass.sseup) {
+                    plan.registers[plan.count++] = Register(
+                        Register.Kind.sse, cast(ubyte) bytes);
+                    break;
+                }
                 plan.registers[i] = Register(
                     Register.Kind.sse,
                     cast(ubyte) min(8, bytes - i * 8),
                 );
                 ++plan.count;
+                break;
+            case sseup:
                 break;
             case x87, x87up:
                 // Ruled out above: every path here already forced
@@ -429,9 +430,7 @@ private void classify(
     ref ArgumentPlan.ValueClass[2] classes,
     ref bool memory,
 ) {
-    import dmd.astenums:
-        Taarray, Tarray, Tclass, Tcomplex32, Tcomplex64, Tdelegate,
-        Tfloat32, Tfloat64, Tfloat80, Tnull, Tpointer, Tsarray;
+    import dmd.astenums: TY;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: alignsize, isIntegral, nextOf, size, toBasetype;
 
@@ -456,11 +455,10 @@ private void classify(
         return;
     }
 
-    if (type.ty == Tfloat32 || type.ty == Tfloat64) {
+    final switch (type.ty) with (TY) {
+    case Tfloat32, Tfloat64, Timaginary32, Timaginary64:
         merge(classes, offset, bytes, ArgumentPlan.ValueClass.sse, memory);
         return;
-    }
-
     // `real` (`long double`) always spans exactly two eightbytes on this
     // ABI - its own 16-byte size and 16-byte alignment (`isIntegralSize`
     // never matches it, so it never takes the `isIntegral` case below)
@@ -471,50 +469,43 @@ private void classify(
     // type-specific case runs, the same route a `creal` return or
     // parameter already takes through `aggregatePlan`'s own
     // `count > 2` branch.
-    if (type.ty == Tfloat80) {
+    case Tfloat80, Timaginary80:
         merge(classes, offset, 8, ArgumentPlan.ValueClass.x87, memory);
         merge(classes, offset + 8, 8, ArgumentPlan.ValueClass.x87up,
             memory);
         return;
-    }
-
-    if (type.ty == Tcomplex32 || type.ty == Tcomplex64) {
+    case Tcomplex32, Tcomplex64:
         foreach (i; 0 .. (bytes + 7) / 8)
             merge(classes, offset + i * 8, 8,
                 ArgumentPlan.ValueClass.sse, memory);
         return;
-    }
-
-    if (type.ty == Tpointer || type.ty == Tclass || type.ty == Tdelegate
-            || type.ty == Taarray || type.ty == Tnull) {
+    case Tpointer, Tclass, Tdelegate, Taarray, Tnull:
         foreach (i; 0 .. (bytes + 7) / 8)
             merge(classes, offset + i * 8, 8,
                 ArgumentPlan.ValueClass.integer, memory);
         return;
-    }
-
-    if (type.ty == Tarray) {
+    case Tarray:
         merge(classes, offset, 8, ArgumentPlan.ValueClass.integer, memory);
         merge(classes, offset + 8, 8,
             ArgumentPlan.ValueClass.integer, memory);
         return;
-    }
-
-    if (type.isIntegral) {
+    case Tbool, Tchar, Twchar, Tdchar, Tint8, Tuns8, Tint16, Tuns16,
+        Tint32, Tuns32, Tint64, Tuns64, Tint128, Tuns128:
         merge(classes, offset, bytes, ArgumentPlan.ValueClass.integer,
             memory);
         return;
-    }
-
-    if (auto array = type.isTypeSArray) {
+    case Tsarray: {
+        auto array = type.isTypeSArray;
+        assert(array !is null);
         const count = array.dim.toInteger;
         foreach (i; 0 .. count)
             classify(type.nextOf, offset + i * type.nextOf.size,
                 classes, memory);
         return;
     }
-
-    if (auto aggregate = type.isTypeStruct) {
+    case Tstruct: {
+        auto aggregate = type.isTypeStruct;
+        assert(aggregate !is null);
         // dmd's own rule (`argtypes_sysv_x64.d`'s `toArgTypes_sysv_x64`:
         // "if (nfields == 0) return memory();"): a struct with no fields
         // classifies MEMORY, not `none` - an empty `fields` walk below
@@ -551,11 +542,23 @@ private void classify(
         }
         return;
     }
-
-    import std.conv: text;
-    throw new Exception(
-        text("ffi cannot classify a value of type `", type.toString, "`"),
-    );
+    // These types cannot occur in a value after `toBasetype` and semantic
+    // analysis. Vectors use the same two-SSE-register layout as their
+    // element bytes on SysV AMD64.
+    case Tvector:
+        merge(classes, offset, 8, ArgumentPlan.ValueClass.sse, memory);
+        foreach (i; 1 .. (bytes + 7) / 8)
+            merge(classes, offset + i * 8, 8,
+                ArgumentPlan.ValueClass.sseup, memory);
+        return;
+    case Tcomplex80:
+        memory = true;
+        return;
+    case Tvoid, Tfunction, Treference, Tident, Tnone, Terror, Tenum,
+        Tinstance, Ttypeof, Ttuple, Tslice, Treturn, Ttraits, Tmixin,
+        Ttag, Tnoreturn:
+        assert(0);
+    }
 }
 
 // The SysV merge rule two different eightbyte classes go through when a
@@ -596,6 +599,9 @@ private void merge(
             classes[i] = incoming;
         } else if (existing == incoming) {
             // Nothing to merge - both fields already agree.
+        } else if (existing == ArgumentPlan.ValueClass.sseup
+                || incoming == ArgumentPlan.ValueClass.sseup) {
+            classes[i] = ArgumentPlan.ValueClass.sse;
         } else if (existing == ArgumentPlan.ValueClass.integer
                 || incoming == ArgumentPlan.ValueClass.integer) {
             classes[i] = ArgumentPlan.ValueClass.integer;

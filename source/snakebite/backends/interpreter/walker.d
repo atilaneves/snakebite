@@ -313,24 +313,23 @@ private struct Shared {
         if (method.isAbstract)
             return null;
 
-        // Untyped variadic calls need the argument types from their call
-        // site. The callback bridge cannot prepare a fixed entry for
-        // them, so this keeps the declaration itself as the word, the
-        // same as before this cache existed: `calleeOf` still resolves
-        // it through `plans.isGuestWord`.
-        if (typeFunctionOf(method).parameterList.varargs == VarArg.variadic
-                && adjustment == 0) {
-            plans.registerGuestFunction(cast(void*) method, method);
-            return cast(void*) method;
-        }
-
         const(void)* word;
-        if (callSelection.usesGuestBody(method,
+        const isVariadicGuest =
+            typeFunctionOf(method).parameterList.varargs == VarArg.variadic
+            && method.fbody !is null && !plans.hasNativeSymbol(method);
+        if (word is null
+                && typeFunctionOf(method).parameterList.varargs
+                    == VarArg.variadic
+                && plans.hasNativeSymbol(method))
+            return plans.addressOf(method);
+        if (isVariadicGuest || callSelection.usesGuestBody(method,
                 (callee) => program.isInterpreted(callee),
                 plans.hasNativeSymbol(method),
                 plans.hasIndependentNativeSymbol(method))) {
             plans.registerGuestFunction(cast(void*) method, method);
             word = cast(void*) method;
+            if (isVariadicGuest)
+                return cast(void*) word;
         }
         auto address = plans.callableAddress(word, method, adjustment);
         // The reverse lookup only ever needs the unadjusted address: an
@@ -602,9 +601,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         FuncDeclaration function_,
         void* returnPlace,
         scope const(void*)[] args,
+        void* variadicCursor = null,
+        const(void)* variadicTypes = null,
     ) {
         runOnInterpreterStack({
-            runHostToGuestOnDedicatedStack(function_, returnPlace, args);
+            runHostToGuestOnDedicatedStack(
+                function_, returnPlace, args, variadicCursor, variadicTypes);
         });
     }
 
@@ -744,6 +746,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         FuncDeclaration function_,
         void* returnPlace,
         scope const(void*)[] args,
+        void* variadicCursor,
+        const(void)* variadicTypes,
     ) {
         import snakebite.nativelayout: loadIntegral, storeIntegral;
 
@@ -761,6 +765,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         layout.checkHostArgumentCount(
             args.length, function_, "interpreter");
         auto frame = _frames.push(layout.size, layout.alignment);
+        if (variadicCursor !is null) {
+            assert(layout.variadicCursor != size_t.max);
+            storeIntegral(frame.base + layout.variadicCursor,
+                cast(size_t) variadicCursor, size_t.sizeof);
+        }
+        if (variadicTypes !is null) {
+            assert(layout.variadicTypes != size_t.max);
+            storeIntegral(frame.base + layout.variadicTypes,
+                cast(size_t) variadicTypes, size_t.sizeof);
+        }
 
         scope const(void*)[] declaredArguments = args;
         if (layout.hiddenThis.variable !is null) {
@@ -787,7 +801,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     executeRaw(
                         function_, returnPlace, frame.base, layout,
                         null, arguments.values.ptr,
-                        arguments.values.length,
+                        arguments.values.length, true,
                     );
                 });
             });
@@ -1073,6 +1087,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallExp callSite = null,
         const(void*)* arguments,
         size_t argumentCount,
+        bool callbackEntry = false,
     ) {
         import std.conv: text;
 
@@ -1092,7 +1107,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             hasNativeSymbol(function_),
             hasIndependentNativeSymbol(function_),
         );
-        final switch (decision.route) with (CallSelection.Route) {
+        if (!callbackEntry) final switch (decision.route)
+            with (CallSelection.Route) {
         case native:
             const plan = callSite is null
                 ? _plans.of(function_)
@@ -1207,7 +1223,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // `Throwable` the body throws unwinds through the host frames
     // untouched (ADR-0004).
     extern(D) final void callGuestFromHost(CallbackCall* call) {
-        runHostToGuest(call.declaration, call.returnPlace, call.arguments);
+        runHostToGuest(call.declaration, call.returnPlace, call.arguments,
+            call.variadicCursor, call.variadicTypes);
     }
 
     extern(D) final void prepareCallback(FuncDeclaration function_) {
@@ -5598,6 +5615,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallExp expression, TypeFunction type, const(void)* address,
         void* context, bool hasContext, void* returnPlace,
     ) {
+        import dmd.astenums: VarArg;
+        if (type.parameterList.varargs == VarArg.variadic)
+            return _callVariadicIndirect(
+                expression, type, address, context, hasContext, returnPlace);
+
         const layout = FrameLayout.ofParameters(type, hasContext);
         auto frame = _frames.push(layout.size, layout.alignment);
         _bindArguments(type, expression.arguments, expression.loc,
@@ -5613,6 +5635,32 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 _plans.signatureOf(type, hasContext).callAt(
                     address, place, arguments);
             });
+    }
+
+    private CallResult _callVariadicIndirect(
+        CallExp expression, TypeFunction type, const(void)* address,
+        void* context, bool hasContext, void* returnPlace,
+    ) {
+        auto preparation = CallAdapter.Arguments.of(
+            type, expression.arguments,
+        );
+        const plan = preparation.prepareAtAddress(
+            *_plans, address, hasContext,
+        );
+        const layout = FrameLayout.ofParameters(type, hasContext);
+        auto frame = _frames.push(layout.size, layout.alignment);
+        _bindArguments(type, expression.arguments, expression.loc,
+            frame.base, &layout, true);
+
+        const mark = _frames.mark;
+        scope(exit) _frames.release(mark);
+        auto slots = preparation.bind(
+            hasContext ? &context : null,
+            (i) => frame.base + layout.parameters[i].offset,
+            &evaluateBarrierArgument,
+        );
+        plan.callAt(address, returnPlace, slots.values);
+        return CallResult.init;
     }
 
     private struct Callee {

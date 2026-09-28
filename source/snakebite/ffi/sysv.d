@@ -22,7 +22,7 @@ public struct CallFrame {
     public size_t[6] integer;
     // The first eight SSE-class argument words, in the order
     // `%xmm0 .. %xmm7` read them.
-    public double[8] sse;
+    align(16) public ubyte[16][8] sse;
     // How many of `sse` are real arguments - the value the stub loads
     // into `%al` for a variadic callee.
     public size_t sseCount;
@@ -32,10 +32,12 @@ public struct CallFrame {
     // prologue expects to find them.
     public const(size_t)* stack;
     public size_t stackWords;
+    // Largest alignment required by a stack argument, at least 16.
+    public size_t stackAlignment;
     // `%rax`, then `%rdx`, as left by the call.
     public size_t[2] integerResult;
     // `%xmm0`, then `%xmm1`, as left by the call.
-    public double[2] sseResult;
+    align(16) public ubyte[16][2] sseResult;
     // A scalar `real` result is returned in x87 ST0. The assembly stub
     // stores and pops it here when `realResultUsed` is set.
     align(16) public real realResult;
@@ -44,14 +46,15 @@ public struct CallFrame {
 
 static assert(CallFrame.integer.offsetof == 0);
 static assert(CallFrame.sse.offsetof == 48);
-static assert(CallFrame.sseCount.offsetof == 112);
-static assert(CallFrame.stack.offsetof == 120);
-static assert(CallFrame.stackWords.offsetof == 128);
-static assert(CallFrame.integerResult.offsetof == 136);
-static assert(CallFrame.sseResult.offsetof == 152);
-static assert(CallFrame.realResult.offsetof == 176);
-static assert(CallFrame.realResultUsed.offsetof == 192);
-static assert(CallFrame.sizeof == 208);
+static assert(CallFrame.sseCount.offsetof == 176);
+static assert(CallFrame.stack.offsetof == 184);
+static assert(CallFrame.stackWords.offsetof == 192);
+static assert(CallFrame.stackAlignment.offsetof == 200);
+static assert(CallFrame.integerResult.offsetof == 208);
+static assert(CallFrame.sseResult.offsetof == 224);
+static assert(CallFrame.realResult.offsetof == 256);
+static assert(CallFrame.realResultUsed.offsetof == 272);
+static assert(CallFrame.sizeof == 288);
 
 // `snakebite_ffi_call_sysv_amd64`, the general entry, in `sysv_amd64.S`.
 // One of two entry points that make a forward call across the barrier

@@ -1015,6 +1015,188 @@ private extern(C) long snakebite_ut_many_callback(
         + (callback() ? 100 : 0);
 }
 
+private alias CVariadicCallback = extern(C) int function(int, ...);
+
+private extern(C) int snakebite_ut_call_c_variadic_callback(
+    CVariadicCallback callback,
+) {
+    return callback(11, 31);
+}
+
+private alias MixedCVariadicCallback = extern(C) double function(int, ...);
+
+private extern(C) double snakebite_ut_call_mixed_c_variadic_callback(
+    MixedCVariadicCallback callback,
+) {
+    return callback(9, 1.5, 3, 2.5);
+}
+
+private alias SpilledCVariadicCallback = extern(C) int function(
+    int, int, int, int, int, int, int, ...
+);
+
+private extern(C) int snakebite_ut_call_spilled_c_variadic_callback(
+    SpilledCVariadicCallback callback,
+) {
+    return callback(1, 2, 3, 4, 5, 6, 7, 8);
+}
+
+private alias DVariadicCallback = extern(D) int function(int, ...);
+
+private alias Vector4StackCallback = extern(C) float function(
+    double, double, double, double, double, double, double, double,
+    __vector(float[4]),
+);
+
+private extern(C) float snakebite_ut_call_vector4_spilled_callback(
+    Vector4StackCallback callback,
+) {
+    return callback(1, 2, 3, 4, 5, 6, 7, 8,
+        cast(__vector(float[4])) [1.0f, 2.0f, 3.0f, 4.0f]);
+}
+
+private extern(C) float snakebite_ut_vector4_after_eight_doubles(
+    double a, double b, double c, double d,
+    double e, double f, double g, double h,
+    __vector(float[4]) value,
+) {
+    return cast(float) (a + b + c + d + e + f + g + h)
+        + value[0] + value[3];
+}
+
+private extern(C) int snakebite_ut_call_d_variadic_callback(
+    DVariadicCallback callback,
+) {
+    return callback(10, 32, 2.5, 4, 8, 16, 32);
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("callback.variadicC.nativeVaList." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg;
+            alias Callback = extern(C) int function(int, ...);
+
+            pragma(mangle, "snakebite_ut_call_c_variadic_callback")
+            extern(C) int callCVariadicCallback(
+                Callback,
+            );
+
+            extern(C) int guest(int fixed, ...) {
+                return fixed + va_arg!int(_argptr);
+            }
+
+            int answer() { return callCVariadicCallback(&guest); }
+        }, "answer");
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("callback.variadicC.mixedRegisterFiles." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        16.0.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg;
+            alias Callback = extern(C) double function(int, ...);
+            pragma(mangle, "snakebite_ut_call_mixed_c_variadic_callback")
+            extern(C) double invoke(Callback);
+            extern(C) double guest(int fixed, ...) {
+                return fixed + va_arg!double(_argptr)
+                    + va_arg!int(_argptr) + va_arg!double(_argptr);
+            }
+            double answer() { return invoke(&guest); }
+        }, "answer");
+    }
+
+    @("callback.variadicC.overflowStack." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        15.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg;
+            alias Callback = extern(C) int function(
+                int, int, int, int, int, int, int, ...);
+            pragma(mangle, "snakebite_ut_call_spilled_c_variadic_callback")
+            extern(C) int invoke(Callback);
+            extern(C) int guest(
+                int a, int b, int c, int d, int e, int f, int g, ...
+            ) { return g + va_arg!int(_argptr); }
+            int answer() { return invoke(&guest); }
+        }, "answer");
+    }
+
+    @("callback.variadicD.argumentsAndCursor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        104.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg;
+            import core.vararg: va_arg;
+            alias Callback = extern(D) int function(int, ...);
+            pragma(mangle, "snakebite_ut_call_d_variadic_callback")
+            extern(C) int invoke(Callback);
+            static extern(D) int guest(int fixed, ...) {
+                assert(_arguments.length == 6);
+                assert(_arguments[0] is typeid(int));
+                assert(_arguments[1] is typeid(double));
+                int total = fixed;
+                foreach (i; 0 .. _arguments.length) {
+                    if (_arguments[i] is typeid(double))
+                        total += cast(int) va_arg!double(_argptr);
+                    else
+                        total += va_arg!int(_argptr);
+                }
+                return total;
+            }
+            int answer() { return invoke(cast(Callback) &guest); }
+        }, "answer");
+    }
+
+    @("callback.vector4SpillsAfterEightSseArguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        41.0f.shouldBeRetOf!(backend, q{
+            alias Vector4 = __vector(float[4]);
+            alias Callback = extern(C) float function(
+                double, double, double, double, double, double, double, double,
+                Vector4,
+            );
+            pragma(mangle, "snakebite_ut_call_vector4_spilled_callback")
+            extern(C) float invoke(Callback);
+            static extern(C) float guest(
+                double a, double b, double c, double d,
+                double e, double f, double g, double h,
+                Vector4 value,
+            ) {
+                return cast(float) (a + b + c + d + e + f + g + h)
+                    + value[0] + value[3];
+            }
+            float answer() { return invoke(&guest); }
+        }, "answer");
+    }
+
+    @("vector4SpillsAfterEightSseArguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        41.0f.shouldBeRetOf!(backend, q{
+            alias Vector4 = __vector(float[4]);
+            pragma(mangle, "snakebite_ut_vector4_after_eight_doubles")
+            extern(C) float invoke(
+                double, double, double, double, double, double, double, double,
+                Vector4,
+            );
+            float answer() {
+                auto value = cast(Vector4) [1.0f, 2.0f, 3.0f, 4.0f];
+                return invoke(1, 2, 3, 4, 5, 6, 7, 8, value);
+            }
+        }, "answer");
+    }
+}
+
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
