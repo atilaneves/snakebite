@@ -4921,17 +4921,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // compares the stored bits, which would make a NaN equal itself and
             // positive and negative zero unequal.
             case floating: {
-                Instruction.Handler floatHandler;
-                with (EXP) switch (expression.op) {
-                    case lessThan: floatHandler = &opFloatLessThan; break;
-                    case lessOrEqual: floatHandler = &opFloatLessOrEqual; break;
-                    case greaterThan: floatHandler = &opFloatGreaterThan; break;
-                    case greaterOrEqual:
-                        floatHandler = &opFloatGreaterOrEqual; break;
-                    case equal: floatHandler = &opFloatEqual; break;
-                    case notEqual: floatHandler = &opFloatNotEqual; break;
-                    default: assert(0);
-                }
+                auto floatHandler = floatComparisonHandler(expression);
 
                 const floatLeftOffset = reserveTemp(operandFacts);
                 evalInto(expression.e1, floatLeftOffset, operandFacts.size);
@@ -4944,6 +4934,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     emit(&opCopy, destOffset, floatLeftOffset, 1);
                 return;
             }
+
+            // D does not order complex values, so only `==`/`!=` reach
+            // here: both halves compare, and the answers combine.
+            case complex: {
+                const half = operandFacts.size / 2;
+                auto halfHandler = floatComparisonHandler(expression);
+                const leftOffset = reserveTemp(operandFacts);
+                evalInto(expression.e1, leftOffset, operandFacts.size);
+                const rightOffset = reserveTemp(operandFacts);
+                evalInto(expression.e2, rightOffset, operandFacts.size);
+                emit(halfHandler, leftOffset, rightOffset, half);
+                emit(halfHandler, leftOffset + half, rightOffset + half, half);
+                emit(expression.op == EXP.equal ? &opBitAnd : &opBitOr,
+                    leftOffset, leftOffset + half, 1);
+
+                if (destOffset != leftOffset)
+                    emit(&opCopy, destOffset, leftOffset, 1);
+                return;
+            }
+
+            case vector:
+                return compileVectorComparison(expression, plan, destOffset);
 
             case integral: {
                 if (!operandFacts.isIntegral || !isIntegralSize(operandFacts.size))
@@ -4962,6 +4974,56 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     emit(&opCopy, destOffset, leftOffset, 1);
                 return;
             }
+        }
+    }
+
+    private Instruction.Handler floatComparisonHandler(BinExp expression) {
+        with (EXP) switch (expression.op) {
+            case lessThan: return &opFloatLessThan;
+            case lessOrEqual: return &opFloatLessOrEqual;
+            case greaterThan: return &opFloatGreaterThan;
+            case greaterOrEqual: return &opFloatGreaterOrEqual;
+            case equal: return &opFloatEqual;
+            case notEqual: return &opFloatNotEqual;
+            default: assert(0);
+        }
+    }
+
+    // Each result lane is all-ones where the operands' lanes compare true:
+    // the one-byte answer widens to the lane and negates.
+    private void compileVectorComparison(
+        BinExp expression, in ComparisonPlan plan, in size_t destOffset,
+    ) {
+        const leftOffset = reserveTemp(plan.facts);
+        evalInto(expression.e1, leftOffset, plan.facts.size);
+        const rightOffset = reserveTemp(plan.facts);
+        evalInto(expression.e2, rightOffset, plan.facts.size);
+
+        Instruction.Handler handler;
+        with (ComparisonPlan.Kind) final switch (plan.laneKind) {
+            case floating:
+                handler = floatComparisonHandler(expression);
+                break;
+            case integral:
+                handler = comparisonHandler(
+                    expression, plan.laneFacts.isUnsigned);
+                break;
+            // A vector's lanes are integral or floating.
+            case complex, reference, vector:
+                assert(0);
+        }
+
+        const laneSize = plan.laneFacts.size;
+        const lanes = plan.facts.size / laneSize;
+        const resultLaneSize = TypeFacts.of(expression.type).size / lanes;
+        const laneOffset = reserveTemp(plan.laneFacts);
+        foreach (i; 0 .. lanes) {
+            emit(&opCopy, laneOffset, leftOffset + i * laneSize, laneSize);
+            emit(handler, laneOffset, rightOffset + i * laneSize, laneSize);
+            emit(&opCastWidenUnsigned, laneOffset, 1, resultLaneSize);
+            emit(&opNegate, laneOffset, 0, resultLaneSize);
+            emit(&opCopy, destOffset + i * resultLaneSize, laneOffset,
+                resultLaneSize);
         }
     }
 

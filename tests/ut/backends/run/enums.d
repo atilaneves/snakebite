@@ -632,3 +632,42 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// dmd compares an enum of `double` with a `double` literal as `creal`.
+static foreach (backend; Matrix!()) {
+    @("enumOfFloating.equalityPromotesToComplex." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum F : double { a = 1.5 }
+
+            void main() {
+                F f = F.a;
+                assert(-f == -1.5);
+                assert(f != 2.5);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot compare vectors"),
+)) {
+    @("enumOfVector.comparison." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd: int4;
+            enum Lanes : int4 { z = int4.init }
+
+            void main() {
+                int4 raw = [1, 2, 3, 4];
+                Lanes lanes = cast(Lanes) raw;
+                int4 other = [1, 0, 3, 0];
+                int4 equal = lanes == other;
+                assert(equal.array == [-1, 0, -1, 0]);
+            }
+        });
+    }
+}

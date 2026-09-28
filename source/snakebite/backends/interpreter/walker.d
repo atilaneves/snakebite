@@ -3416,6 +3416,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 storeIntegral(_place, answer ? 1 : 0, _facts.size);
                 return;
             }
+            // D does not order complex values.
+            case complex:
+                assert(0);
+            case vector:
+                return storeVectorComparison!op(expression, plan);
             case reference: {
                 const a = cast(size_t) asReference(expression.e1, plan.facts);
                 const b = cast(size_t) asReference(expression.e2, plan.facts);
@@ -3539,19 +3544,30 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
+        import snakebite.backends.comparison: comparisonPlan;
+
+        const plan = comparisonPlan(expression);
         bool equal;
-        if (type.ty == Tpointer)
-            equal = asPointer(expression.e1) == asPointer(expression.e2);
-        else if (type.ty == Tfloat32 || type.ty == Tfloat64
-                || type.ty == Tfloat80)
-            equal = asFloating(expression.e1) == asFloating(expression.e2);
-        else if (factsOf(type).isIntegral)
-            equal = asIntegral(expression.e1) == asIntegral(expression.e2);
-        else
-            throw new SnakebiteException(
-                text("interpreter cannot compare `", expression.toString,
-                    "`: its operands are of type `", type.toString, "`"),
-            );
+        with (ComparisonPlan.Kind) final switch (plan.kind) {
+            case integral:
+                equal = asIntegral(expression.e1, plan.facts)
+                    == asIntegral(expression.e2, plan.facts);
+                break;
+            case floating:
+                equal = asFloating(expression.e1) == asFloating(expression.e2);
+                break;
+            case complex:
+                equal = equalComplex(expression, plan.facts);
+                break;
+            case reference:
+                equal = asReference(expression.e1, plan.facts)
+                    == asReference(expression.e2, plan.facts);
+                break;
+            case vector:
+                return expression.op == EXP.equal
+                    ? storeVectorComparison!"=="(expression, plan)
+                    : storeVectorComparison!"!="(expression, plan);
+        }
 
         const answer = expression.op == EXP.equal ? equal : !equal;
 
@@ -3571,6 +3587,61 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         evaluate(expression, type, factsOf(type), storage);
         return ArrayValue(
             cast(size_t) type.isTypeSArray.dim.toInteger, storage);
+    }
+
+    private bool equalComplex(EqualExp expression, in TypeFacts facts) {
+        import snakebite.nativevalue: loadFloating;
+
+        align(real.alignof) ubyte[2 * real.sizeof] left = void;
+        align(real.alignof) ubyte[2 * real.sizeof] right = void;
+        evaluate(expression.e1, expression.e1.type, facts, left.ptr);
+        evaluate(expression.e2, expression.e2.type, facts, right.ptr);
+        const half = facts.size / 2;
+        return loadFloating(left.ptr, half) == loadFloating(right.ptr, half)
+            && loadFloating(left.ptr + half, half)
+                == loadFloating(right.ptr + half, half);
+    }
+
+    // Each result lane is all-ones where the operands' lanes compare true.
+    private extern(D) void storeVectorComparison(string op)(
+        BinExp expression, in ComparisonPlan plan,
+    ) {
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+        import snakebite.nativevalue: loadFloating;
+
+        auto left = _frames.push(plan.facts.size, plan.facts.alignment);
+        auto right = _frames.push(plan.facts.size, plan.facts.alignment);
+        evaluate(expression.e1, expression.e1.type, plan.facts, left.base);
+        evaluate(expression.e2, expression.e2.type, plan.facts, right.base);
+
+        const laneSize = plan.laneFacts.size;
+        const lanes = plan.facts.size / laneSize;
+        const resultLaneSize = _facts.size / lanes;
+        foreach (i; 0 .. lanes) {
+            auto a = cast(ubyte*) left.base + i * laneSize;
+            auto b = cast(ubyte*) right.base + i * laneSize;
+            bool answer;
+            with (ComparisonPlan.Kind) final switch (plan.laneKind) {
+                case floating:
+                    answer = mixin("loadFloating(a, laneSize) " ~ op
+                        ~ " loadFloating(b, laneSize)");
+                    break;
+                case integral: {
+                    const signed = !plan.laneFacts.isUnsigned;
+                    const x = loadIntegral(a, laneSize, signed);
+                    const y = loadIntegral(b, laneSize, signed);
+                    answer = signed
+                        ? mixin("x " ~ op ~ " y")
+                        : mixin("cast(ulong) x " ~ op ~ " cast(ulong) y");
+                    break;
+                }
+                // A vector's lanes are integral or floating.
+                case complex, reference, vector:
+                    assert(0);
+            }
+            storeIntegral(cast(ubyte*) _place + i * resultLaneSize,
+                answer ? -1 : 0, resultLaneSize);
+        }
     }
 
     private bool equalStruct(
@@ -3847,26 +3918,30 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // caller narrows back when the operation itself is `float`- or
     // `double`-precision.
     private real asFloating(Expression expression) {
-        import std.conv: text;
+        import dmd.astenums: TY;
+        import snakebite.nativevalue: loadFloating;
 
         auto type = expression.type.toBasetype;
-        if (type.ty != Tfloat32 && type.ty != Tfloat64
-                && type.ty != Tfloat80)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "` as floating point: its type is `", type.toString,
-                    "`"),
-            );
+        final switch (type.ty) with (TY) {
+            case Tfloat32, Tfloat64, Tfloat80,
+                Timaginary32, Timaginary64, Timaginary80:
+                break;
+
+            // Callers ask only for an operand dmd has typed as floating.
+            case Tarray, Tsarray, Taarray, Tpointer, Treference, Tfunction,
+                Tident, Tclass, Tstruct, Tenum, Tdelegate, Tnone, Tvoid,
+                Tint8, Tuns8, Tint16, Tuns16, Tint32, Tuns32, Tint64,
+                Tuns64, Tcomplex32, Tcomplex64, Tcomplex80, Tbool, Tchar,
+                Twchar, Tdchar, Terror, Tinstance, Ttypeof, Ttuple, Tslice,
+                Treturn, Tnull, Tvector, Tint128, Tuns128, Ttraits, Tmixin,
+                Tnoreturn, Ttag:
+                assert(0);
+        }
 
         const facts = factsOf(type);
         align(real.alignof) ubyte[real.sizeof] buffer = void;
         evaluate(expression, type, facts, buffer.ptr);
-
-        if (type.ty == Tfloat32)
-            return *cast(float*) buffer.ptr;
-        if (type.ty == Tfloat64)
-            return *cast(double*) buffer.ptr;
-        return *cast(real*) buffer.ptr;
+        return loadFloating(buffer.ptr, facts.size);
     }
 
     // `-x` and `~x` leave the same low bits whether the operand was read as

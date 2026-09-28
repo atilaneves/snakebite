@@ -343,3 +343,60 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// Complex values are equal when both halves are; imaginary values compare
+// as floating point.
+static foreach (backend; Matrix!()) {
+    @("complexAndImaginaryComparison." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                creal c = 1.5 + 2.0i;
+                assert(c == 1.5 + 2.0i);
+                assert(c != 1.5 + 3.0i);
+                assert(c != 0.5 + 2.0i);
+                cfloat zero = 0.0f + 0.0fi;
+                cfloat negativeZero = -0.0f + 0.0fi;
+                assert(zero == negativeZero);
+                idouble i = 2.0i;
+                assert(i == 2.0i);
+                assert(i < 3.0i);
+            }
+        });
+    }
+}
+
+// A vector comparison gives a vector: each lane is all-ones where it
+// compares true.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot compare vectors"),
+)) {
+    @("vectorComparisonGivesLaneMasks." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.simd: float4, int4, ubyte16;
+
+            void main() {
+                int4 a = [1, 2, 3, 4];
+                int4 b = [1, 0, 3, 5];
+                int4 equal = a == b;
+                assert(equal.array == [-1, 0, -1, 0]);
+                int4 less = a < b;
+                assert(less.array == [0, 0, 0, -1]);
+                float4 x = [1.0f, 2.0f, float.nan, 4.0f];
+                float4 y = [1.0f, 3.0f, float.nan, 0.0f];
+                auto floatEqual = x == y;
+                assert(floatEqual.array[0] != 0);
+                assert(floatEqual.array[1] == 0);
+                assert(floatEqual.array[2] == 0);
+                ubyte16 u = 200;
+                ubyte16 v = 100;
+                ubyte16 greater = u > v;
+                assert(greater.array[0] == 255);
+            }
+        });
+    }
+}
