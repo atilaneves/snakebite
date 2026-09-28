@@ -2,11 +2,22 @@ module at.runtime.threads;
 
 
 import ut.backends;
+import snakebite.backends: backendIdentity;
+import core.sys.linux.sys.file: LOCK_EX, LOCK_UN, flock;
+import core.sys.posix.fcntl: O_CLOEXEC, O_CREAT, O_RDWR, open;
+import core.sys.posix.unistd: close, getuid;
+import std.algorithm: any, sort;
 import std.conv: text;
-import std.file: getcwd, readText, rmdirRecurse, tempDir;
+import std.digest.sha: sha256Of;
+import std.digest: toHexString;
+import std.exception: enforce;
+import std.file: dirEntries, exists, getcwd, isDir, mkdirRecurse, read,
+    readText, rename, rmdirRecurse, SpanMode, tempDir;
 import std.json: parseJSON;
-import std.path: buildPath;
-import std.process: Config, environment, execute, thisProcessID;
+import std.path: buildPath, relativePath;
+import std.process: Config, environment, execute;
+import std.string: split, toStringz;
+import std.uuid: randomUUID;
 
 
 // `loadImage` (source/snakebite/dependencyimage.d) used to pin every
@@ -31,33 +42,42 @@ import std.process: Config, environment, execute, thisProcessID;
 // no network access, and no smaller, hand-written fixture reproduced
 // the race reliably (a handful of guest threads over a trivial
 // dependency almost never overlaps the loader's own teardown window;
-// tried and abandoned). The package is copied out of that cache first:
-// both `dub test` and `bin/sb` write build artifacts next to a
-// project's own sources, and the cache is shared with every other build
-// that uses the same package, including a concurrent one.
+// tried and abandoned). A content-keyed copy lives in the user's cache,
+// so DUB and dependency-image build outputs survive between runs. One
+// advisory lock protects the shared package while any backend uses it:
+// unit-threaded deletes `tmp/unit-threaded` relative to its working
+// directory, and DUB also writes build outputs beside the package.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot start a real OS thread"),
 )) {
     @("guestThreadOutlivesDependencyImage." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        const directory = buildPath(tempDir, text(
-            "snakebite-runtime-threads-", thisProcessID, "-", backend.stringof));
-        scope(exit) directory.rmdirRecurse;
-        const copy = execute(["cp", "-r", unitThreadedPackagePath, directory]);
-        copy.output.should == "";
-        copy.status.should == 0;
+        const packagePath = unitThreadedPackagePath;
+        const cacheRoot = buildPath(tempDir,
+            text("snakebite-runtime-threads-", getuid), "v1");
+        cacheRoot.mkdirRecurse;
+        const key = unitThreadedPackageKey(packagePath);
+        buildPath(cacheRoot, key).mkdirRecurse;
+        const directory = buildPath(cacheRoot, key, "unit-threaded");
+        auto lock = CacheLock(buildPath(cacheRoot, key ~ ".lock"));
+        if (!directory.exists) {
+            const staging = buildPath(cacheRoot, text(
+                key, ".stage-", backend.stringof, "-", uniqueToken));
+            scope(exit) if (staging.exists) staging.rmdirRecurse;
+            const copy = execute(["cp", "-r", packagePath, staging]);
+            copy.output.should == "";
+            copy.status.should == 0;
+            rename(staging, directory);
+        }
 
         static if (is(backend == Native))
             const result = execute(["dub", "test", "--compiler=dmd"],
                 null, Config.none, size_t.max, directory);
         else {
-            import snakebite.backends: backendIdentity;
-
-            // The image built here is thrown away once the test ends: only
-            // the guest run's behaviour (a clean exit, never a segfault)
-            // is checked, never its speed. Skipping optimisation keeps
-            // this test's own build fast without weakening what it proves.
+            // This test checks a clean exit, never image speed. Skipping
+            // optimisation keeps a cold image build fast without changing
+            // the thread and loader teardown it exercises.
             //
             // The Native branch above runs `dub test` with `directory` as
             // its working directory, so the guest branch must match: the
@@ -83,6 +103,61 @@ static foreach (backend; Matrix!(
         else
             result.status.shouldBeIn([0, 1]);
     }
+}
+
+
+private string unitThreadedPackageKey(in string packagePath) {
+    string[] files;
+    foreach (entry; dirEntries(packagePath, SpanMode.depth)) {
+        const relative = entry.name.relativePath(packagePath);
+        const parts = relative.split("/");
+        if (parts.any!(part => part == ".dub" || part == ".snakebite"
+                || part == "tmp"))
+            continue;
+        if (!entry.isDir)
+            files ~= entry.name;
+    }
+    files.sort;
+
+    string contents;
+    foreach (filePath; files) {
+        const relative = filePath.relativePath(packagePath);
+        const bytes = read(filePath);
+        contents ~= text(relative.length, ":", relative, bytes.length, ":");
+        contents ~= cast(string)bytes;
+    }
+    return contents.sha256Of.toHexString.idup;
+}
+
+
+private struct CacheLock {
+    private int _descriptor = -1;
+
+    @disable this(this);
+
+    this(in string path) {
+        _descriptor = open(path.toStringz,
+            O_CLOEXEC | O_CREAT | O_RDWR, 0x180);
+        enforce(_descriptor >= 0, "Cannot open unit-threaded cache lock");
+        scope(failure) {
+            close(_descriptor);
+            _descriptor = -1;
+        }
+        enforce(flock(_descriptor, LOCK_EX) == 0,
+            "Cannot lock unit-threaded cache");
+    }
+
+    ~this() {
+        if (_descriptor >= 0) {
+            flock(_descriptor, LOCK_UN);
+            close(_descriptor);
+        }
+    }
+}
+
+
+private string uniqueToken() {
+    return randomUUID.toString;
 }
 
 

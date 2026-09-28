@@ -1,4 +1,4 @@
-module at.ffi.aggregates;
+module ut.ffi.aggregates;
 
 
 import ut.backends;
@@ -14,7 +14,7 @@ private struct LargerMemory {
 }
 
 
-public extern(C) int snakebite_at_large_memory(
+public extern(C) int snakebite_ut_aggregates_large_memory(
     int a, int b, int c, int d, int e, int f, int g,
     LargeMemory value, LargerMemory larger, int tail,
 ) {
@@ -47,7 +47,7 @@ static foreach (backend; Matrix!(
             struct LargerMemory {
                 ulong[8193] words;
             }
-            pragma(mangle, "snakebite_at_large_memory")
+            pragma(mangle, "snakebite_ut_aggregates_large_memory")
             extern(C) int nativeLargeMemory(
                 int, int, int, int, int, int, int,
                 LargeMemory, LargerMemory, int,
@@ -79,7 +79,7 @@ private struct Owned {
 private alias OwnedCallback = extern(C) long function(Owned);
 
 
-public extern(C) long snakebite_at_owned_roundtrip(
+public extern(C) long snakebite_ut_aggregates_owned_roundtrip(
     long a, long b, long c, long d, long e, long f,
     Owned value, OwnedCallback callback,
 ) {
@@ -99,8 +99,8 @@ static foreach (backend; Matrix!(
                 ~this() {}
             }
             alias Callback = extern(C) long function(Value);
-            pragma(mangle, "snakebite_at_owned_roundtrip")
-            extern(C) long snakebite_at_owned_roundtrip(
+            pragma(mangle, "snakebite_ut_aggregates_owned_roundtrip")
+            extern(C) long snakebite_ut_aggregates_owned_roundtrip(
                 long, long, long, long, long, long,
                 Value, Callback,
             );
@@ -108,7 +108,7 @@ static foreach (backend; Matrix!(
                 return value.number * 2;
             }
             void main() {
-                assert(snakebite_at_owned_roundtrip(
+                assert(snakebite_ut_aggregates_owned_roundtrip(
                     1, 2, 3, 4, 5, 6, Value(42), &read,
                 ) == 105);
             }

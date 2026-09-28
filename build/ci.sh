@@ -4,7 +4,9 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
 build/reggae.sh
 ninja
-bin/ut
+# Local full-suite measurements favour one worker (52s with the default
+# worker count, 43s with one worker).
+bin/ut -j 1
 # `at.ffi.cost.barrier.overhead` carries `@Tags("timing")` and gates a
 # ratio, not a pass/fail result. Run it on its own, single-threaded, so
 # it never shares a core with the other acceptance tests. Running both
