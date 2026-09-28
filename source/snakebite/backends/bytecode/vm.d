@@ -538,13 +538,18 @@ private void dispatch(
                 continue;
             }
 
-            state.current = active;
-            const next = active.pc.handler(active.pc, active, &state);
-            if (state.pending !is null) {
-                active = state.pending;
-                state.pending = null;
+            const instruction = active.pc;
+            const handler = instruction.handler;
+            if (handler is &opCall) {
+                state.current = active;
+                const next = handler(instruction, active, &state);
+                if (state.pending !is null) {
+                    active = state.pending;
+                    state.pending = null;
+                } else
+                    active.pc = next;
             } else
-                active.pc = next;
+                active.pc = handler(instruction, active, &state);
         } catch (Throwable throwable) {
             size_t firstHandler;
             while (true) {
