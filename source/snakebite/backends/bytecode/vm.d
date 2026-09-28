@@ -225,16 +225,14 @@ private struct Execution(OperandKind destinationKind, OperandKind sourceKind) {
     private ubyte* _frame;
 
     public this(
-        const(Instruction)* pc, ubyte* frame, void* returnPlace,
-        const(long)[] constants, const(CallSite)[] callSites,
-        const(AssertSite)[] assertSites, DispatchState* state,
+        const(Instruction)* pc, Activation* activation, DispatchState* state,
     ) pure nothrow @nogc {
         _pc = pc;
-        _frame = frame;
-        this.returnPlace = returnPlace;
-        this.constants = constants;
-        this.callSites = callSites;
-        this.assertSites = assertSites;
+        _frame = activation.frame;
+        this.returnPlace = activation.returnPlace;
+        this.constants = activation.constants;
+        this.callSites = activation.callSites;
+        this.assertSites = activation.assertSites;
         this.frames = state.frames;
         _dispatch = state;
         destination = decode!destinationKind(pc.destination);
@@ -279,16 +277,12 @@ private const(Instruction)* execute(
     Parameters...,
 )(
     const(Instruction)* pc,
-    ubyte* frame,
-    void* returnPlace,
-    scope const long[] constants,
-    scope const CallSite[] callSites,
-    scope const AssertSite[] assertSites,
+    Activation* activation,
     DispatchState* state,
 ) {
     // const would prevent operations from writing through storage pointers.
     auto execution = Execution!(destinationKind, sourceKind)(
-        pc, frame, returnPlace, constants, callSites, assertSites, state,
+        pc, activation, state,
     );
     return operation!Parameters(execution);
 }
@@ -297,11 +291,7 @@ private const(Instruction)* execute(
 public struct Instruction {
     public alias Handler = const(Instruction)* function(
         const(Instruction)* pc,
-        ubyte* frame,
-        void* returnPlace,
-        scope const long[] constants,
-        scope const CallSite[] callSites,
-        scope const AssertSite[] assertSites,
+        Activation* activation,
         DispatchState* state,
     );
 
@@ -534,8 +524,8 @@ private void dispatch(
     root.assertSites = assertSites;
     root.exceptionHandlers = exceptionHandlers;
     root.cleanupMark = frames.cleanupMark;
-    auto active = &root;
     auto state = DispatchState(frames);
+    auto active = &root;
 
     while (true) {
         try {
@@ -549,9 +539,7 @@ private void dispatch(
             }
 
             state.current = active;
-            const next = active.pc.handler(
-                active.pc, active.frame, active.returnPlace,
-                active.constants, active.callSites, active.assertSites, &state);
+            const next = active.pc.handler(active.pc, active, &state);
             if (state.pending !is null) {
                 active = state.pending;
                 state.pending = null;
