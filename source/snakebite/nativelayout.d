@@ -426,7 +426,9 @@ public bool isStoredLiteral(imported!"dmd.expression".Expression value) {
         return true;
     }
     if (auto literal = value.isArrayLiteralExp) {
-        if (literal.type.isTypeSArray is null)
+        import dmd.typesem: toBasetype;
+
+        if (literal.type.toBasetype.isTypeSArray is null)
             return false;
         foreach (i; 0 .. literal.elements.length)
             if (!isStoredLiteral(literal[i]))

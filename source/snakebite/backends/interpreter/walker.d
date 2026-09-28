@@ -4611,7 +4611,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // has already run its `(){ ... }()` initialiser and left this
         // evaluator a plain literal of the result to place, the same as
         // any other static's initializer (`staticSlotOf`).
-        if (_type.ty == Tsarray) {
+        const kind = _type.toBasetype.ty;
+        if (kind == Tsarray) {
             auto elementType = _type.nextOf;
             const elementFacts = factsOf(elementType);
             const length = expression.elements is null
@@ -4625,7 +4626,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        if (_type.ty != Tarray)
+        if (kind != Tarray)
             throw new SnakebiteException(
                 text("interpreter cannot evaluate `", expression.toString,
                     "` as a `", _type.toString, "`: only a dynamic array ",

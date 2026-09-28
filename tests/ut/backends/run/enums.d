@@ -520,3 +520,63 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("enumOfStaticArray.valueSemantics." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Triple : int[3] { a = [1, 2, 3] }
+            int one() { return 1; }
+            int two() { return 2; }
+            enum Functions : int function()[2] { a = [&one, &two] }
+
+            Triple make() { return Triple.a; }
+            int sum(Triple value) {
+                int total;
+                foreach (element; value)
+                    total += element;
+                return total;
+            }
+
+            void main() {
+                Triple value = make();
+                assert(value[2] == 3);
+                assert(sum(value) == 6);
+                assert(value == Triple.a);
+                int[] head = value[0 .. 2];
+                assert(head.length == 2);
+                assert(head[1] == 2);
+                Functions functions = Functions.a;
+                assert(functions[1]() == 2);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine asserts on a slice assignment to an enum of "
+            ~ "a static array"),
+)) {
+    @("enumOfStaticArray.sliceAssignment." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Triple : int[3] { a = [1, 2, 3] }
+
+            void main() {
+                Triple value = Triple.a;
+                value[] = 5;
+                assert(value[0] == 5);
+                assert(value[2] == 5);
+                int[3] source = [7, 8, 9];
+                value[] = source[];
+                assert(value[1] == 8);
+                value[1 .. 3] = 4;
+                assert(value[0] == 7);
+                assert(value[2] == 4);
+            }
+        });
+    }
+}

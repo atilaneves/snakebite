@@ -2909,7 +2909,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // array's own sub-range, through `visit(SliceExp)`'s own
         // `compileBoundedSlice`, the same machinery a bare read of that
         // sub-range already goes through, bounds checks included.
-        if (target.e1.type.ty != Tsarray
+        auto targetType = target.e1.type.toBasetype;
+        if (targetType.ty != Tsarray
                 || target.lwr !is null || target.upr !is null)
             return compileDynamicSliceAssign(
                 expression, target, destOffset, resolvedTarget);
@@ -2917,7 +2918,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tarray;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
-        auto sarrayType = target.e1.type.isTypeSArray;
+        auto sarrayType = targetType.isTypeSArray;
         const elementFacts = TypeFacts.of(sarrayType.next);
 
         const dim = cast(size_t) sarrayType.dim.toInteger;
@@ -2944,7 +2945,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? compileAddress(target.e1)
             : loadSlicePointer(resolvedTarget, TypeFacts.of(target.type));
 
-        const rightTy = expression.e2.type.ty;
+        const rightTy = expression.e2.type.toBasetype.ty;
         import snakebite.nativelayout: isStoredLiteral;
 
         if (isStoredLiteral(expression.e2)) {
@@ -3030,8 +3031,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tarray, Tpointer, Tsarray, Tvoid;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
-        if (target.e1.type.ty != Tarray && target.e1.type.ty != Tpointer
-                && target.e1.type.ty != Tsarray)
+        const targetKind = target.e1.type.toBasetype.ty;
+        if (targetKind != Tarray && targetKind != Tpointer
+                && targetKind != Tsarray)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -6662,7 +6664,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tsarray;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
-        if (expression.type.ty == Tsarray)
+        if (expression.type.toBasetype.ty == Tsarray)
             return compileStaticArrayLiteral(expression, destOffset);
 
         const facts = TypeFacts.of(expression.type);
@@ -6733,7 +6735,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileStaticArrayLiteral(
         ArrayLiteralExp expression, in size_t destOffset,
     ) {
-        auto sarrayType = expression.type.isTypeSArray;
+        auto sarrayType = expression.type.toBasetype.isTypeSArray;
         const elementFacts = TypeFacts.of(sarrayType.next);
 
         const count =
