@@ -2982,8 +2982,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         public size_t storageStaticIndexLength(IndexExp expression) {
-            return cast(size_t) expression.e1.type.isTypeSArray.dim
-                .toInteger;
+            return cast(size_t) expression.e1.type.toBasetype.isTypeSArray
+                .dim.toInteger;
         }
 
         public void* storageIndexValue(
@@ -3033,7 +3033,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             import snakebite.nativelayout:
                 arrayPointerOffset, loadIntegral;
 
-            const stride = evaluator.factsOf(expression.e1.type.nextOf).size;
+            const stride =
+                evaluator.factsOf(expression.e1.type.toBasetype.nextOf).size;
             const value = loadIntegral(index, size_t.sizeof, false);
             auto elements = cast(ubyte*) loadIntegral(
                 cast(ubyte*) base + arrayPointerOffset,
@@ -3048,7 +3049,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         ) {
             import snakebite.nativelayout: loadIntegral;
 
-            const stride = evaluator.factsOf(expression.e1.type.nextOf).size;
+            const stride =
+                evaluator.factsOf(expression.e1.type.toBasetype.nextOf).size;
             const value = loadIntegral(index, size_t.sizeof, false);
             return cast(ubyte*) base + value * stride;
         }
@@ -3058,7 +3060,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         ) {
             import snakebite.nativelayout: loadIntegral;
 
-            const stride = evaluator.factsOf(expression.e1.type.nextOf).size;
+            const stride =
+                evaluator.factsOf(expression.e1.type.toBasetype.nextOf).size;
             const value = loadIntegral(index, size_t.sizeof, false);
             auto elements = cast(ubyte*) pointer;
             if (elements is null)
