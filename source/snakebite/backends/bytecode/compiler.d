@@ -5084,14 +5084,21 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         assert(expression.lowering is null);
 
-        const facts = TypeFacts.of(expression.e1.type);
+        const leftFacts = TypeFacts.of(expression.e1.type);
+        const rightFacts = TypeFacts.of(expression.e2.type);
 
-        const leftOffset = reserveTemp(facts);
-        evalInto(expression.e1, leftOffset, facts.size);
-        const rightOffset = reserveTemp(facts);
-        evalInto(expression.e2, rightOffset, facts.size);
+        const leftOffset = reserveTemp(leftFacts);
+        evalInto(expression.e1, leftOffset, leftFacts.size);
+        const rightOffset = reserveTemp(rightFacts);
+        evalInto(expression.e2, rightOffset, rightFacts.size);
 
-        emit(&opStaticArrayEqual, leftOffset, rightOffset, facts.size);
+        if (leftFacts.size != rightFacts.size) {
+            emit(&opConstant, destOffset,
+                addConstant(expression.op == EXP.notEqual), 1);
+            return;
+        }
+
+        emit(&opStaticArrayEqual, leftOffset, rightOffset, leftFacts.size);
         if (expression.op == EXP.notEqual)
             emit(&opLogicalNot, leftOffset, 0, 1);
         if (destOffset != leftOffset)

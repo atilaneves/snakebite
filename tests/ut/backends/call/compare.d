@@ -855,6 +855,88 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+
+// Two static arrays whose lengths differ: dmd's `shouldUseMemcmp` accepts
+// them once the element types are memcmp-compatible, without checking
+// that the lengths match, so compiled D reads past the shorter operand.
+// snakebite treats differing lengths as unequal instead, without reading
+// past either operand's storage.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd and ldc2 read past the shorter static array and disagree " ~
+        "on the result - pinned below"),
+)) {
+    @("compare.staticArrayEquality.differentLengths." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        true.shouldBeRetOf!(
+            backend,
+            q{
+                int[3] a() {
+                    return [1, 2, 3];
+                }
+
+                uint[2] b() {
+                    return [1, 2];
+                }
+
+                int[2] c() {
+                    return [1, 2];
+                }
+
+                uint[2] same() {
+                    return [1, 2];
+                }
+
+                uint[2] different() {
+                    return [1, 3];
+                }
+
+                bool compareStatic() {
+                    return !(a() == b())
+                        && !(b() == a())
+                        && (a() != b())
+                        && (b() != a())
+                        && (c() == same())
+                        && (same() == c())
+                        && !(c() == different())
+                        && (c() != different());
+                }
+            },
+            "compareStatic",
+        );
+    }
+}
+
+// dmd's own runtime reads past the shorter operand for two static arrays
+// of different lengths; ldc2 gives a different answer for the same code.
+// This pins what native dmd actually returns, the divergence
+// `Because.diverges` names above.
+@("compare.staticArrayEquality.differentLengths.Native.diverges")
+@Tags("Native")
+unittest {
+    true.shouldBeRetOf!(
+        Native,
+        q{
+            int[3] a() {
+                return [1, 2, 3];
+            }
+
+            uint[2] b() {
+                return [1, 2];
+            }
+
+            bool compareStatic() {
+                return (a() == b())
+                    && !(b() == a())
+                    && !(a() != b())
+                    && (b() != a());
+            }
+        },
+        "compareStatic",
+    );
+}
+
 // The four orderings over `real`, each pinned on both sides of its
 // boundary the same way the integral versions above are. Every operand
 // comes from a call so dmd cannot fold the comparison away.
