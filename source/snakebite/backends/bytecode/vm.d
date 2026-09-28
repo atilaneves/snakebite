@@ -1835,12 +1835,11 @@ private const(Instruction)* runCastAs(CastKind kind, Decoded)(
             ),
             execution.source, execution.destination,
         );
-    else static if (kind == sarrayToSlice) {
+    else static if (kind == sarrayToSlice)
         applyCastAs!kind(
             CastLayout(kind, 0, 0, false, false, 0, 0, execution.width),
             execution.source, execution.destination,
         );
-    }
     else static if (kind == sarrayToPointer || kind == sliceToPointer
             || kind == pointerToArray || kind == pointerToIntegral
             || kind == delegateToPointer)

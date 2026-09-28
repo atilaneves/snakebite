@@ -368,6 +368,21 @@ unittest {
 }
 
 
+@("kind.copy.functionPointerToPointer")
+unittest {
+    auto function_ = castFunctionOf(q{
+        void* cast_(int function(int) callback) {
+            return cast(void*) callback;
+        }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastKind.copy;
+}
+
+
 @("kind.copy.aaToClass")
 unittest {
     auto function_ = castFunctionOf(q{
