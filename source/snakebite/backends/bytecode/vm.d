@@ -529,71 +529,85 @@ private void dispatch(
 
     while (true) {
         try {
-            if (active.pc is null || active.pc is active.end) {
+            if (pc is null || pc is active.end) {
                 active.cleanup(frames);
                 if (active.parent is null)
                     return;
                 active = popActivation(active, frames);
-                active.pc = active.resume;
+                pc = active.resume;
                 continue;
             }
 
-            const instruction = active.pc;
+            const instruction = pc;
             const handler = instruction.handler;
             if (handler is &opCall) {
+                active.pc = instruction;
                 state.current = active;
                 const next = handler(instruction, active, &state);
                 if (state.pending !is null) {
                     active = state.pending;
                     state.pending = null;
+                    pc = active.pc;
                 } else
-                    active.pc = next;
+                    pc = next;
             } else
-                active.pc = handler(instruction, active, &state);
+                pc = handler(instruction, active, &state);
         } catch (Throwable throwable) {
-            size_t firstHandler;
-            while (true) {
-                try {
-                    unwindFinally(throwable, () { active.cleanup(frames); });
-                } catch (Throwable chained) {
-                    throwable = chained;
-                }
-                const handler = findHandler(
-                    active.exceptionHandlers[firstHandler .. $], active.pc,
-                    throwable.classinfo);
-                if (handler is null || (active.end !is null
-                        && (handler.handler < active.start
-                            || handler.handler >= active.end))) {
-                    if (active.parent is null)
-                        throw throwable;
-                    active = popActivation(active, frames);
-                    firstHandler = 0;
-                    continue;
-                }
-
-                if (handler.cleanupEnd !is null) {
-                    try {
-                        unwindFinally(throwable, () {
-                            dispatch(handler.handler, active.frame,
-                                active.returnPlace, active.constants,
-                                active.callSites, active.assertSites,
-                                active.exceptionHandlers, frames,
-                                handler.cleanupEnd);
-                        });
-                    } catch (Throwable chained) {
-                        throwable = chained;
-                    }
-                    firstHandler = handler - active.exceptionHandlers.ptr + 1;
-                    continue;
-                }
-
-                if (handler.catchOffset != size_t.max)
-                    *cast(void**)(active.frame + handler.catchOffset) =
-                        cast(void*) throwable;
-                active.pc = handler.handler;
-                break;
-            }
+            active.pc = pc;
+            active = handleException(active, frames, throwable);
+            pc = active.pc;
         }
+    }
+}
+
+// Cleanup delegates must not capture the normal dispatch loop's state:
+// an escaped activation pointer forces a reload after every instruction.
+private Activation* handleException(
+    Activation* active,
+    FrameStack* frames,
+    Throwable throwable,
+) {
+    size_t firstHandler;
+    while (true) {
+        try {
+            unwindFinally(throwable, () { active.cleanup(frames); });
+        } catch (Throwable chained) {
+            throwable = chained;
+        }
+        const handler = findHandler(
+            active.exceptionHandlers[firstHandler .. $], active.pc,
+            throwable.classinfo);
+        if (handler is null || (active.end !is null
+                && (handler.handler < active.start
+                    || handler.handler >= active.end))) {
+            if (active.parent is null)
+                throw throwable;
+            active = popActivation(active, frames);
+            firstHandler = 0;
+            continue;
+        }
+
+        if (handler.cleanupEnd !is null) {
+            try {
+                unwindFinally(throwable, () {
+                    dispatch(handler.handler, active.frame,
+                        active.returnPlace, active.constants,
+                        active.callSites, active.assertSites,
+                        active.exceptionHandlers, frames,
+                        handler.cleanupEnd);
+                });
+            } catch (Throwable chained) {
+                throwable = chained;
+            }
+            firstHandler = handler - active.exceptionHandlers.ptr + 1;
+            continue;
+        }
+
+        if (handler.catchOffset != size_t.max)
+            *cast(void**)(active.frame + handler.catchOffset) =
+                cast(void*) throwable;
+        active.pc = handler.handler;
+        return active;
     }
 }
 
@@ -980,15 +994,19 @@ private const(Instruction)* callFunction(Decoded)(
     in ptrdiff_t contextAdjustment = 0,
 ) {
     import core.stdc.string: memcpy;
+    import std.algorithm: max;
 
     const mark = execution.frames.mark;
     scope(failure) execution.frames.release(mark);
+    assert(callee.frameAlignment > 0
+        && (callee.frameAlignment & (callee.frameAlignment - 1)) == 0);
+    const alignment = max(callee.frameAlignment, uint(Activation.alignof));
+    const mask = size_t(alignment) - 1;
+    const frameOffset = (Activation.sizeof + mask) & ~mask;
     auto activation = cast(Activation*) execution.frames.reserve(
-        Activation.sizeof, Activation.alignof);
-    *activation = Activation.init;
+        frameOffset + callee.frameSize, alignment);
     activation.frameMark = mark;
-    activation.frame = execution.frames.reserve(
-        callee.frameSize, callee.frameAlignment);
+    activation.frame = cast(ubyte*) activation + frameOffset;
 
     // An inferred function literal can convert to a delegate without
     // gaining a context parameter. Use its declared parameter layout;
@@ -1010,6 +1028,8 @@ private const(Instruction)* callFunction(Decoded)(
     initializeClosure(callee, activation.frame, execution.frames);
 
     activation.pc = activation.start = callee.instructions.ptr;
+    activation.end = null;
+    activation.resume = null;
     activation.returnPlace = site.returnWidth == 0 ? null : execution.destination;
     activation.constants = callee.constants;
     activation.callSites = callee.callSites;
@@ -1029,6 +1049,17 @@ private const(Instruction)* callFunction(Decoded)(
 // unused: there is no frame slot on the receiving end, only `returnPlace`.
 public alias opReturn =
     execute!(runReturn, OperandKind.immediate, OperandKind.storage);
+
+package const(Instruction)* opThenReturn(alias operation)(
+    const(Instruction)* pc,
+    Activation* activation,
+    DispatchState* state,
+) {
+    const next = operation(pc, activation, state);
+    // Cleanup can execute only the producer, with the return outside its
+    // instruction range.
+    return next is activation.end ? next : opReturn(next, activation, state);
+}
 
 private const(Instruction)* runReturn(Decoded)(
     ref Decoded execution,
