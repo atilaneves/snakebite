@@ -841,7 +841,7 @@ private void storeValue(
     NativeData* nativeData = null,
 ) {
     import core.stdc.string: memcpy, memset;
-    import dmd.astenums: TY, Tarray, Tpointer, Tsarray;
+    import dmd.astenums: TY, Tarray, Tdelegate, Tpointer, Tsarray;
     import dmd.expressionsem: toComplex, toImaginary, toInteger, toReal;
     import dmd.typesem: mutableOf, nextOf, size, toBasetype;
     import std.conv: text;
@@ -904,7 +904,12 @@ private void storeValue(
 
     if (auto literal = value.isFuncExp) {
         assert(symbolAddress !is null);
-        *cast(void**) place = symbolAddress(literal.fd);
+        if (type.ty == Tdelegate) {
+            *cast(void**) (bytes + delegateContextOffset) = null;
+            *cast(void**) (bytes + delegateFunctionOffset) =
+                symbolAddress(literal.fd);
+        } else
+            *cast(void**) place = symbolAddress(literal.fd);
         return;
     }
 

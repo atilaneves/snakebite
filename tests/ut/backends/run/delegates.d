@@ -283,3 +283,77 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// A static (thread-local) variable initialized from a non-capturing
+// lambda has a null context word: dmd's `FuncExp` lowering for a static
+// initializer stores only the function address, at offset 0 of the
+// delegate's own two words - the context word, not `funcptr`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable's value at compile time"),
+)) {
+    @("staticDelegateInitializerHasNullContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                static int delegate() global = delegate() => 5;
+
+                assert(global.ptr is null);
+                assert(global.funcptr !is null);
+                assert(global() == 5);
+            }
+        });
+    }
+}
+
+// The same module-scope `FuncExp` initializer, but through an enum of a
+// delegate. dmd's own runtime codegen for this case is a compiler bug:
+// it stores the function address in `funcptr`'s slot, but reads `ptr` as
+// nonzero and `funcptr` as null when the enum member is fetched, so
+// calling it dereferences a null function pointer and crashes - the
+// sibling test below pins those (non-crashing) field values without
+// calling through them. `ldc2 -run`, the interpreter and the bytecode
+// backend all agree with the D spec.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable's value at compile time"),
+    Omit!(Native, Because.diverges,
+        "dmd's runtime codegen reads an enum-of-delegate module "
+            ~ "initializer's fields swapped and crashes when it is "
+            ~ "called; ldc follows the spec"),
+)) {
+    @("enumOfDelegateModuleInitializerHasNullContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Getter : int delegate() { a = delegate() => 9 }
+            Getter gg = Getter.a;
+
+            void main() {
+                assert(gg.ptr is null);
+                assert(gg.funcptr !is null);
+                assert(gg() == 9);
+            }
+        });
+    }
+}
+
+// Sibling pinning the divergence above: `dmd -run` itself, real compiled
+// D, gives an enum-of-delegate module initializer's fields swapped
+// (`ptr` nonzero, `funcptr` null) and never calls through them, since
+// calling crashes.
+@("enumOfDelegateModuleInitializerHasNullContext.Native")
+@Tags(Native.stringof)
+unittest {
+    0.shouldBeStatusOf!(Native, q{
+        enum Getter : int delegate() { a = delegate() => 9 }
+        Getter gg = Getter.a;
+
+        void main() {
+            assert(gg.ptr !is null);
+            assert(gg.funcptr is null);
+        }
+    });
+}
