@@ -501,10 +501,6 @@ public struct NativeData {
         _tls = PerThread!(TlsSlots*)(() => new TlsSlots);
     }
 
-    // A static-initializer constant whose native layout only a druntime
-    // call can build (an associative array - see `storeValue`'s `Taarray`
-    // case): calls `function_` the way any other FFI barrier crossing
-    // does, through the same plan a backend's ordinary calls use.
     private void callNative(
         imported!"dmd.func".FuncDeclaration function_,
         void* returnPlace,
@@ -783,10 +779,8 @@ private alias SymbolAddress =
     void* delegate(imported!"dmd.declaration".Declaration);
 // This thread's address of a thread-local symbol, by linker name.
 private alias ThreadLocalAddress = void* delegate(in char[] name);
-// Calls an already-compiled function, the way a backend's own FFI plan
-// would: `arguments[i]` is the address of parameter `i`'s own native
-// bytes, and the result lands at `returnPlace` - see `NativeData.
-// callNative`.
+// Calls `function_` natively: `arguments[i]` is the address of parameter
+// `i`'s bytes, and the result goes to `returnPlace`.
 private alias NativeCall = void delegate(
     imported!"dmd.func".FuncDeclaration function_,
     void* returnPlace,
@@ -1033,14 +1027,8 @@ private void storeValue(
             return;
         }
 
-        // dmd's own static-initializer lowering (`AssocArrayLiteralExp.
-        // lowering`, `dmd.semantic2.lowerStaticAAs`) is always a call to
-        // `object._d_assocarrayliteralTX!(K, V)` on this same literal's own
-        // `keys`/`values` - the native layout of a `Taarray` constant is
-        // that druntime function's own return value, so it is built by
-        // calling it for real, on those pairs' native bytes, the same way
-        // a dynamic associative-array literal is built at run time - not
-        // by hand-laying-out druntime's internal hashtable here.
+        // An associative array's layout is druntime's: its literal's
+        // lowering, `_d_assocarrayliteralTX`, builds it.
         case Taarray: {
             auto literal = value.isAssocArrayLiteralExp;
             assert(literal !is null, text("no native layout for the ",

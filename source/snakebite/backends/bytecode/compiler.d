@@ -121,9 +121,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _plans.resolve(nativeSymbolName(symbol));
     }
 
-    // A static-initializer constant's own druntime call (`NativeData.
-    // callNative`, `storeValue`'s `Taarray` case) - the same plan an
-    // ordinary compiled call to `function_` would use.
     private void callNative(
         FuncDeclaration function_,
         void* returnPlace,
