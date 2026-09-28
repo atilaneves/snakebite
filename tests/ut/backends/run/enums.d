@@ -93,19 +93,13 @@ static foreach (backend; Matrix!()) {
 // indexing it must read through the base type, not stop at the enum's own
 // kind. `frontend.storage`'s index resolver used to test the index target's
 // raw `.ty` against `Tsarray`, which an enum's own `.ty` (`Tenum`) never
-// matches. `frontend.storage` is shared, but `Interpreter`'s and
-// `Bytecode`'s own downstream handling of an enum-of-static-array index
-// target (`walker.d`/`compiler.d`) is not yet fixed - both crash the host
-// process outright, out of this PR's scope.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "crashes: walker.d's own index handling is not yet fixed for an "
-            ~ "enum-of-static-array target (issue #441, walker.d part)"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "crashes: compiler.d's own index handling is not yet fixed for "
-            ~ "an enum-of-static-array target (issue #441, compiler.d "
-            ~ "part)"),
-)) {
+// matches. `frontend.storage` is shared; `Interpreter`'s and `Bytecode`'s
+// own downstream handling of an enum-of-static-array index target
+// (`walker.d`'s `storageStaticIndexLength`, `compiler.d`'s own copy) had
+// the same raw-`.ty`-shaped bug: each tested `expression.e1.type
+// .isTypeSArray` directly, so an enum base type never matched and both
+// crashed the host process reading through a null `TypeSArray`.
+static foreach (backend; Matrix!()) {
     @("enumOfStaticArray.indexing." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -129,19 +123,12 @@ static foreach (backend; Matrix!(
 // array's own two-word layout - `.length` and indexing must read through
 // the base type. `frontend.storage`'s `.length` and index resolvers used to
 // test the raw `.ty` against `Tarray`, missing an enum base the same way.
-// As with the static-array case above, `Interpreter`'s and `Bytecode`'s
-// own downstream handling (`walker.d`/`compiler.d`) is not yet fixed and
-// crashes the host process, out of this PR's scope.
-static foreach (backend; Matrix!(
-    Omit!(Interpreter, Because.unconfirmed,
-        "crashes: walker.d's own index/length handling is not yet fixed "
-            ~ "for an enum-of-dynamic-array target (issue #441, walker.d "
-            ~ "part)"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "crashes: compiler.d's own index/length handling is not yet "
-            ~ "fixed for an enum-of-dynamic-array target (issue #441, "
-            ~ "compiler.d part)"),
-)) {
+// `Interpreter`'s and `Bytecode`'s own element-stride lookups
+// (`walker.d`/`compiler.d`) also matter here: `expression.e1.type.nextOf`
+// already unwraps an enum base by itself (`dmd.typesem.nextOf` forwards
+// through `TypeEnum.memType`), so this case worked once the shared
+// resolver's own normalisation reached it.
+static foreach (backend; Matrix!()) {
     @("enumOfDynamicArray.lengthAndIndexing." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -164,20 +151,12 @@ static foreach (backend; Matrix!(
 // An enum whose base type is a pointer indexes exactly like the pointer
 // itself. `frontend.storage`'s index resolver used to test the raw `.ty`
 // against `Tpointer`, missing an enum base the same way as the array cases
-// above. `Interpreter`'s and `Bytecode`'s own downstream handling
-// (`walker.d`/`compiler.d`) is not yet fixed and crashes the host process,
-// out of this PR's scope; CTFE cannot take the address of a local variable
-// at compile time at all, regardless of enum normalisation.
+// above. CTFE cannot take the address of a local variable at compile time
+// at all, regardless of enum normalisation.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot interpret the address of a local variable at "
             ~ "compile time"),
-    Omit!(Interpreter, Because.unconfirmed,
-        "crashes: walker.d's own index handling is not yet fixed for an "
-            ~ "enum-of-pointer target (issue #441, walker.d part)"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "crashes: compiler.d's own index handling is not yet fixed for "
-            ~ "an enum-of-pointer target (issue #441, compiler.d part)"),
 )) {
     @("enumOfPointer.indexing." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -201,15 +180,17 @@ static foreach (backend; Matrix!(
 // integral value gets. `nativelayout.storeValue`'s int-to-pointer fast
 // path used to run before its own `toBasetype` normalisation, so
 // initialising an enum-of-pointer local from one fell through to the
-// trailing "no native layout" throw instead. `Bytecode`'s own downstream
-// handling (`compiler.d`) is not yet fixed and crashes the host process,
-// out of this PR's scope.
-static foreach (backend; Matrix!(
-    Omit!(Bytecode, Because.unconfirmed,
-        "crashes: compiler.d's own handling is not yet fixed for an "
-            ~ "enum-of-pointer local initialised from an integer literal "
-            ~ "(issue #441, compiler.d part)"),
-)) {
+// trailing "no native layout" throw instead. That is fixed; `Bytecode`'s
+// `compileVariableInitializer` had a separate bug this snippet also
+// reaches: it built its rejection-path error text eagerly, for every
+// declared variable, by printing the guest declaration through dmd's own
+// `Expression.toString`. Printing this particular declaration - a cast to
+// an enum whose only member is a pointer literal `null`, not an
+// `IntegerExp` - crashes inside dmd's own pretty-printer
+// (`hdrgen.expressionPrettyPrint`'s enum-member lookup dereferences a
+// null `isIntegerExp`). `operation` is now `lazy`, so it is only rendered
+// when a rejection actually happens.
+static foreach (backend; Matrix!()) {
     @("enumOfPointer.fromIntegerLiteral." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
