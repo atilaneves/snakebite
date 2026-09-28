@@ -924,10 +924,10 @@ public alias opCall =
 private const(Instruction)* runCall(Decoded)(
     ref Decoded execution,
 ) {
-    const site = execution.callSites[execution.source];
+    const site = &execution.callSites[execution.source];
     final switch (site.kind) with (CallSite.Kind) {
     case guest:
-        return callFunction(execution, site,
+        return callFunction(execution, *site,
             site.callee !is null ? site.callee : site.prepareGuest());
     case indirect:
         auto callee =
@@ -941,7 +941,7 @@ private const(Instruction)* runCall(Decoded)(
                     contextAdjustment))
                 return execution.next;
         }
-        return callFunction(execution, site, cast(const(Function)*) callee,
+        return callFunction(execution, *site, cast(const(Function)*) callee,
             contextAdjustment);
     case native:
         auto arguments = gatherArguments(execution, site.args);
