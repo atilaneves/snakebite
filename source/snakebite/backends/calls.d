@@ -202,6 +202,7 @@ public struct CallSelection {
     private static ParameterType parameterTypeOf(FuncDeclaration function_) {
         import dmd.astenums: Tfloat32, Tfloat64, Tfloat80,
             Tuns16, Tuns32, Tuns64;
+        import dmd.typesem: toBasetype;
         import snakebite.exception: SnakebiteException;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import std.conv: text;
@@ -214,7 +215,12 @@ public struct CallSelection {
                 "snakebite's builtin table has no entry for `",
                 function_.toString, "`, which takes no parameters"));
 
-        const parameterType = parameterList[0].type;
+        // Every builtin this table serves declares its first parameter
+        // with a literal basic type in druntime's own source (never an
+        // enum), so this is a no-op today - kept for the same reason
+        // every other type-kind dispatch in this codebase normalises
+        // first, not because a concrete enum case is known to reach it.
+        const parameterType = parameterList[0].type.toBasetype;
         switch (parameterType.ty) {
             case Tfloat32: return ParameterType.float_;
             case Tfloat64: return ParameterType.double_;
