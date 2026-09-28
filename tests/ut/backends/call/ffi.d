@@ -3374,6 +3374,30 @@ static foreach (backend; Matrix!(
 }
 
 
+// C++ functions use the System V C variadic convention on this target,
+// so their call sites must include the extra argument types in the plan.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("variadic.cppLinkage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        331.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_sum_ints_backend")
+                extern(C++) int nativeSum(int first, ...);
+
+                int answer() {
+                    return nativeSum(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
 // `RuntimeTypes.get`'s own top-level cache (keyed by `Type` identity) is
 // generic - it already covers the `TypeTuple`/qualified-wrapper branches
 // `build` below fabricates for an `extern(D)` untyped variadic call
