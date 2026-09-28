@@ -88,3 +88,109 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// An enum whose base type is a static array has the array's own layout -
+// indexing it must read through the base type, not stop at the enum's own
+// kind. `frontend.storage`'s index resolver used to test the index target's
+// raw `.ty` against `Tsarray`, which an enum's own `.ty` (`Tenum`) never
+// matches. `frontend.storage` is shared, but `Interpreter`'s and
+// `Bytecode`'s own downstream handling of an enum-of-static-array index
+// target (`walker.d`/`compiler.d`) is not yet fixed - both crash the host
+// process outright, out of this PR's scope.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "crashes: walker.d's own index handling is not yet fixed for an "
+            ~ "enum-of-static-array target (issue #441, walker.d part)"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "crashes: compiler.d's own index handling is not yet fixed for "
+            ~ "an enum-of-static-array target (issue #441, compiler.d "
+            ~ "part)"),
+)) {
+    @("enumOfStaticArray.indexing." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Bytes : ubyte[3] {
+                a = [9, 9, 9],
+            }
+
+            void main() {
+                ubyte[3] raw = [1, 2, 3];
+                Bytes value = cast(Bytes) raw;
+                assert(value[0] == 1);
+                assert(value[1] == 2);
+                assert(value[2] == 3);
+            }
+        });
+    }
+}
+
+// An enum whose base type is a dynamic array (here `string`) has the
+// array's own two-word layout - `.length` and indexing must read through
+// the base type. `frontend.storage`'s `.length` and index resolvers used to
+// test the raw `.ty` against `Tarray`, missing an enum base the same way.
+// As with the static-array case above, `Interpreter`'s and `Bytecode`'s
+// own downstream handling (`walker.d`/`compiler.d`) is not yet fixed and
+// crashes the host process, out of this PR's scope.
+static foreach (backend; Matrix!(
+    Omit!(Interpreter, Because.unconfirmed,
+        "crashes: walker.d's own index/length handling is not yet fixed "
+            ~ "for an enum-of-dynamic-array target (issue #441, walker.d "
+            ~ "part)"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "crashes: compiler.d's own index/length handling is not yet "
+            ~ "fixed for an enum-of-dynamic-array target (issue #441, "
+            ~ "compiler.d part)"),
+)) {
+    @("enumOfDynamicArray.lengthAndIndexing." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Greeting : string {
+                a = "xx",
+            }
+
+            void main() {
+                string raw = "hi";
+                Greeting value = cast(Greeting) raw;
+                assert(value.length == 2);
+                assert(value[0] == 'h');
+                assert(value[1] == 'i');
+            }
+        });
+    }
+}
+
+// An enum whose base type is a pointer indexes exactly like the pointer
+// itself. `frontend.storage`'s index resolver used to test the raw `.ty`
+// against `Tpointer`, missing an enum base the same way as the array cases
+// above. `Interpreter`'s and `Bytecode`'s own downstream handling
+// (`walker.d`/`compiler.d`) is not yet fixed and crashes the host process,
+// out of this PR's scope; CTFE cannot take the address of a local variable
+// at compile time at all, regardless of enum normalisation.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret the address of a local variable at "
+            ~ "compile time"),
+    Omit!(Interpreter, Because.unconfirmed,
+        "crashes: walker.d's own index handling is not yet fixed for an "
+            ~ "enum-of-pointer target (issue #441, walker.d part)"),
+    Omit!(Bytecode, Because.unconfirmed,
+        "crashes: compiler.d's own index handling is not yet fixed for "
+            ~ "an enum-of-pointer target (issue #441, compiler.d part)"),
+)) {
+    @("enumOfPointer.indexing." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3] data = [10, 20, 30];
+                enum Ptr : int* { z = null }
+                Ptr p = cast(Ptr) data.ptr;
+                assert(p[0] == 10);
+                assert(p[1] == 20);
+                assert(p[2] == 30);
+            }
+        });
+    }
+}

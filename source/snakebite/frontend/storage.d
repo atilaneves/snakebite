@@ -121,18 +121,23 @@ public struct StorageResolver(Result, Adapter) {
         }
 
         if (auto length = expression.isArrayLengthExp) {
-            if (length.e1.type.ty != Tarray)
+            if (length.e1.type.toBasetype.ty != Tarray)
                 return _adapter.storageValue(length);
             auto base = resolve(length.e1);
             return _adapter.storageArrayLength(length, base);
         }
 
         if (auto index = expression.isIndexExp) {
+            // An enum's own base type has the same layout as the enum
+            // itself, so indexing reads through it: `enum E : int[3]`
+            // indexes exactly like a plain `int[3]`.
+            auto indexBase = index.e1.type.toBasetype;
+
             // Static-array code generation evaluates the rightmost index
             // before recursing into the outer array expression. Keep that
             // language-defined order in the shared resolver; all other
             // index kinds evaluate the base before the index.
-            if (index.e1.type.ty == Tsarray) {
+            if (indexBase.ty == Tsarray) {
                 auto length = _adapter.storageStaticIndexLength(index);
                 auto indexValue = _adapter.storageIndexValue(index, length);
                 _adapter.storageIndexBounds(index, indexValue, length);
@@ -141,7 +146,7 @@ public struct StorageResolver(Result, Adapter) {
                     index, base, indexValue);
             }
 
-            if (index.e1.type.ty == Tarray) {
+            if (indexBase.ty == Tarray) {
                 // A normal dynamic-array index evaluates its index before
                 // the array expression. `$` needs the descriptor captured
                 // first, so that special form keeps the extra early step.
@@ -161,7 +166,7 @@ public struct StorageResolver(Result, Adapter) {
                 return _adapter.storageDynamicIndex(
                     index, base, indexValue);
             }
-            if (index.e1.type.ty == Tpointer) {
+            if (indexBase.ty == Tpointer) {
                 auto base = resolve(index.e1);
                 auto pointer = _adapter.storagePointerIndexBase(index, base);
                 auto indexValue = _adapter.storagePointerIndexValue(index);
