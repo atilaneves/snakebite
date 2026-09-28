@@ -203,7 +203,20 @@ public struct RuntimeTypes {
         }
 
         if (info is null) {
-            switch (type.ty) {
+            // Every basic scalar kind builds a `typeid` of its native D
+            // counterpart. `Tclass`/`Tstruct`/`Tenum`/`Tfunction`/
+            // `Tdelegate`/`Tpointer`/`Tsarray`/`Taarray`/`Tvector`/
+            // `Ttuple`/`Tarray` can never reach here with `info` still
+            // null: each either sets `info` unconditionally above (the
+            // three aggregate kinds) or returns out of `build` entirely
+            // on failure (the six kinds that recurse into a component
+            // type, plus the outer `Tarray` check just above) - a
+            // `final switch` catches a new `TY` member at compile time
+            // instead of silently returning `null` for it. Every other
+            // kind - `Timaginary*`/`Tcomplex*` (deprecated basic types
+            // with no `TypeInfo` builder here), and the placeholder,
+            // c-import, and semantic-only kinds - keeps today's `null`.
+            final switch (type.ty) {
                 case Tvoid: info = typeid(void); break;
                 case Tbool: info = typeid(bool); break;
                 case Tchar: info = typeid(char); break;
@@ -220,7 +233,16 @@ public struct RuntimeTypes {
                 case Tfloat32: info = typeid(float); break;
                 case Tfloat64: info = typeid(double); break;
                 case Tfloat80: info = typeid(real); break;
-                default: return null;
+
+                case Treference, Tident, Tnone, Timaginary32, Timaginary64,
+                    Timaginary80, Tcomplex32, Tcomplex64, Tcomplex80,
+                    Terror, Tinstance, Ttypeof, Tslice, Treturn, Tnull,
+                    Tint128, Tuns128, Ttraits, Tmixin, Tnoreturn, Ttag:
+                    return null;
+
+                case Tclass, Tstruct, Tenum, Tfunction, Tdelegate,
+                    Tpointer, Tsarray, Taarray, Tvector, Ttuple, Tarray:
+                    assert(0);
             }
         }
         return info;
