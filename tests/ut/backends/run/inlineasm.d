@@ -2,7 +2,7 @@ module ut.backends.run.inlineasm;
 
 
 import ut.backends;
-import snakebite.frontend.compiler: parseSnippet, withCompilerLock;
+import snakebite.frontend.compiler: frontend, parseSnippet;
 import std.conv: text;
 import std.file: mkdirRecurse, rmdirRecurse, tempDir, write;
 import std.path: buildPath;
@@ -293,10 +293,8 @@ unittest {
     // dmd looks up an import under `global.path`, a process-global
     // list `rootImportPaths` below does not itself populate; add it
     // the same way `snakebite.repl.Repl.this()` does for a real
-    // session, but under the frontend's own lock. `Repl.this()` does
-    // not take that lock around its own `addImport` call - a separate,
-    // pre-existing thread-safety gap, not this finding.
-    withCompilerLock({ addImport(directory); });
+    // session.
+    frontend!addImport(directory);
 
     parseSnippet(
         "import " ~ moduleName ~ ";",

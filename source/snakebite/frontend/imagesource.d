@@ -186,13 +186,14 @@ private extern(C++) class Collector
     // parse into a nested mixin makes it happen speculatively too.
     private extern(D) string addressGuard(Reference reference, in string key) {
         import dmd.typesem: pointerTo;
+        import snakebite.frontend.compiler: frontend;
 
         const untyped = text("mixin(q{&", key, "})");
         string guard = text("__traits(compiles, { auto pointer = ", untyped, "; })");
         foreach (function_; reference.functions) {
             if (function_.type.isTypeFunction is null)
                 continue;
-            auto pointerType = function_.type.pointerTo; // DMD caches mutable type nodes.
+            auto pointerType = frontend!pointerTo(function_.type);
             const declaration = text(sourceSpelling(pointerType.toChars.fromStringz),
                 " matched = pointer;");
             guard ~= text(" && __traits(compiles, { auto pointer = ", untyped,
@@ -205,6 +206,7 @@ private extern(C++) class Collector
         FuncDeclaration function_, in string key,
     ) {
         import dmd.typesem: pointerTo;
+        import snakebite.frontend.compiler: frontend;
         import snakebite.frontend.dmd.mangle: mangledNameOf;
 
         if (function_.type.isTypeFunction is null)
@@ -214,7 +216,7 @@ private extern(C++) class Collector
         // an inferred return type or attribute set dmd has not resolved
         // yet would otherwise print incomplete.
         const mangled = mangledNameOf(function_);
-        auto pointerType = function_.type.pointerTo; // DMD caches mutable type nodes.
+        auto pointerType = frontend!pointerTo(function_.type);
         const pointer = text(sourceSpelling(pointerType.toChars.fromStringz),
             " pointer = &", key, ";");
         const result = text("{\nstatic if (__traits(compiles, { mixin(q{", pointer,
@@ -502,43 +504,42 @@ private bool eachTemplateArgument(
 // even when their type requires a cast. Such casts require parentheses in
 // source. Token boundaries keep nested instances and string arguments intact.
 private string sourceSpelling(in char[] spelling) {
-    import dmd.lexer: Lexer;
-    import dmd.globals: global;
     import dmd.tokens: TOK;
+    import snakebite.frontend.compiler: lex;
 
-    const input = spelling ~ "\0";
-    scope lexer = new Lexer(null, input.ptr, 0, spelling.length,
-        false, false, global.errorSink, &global.compileEnv);
+    const tokens = lex(spelling);
     string result;
     size_t copied;
-    lexer.nextToken;
-    while (lexer.token.value != TOK.endOfFile) {
-        if (lexer.token.value != TOK.not) {
-            lexer.nextToken;
+    size_t next;
+    TOK value() => tokens[next].value;
+
+    while (value != TOK.endOfFile) {
+        if (value != TOK.not) {
+            ++next;
             continue;
         }
-        lexer.nextToken;
-        if (lexer.token.value != TOK.cast_)
+        ++next;
+        if (value != TOK.cast_)
             continue;
-        const start = lexer.token.ptr - input.ptr;
+        const start = tokens[next].offset;
         // Folded pointer and enum values can have more than one cast.
-        while (lexer.token.value == TOK.cast_) {
-            lexer.nextToken;
-            assert(lexer.token.value == TOK.leftParenthesis);
+        while (value == TOK.cast_) {
+            ++next;
+            assert(value == TOK.leftParenthesis);
             size_t depth;
             do {
-                if (lexer.token.value == TOK.leftParenthesis)
+                if (value == TOK.leftParenthesis)
                     ++depth;
-                else if (lexer.token.value == TOK.rightParenthesis)
+                else if (value == TOK.rightParenthesis)
                     --depth;
-                assert(lexer.token.value != TOK.endOfFile);
-                lexer.nextToken;
+                assert(value != TOK.endOfFile);
+                ++next;
             } while (depth);
         }
-        if (lexer.token.value == TOK.min || lexer.token.value == TOK.add)
-            lexer.nextToken;
-        lexer.nextToken;
-        const end = lexer.token.ptr - input.ptr;
+        if (value == TOK.min || value == TOK.add)
+            ++next;
+        ++next;
+        const end = tokens[next].offset;
         result ~= spelling[copied .. start] ~ "(" ~ spelling[start .. end] ~ ")";
         copied = end;
     }

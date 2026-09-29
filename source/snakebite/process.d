@@ -8,6 +8,9 @@ module snakebite.process;
 private:
 
 
+// `gc`: the frontend allocates like dmd does (`snakebite.gc`).
 // `cleanup:none`: no collection at exit. The process is about to end and
 // the OS takes its memory back; a final collection only costs time.
-extern(C) public __gshared string[] rt_options = ["gcopt=cleanup:none"];
+extern(C) public __gshared string[] rt_options = [
+    "gcopt=gc:" ~ imported!"snakebite.gc".gcName ~ " cleanup:none",
+];

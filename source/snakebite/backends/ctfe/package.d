@@ -84,6 +84,7 @@ private InterpretResult interpret(
     import dmd.typesem: nextOf;
     import snakebite.frontend.compiler:
         diagnosticMessage,
+        frontend,
         resetErrors,
         withCompilerLock;
 
@@ -109,12 +110,12 @@ private InterpretResult interpret(
     withCompilerLock({
         resetErrors;
 
-        auto callee = new VarExp(Loc.initial, function_);
+        auto callee = frontend!VarExp(Loc.initial, function_);
         callee.type = function_.type;
-        auto call = CallExp.create(Loc.initial, callee);
+        auto call = frontend!(CallExp.create)(Loc.initial, callee);
         call.type = function_.type.nextOf;
 
-        result.value = call.ctfeInterpret;
+        result.value = frontend!ctfeInterpret(call);
 
         if (result.value.isErrorExp !is null || global.errors != 0)
             result.error = diagnosticMessage;

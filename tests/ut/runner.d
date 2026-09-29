@@ -67,7 +67,8 @@ static import ut.backends.run.main,
     ut.repl.cli,
     ut.repl.cell,
     ut.repl.session,
-    ut.process;
+    ut.process,
+    ut.frontend.memory;
 
 // `bin/ut`: prepare the frontend for the selected tests, then run them.
 int run(string[] args) {
@@ -75,7 +76,17 @@ int run(string[] args) {
     import snakebite.frontend.compiler: Snippets, initialize;
     import ut.backends: prewarmFrontend;
     import unit_threaded.runner.options: Options;
+    import std.algorithm.iteration: filter;
+    import std.algorithm.searching: canFind;
+    import std.array: array;
+    import std.stdio: writeln;
+    import ut: selectFrontendMemoryFromArguments;
 
+    args = selectFrontendMemoryFromArguments(args);
+    const checkArena = args.canFind(checkArenaFlag);
+    if (args.canFind("-h") || args.canFind("--help"))
+        writeln("  ", checkArenaFlag, ": ", checkArenaHelp);
+    args = args.filter!(arg => arg != checkArenaFlag).array;
     initialize(Snippets.yes);
 
     // Parse every snippet/program the selected tests need in one serial
@@ -85,7 +96,7 @@ int run(string[] args) {
     // still needs the full, unstripped `args`.
     prewarmFrontend(Options(args.dup).testsToRun);
 
-    return args.runTests!(
+    const status = args.runTests!(
         "ut.backends.run.main",
         "ut.backends.run.arrays",
         "ut.backends.run.associative",
@@ -153,5 +164,26 @@ int run(string[] args) {
         "ut.repl.cell",
         "ut.repl.session",
         "ut.process",
+        "ut.frontend.memory",
     );
+    return checkArena ? status | arenaStatus : status;
+}
+
+private enum checkArenaFlag = "--check-arena";
+private enum checkArenaHelp =
+    "After the tests, fail if an arena word points into the GC heap "
+    ~ "(debug builds; run with --DRT-gcopt=disable:1 so no block it points "
+    ~ "to is freed first).";
+
+// Every test has run, so the arena holds everything they made the
+// frontend keep: no word of it may point into the GC heap.
+private int arenaStatus() {
+    import snakebite.frontend.compiler: arenaReport;
+    import std.stdio: stderr;
+
+    const report = arenaReport;
+    if (report.length == 0)
+        return 0;
+    stderr.write(report);
+    return 1;
 }

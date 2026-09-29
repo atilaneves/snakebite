@@ -11,4 +11,6 @@ unittest {
     import core.gc.config: config;
 
     config.cleanup.should == "none";
+    config.gc.should == "snakebite";
 }
+

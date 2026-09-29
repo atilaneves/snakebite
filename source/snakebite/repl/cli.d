@@ -17,6 +17,7 @@ public struct ReplOptions {
     public bool showHelp;
     public string[] files;
     public bool liveAfterFiles;
+    public bool lowmem;
 }
 
 
@@ -26,11 +27,9 @@ public int run(string[] args) {
     import snakebite.dependencyimage: DependencyImage;
     import snakebite.dub: fetchProject;
     import snakebite.project: loadProject, prepareDependencies, sourceSet;
+    import snakebite.gc: selectFrontendMemory;
     import snakebite.repl: Repl;
     import std.stdio: stderr, writeln;
-
-    // The REPL evaluates single snippets, so it is the snippet world.
-    initialize(Snippets.yes);
 
     const parsed = parseReplArgs(args);
     if (parsed.status != 0) {
@@ -42,6 +41,10 @@ public int run(string[] args) {
         writeln(parsed.diagnostic);
         return 0;
     }
+
+    selectFrontendMemory(parsed.options.lowmem);
+    // The REPL evaluates single snippets, so it is the snippet world.
+    initialize(Snippets.yes);
 
     try {
         string[] importPaths = parsed.options.importPaths.dup;
@@ -307,6 +310,7 @@ public struct ReplCliResult {
 
 public ReplCliResult parseReplArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
+    import snakebite.gc: lowmemHelp;
     import std.getopt: getopt, GetOptException;
 
     ReplCliResult result;
@@ -333,6 +337,7 @@ public ReplCliResult parseReplArgs(string[] args) {
                 &backendName,
             "l", "Stay interactive after loading file arguments.",
                 &result.options.liveAfterFiles,
+            "lowmem", lowmemHelp, &result.options.lowmem,
         );
     } catch (GetOptException exception) {
         return ReplCliResult(1, exception.msg);
@@ -370,4 +375,5 @@ private enum helpText =
     "                        valid: "
         ~ imported!"snakebite.backends".validBackendNames ~ "\n" ~
     "  -l                    Stay interactive after loading file arguments\n" ~
+    "  --lowmem              " ~ imported!"snakebite.gc".lowmemHelp ~ "\n" ~
     "  -h, --help            Show this help\n";

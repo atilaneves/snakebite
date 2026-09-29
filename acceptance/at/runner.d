@@ -5,7 +5,9 @@ module at.runner;
 int run(string[] args) {
     import snakebite.frontend.compiler: Snippets, initialize;
     import unit_threaded;
+    import ut: selectFrontendMemoryFromArguments;
 
+    args = selectFrontendMemoryFromArguments(args);
     initialize(Snippets.yes);
 
     return args.runTests!(

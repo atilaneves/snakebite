@@ -931,10 +931,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // Acquire load - see `forceIfNeeded`'s own doc
         // (`snakebite.frontend.compiler`) for why the unlocked check
         // needs that much, not a plain field read.
-        forceIfNeeded(
+        forceIfNeeded!functionSemantic3(
             () => atomicLoad!(MemoryOrder.acq)(function_.semanticRun)
                 >= PASS.semantic3done,
-            () { functionSemantic3(function_); },
+            function_,
         );
 
         return FrameLayout.of(function_);

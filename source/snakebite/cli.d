@@ -18,6 +18,7 @@ public struct Options {
     // run time, not just its build time. This flag trades that away for
     // faster image builds, for a caller that only checks behaviour.
     public bool noOptimiseImage;
+    public bool lowmem;
 }
 
 
@@ -27,6 +28,7 @@ public int run(string[] args) {
     import snakebite.dependencyimage: Optimise;
     import snakebite.dub: fetchProject;
     import snakebite.execution: executeBackend, prepareProject;
+    import snakebite.gc: selectFrontendMemory;
     import std.algorithm.iteration: map;
     import std.array: array;
     import std.file: chdir, exists, getcwd, isDir;
@@ -39,6 +41,7 @@ public int run(string[] args) {
             .write(parsed.diagnostic);
     if (parsed.status != 0 || parsed.options.showHelp)
         return parsed.status;
+    selectFrontendMemory(parsed.options.lowmem);
 
     try {
         string projectDirectory = parsed.options.projectDirectory;
@@ -137,6 +140,7 @@ public struct CliResult {
 
 public CliResult parseArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
+    import snakebite.gc: lowmemHelp;
     import std.algorithm.searching: countUntil;
     import std.getopt: getopt, GetOptException;
 
@@ -162,6 +166,7 @@ public CliResult parseArgs(string[] args) {
                 &result.options.versions,
             "no-optimise-image", "Build the dependency image without optimisation (faster build, slower run).",
                 &result.options.noOptimiseImage,
+            "lowmem", lowmemHelp, &result.options.lowmem,
         );
     } catch (GetOptException exception) {
         return CliResult(1, exception.msg);
@@ -204,4 +209,6 @@ private enum helpText =
     "  --version=<identifier>    Define a version identifier (repeatable)\n" ~
     "  --no-optimise-image       Build the dependency image without\n" ~
     "                            optimisation (faster build, slower run)\n" ~
+    "  --lowmem                  "
+        ~ imported!"snakebite.gc".lowmemHelp ~ "\n" ~
     "  -h, --help                Show this help\n";
