@@ -20,8 +20,8 @@ extern(C) bool executeIndirectCallPlan(
 import snakebite.backends.builtins: BuiltinCall;
 import snakebite.callarguments: CallArguments;
 import snakebite.nativevalue:
-    CastKind, floatingToBool, loadFloating, loadSigned, loadUnsigned,
-    storeFloating, storeIntegral;
+    CastKind, ComplexOperation, floatingToBool, loadFloating, loadSigned,
+    loadUnsigned, storeFloating, storeIntegral;
 import object: Throwable, TypeInfo_Class;
 
 private alias storeWidth = storeIntegral;
@@ -1209,6 +1209,37 @@ private const(Instruction)* runFloatBinary(string operation, Decoded)(
             *cast(const real*) (execution.source),
         );
     }
+    return execution.next;
+}
+
+// A complex operation: `destination` holds the left operand on entry and
+// the answer on exit, `source` the right operand, `width` the part width,
+// and `sourceWidth` what each operand holds, as `ComplexOperands.packed`.
+package alias opComplex(ComplexOperation operation) =
+    execute!(runComplex, OperandKind.storage, OperandKind.storage, operation);
+
+private const(Instruction)* runComplex(ComplexOperation operation, Decoded)(
+    ref Decoded execution,
+) {
+    import snakebite.nativevalue: applyComplex, ComplexOperands;
+
+    applyComplex!operation(execution.destination, execution.destination,
+        execution.source, ComplexOperands.unpack(execution.sourceWidth),
+        execution.width);
+    return execution.next;
+}
+
+// `-x` for a complex `x` in `destination`, whose part width is `width`.
+package alias opComplexNegate =
+    execute!(runComplexNegate, OperandKind.storage, OperandKind.immediate);
+
+private const(Instruction)* runComplexNegate(Decoded)(
+    ref Decoded execution,
+) {
+    import snakebite.nativevalue: negateComplex;
+
+    negateComplex(execution.destination, execution.destination,
+        execution.width);
     return execution.next;
 }
 

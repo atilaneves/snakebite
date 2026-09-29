@@ -16,15 +16,6 @@ import snakebite.backends.druntimehooks: DruntimeHook, planOf, specOf;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
 
 
-// Whether `type` is `float`/`double`/`real` - `TypeFacts` has no notion of
-// its own for this, unlike `isIntegral`/`isDynamicArray`, which drive
-// checks all over this compiler.
-private bool isFloatingType(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
-
-    return type.ty == Tfloat32 || type.ty == Tfloat64 || type.ty == Tfloat80;
-}
-
 // A pointer-sized temporary's facts: the shape every address this compiler
 // computes at run time - a `ref` binding, an array element's, an
 // allocation's result - shares, whatever the value living behind it
@@ -111,7 +102,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         _nativeData = NativeData(&_program.isRootOwned,
             &constantSymbolAddress,
             (name) => _plans.resolveThreadLocal(name),
-            &classRuntimeInfo);
+            &classRuntimeInfo, &callNative);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
@@ -128,6 +119,14 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             return callableAddress(function_, 0);
 
         return _plans.resolve(nativeSymbolName(symbol));
+    }
+
+    private void callNative(
+        FuncDeclaration function_,
+        void* returnPlace,
+        scope const(void*)[] arguments,
+    ) {
+        _plans.of(function_).call(returnPlace, arguments);
     }
 
     public override CompilationStatistics compilationStatistics() const {
@@ -576,7 +575,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opBranchTrue, opCall,
         opCastAs, opCastFixedAs,
         opCastToBool, opCastWidenSigned, opCastWidenUnsigned, opComplement,
-        opArrayEqual, opConstant, opCopy, opCopyFixed, opThenReturn,
+        opArrayEqual, opComplex, opComplexNegate, opConstant, opCopy,
+        opCopyFixed, opThenReturn,
         opDivideSigned, opDivideUnsigned,
         opEqual, opEqualBranch, opGreaterOrEqualSignedBranch,
         opGreaterOrEqualUnsignedBranch, opGreaterThanSignedBranch,
@@ -603,7 +603,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero,
         opTlsAddress, opTlsLoad, opTlsStore;
     import dmd.expressionsem: toInteger;
-    import dmd.typesem: nextOf;
+    import dmd.typesem: nextOf, toBasetype;
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, delegateTargetOf, functionNeedsClosure,
         outerFunctionOf;
@@ -1431,7 +1431,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileThrow(Expression expression, in Loc loc) {
         import dmd.astenums: Tclass;
 
-        if (expression is null || expression.type.ty != Tclass)
+        if (expression is null || expression.type.toBasetype.ty != Tclass)
             throw rejection(_function, loc, expression is null
                 ? "a null throw expression" : expressionText(expression));
 
@@ -1668,10 +1668,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     extern(D):
 
-    private TypeInfo_Class runtimeClassInfo(Type type) {
+    private TypeInfo_Class runtimeClassInfo(Type declared) {
         import dmd.astenums: Tclass;
         import std.conv: text;
 
+        auto type = declared.toBasetype;
         if (type.ty != Tclass)
             throw new SnakebiteException(text(
                 "bytecode compiler cannot compile a non-class catch type `",
@@ -1781,9 +1782,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.nativelayout: TypeFacts;
 
         const truth = TypeFacts.Truth.of(condition.type);
-        if (!truth.supported)
-            throw rejection(_function, condition.loc,
-                expressionText(condition));
 
         const facts = TypeFacts.of(condition.type);
         const valueOffset = reserveTemp(facts);
@@ -2867,11 +2865,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 expressionText(expression));
 
         size_t addressOffset;
-        if (expression.e1.type.ty == Tclass) {
+        auto aggregateType = expression.e1.type.toBasetype;
+        if (aggregateType.ty == Tclass) {
             addressOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, addressOffset, size_t.sizeof);
         } else {
-            if (expression.e1.type.isTypeStruct is null)
+            if (aggregateType.isTypeStruct is null)
                 throw rejection(_function, expression.loc,
                     expressionText(expression));
             addressOffset = compileAddress(expression.e1);
@@ -2936,7 +2935,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // array's own sub-range, through `visit(SliceExp)`'s own
         // `compileBoundedSlice`, the same machinery a bare read of that
         // sub-range already goes through, bounds checks included.
-        if (target.e1.type.ty != Tsarray
+        auto targetType = target.e1.type.toBasetype;
+        if (targetType.ty != Tsarray
                 || target.lwr !is null || target.upr !is null)
             return compileDynamicSliceAssign(
                 expression, target, destOffset, resolvedTarget);
@@ -2944,7 +2944,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tarray;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
-        auto sarrayType = target.e1.type.isTypeSArray;
+        auto sarrayType = targetType.isTypeSArray;
         const elementFacts = TypeFacts.of(sarrayType.next);
 
         const dim = cast(size_t) sarrayType.dim.toInteger;
@@ -2971,7 +2971,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? compileAddress(target.e1)
             : loadSlicePointer(resolvedTarget, TypeFacts.of(target.type));
 
-        const rightTy = expression.e2.type.ty;
+        const rightTy = expression.e2.type.toBasetype.ty;
         import snakebite.nativelayout: isStoredLiteral;
 
         if (isStoredLiteral(expression.e2)) {
@@ -3057,8 +3057,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tarray, Tpointer, Tsarray, Tvoid;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
-        if (target.e1.type.ty != Tarray && target.e1.type.ty != Tpointer
-                && target.e1.type.ty != Tsarray)
+        const targetKind = target.e1.type.toBasetype.ty;
+        if (targetKind != Tarray && targetKind != Tpointer
+                && targetKind != Tsarray)
             throw rejection(_function, expression.loc,
                 expressionText(expression));
 
@@ -3130,18 +3131,42 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         BinAssignExp expression, in size_t targetOffset,
         in size_t destOffset = discardResult,
     ) {
+        import snakebite.backends.arithmetic:
+            ArithmeticPlan, arithmeticKind, arithmeticPlan;
         import snakebite.frontend.storage: compoundTarget;
+        import std.conv: text;
 
         auto target = compoundTarget(expression);
         const targetFacts = TypeFacts.of(target.type);
         const operationFacts = TypeFacts.of(expression.e1.type);
-        auto handler = compoundHandler(
-            expression, operationFacts.isUnsigned,
-            isFloatingType(expression.e1.type),
-        );
-        if (handler is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+        const plan = arithmeticPlan(expression);
+        Instruction.Handler handler;
+        // Explicit types: `auto` would copy `const` from the facts.
+        TypeFacts rightFacts = operationFacts;
+        size_t operationWidth = operationFacts.size;
+        size_t operands;
+        with (ArithmeticPlan.Kind) final switch (plan.kind) {
+            case integral, pointerOffset:
+                handler = compoundHandler(
+                    expression, operationFacts.isUnsigned, false);
+                break;
+            case floating:
+                handler = compoundHandler(
+                    expression, operationFacts.isUnsigned, true);
+                break;
+            case complex:
+                handler = complexHandler(expression);
+                rightFacts = TypeFacts.of(expression.e2.type);
+                operationWidth = operationFacts.size / 2;
+                operands = plan.operands.packed;
+                break;
+            case vector:
+                return compileVectorCompoundAssign(
+                    expression, plan, targetOffset, destOffset);
+            case pointerDifference:
+                assert(0, text("`", expressionText(expression), "`: `-=` ",
+                    "cannot store a pointer difference in a pointer"));
+        }
 
         auto field = target.isDotVarExp;
         auto fieldDeclaration = field is null
@@ -3151,23 +3176,72 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || fieldDeclaration.isBitFieldDeclaration is null
                 ? ScalarStorage.Kind.indirect : ScalarStorage.Kind.bitfield,
             targetFacts, targetOffset, fieldDeclaration,
-            isFloatingType(target.type),
+            arithmeticKind(target.type),
         );
-        const mixedFloating = storage.isFloating
+        // `>>>=` shifts the target's own unsigned bit pattern. Reading it
+        // through the promoted target's own (possibly signed) facts would
+        // sign-extend a negative narrow target, and the vacated high bits
+        // would then leak into the truncated result.
+        if (expression.isUshrAssignExp)
+            storage.facts.isUnsigned = true;
+        const promotedFirst = storage.promotesBeforeOperand
             && operationFacts.size != storage.facts.size;
         size_t valueOffset;
-        if (mixedFloating)
+        if (promotedFirst)
             valueOffset = readScalar(storage, operationFacts);
 
-        const rightOffset = reserveTemp(operationFacts);
-        evalInto(expression.e2, rightOffset, operationFacts.size);
-        if (!mixedFloating)
+        const rightOffset = reserveTemp(rightFacts);
+        evalInto(expression.e2, rightOffset, rightFacts.size);
+        if (!promotedFirst)
             valueOffset = readScalar(storage, operationFacts);
-        emit(handler, valueOffset, rightOffset, operationFacts.size);
+        emit(handler, valueOffset, rightOffset, operationWidth, operands);
         valueOffset = writeScalar(storage, valueOffset, operationFacts.size);
 
         if (destOffset != discardResult)
             emit(&opCopy, destOffset, valueOffset, storage.facts.size);
+    }
+
+    // A vector target has the operation's own type: dmd promotes no lane.
+    private void compileVectorCompoundAssign(
+        BinAssignExp expression,
+        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        in size_t targetOffset, in size_t destOffset,
+    ) {
+        auto storage = ScalarStorage(ScalarStorage.Kind.indirect, plan.facts,
+            targetOffset, null, plan.kind);
+        const rightOffset = reserveTemp(plan.facts);
+        evalInto(expression.e2, rightOffset, plan.facts.size);
+        auto valueOffset = readScalar(storage, plan.facts);
+        const laneHandler = laneHandler(expression, plan, compoundHandler(
+            expression, plan.laneFacts.isUnsigned, false));
+        emitLanes(laneHandler, plan, valueOffset, rightOffset);
+        valueOffset = writeScalar(storage, valueOffset, plan.facts.size);
+
+        if (destOffset != discardResult)
+            emit(&opCopy, destOffset, valueOffset, plan.facts.size);
+    }
+
+    // The complex operation for a binary, compound or postfix operator.
+    private Instruction.Handler complexHandler(Expression expression) {
+        import snakebite.nativevalue: ComplexOperation;
+        import std.conv: text;
+
+        with (EXP) switch (expression.op) {
+            case add, addAssign, plusPlus:
+                return &opComplex!(ComplexOperation.add);
+            case min, minAssign, minusMinus:
+                return &opComplex!(ComplexOperation.subtract);
+            case mul, mulAssign:
+                return &opComplex!(ComplexOperation.multiply);
+            case div, divAssign:
+                return &opComplex!(ComplexOperation.divide);
+            case mod, modAssign:
+                return &opComplex!(ComplexOperation.modulo);
+            default:
+                assert(0, text("`", expressionText(expression), "`: dmd ",
+                    "rejects bitwise and shift operators on complex ",
+                    "operands"));
+        }
     }
 
     private struct ScalarStorage {
@@ -3177,19 +3251,31 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         TypeFacts facts;
         size_t offset;
         VarDeclaration variable;
-        bool isFloating;
+        imported!"snakebite.backends.arithmetic".ArithmeticPlan.Kind
+            arithmetic;
+
+        // DMD reads a promoted floating or complex target before its right
+        // side; integral targets keep the ordinary right-side-first order.
+        bool promotesBeforeOperand() const {
+            import snakebite.backends.arithmetic: ArithmeticPlan;
+
+            with (ArithmeticPlan.Kind) final switch (arithmetic) {
+                case floating, complex:
+                    return true;
+                case integral, pointerOffset, pointerDifference, vector:
+                    return false;
+            }
+        }
     }
 
     private ScalarStorage scalarStorage(
         Expression target, in Loc loc,
         in string operation,
     ) {
-        import dmd.astenums: Tpointer;
+        import snakebite.backends.arithmetic: arithmeticKind;
 
         const facts = TypeFacts.of(target.type);
-        if ((!facts.isIntegral && target.type.ty != Tpointer)
-                || !isIntegralSize(facts.size))
-            throw rejection(_function, loc, operation);
+        const arithmetic = arithmeticKind(target.type);
 
         if (auto dot = target.isDotVarExp) {
             auto field = dot.var.isVarDeclaration;
@@ -3201,6 +3287,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     ? ScalarStorage.Kind.indirect
                     : ScalarStorage.Kind.bitfield,
                 facts, address, field,
+                arithmetic,
             );
         }
 
@@ -3212,26 +3299,31 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return ScalarStorage(
                     ScalarStorage.Kind.indirect, facts,
                     compileAddress(target), null,
+                    arithmetic,
                 );
             if (variable.isDataseg)
                 return ScalarStorage(
                     ScalarStorage.Kind.staticData, facts, 0, variable,
+                    arithmetic,
                 );
             if (_layout.hasSlot(variable) && !isClosureVariable(variable)
                     && !_layout.isRef(variable))
                 return ScalarStorage(
                     ScalarStorage.Kind.frame, facts,
                     _layout.offsetOf(variable), null,
+                    arithmetic,
                 );
             return ScalarStorage(
                 ScalarStorage.Kind.indirect, facts,
                 addressOfVariable(variable), null,
+                arithmetic,
             );
         }
 
         return ScalarStorage(
             ScalarStorage.Kind.indirect, facts,
             compileAddress(target), null,
+            arithmetic,
         );
     }
 
@@ -3249,16 +3341,40 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         loadScalar(storage, valueOffset, storage.facts.size);
-        if (storage.isFloating && !resultFacts.isIntegral)
-            emit(&opFloatWidthCast, valueOffset, valueOffset,
-                resultFacts.size, storage.facts.size);
-        else
-            emit(
-                storage.facts.isUnsigned
-                    ? &opCastWidenUnsigned : &opCastWidenSigned,
-                valueOffset, storage.facts.size, resultFacts.size,
-            );
+        emitWidthChange(storage.arithmetic, storage.facts, valueOffset,
+            valueOffset, resultFacts.size, storage.facts.size);
         return valueOffset;
+    }
+
+    // Converts a target's value between its own width and the width of a
+    // compound assignment's promoted operation.
+    private void emitWidthChange(
+        imported!"snakebite.backends.arithmetic".ArithmeticPlan.Kind kind,
+        in TypeFacts facts, in size_t destination, in size_t source,
+        in size_t width, in size_t sourceWidth,
+    ) {
+        import snakebite.backends.arithmetic: ArithmeticPlan;
+        import snakebite.nativevalue: CastKind;
+
+        with (ArithmeticPlan.Kind) final switch (kind) {
+            case floating:
+                emit(&opFloatWidthCast, destination, source, width,
+                    sourceWidth);
+                return;
+            case complex:
+                emit(&opCastAs!(CastKind.complexWidth), destination, source,
+                    width, sourceWidth);
+                return;
+            case integral, pointerOffset:
+                assert(destination == source,
+                    "an integral target widens in place");
+                emit(facts.isUnsigned
+                        ? &opCastWidenUnsigned : &opCastWidenSigned,
+                    destination, sourceWidth, width);
+                return;
+            case vector, pointerDifference:
+                assert(0, "a vector or pointer target is never promoted");
+        }
     }
 
     private void loadScalar(
@@ -3288,10 +3404,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t valueWidth,
     ) {
         size_t storedOffset = valueOffset;
-        if (storage.isFloating && valueWidth != storage.facts.size) {
+        if (valueWidth != storage.facts.size
+                && storage.promotesBeforeOperand) {
             storedOffset = reserveTemp(storage.facts);
-            emit(&opFloatWidthCast, storedOffset, valueOffset,
-                storage.facts.size, valueWidth);
+            emitWidthChange(storage.arithmetic, storage.facts, storedOffset,
+                valueOffset, storage.facts.size, valueWidth);
         }
 
         final switch (storage.kind) with (ScalarStorage.Kind) {
@@ -3326,6 +3443,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private Instruction.Handler compoundHandler(
         BinAssignExp expression, in bool unsigned, in bool floating,
     ) {
+        import std.conv: text;
+
         if (expression.isAddAssignExp)
             return floating ? &opFloatAdd : &opAdd;
         if (expression.isMinAssignExp)
@@ -3348,7 +3467,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 ? &opFloatModulo
                 : (unsigned ? &opModuloUnsigned : &opModuloSigned);
 
-        return null;
+        assert(0, text("`", expressionText(expression), "`: dmd lowers ",
+            "every other compound assignment"));
     }
 
     // `x++`/`x--`, dmd's own node for the postfix forms alone - the
@@ -3358,6 +3478,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // an expression - goes, captured before the target changes;
     // `discardResult` when a caller at statement level does not want it.
     private void compilePost(PostExp expression, in size_t destOffset) {
+        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+        import std.conv: text;
+
+        const plan = arithmeticPlan(expression);
         auto storage = scalarStorage(
             expression.e1, expression.loc, expressionText(expression));
         const valueOffset = readScalar(storage, storage.facts);
@@ -3365,11 +3489,55 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (destOffset != discardResult)
             emit(&opCopy, destOffset, valueOffset, storage.facts.size);
 
+        const increment = expression.op == EXP.plusPlus;
         const stepOffset = reserveTemp(storage.facts);
-        evalInto(expression.e2, stepOffset, storage.facts.size);
-        auto handler = expression.op == EXP.plusPlus
-            ? &opAdd : &opSubtract;
-        emit(handler, valueOffset, stepOffset, storage.facts.size);
+        Instruction.Handler handler;
+        size_t operationWidth = storage.facts.size;
+        size_t operands;
+        with (ArithmeticPlan.Kind) final switch (plan.kind) {
+            case integral:
+                evalInto(expression.e2, stepOffset, storage.facts.size);
+                handler = increment ? &opAdd : &opSubtract;
+                break;
+
+            case floating:
+                evalInto(expression.e2, stepOffset, storage.facts.size);
+                handler = increment ? &opFloatAdd : &opFloatSubtract;
+                break;
+
+            // dmd's own AST does not scale a postfix `++`/`--` step for an
+            // enum of a pointer, so the step comes from the pointee size,
+            // not from `e2`.
+            case pointerOffset: {
+                const elementFacts =
+                    TypeFacts.of(expression.e1.type.toBasetype.nextOf);
+                emit(&opConstant, stepOffset,
+                    addConstant(cast(long) elementFacts.size),
+                    storage.facts.size);
+                handler = increment ? &opAdd : &opSubtract;
+                break;
+            }
+
+            case complex:
+                evalInto(expression.e2, stepOffset, storage.facts.size);
+                handler = complexHandler(expression);
+                operationWidth = storage.facts.size / 2;
+                operands = plan.operands.packed;
+                break;
+
+            case vector:
+                evalInto(expression.e2, stepOffset, storage.facts.size);
+                emitLanes(laneHandler(expression, plan,
+                    increment ? &opAdd : &opSubtract), plan, valueOffset,
+                    stepOffset);
+                writeScalar(storage, valueOffset, storage.facts.size);
+                return;
+
+            case pointerDifference:
+                assert(0, text("`", expressionText(expression), "`: a ",
+                    "postfix `++`/`--` has the type of its operand"));
+        }
+        emit(handler, valueOffset, stepOffset, operationWidth, operands);
         writeScalar(storage, valueOffset, storage.facts.size);
     }
 
@@ -3586,7 +3754,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         import dmd.astenums: Tdelegate;
 
-        if (expression.type.ty != Tdelegate) {
+        if (expression.type.toBasetype.ty != Tdelegate) {
             if (expression.fd is null)
                 return visit(cast(Expression) expression);
 
@@ -3781,7 +3949,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         import dmd.astenums: Tclass;
-        if (expression.e1.type.ty == Tclass) {
+        auto aggregateType = expression.e1.type.toBasetype;
+        if (aggregateType.ty == Tclass) {
             const facts = TypeFacts.of(field.type);
             const objectOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, objectOffset, size_t.sizeof);
@@ -3793,7 +3962,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        if (expression.e1.type.isTypeStruct is null)
+        if (aggregateType.isTypeStruct is null)
             return visit(cast(Expression) expression);
 
         const baseFacts = TypeFacts.of(expression.e1.type);
@@ -4025,49 +4194,79 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // A dynamic array's whole slice is the same two words as the array
     // itself, so it does not need the bounds work of a bounded slice.
     override void visit(SliceExp expression) {
-        import dmd.astenums: Tpointer, Tsarray;
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset;
+        import dmd.astenums: TY;
+        import std.conv: text;
 
         requireDestination(expression);
 
-        const facts = TypeFacts.of(expression.e1.type);
-        if (expression.e1.type.ty == Tpointer
-                && expression.upr !is null) {
-            const pointerOffset = reserveTemp(facts);
-            evalInto(expression.e1, pointerOffset, facts.size);
-
-            const lowOffset = reserveTemp(pointerFacts);
-            if (expression.lwr is null)
-                emit(&opConstant, lowOffset, addConstant(0), size_t.sizeof);
-            else
-                evalOperandInto(expression.lwr, lowOffset, size_t.sizeof);
-
-            const highOffset = reserveTemp(pointerFacts);
-            evalOperandInto(expression.upr, highOffset, size_t.sizeof);
-            emit(&opSubtract, highOffset, lowOffset, size_t.sizeof);
-            emit(&opCopy, _destination + arrayLengthOffset, highOffset,
-                size_t.sizeof);
-
-            const elementFacts = TypeFacts.of(expression.e1.type.nextOf);
-            const elementSizeOffset = reserveTemp(pointerFacts);
-            emit(&opConstant, elementSizeOffset,
-                addConstant(cast(long) elementFacts.size), size_t.sizeof);
-            emit(&opMultiply, lowOffset, elementSizeOffset, size_t.sizeof);
-            emit(&opAdd, pointerOffset, lowOffset, size_t.sizeof);
-            emit(&opCopy, _destination + arrayPointerOffset, pointerOffset,
-                size_t.sizeof);
-            return;
+        auto sourceType = expression.e1.type.toBasetype;
+        final switch (sourceType.ty) with (TY) {
+            case Tpointer:
+                return compilePointerSlice(expression, sourceType);
+            case Tsarray:
+                return compileStaticArraySlice(expression, sourceType);
+            case Tarray:
+                return compileDynamicArraySlice(expression, sourceType);
+            case Taarray, Treference, Tfunction, Tident, Tclass, Tstruct,
+                Tenum, Tdelegate, Tnone, Tvoid, Tint8, Tuns8, Tint16,
+                Tuns16, Tint32, Tuns32, Tint64, Tuns64, Tfloat32, Tfloat64,
+                Tfloat80, Timaginary32, Timaginary64, Timaginary80,
+                Tcomplex32, Tcomplex64, Tcomplex80, Tbool, Tchar, Twchar,
+                Tdchar, Terror, Tinstance, Ttypeof, Ttuple, Tslice, Treturn,
+                Tnull, Tvector, Tint128, Tuns128, Ttraits, Tmixin,
+                Tnoreturn, Ttag:
+                assert(0, text("`", expression.toString, "` slices a `",
+                    sourceType.toString, "`: semantic slices only a ",
+                    "pointer or an array at run time, a vector through its ",
+                    "`.array` and an aggregate through `opSlice`"));
         }
+    }
 
-        // A bounded static-array slice has no length word to read back, but
-        // its result still has the native dynamic-array shape. Use the
+    // Semantic requires both bounds to slice a pointer.
+    private void compilePointerSlice(SliceExp expression, Type sourceType) {
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset;
+
+        assert(expression.upr !is null);
+        const facts = TypeFacts.of(sourceType);
+        const pointerOffset = reserveTemp(facts);
+        evalInto(expression.e1, pointerOffset, facts.size);
+
+        const lowOffset = reserveTemp(pointerFacts);
+        if (expression.lwr is null)
+            emit(&opConstant, lowOffset, addConstant(0), size_t.sizeof);
+        else
+            evalOperandInto(expression.lwr, lowOffset, size_t.sizeof);
+
+        const highOffset = reserveTemp(pointerFacts);
+        evalOperandInto(expression.upr, highOffset, size_t.sizeof);
+        emit(&opSubtract, highOffset, lowOffset, size_t.sizeof);
+        emit(&opCopy, _destination + arrayLengthOffset, highOffset,
+            size_t.sizeof);
+
+        const elementFacts = TypeFacts.of(sourceType.nextOf);
+        const elementSizeOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, elementSizeOffset,
+            addConstant(cast(long) elementFacts.size), size_t.sizeof);
+        emit(&opMultiply, lowOffset, elementSizeOffset, size_t.sizeof);
+        emit(&opAdd, pointerOffset, lowOffset, size_t.sizeof);
+        emit(&opCopy, _destination + arrayPointerOffset, pointerOffset,
+            size_t.sizeof);
+    }
+
+    private void compileStaticArraySlice(
+        SliceExp expression, Type sourceType,
+    ) {
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset;
+
+        const dim = cast(size_t) sourceType.isTypeSArray.dim.toInteger;
+
+        // A bounded static-array slice has no length word to read back,
+        // but its result still has the native dynamic-array shape. Use the
         // dimension from the static type as its source length.
-        if (expression.e1.type.ty == Tsarray
-                && (expression.lwr !is null || expression.upr !is null)) {
+        if (expression.lwr !is null || expression.upr !is null) {
             const sourceLengthOffset = reserveTemp(pointerFacts);
-            const dim = cast(size_t)
-                expression.e1.type.isTypeSArray.dim.toInteger;
             emit(&opConstant, sourceLengthOffset,
                 addConstant(cast(long) dim), size_t.sizeof);
             const addressOffset = compileAddress(expression.e1);
@@ -4083,28 +4282,25 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // of itself - and no separate storage to point into: the result's
         // pointer word is `xs`'s own address, its length word `xs`'s own
         // dimension, known at compile time.
-        if (expression.e1.type.ty == Tsarray) {
-            if (expression.lwr !is null || expression.upr !is null)
-                return visit(cast(Expression) expression);
+        const addressOffset = compileAddress(expression.e1);
+        emit(&opConstant, _destination + arrayLengthOffset,
+            addConstant(cast(long) dim), size_t.sizeof);
+        emit(&opCopy, _destination + arrayPointerOffset,
+            addressOffset, size_t.sizeof);
+    }
 
-            const dim = cast(size_t)
-                expression.e1.type.isTypeSArray.dim.toInteger;
-            const addressOffset = compileAddress(expression.e1);
-            emit(&opConstant, _destination + arrayLengthOffset,
-                addConstant(cast(long) dim), size_t.sizeof);
-            emit(&opCopy, _destination + arrayPointerOffset,
-                addressOffset, size_t.sizeof);
-            return;
-        }
-
-        if (!facts.isDynamicArray)
-            return visit(cast(Expression) expression);
+    private void compileDynamicArraySlice(
+        SliceExp expression, Type sourceType,
+    ) {
+        import snakebite.nativelayout:
+            arrayLengthOffset, arrayPointerOffset;
 
         if (expression.lwr is null && expression.upr is null) {
             evalInto(expression.e1, _destination, _width);
             return;
         }
 
+        const facts = TypeFacts.of(sourceType);
         const arrayOffset = reserveTemp(facts);
         evalInto(expression.e1, arrayOffset, facts.size);
 
@@ -4320,10 +4516,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     protected override void visitLoweredNew(NewExp expression) {
         import dmd.astenums: Tpointer;
-        if (expression.newtype.isTypeClass !is null
-                || expression.newtype.isTypeStruct !is null)
+        auto newType = expression.newtype.toBasetype;
+        if (newType.isTypeClass !is null || newType.isTypeStruct !is null)
             compileNew(expression);
-        else if (expression.type.ty == Tpointer
+        else if (expression.type.toBasetype.ty == Tpointer
                 && expression.arguments !is null
                 && expression.arguments.length != 0) {
             if (expression.arguments.length != 1)
@@ -4354,7 +4550,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.backends.aggregateinit:
             driveInit, planClassContext, planPositionalFields;
 
-        auto structType = expression.newtype.isTypeStruct;
+        auto structType = expression.newtype.toBasetype.isTypeStruct;
         const objectOffset = _destination;
         const storage = indirectStorage(objectOffset);
 
@@ -4410,7 +4606,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (auto value = isExpression(expression.obj)) {
             evalInto(value, _destination, size_t.sizeof);
             const indirections = 2
-                + (value.type.isTypeClass.sym.isInterfaceDeclaration !is null);
+                + (value.type.toBasetype.isTypeClass.sym
+                    .isInterfaceDeclaration !is null);
             foreach (i; 0 .. indirections)
                 emit(&opLoadIndirect, _destination, _destination, size_t.sizeof);
             return;
@@ -4612,37 +4809,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     protected override void visitUnloweredEqual(EqualExp expression) {
-        import dmd.astenums: Tarray, Tdelegate, Tsarray;
-        import dmd.typesem: toBasetype;
-
         requireDestination(expression);
 
-        auto operandType = expression.e1.type.toBasetype;
-        auto rightType = expression.e2.type.toBasetype;
-        if (operandType.isStaticOrDynamicArray
-                && rightType.isStaticOrDynamicArray
-                && (operandType.ty == Tarray || rightType.ty == Tarray)) {
-            compileMemcmpDynamicArrayEquality(expression, _destination);
-            return;
+        const plan = comparisonPlan(expression);
+        with (ComparisonPlan.Kind) final switch (plan.kind) {
+            case dynamicArray:
+                return compileMemcmpDynamicArrayEquality(
+                    expression, _destination);
+            // A delegate is a plain `{context, function}` pair - dmd's own
+            // native equality for it, like a static array's, is exactly its
+            // bytes compared whole. `compileStaticArrayEquality` does
+            // nothing but that byte compare, sizing each operand from its
+            // own type, so operands of different sizes compare unequal.
+            case staticArray, delegate_:
+                return compileStaticArrayEquality(expression, _destination);
+            case integral, floating, complex, reference, vector:
+                return compileComparison(expression, plan, _destination);
         }
-
-        if (operandType.ty == Tsarray && rightType.ty == Tsarray) {
-            compileStaticArrayEquality(expression, _destination);
-            return;
-        }
-
-        // A delegate is a plain `{context, function}` pair - dmd's own
-        // native equality for it, like a static array's, is exactly its
-        // bytes compared whole, never a guest-visible `opEquals` call (a
-        // delegate is not an aggregate with one). `compileStaticArrayEquality`
-        // already does nothing but that byte compare, keyed off `facts.size`
-        // rather than anything array-specific, so it serves here unchanged.
-        if (operandType.ty == Tdelegate && rightType.ty == Tdelegate) {
-            compileStaticArrayEquality(expression, _destination);
-            return;
-        }
-
-        compileComparison(expression, comparisonPlan(expression), _destination);
     }
 
     override protected void visitIdentity(
@@ -4749,99 +4932,142 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         BinExp expression, in size_t destOffset, in size_t width,
         Instruction.Handler handler,
     ) {
-        import dmd.astenums: Tpointer;
+        import snakebite.backends.arithmetic:
+            ArithmeticPlan, arithmeticKind, arithmeticPlan;
+        import std.conv: text;
 
-        if (expression.type.ty == Tpointer) {
-            if (handler !is &opAdd && handler !is &opSubtract)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
-
-            Expression pointerOperand = expression.e1.type.ty == Tpointer
-                ? expression.e1 : expression.e2;
-            Expression integralOperand = pointerOperand is expression.e1
-                ? expression.e2 : expression.e1;
-            if (pointerOperand.type.ty != Tpointer) {
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+        const plan = arithmeticPlan(expression);
+        with (ArithmeticPlan.Kind) final switch (plan.kind) {
+            case integral: {
+                const leftOffset = reserveTemp(plan.facts);
+                evalOperandInto(expression.e1, leftOffset, width);
+                const rightOffset = reserveTemp(plan.facts);
+                evalOperandInto(expression.e2, rightOffset, width);
+                emit(handler, leftOffset, rightOffset, width);
+                return copyResult(destOffset, leftOffset, width);
             }
 
-            const pointerFacts = TypeFacts.of(pointerOperand.type);
-            const integralFacts = TypeFacts.of(integralOperand.type);
-            if (!integralFacts.isIntegral
-                    || !isIntegralSize(integralFacts.size))
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+            case floating: {
+                const leftOffset = reserveTemp(plan.facts);
+                evalInto(expression.e1, leftOffset, plan.facts.size);
+                const rightOffset = reserveTemp(plan.facts);
+                evalInto(expression.e2, rightOffset, plan.facts.size);
+                emit(floatingBinaryHandler(expression), leftOffset,
+                    rightOffset, plan.facts.size);
+                return copyResult(destOffset, leftOffset, width);
+            }
 
-            const leftOffset = reserveTemp(pointerFacts);
-            evalInto(pointerOperand, leftOffset, pointerFacts.size);
-            const rightOffset = reserveTemp(pointerFacts);
-            evalOperandInto(integralOperand, rightOffset,
-                pointerFacts.size);
-            emit(handler, leftOffset, rightOffset, pointerFacts.size);
+            case complex: {
+                const leftFacts = TypeFacts.of(expression.e1.type);
+                const leftOffset = reserveTemp(plan.facts);
+                evalInto(expression.e1, leftOffset, leftFacts.size);
+                const rightFacts = TypeFacts.of(expression.e2.type);
+                const rightOffset = reserveTemp(rightFacts);
+                evalInto(expression.e2, rightOffset, rightFacts.size);
+                emit(complexHandler(expression), leftOffset, rightOffset,
+                    plan.facts.size / 2, plan.operands.packed);
+                return copyResult(destOffset, leftOffset, width);
+            }
 
-            if (destOffset != leftOffset)
-                emit(&opCopy, destOffset, leftOffset, width);
-            return;
+            case vector: {
+                const leftOffset = reserveTemp(plan.facts);
+                evalInto(expression.e1, leftOffset, plan.facts.size);
+                const rightOffset = reserveTemp(plan.facts);
+                evalInto(expression.e2, rightOffset, plan.facts.size);
+                emitLanes(laneHandler(expression, plan, handler), plan,
+                    leftOffset, rightOffset);
+                return copyResult(destOffset, leftOffset, width);
+            }
+
+            case pointerOffset: {
+                assert(handler is &opAdd || handler is &opSubtract,
+                    text("`", expressionText(expression), "`: D only adds ",
+                        "an offset to a pointer or subtracts one"));
+                const pointerLeft =
+                    arithmeticKind(expression.e1.type) == pointerOffset;
+                auto pointerOperand =
+                    pointerLeft ? expression.e1 : expression.e2;
+                auto offsetOperand =
+                    pointerLeft ? expression.e2 : expression.e1;
+                const leftOffset = reserveTemp(plan.facts);
+                evalInto(pointerOperand, leftOffset, plan.facts.size);
+                const rightOffset = reserveTemp(plan.facts);
+                evalOperandInto(offsetOperand, rightOffset, plan.facts.size);
+                emit(handler, leftOffset, rightOffset, plan.facts.size);
+                return copyResult(destOffset, leftOffset, width);
+            }
+
+            // `p2 - p1`: dmd's own semantic pass (`MinExp::semantic`)
+            // already wraps the subtraction in a `DivExp` by the pointee's
+            // size, so this leaves the raw byte count for that division.
+            case pointerDifference: {
+                assert(handler is &opSubtract, text("`",
+                    expressionText(expression), "`: D only subtracts one ",
+                    "pointer from another"));
+                const leftOffset = reserveTemp(pointerFacts);
+                evalInto(expression.e1, leftOffset, pointerFacts.size);
+                const rightOffset = reserveTemp(pointerFacts);
+                evalInto(expression.e2, rightOffset, pointerFacts.size);
+                emit(&opSubtract, leftOffset, rightOffset, pointerFacts.size);
+                return copyResult(destOffset, leftOffset, width);
+            }
         }
+    }
 
-        // `p2 - p1`: dmd's own semantic pass for this (`MinExp::semantic`,
-        // `expressionsem.d`) already wraps the whole subtraction in a
-        // `DivExp` by the pointee's size, so this node's own `type` is
-        // `ptrdiff_t`, not a pointer, even though both operands still
-        // are. Nothing here needs to know the pointee's size at all: the
-        // outer `DivExp` this compiler visits next does that division on
-        // the raw byte count this leaves behind, the same way it divides
-        // any other pair of integers.
-        if (handler is &opSubtract
-                && expression.e1.type.ty == Tpointer
-                && expression.e2.type.ty == Tpointer) {
-            const leftOffset = reserveTemp(pointerFacts);
-            evalInto(expression.e1, leftOffset, pointerFacts.size);
-            const rightOffset = reserveTemp(pointerFacts);
-            evalInto(expression.e2, rightOffset, pointerFacts.size);
-            emit(&opSubtract, leftOffset, rightOffset, pointerFacts.size);
+    // The operation on one lane of a vector: `handler` for an integral
+    // lane, the floating operation for a floating one.
+    private Instruction.Handler laneHandler(
+        BinExp expression,
+        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        Instruction.Handler integralHandler,
+    ) {
+        import snakebite.backends.arithmetic: ArithmeticPlan;
+        import std.conv: text;
 
-            if (destOffset != leftOffset)
-                emit(&opCopy, destOffset, leftOffset, width);
-            return;
+        with (ArithmeticPlan.Kind) final switch (plan.laneKind) {
+            case integral:
+                return integralHandler;
+            case floating:
+                return floatingBinaryHandler(expression);
+            case complex, pointerOffset, pointerDifference, vector:
+                assert(0, text("`", expressionText(expression), "` has a ",
+                    "lane that is neither integral nor floating"));
         }
+    }
 
-        const facts = TypeFacts.of(expression.type);
-        if (isFloatingType(expression.type)) {
-            const leftOffset = reserveTemp(facts);
-            evalInto(expression.e1, leftOffset, facts.size);
-            const rightOffset = reserveTemp(facts);
-            evalInto(expression.e2, rightOffset, facts.size);
-            emit(floatingBinaryHandler(expression), leftOffset, rightOffset,
-                facts.size);
+    // Applies `handler` to each lane of the vectors at `left` and `right`,
+    // leaving the answer at `left`.
+    private void emitLanes(
+        Instruction.Handler handler,
+        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        in size_t left, in size_t right,
+    ) {
+        const laneSize = plan.laneFacts.size;
+        foreach (i; 0 .. plan.facts.size / laneSize)
+            emit(handler, left + i * laneSize, right + i * laneSize,
+                laneSize);
+    }
 
-            if (destOffset != leftOffset)
-                emit(&opCopy, destOffset, leftOffset, width);
-            return;
-        }
-
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        const leftOffset = reserveTemp(facts);
-        evalOperandInto(expression.e1, leftOffset, width);
-        const rightOffset = reserveTemp(facts);
-        evalOperandInto(expression.e2, rightOffset, width);
-        emit(handler, leftOffset, rightOffset, width);
-
-        if (destOffset != leftOffset)
-            emit(&opCopy, destOffset, leftOffset, width);
+    private void copyResult(
+        in size_t destOffset, in size_t resultOffset, in size_t width,
+    ) {
+        if (destOffset != resultOffset)
+            emit(&opCopy, destOffset, resultOffset, width);
     }
 
     private Instruction.Handler floatingBinaryHandler(BinExp expression) {
+        import std.conv: text;
+
         with (EXP) switch (expression.op) {
-            case add: return &opFloatAdd;
-            case min: return &opFloatSubtract;
-            case mul: return &opFloatMultiply;
-            case div: return &opFloatDivide;
-            case mod: return &opFloatModulo;
-            default: assert(0);
+            case add, addAssign, plusPlus: return &opFloatAdd;
+            case min, minAssign, minusMinus: return &opFloatSubtract;
+            case mul, mulAssign: return &opFloatMultiply;
+            case div, divAssign: return &opFloatDivide;
+            case mod, modAssign: return &opFloatModulo;
+            default:
+                assert(0, text("`", expressionText(expression), "`: dmd ",
+                    "rejects bitwise and shift operators on floating ",
+                    "operands"));
         }
     }
 
@@ -4861,9 +5087,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void evalOperandInto(
         Expression operand, in size_t destOffset, in size_t width,
     ) {
+        import std.conv: text;
+
         const operandFacts = TypeFacts.of(operand.type);
-        if (!operandFacts.isIntegral || !isIntegralSize(operandFacts.size))
-            throw rejection(_function, operand.loc, expressionText(operand));
+        assert(operandFacts.isIntegral && isIntegralSize(operandFacts.size),
+            text("`", expressionText(operand), "`: semantic types every ",
+                "index, slice bound and integral operand as an integer"));
 
         if (operandFacts.size == width) {
             evalInto(operand, destOffset, width);
@@ -4893,6 +5122,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileComparison(
         BinExp expression, in ComparisonPlan plan, in size_t destOffset,
     ) {
+        import std.conv: text;
+
         const operandFacts = plan.facts;
 
         with (ComparisonPlan.Kind) final switch (plan.kind) {
@@ -4938,17 +5169,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // compares the stored bits, which would make a NaN equal itself and
             // positive and negative zero unequal.
             case floating: {
-                Instruction.Handler floatHandler;
-                with (EXP) switch (expression.op) {
-                    case lessThan: floatHandler = &opFloatLessThan; break;
-                    case lessOrEqual: floatHandler = &opFloatLessOrEqual; break;
-                    case greaterThan: floatHandler = &opFloatGreaterThan; break;
-                    case greaterOrEqual:
-                        floatHandler = &opFloatGreaterOrEqual; break;
-                    case equal: floatHandler = &opFloatEqual; break;
-                    case notEqual: floatHandler = &opFloatNotEqual; break;
-                    default: assert(0);
-                }
+                auto floatHandler = floatComparisonHandler(expression);
 
                 const floatLeftOffset = reserveTemp(operandFacts);
                 evalInto(expression.e1, floatLeftOffset, operandFacts.size);
@@ -4962,10 +5183,42 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 return;
             }
 
+            // D does not order complex values, so only `==`/`!=` reach
+            // here: both halves compare, and the answers combine.
+            case complex: {
+                const half = operandFacts.size / 2;
+                auto halfHandler = floatComparisonHandler(expression);
+                const leftOffset = reserveTemp(operandFacts);
+                evalInto(expression.e1, leftOffset, operandFacts.size);
+                const rightOffset = reserveTemp(operandFacts);
+                evalInto(expression.e2, rightOffset, operandFacts.size);
+                emit(halfHandler, leftOffset, rightOffset, half);
+                emit(halfHandler, leftOffset + half, rightOffset + half, half);
+                emit(expression.op == EXP.equal ? &opBitAnd : &opBitOr,
+                    leftOffset, leftOffset + half, 1);
+
+                if (destOffset != leftOffset)
+                    emit(&opCopy, destOffset, leftOffset, 1);
+                return;
+            }
+
+            case vector:
+                return compileVectorComparison(expression, plan, destOffset);
+
+            case dynamicArray, staticArray:
+                assert(0, text("`", expressionText(expression), "` cannot ",
+                    "reach here: dmd lowers array ordering to `__cmp`, and ",
+                    "array equality is a byte compare"));
+
+            case delegate_:
+                return compileDelegateOrdering(expression, destOffset);
+
             case integral: {
-                if (!operandFacts.isIntegral || !isIntegralSize(operandFacts.size))
-                    throw rejection(_function, expression.loc,
-                        expressionText(expression));
+                assert(operandFacts.isIntegral
+                        && isIntegralSize(operandFacts.size),
+                    text("`", expressionText(expression), "`: `kindOf` ",
+                        "gives `integral` only to 1, 2, 4 and 8 byte ",
+                        "integers"));
 
                 auto handler = comparisonHandler(expression, operandFacts.isUnsigned);
 
@@ -4979,6 +5232,113 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     emit(&opCopy, destOffset, leftOffset, 1);
                 return;
             }
+        }
+    }
+
+    private Instruction.Handler floatComparisonHandler(BinExp expression) {
+        import std.conv: text;
+
+        with (EXP) switch (expression.op) {
+            case lessThan: return &opFloatLessThan;
+            case lessOrEqual: return &opFloatLessOrEqual;
+            case greaterThan: return &opFloatGreaterThan;
+            case greaterOrEqual: return &opFloatGreaterOrEqual;
+            case equal: return &opFloatEqual;
+            case notEqual: return &opFloatNotEqual;
+            default:
+                assert(0, text("`", expressionText(expression), "`: dmd ",
+                    "builds a `CmpExp` or `EqualExp` only for these ",
+                    "operators"));
+        }
+    }
+
+    // A delegate orders as one unsigned integer whose high word is its
+    // function pointer: `a < b` is `fa < fb || fa == fb && pa < pb`, and
+    // likewise for the other orderings.
+    private void compileDelegateOrdering(
+        BinExp expression, in size_t destOffset,
+    ) {
+        import snakebite.nativelayout:
+            delegateContextOffset, delegateFunctionOffset;
+        import std.conv: text;
+
+        const facts = TypeFacts.delegateValue;
+        const left = reserveTemp(facts);
+        evalInto(expression.e1, left, facts.size);
+        const right = reserveTemp(facts);
+        evalInto(expression.e2, right, facts.size);
+
+        Instruction.Handler strict;
+        with (EXP) switch (expression.op) {
+            case lessThan, lessOrEqual:
+                strict = &opLessThanUnsigned;
+                break;
+            case greaterThan, greaterOrEqual:
+                strict = &opGreaterThanUnsigned;
+                break;
+            default:
+                assert(0, text("`", expressionText(expression), "`: dmd ",
+                    "builds a `CmpExp` only for the four orderings"));
+        }
+        auto low = comparisonHandler(expression, true);
+
+        const highOrdered = reserveTemp(pointerFacts);
+        emit(&opCopy, highOrdered, left + delegateFunctionOffset,
+            size_t.sizeof);
+        emit(strict, highOrdered, right + delegateFunctionOffset,
+            size_t.sizeof);
+        const highEqual = reserveTemp(pointerFacts);
+        emit(&opCopy, highEqual, left + delegateFunctionOffset,
+            size_t.sizeof);
+        emit(&opEqual, highEqual, right + delegateFunctionOffset,
+            size_t.sizeof);
+        const lowOrdered = reserveTemp(pointerFacts);
+        emit(&opCopy, lowOrdered, left + delegateContextOffset,
+            size_t.sizeof);
+        emit(low, lowOrdered, right + delegateContextOffset, size_t.sizeof);
+
+        emit(&opBitAnd, highEqual, lowOrdered, 1);
+        emit(&opBitOr, highOrdered, highEqual, 1);
+        emit(&opCopy, destOffset, highOrdered, 1);
+    }
+
+    // Each result lane is all-ones where the operands' lanes compare true.
+    private void compileVectorComparison(
+        BinExp expression, in ComparisonPlan plan, in size_t destOffset,
+    ) {
+        import std.conv: text;
+
+        const leftOffset = reserveTemp(plan.facts);
+        evalInto(expression.e1, leftOffset, plan.facts.size);
+        const rightOffset = reserveTemp(plan.facts);
+        evalInto(expression.e2, rightOffset, plan.facts.size);
+
+        Instruction.Handler handler;
+        with (ComparisonPlan.Kind) final switch (plan.laneKind) {
+            case floating:
+                handler = floatComparisonHandler(expression);
+                break;
+            case integral:
+                handler = comparisonHandler(
+                    expression, plan.laneFacts.isUnsigned);
+                break;
+            case complex, reference, vector, dynamicArray, staticArray,
+                delegate_:
+                assert(0, text("`", expressionText(expression), "` has a ",
+                    "vector lane that is neither integral nor floating"));
+        }
+
+        const laneSize = plan.laneFacts.size;
+        const lanes = plan.facts.size / laneSize;
+        const resultLaneSize = TypeFacts.of(expression.type).size / lanes;
+        const laneOffset = reserveTemp(plan.laneFacts);
+        foreach (i; 0 .. lanes) {
+            emit(&opCopy, laneOffset, leftOffset + i * laneSize, laneSize);
+            emit(handler, laneOffset, rightOffset + i * laneSize, laneSize);
+            emit(&opCastWidenUnsigned, laneOffset, 1, resultLaneSize);
+            emit(&opNegate, laneOffset, 0, resultLaneSize);
+            emit(&opCopy, destOffset + i * resultLaneSize, laneOffset,
+                resultLaneSize);
         }
     }
 
@@ -5165,23 +5525,60 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         UnaExp expression, in size_t destOffset, in size_t width,
         Instruction.Handler handler,
     ) {
-        const facts = TypeFacts.of(expression.type);
-        if (isFloatingType(expression.type)) {
-            if (handler !is &opNegate)
-                throw rejection(_function, expression.loc,
-                    expressionText(expression));
+        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+        import std.conv: text;
 
-            evalInto(expression.e1, destOffset, width);
-            emit(&opFloatNegate, destOffset, 0, width);
-            return;
+        const plan = arithmeticPlan(expression);
+        with (ArithmeticPlan.Kind) final switch (plan.kind) {
+            case integral:
+                evalInto(expression.e1, destOffset, width);
+                emit(handler, destOffset, 0, width);
+                return;
+
+            case floating:
+                assert(handler is &opNegate, text("`",
+                    expressionText(expression), "`: dmd rejects `~` on a ",
+                    "floating operand"));
+                evalInto(expression.e1, destOffset, width);
+                emit(&opFloatNegate, destOffset, 0, width);
+                return;
+
+            case complex:
+                assert(handler is &opNegate, text("`",
+                    expressionText(expression), "`: dmd rejects `~` on a ",
+                    "complex operand"));
+                evalInto(expression.e1, destOffset, width);
+                emit(&opComplexNegate, destOffset, 0, width / 2);
+                return;
+
+            case vector: {
+                evalInto(expression.e1, destOffset, width);
+                const laneSize = plan.laneFacts.size;
+                Instruction.Handler laneHandler;
+                final switch (plan.laneKind) {
+                    case integral:
+                        laneHandler = handler;
+                        break;
+                    case floating:
+                        assert(handler is &opNegate, text("`",
+                            expressionText(expression), "`: dmd rejects ",
+                            "`~` on floating lanes"));
+                        laneHandler = &opFloatNegate;
+                        break;
+                    case complex, pointerOffset, pointerDifference, vector:
+                        assert(0, text("`", expressionText(expression),
+                            "` has a lane that is neither integral nor ",
+                            "floating"));
+                }
+                foreach (i; 0 .. plan.facts.size / laneSize)
+                    emit(laneHandler, destOffset + i * laneSize, 0, laneSize);
+                return;
+            }
+
+            case pointerOffset, pointerDifference:
+                assert(0, text("`", expressionText(expression), "`: D has ",
+                    "no unary arithmetic on a pointer"));
         }
-
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
-
-        evalInto(expression.e1, destOffset, width);
-        emit(handler, destOffset, 0, width);
     }
 
     // `!x`: evaluated the same way any other condition is - `compileCondition`
@@ -5554,7 +5951,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return false;
 
         auto dot = expression.e1.isDotVarExp;
-        return dot !is null && dot.e1.type.ty == Tclass;
+        return dot !is null && dot.e1.type.toBasetype.ty == Tclass;
     }
 
     // A call reached through the receiver's own dynamic type: `callee`
@@ -5745,7 +6142,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto dot = expression.e1.isDotVarExp;
         auto receiver = dot is null ? expression.e1 : dot.e1;
 
-        if (receiver.type.isTypeClass !is null) {
+        if (receiver.type.toBasetype.isTypeClass !is null) {
             const object = reserveTemp(pointerFacts);
             evalInto(receiver, object, size_t.sizeof);
             return object;
@@ -6681,7 +7078,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tsarray;
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
-        if (expression.type.ty == Tsarray)
+        if (expression.type.toBasetype.ty == Tsarray)
             return compileStaticArrayLiteral(expression, destOffset);
 
         const facts = TypeFacts.of(expression.type);
@@ -6752,7 +7149,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileStaticArrayLiteral(
         ArrayLiteralExp expression, in size_t destOffset,
     ) {
-        auto sarrayType = expression.type.isTypeSArray;
+        auto sarrayType = expression.type.toBasetype.isTypeSArray;
         const elementFacts = TypeFacts.of(sarrayType.next);
 
         const count =

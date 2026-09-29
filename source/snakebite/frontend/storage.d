@@ -6,7 +6,7 @@ private:
 import dmd.expression:
     AssignExp, BinAssignExp, CatAssignExp, Expression, IndexExp, MemorySet,
     SymOffExp;
-import dmd.astenums: Tarray, Tpointer, Tsarray;
+import dmd.astenums: Tarray, Tsarray, Tvector;
 import dmd.typesem: isIntegral, toBasetype;
 
 // DMD represents the target of a compound assignment at its promoted
@@ -49,7 +49,18 @@ public struct StorageResolver(Result, Adapter) {
         if (auto cast_ = expression.isCastExp) {
             if (isIntegral(cast_.e1.type) && isIntegral(expression.type))
                 return resolve(cast_.e1);
+            // dmd represents `v[i]` on a vector `v` by indexing a cast of
+            // `v` to its element static array type; the cast shares `v`'s
+            // storage, so index into `v` directly.
+            if (cast_.e1.type.toBasetype.ty == Tvector
+                    && expression.type.toBasetype.ty == Tsarray)
+                return resolve(cast_.e1);
         }
+
+        // `v.array[i]` indexes the same storage through the `.array`
+        // property instead of a cast.
+        if (auto vectorArray = expression.isVectorArrayExp)
+            return resolve(vectorArray.e1);
 
         if (auto ptrExp = expression.isPtrExp)
             return _adapter.storagePointer(ptrExp);
@@ -127,16 +138,28 @@ public struct StorageResolver(Result, Adapter) {
             return _adapter.storageArrayLength(length, base);
         }
 
-        if (auto index = expression.isIndexExp) {
-            // An enum has its base type's layout: `enum E : int[3]`
-            // indexes like `int[3]`.
-            auto indexBase = index.e1.type.toBasetype;
+        if (auto index = expression.isIndexExp)
+            return resolveIndex(index);
 
+        if (auto field = expression.isDotVarExp)
+            return _adapter.storageField(field);
+
+        return _adapter.storageValue(expression);
+    }
+
+    private Result resolveIndex(IndexExp index) {
+        import dmd.astenums: TY;
+        import std.conv: text;
+
+        // An enum has its base type's layout: `enum E : int[3]` indexes
+        // like `int[3]`.
+        auto indexBase = index.e1.type.toBasetype;
+        final switch (indexBase.ty) with (TY) {
             // Static-array code generation evaluates the rightmost index
             // before recursing into the outer array expression. Keep that
             // language-defined order in the shared resolver; all other
             // index kinds evaluate the base before the index.
-            if (indexBase.ty == Tsarray) {
+            case Tsarray: {
                 auto length = _adapter.storageStaticIndexLength(index);
                 auto indexValue = _adapter.storageIndexValue(index, length);
                 _adapter.storageIndexBounds(index, indexValue, length);
@@ -145,10 +168,10 @@ public struct StorageResolver(Result, Adapter) {
                     index, base, indexValue);
             }
 
-            if (indexBase.ty == Tarray) {
-                // A normal dynamic-array index evaluates its index before
-                // the array expression. `$` needs the descriptor captured
-                // first, so that special form keeps the extra early step.
+            // A normal dynamic-array index evaluates its index before the
+            // array expression. `$` needs the descriptor captured first,
+            // so that special form keeps the extra early step.
+            case Tarray: {
                 Result base;
                 size_t capturedLength;
                 if (index.lengthVar !is null) {
@@ -165,20 +188,28 @@ public struct StorageResolver(Result, Adapter) {
                 return _adapter.storageDynamicIndex(
                     index, base, indexValue);
             }
-            if (indexBase.ty == Tpointer) {
+
+            case Tpointer: {
                 auto base = resolve(index.e1);
                 auto pointer = _adapter.storagePointerIndexBase(index, base);
                 auto indexValue = _adapter.storagePointerIndexValue(index);
                 return _adapter.storagePointerIndex(
                     index, pointer, indexValue);
             }
-            return _adapter.storageValue(index);
+
+            case Taarray, Treference, Tfunction, Tident, Tclass, Tstruct,
+                Tenum, Tdelegate, Tnone, Tvoid, Tint8, Tuns8, Tint16,
+                Tuns16, Tint32, Tuns32, Tint64, Tuns64, Tfloat32, Tfloat64,
+                Tfloat80, Timaginary32, Timaginary64, Timaginary80,
+                Tcomplex32, Tcomplex64, Tcomplex80, Tbool, Tchar, Twchar,
+                Tdchar, Terror, Tinstance, Ttypeof, Ttuple, Tslice, Treturn,
+                Tnull, Tvector, Tint128, Tuns128, Ttraits, Tmixin,
+                Tnoreturn, Ttag:
+                assert(0, text("`", index.toString, "` indexes a `",
+                    indexBase.toString, "`: dmd lowers associative array ",
+                    "indexing to a call, indexes a vector through a cast to ",
+                    "a static array and an aggregate through `opIndex`"));
         }
-
-        if (auto field = expression.isDotVarExp)
-            return _adapter.storageField(field);
-
-        return _adapter.storageValue(expression);
     }
 
     private Result assignmentResult(

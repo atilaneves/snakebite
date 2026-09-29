@@ -996,3 +996,23 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// A condition of type `noreturn` runs, and its throw leaves the `if`.
+static foreach (backend; Matrix!()) {
+    @("noreturnConditionRuns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            noreturn fail() { throw new Exception("stop"); }
+
+            int main() {
+                try {
+                    if (fail())
+                        return 1;
+                    return 2;
+                } catch (Exception exception)
+                    return exception.msg == "stop" ? 0 : 3;
+            }
+        });
+    }
+}

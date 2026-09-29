@@ -283,3 +283,66 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// A static delegate initialized from a lambda outside any frame has a
+// null context and the lambda as its function.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable's value at compile time"),
+)) {
+    @("staticDelegateInitializerHasNullContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                static int delegate() global = delegate() => 5;
+
+                assert(global.ptr is null);
+                assert(global.funcptr !is null);
+                assert(global() == 5);
+            }
+        });
+    }
+}
+
+// The same through an enum of a delegate. dmd swaps the two words and
+// the call crashes; ldc follows the spec.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable's value at compile time"),
+    Omit!(Native, Because.diverges,
+        "dmd's runtime codegen reads an enum-of-delegate module "
+            ~ "initializer's fields swapped and crashes when it is "
+            ~ "called; ldc follows the spec"),
+)) {
+    @("enumOfDelegateModuleInitializerHasNullContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            enum Getter : int delegate() { a = delegate() => 9 }
+            Getter gg = Getter.a;
+
+            void main() {
+                assert(gg.ptr is null);
+                assert(gg.funcptr !is null);
+                assert(gg() == 9);
+            }
+        });
+    }
+}
+
+// dmd's swapped words, pinned without the call that crashes.
+@("enumOfDelegateModuleInitializerHasNullContext.Native")
+@Tags(Native.stringof)
+unittest {
+    0.shouldBeStatusOf!(Native, q{
+        enum Getter : int delegate() { a = delegate() => 9 }
+        Getter gg = Getter.a;
+
+        void main() {
+            assert(gg.ptr !is null);
+            assert(gg.funcptr is null);
+        }
+    });
+}
