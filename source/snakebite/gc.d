@@ -62,6 +62,8 @@ public void selectFrontendMemory(in bool lowmem) nothrow @nogc {
 
 
 // Whether the frontend allocates from the GC (`--lowmem`).
+// @trusted: reads one plain word that does not change once the frontend
+// first runs (`selectFrontendMemory`).
 public bool lowmem() @trusted nothrow @nogc {
     return _frontendMemory == FrontendMemory.gc;
 }
@@ -294,8 +296,6 @@ private final class SnakebiteGC : GC {
     }
 
     BlkInfo qalloc(size_t size, uint bits, const scope TypeInfo ti) nothrow {
-        import snakebite.arena: arenaAlignment;
-
         debug requireInsideFrontend(bits, ti);
         return allocatesInArena ? arenaBlock(size, bits) : _gc.qalloc(size, bits, ti);
     }
