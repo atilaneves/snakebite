@@ -18,6 +18,8 @@ extern(C) bool executeIndirectCallPlan(
 );
 
 import snakebite.backends.builtins: BuiltinCall;
+import snakebite.backends.unwindplan:
+    ExceptionCandidate, UnwindPlan, unwindPlanOf;
 import snakebite.callarguments: CallArguments;
 import snakebite.nativevalue:
     CastKind, ComplexOperation, floatingToBool, loadFloating, loadSigned,
@@ -574,9 +576,14 @@ private Activation* handleException(
         } catch (Throwable chained) {
             throwable = chained;
         }
-        const handler = findHandler(
+        const plan = exceptionPlanOf(
             active.exceptionHandlers[firstHandler .. $], active.pc,
             throwable.classinfo);
+        const step = plan.finalizers.length != 0
+            ? plan.finalizers[0]
+            : plan.handler;
+        const handler = plan.finalizers.length != 0 || plan.hasHandler
+            ? cast(const(ExceptionHandler)*) step.payload : null;
         if (handler is null || (active.end !is null
                 && (handler.handler < active.start
                     || handler.handler >= active.end))) {
@@ -714,20 +721,27 @@ private const(Instruction)* runTemporaryEnd(Decoded)(
 }
 
 
-private const(ExceptionHandler)* findHandler(
+private UnwindPlan exceptionPlanOf(
     const(ExceptionHandler)[] handlers,
     const(Instruction)* pc,
     TypeInfo_Class actual,
-) @nogc nothrow {
-    import snakebite.backends.exceptions: catchMatches;
+) {
+    ExceptionCandidate[] candidates;
 
     foreach (ref handler; handlers) {
         if (pc < handler.bodyStart || pc >= handler.bodyEnd)
             continue;
-        if (catchMatches(handler.type, actual))
-            return &handler;
+        candidates ~= ExceptionCandidate(
+            null,
+            handler.cleanupEnd is null
+                ? ExceptionCandidate.Kind.catch_
+                : ExceptionCandidate.Kind.finally_,
+            cast(TypeInfo_Class) handler.type,
+            cast(const(void)*) &handler,
+        );
     }
-    return null;
+
+    return unwindPlanOf(candidates, actual);
 }
 
 

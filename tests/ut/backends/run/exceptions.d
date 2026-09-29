@@ -44,6 +44,78 @@ static foreach (backend; Matrix!()) {
 
 
 static foreach (backend; Matrix!()) {
+    @("innerFinallyRunsBeforeOuterCatch." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run(ref int order) {
+                try {
+                    try {
+                        throw new Exception("failure");
+                    } finally {
+                        order = order * 10 + 1;
+                    }
+                } catch (Exception) {
+                    order = order * 10 + 2;
+                    return order;
+                }
+
+                return 0;
+            }
+
+            void main() {
+                int order;
+                assert(run(order) == 12);
+                assert(order == 12);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("nestedFinallyRunsForReturnAndBreak." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run(ref int order) {
+                try {
+                    try {
+                        return 7;
+                    } finally {
+                        order = order * 10 + 1;
+                    }
+                } finally {
+                    order = order * 10 + 2;
+                }
+            }
+
+            void main() {
+                int order;
+                assert(run(order) == 7);
+                assert(order == 12);
+
+                order = 0;
+                for (int i; i < 1; ++i) {
+                    try {
+                        try {
+                            break;
+                        } finally {
+                            order = order * 10 + 1;
+                        }
+                    } finally {
+                        order = order * 10 + 2;
+                    }
+                }
+
+                assert(order == 12);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
     @("catchMatchesGuestClassByBaseType." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
