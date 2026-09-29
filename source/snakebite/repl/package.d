@@ -44,15 +44,16 @@ public struct Repl {
         const(DependencyImage)* dependencyImage = null,
     ) {
         import dmd.frontend: addImport, addStringImport;
+        import snakebite.frontend.compiler: newInFrontend;
 
         _backendName = backendName;
         _importPaths = importPaths.dup;
         _flags = FrontendFlags(flags.compilerArguments.dup);
         _dependencyImage = dependencyImage;
         foreach (importPath; _importPaths)
-            addImport(importPath);
+            newInFrontend!addImport(importPath);
         foreach (stringImportPath; stringImportPaths)
-            addStringImport(stringImportPath);
+            newInFrontend!addStringImport(stringImportPath);
     }
 
     public bool shouldQuit(in string input) const @safe pure {

@@ -30,12 +30,14 @@ struct Options {
     string[] versions;
     string projectDirectory;
     bool helpWanted;
+    bool lowmem;
 }
 
 public int run(string[] args) {
     import bench.report: printTable;
     import std.stdio: stderr, writeln;
     import snakebite.execution: PreparationReport;
+    import snakebite.gc: selectFrontendMemory;
 
     Options options;
     try
@@ -47,6 +49,7 @@ public int run(string[] args) {
 
     if (options.helpWanted)
         return 0;
+    selectFrontendMemory(options.lowmem);
 
     if (const error = validate(options)) {
         stderr.writeln(error);
@@ -75,6 +78,7 @@ public int run(string[] args) {
 }
 
 private Options parseOptions(string[] args) {
+    import snakebite.gc: lowmemHelp;
     import std.getopt: defaultGetoptPrinter, getopt;
 
     Options options;
@@ -93,6 +97,7 @@ private Options parseOptions(string[] args) {
         ~ ".d files; repeatable.", &options.stringImportPaths,
         "version", "Define a version identifier (repeatable).",
         &options.versions,
+        "lowmem", lowmemHelp, &options.lowmem,
     );
 
     if (result.helpWanted) {

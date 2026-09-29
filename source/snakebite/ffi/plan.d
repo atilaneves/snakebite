@@ -1495,6 +1495,24 @@ public struct PlanCache {
         return *_rawPlans.insert(name, plan);
     }
 
+    // As `rawPlanOf`, for a required host symbol. The missing-symbol
+    // failure is the same link failure an ordinary FFI call reports.
+    public const(CallPlan)* requiredRawPlanOf(
+        string name,
+        scope const(Register)[] parameterRegisters,
+        Register returnRegister = Register(Register.Kind.none, 0),
+    ) {
+        import std.conv: text;
+
+        if (auto plan = rawPlanOf(name, parameterRegisters, returnRegister))
+            return plan;
+
+        throw new Exception(text(
+            "ffi cannot resolve the symbol `", name,
+            "`: it is not in this process",
+        ));
+    }
+
 }
 
 // Works out how to call `function_`, once.

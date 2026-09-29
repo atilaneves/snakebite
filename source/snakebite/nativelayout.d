@@ -226,18 +226,19 @@ public struct TypeFacts {
     // second write.
     private static void forceResolved(Type type) {
         import dmd.location: Loc;
+        import snakebite.frontend.compiler: newInFrontend;
 
         if (auto enumType = type.isTypeEnum) {
             import dmd.enumsem: getMemtype;
 
-            forceResolved(getMemtype(enumType.sym, Loc.initial));
+            forceResolved(newInFrontend!getMemtype(enumType.sym, Loc.initial));
             return;
         }
 
         if (auto structType = type.isTypeStruct) {
             import dmd.dsymbolsem: size;
 
-            structType.sym.size(Loc.initial);
+            newInFrontend!size(structType.sym, Loc.initial);
             return;
         }
 
@@ -711,6 +712,7 @@ public struct NativeData {
     private void[] buildInitialBytes(VarDeclaration variable, in TypeFacts facts) {
         import core.stdc.string: memcpy;
         import dmd.expressionsem: getConstInitializer;
+        import snakebite.frontend.compiler: newInFrontend;
 
         if (auto pending = variable in _pendingStatics)
             return *pending;
@@ -725,7 +727,7 @@ public struct NativeData {
         } else if (variable._init.isVoidInitializer is null) {
             auto initializer = variable._init.isExpInitializer;
             auto expression = initializer is null
-                ? variable.getConstInitializer
+                ? newInFrontend!getConstInitializer(variable, true)
                 : initializerValueOf(initializer);
             write(variable.type, facts, expression, bytes.ptr);
         }
@@ -760,6 +762,7 @@ public struct NativeData {
         ubyte* place,
     ) {
         import dmd.expressionsem: getConstInitializer;
+        import snakebite.frontend.compiler: newInFrontend;
 
         foreach (field; declaration.fields) {
             if (field._init !is null && field._init.isVoidInitializer)
@@ -767,7 +770,10 @@ public struct NativeData {
 
             const bytes = field._init is null
                 ? initialValue(field.type, field.loc)
-                : value(field.type, field.getConstInitializer(false));
+                : value(
+                    field.type,
+                    newInFrontend!getConstInitializer(field, false),
+                );
             import core.stdc.string: memcpy;
 
             memcpy(place + field.offset, bytes.ptr, bytes.length);
@@ -790,6 +796,7 @@ private alias NativeCall = void delegate(
 public string nativeSymbolName(imported!"dmd.declaration".Declaration symbol) {
     import dmd.common.outbuffer: OutBuffer;
     import dmd.mangle: mangleToBuffer;
+    import snakebite.frontend.compiler: newInFrontend;
     import snakebite.frontend.dmd.mangle: completeMangleTargets;
 
     // `symbol` is never itself a function (every caller branches to
@@ -800,7 +807,7 @@ public string nativeSymbolName(imported!"dmd.declaration".Declaration symbol) {
     // signature - see `completeMangleTargets`.
     completeMangleTargets(symbol);
     OutBuffer name;
-    mangleToBuffer(symbol, name);
+    newInFrontend!mangleToBuffer(symbol, name);
     return name[].idup;
 }
 
@@ -809,8 +816,9 @@ private imported!"dmd.expression".Expression initialExpression(
     in imported!"dmd.location".Loc loc,
 ) {
     import dmd.typesem: defaultInitLiteral;
+    import snakebite.frontend.compiler: newInFrontend;
 
-    return type.defaultInitLiteral(loc);
+    return newInFrontend!defaultInitLiteral(type, loc);
 }
 
 public void storeValue(
@@ -852,6 +860,7 @@ private void storeValue(
     import dmd.astenums: TY, Tarray, Tdelegate, Tpointer, Tsarray;
     import dmd.expressionsem: toComplex, toImaginary, toInteger, toReal;
     import dmd.typesem: mutableOf, nextOf, size, toBasetype;
+    import snakebite.frontend.compiler: newInFrontend;
     import std.conv: text;
 
     if (value.isNullExp) {
@@ -892,7 +901,8 @@ private void storeValue(
     if (auto array = type.isTypeSArray) {
         auto sourceElement = value.type.toBasetype.nextOf;
         const wholeArray = sourceElement !is null
-            && sourceElement.mutableOf.equals(array.next.mutableOf);
+            && newInFrontend!mutableOf(sourceElement)
+                .equals(newInFrontend!mutableOf(array.next));
         if (!wholeArray || value.isStringExp is null) {
             const elementSize = array.next.size;
             auto literal = wholeArray ? value.isArrayLiteralExp : null;
