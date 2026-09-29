@@ -37,3 +37,25 @@ package struct VariadicLayout {
         cursor.stack_args = storage + argumentsOffset;
     }
 }
+
+public void initializeNativeCursor(
+    void* storage,
+    uint integerOffset,
+    uint floatingOffset,
+    void* overflowArea,
+    void* registerArea,
+) {
+    import core.internal.vararg.sysv_x64: __va_list_tag;
+
+    auto cursor = cast(__va_list_tag*) storage;
+    *cursor = __va_list_tag.init;
+    cursor.offset_regs = integerOffset;
+    cursor.offset_fpregs = floatingOffset;
+    cursor.stack_args = overflowArea;
+    cursor.reg_args = registerArea;
+}
+
+public size_t nativeCursorSize() {
+    import core.internal.vararg.sysv_x64: __va_list_tag;
+    return __va_list_tag.sizeof;
+}

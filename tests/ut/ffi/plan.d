@@ -7,7 +7,7 @@ import dmd.mtype: Type;
 import dmd.statement: ReturnStatement, Statement;
 import dmd.typesem: nextOf;
 import snakebite.ffi: CallAdapter, PlanCache;
-import snakebite.ffi.abi: ArgumentPlan, needsHiddenReturnPointer;
+import snakebite.ffi.abi: ArgumentPlan, Register, needsHiddenReturnPointer;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions:
     findFunction, findStruct, typeFunctionOf;
@@ -544,6 +544,28 @@ unittest {
     const plan = ArgumentPlan.of(parameterType);
 
     plan.memory.should == true;
+}
+
+
+// SysV passes a 128-bit integer in two INTEGER eightbytes. LDC's own
+// caller puts the low and high words in `%rdi` and `%rsi`.
+@("abi.integer128UsesTwoIntegerRegisters")
+unittest {
+    auto guestModule = parseSnippet(q{
+        import core.int128: Cent;
+        extern(C) Cent snakebite_ut_integer128(Cent value);
+    });
+    auto function_ = findFunction(guestModule, "snakebite_ut_integer128");
+    assert(function_ !is null,
+        "No `snakebite_ut_integer128` in the guest program");
+
+    const plan = ArgumentPlan.of(
+        typeFunctionOf(function_).parameterList[0].type);
+
+    plan.memory.should == false;
+    plan.count.should == 2;
+    plan.registers[0].kind.should == Register.Kind.integer;
+    plan.registers[1].kind.should == Register.Kind.integer;
 }
 
 
@@ -2048,9 +2070,8 @@ unittest {
 }
 
 
-// The assembly stub guarantees a 16-byte stack base. A greater alignment
-// needs a different stub, so the planner must reject it before resolution.
-@("called.memoryClassParameter.refusedOverAlignment")
+// The SysV call area must match an over-aligned argument's native layout.
+@("called.memoryClassParameter.overAligned")
 unittest {
     auto guestModule = parseSnippet(q{
         struct OverAligned {
@@ -2065,10 +2086,23 @@ unittest {
         "No `snakebite_ut_over_aligned` in the guest program");
 
     PlanCache cache;
-    cache.of(function_).shouldThrowWithMessage(
-        "ffi cannot pass a value of type `OverAligned`: its ABI alignment " ~
-            "is 32 bytes, and only 16-byte-aligned MEMORY-class arguments " ~
-            "are supported");
+    const plan = cache.of(function_);
+    HostOverAligned value;
+    size_t result;
+    const(void*)[1] arguments = [cast(const(void*)) &value];
+
+    plan.call(&result, arguments[]);
+
+    result.should == 0;
+}
+
+private struct HostOverAligned {
+    align(32) long word;
+    long[3] words;
+}
+
+private extern(C) size_t snakebite_ut_over_aligned(HostOverAligned value) {
+    return cast(size_t) &value % 32;
 }
 
 

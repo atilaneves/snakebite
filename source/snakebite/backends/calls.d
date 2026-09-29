@@ -101,6 +101,19 @@ public struct CallSelection {
         ).route == Route.guest;
     }
 
+    // A host variadic function pointer must keep its host address. Its
+    // call plan depends on the extra argument types at each call site.
+    public bool usesNativeVariadicAddress(
+        FuncDeclaration function_, bool hasNativeSymbol,
+    ) {
+        import dmd.astenums: VarArg;
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+        return hasNativeSymbol
+            && typeFunctionOf(function_).parameterList.varargs
+                == VarArg.variadic;
+    }
+
     // Every dmd query a function's decision needs, resolved once and
     // never again - no lock, `decisionOf`'s own doc explains why none of
     // these reads needs one.

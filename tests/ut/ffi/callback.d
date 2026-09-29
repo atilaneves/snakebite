@@ -73,6 +73,22 @@ private alias ReverseReal = extern(D) real function(long, real);
 private alias TripleOfLong = extern(C) Triple function(long);
 private alias LongOfEight = extern(C) long function(
     long, long, long, long, long, long, long, long);
+private alias Vector4 = __vector(float[4]);
+private alias Vector4OfVector4 = extern(C) Vector4 function(Vector4);
+private alias CVariadicInt = extern(C) int function(int, ...);
+
+private extern(C) void recordVector4(void*, CallbackCall* call) {
+    import core.stdc.string: memcpy;
+    memcpy(call.returnPlace, call.arguments[0], 16);
+}
+
+private extern(C) void recordCVariadicInt(void*, CallbackCall* call) {
+    import core.stdc.stdarg: va_arg, va_list;
+
+    auto args = cast(va_list) call.variadicCursor;
+    *cast(int*) call.returnPlace =
+        *cast(const int*) call.arguments[0] + va_arg!int(args);
+}
 
 
 private FuncDeclaration declarationOf(string code, string name) {
@@ -86,6 +102,33 @@ private FuncDeclaration declarationOf(string code, string name) {
 private bool inTemplateChunk(const(void)* entry) {
     return entry >= cast(const(void)*) &snakebite_ffi_callback_chunk
         && entry < cast(const(void)*) &snakebite_ffi_callback_chunk_end;
+}
+
+@("entry.vector4ArgumentAndReturn")
+unittest {
+    auto function_ = declarationOf(
+        q{ extern(C) __vector(float[4]) echo(__vector(float[4]) x); },
+        "echo",
+    );
+    auto bridge = new CallbackBridge(&recordVector4, null);
+    int word;
+    bridge.register(&word, function_);
+    auto entry = cast(Vector4OfVector4) bridge.entryOf(&word);
+    float[4] input = [1.0f, 2.0f, 3.0f, 4.0f];
+    auto output = entry(cast(Vector4) input);
+    (cast(float[4]) output).should == input;
+}
+
+@("entry.variadicC.integerRegister")
+unittest {
+    auto function_ = declarationOf(
+        q{ extern(C) int addExtra(int x, ...); }, "addExtra");
+    auto bridge = new CallbackBridge(&recordCVariadicInt, null);
+    int word;
+    bridge.register(&word, function_);
+    auto entry = cast(CVariadicInt) bridge.entryOf(&word);
+
+    entry(13, 29).should == 42;
 }
 
 

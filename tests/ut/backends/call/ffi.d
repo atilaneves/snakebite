@@ -1015,6 +1015,200 @@ private extern(C) long snakebite_ut_many_callback(
         + (callback() ? 100 : 0);
 }
 
+private alias CVariadicCallback = extern(C) int function(int, ...);
+
+private extern(C) int snakebite_ut_call_c_variadic_callback(
+    CVariadicCallback callback,
+) {
+    return callback(11, 31);
+}
+
+private alias MixedCVariadicCallback = extern(C) double function(int, ...);
+
+private extern(C) double snakebite_ut_call_mixed_c_variadic_callback(
+    MixedCVariadicCallback callback,
+) {
+    return callback(9, 1.5, 3, 2.5);
+}
+
+private alias SpilledCVariadicCallback = extern(C) int function(
+    int, int, int, int, int, int, int, ...
+);
+
+private extern(C) int snakebite_ut_call_spilled_c_variadic_callback(
+    SpilledCVariadicCallback callback,
+) {
+    return callback(1, 2, 3, 4, 5, 6, 7, 8);
+}
+
+private alias DVariadicCallback = extern(D) int function(int, ...);
+
+private alias Vector4StackCallback = extern(C) float function(
+    double, double, double, double, double, double, double, double,
+    __vector(float[4]),
+);
+
+private extern(C) float snakebite_ut_call_vector4_spilled_callback(
+    Vector4StackCallback callback,
+) {
+    return callback(1, 2, 3, 4, 5, 6, 7, 8,
+        cast(__vector(float[4])) [1.0f, 2.0f, 3.0f, 4.0f]);
+}
+
+private alias OddWordVectorCallback = extern(C) float function(
+    double, double, double, double, double, double, double, double, double,
+    __vector(float[4]),
+);
+
+private extern(C) float snakebite_ut_call_vector4_after_odd_stack_word(
+    OddWordVectorCallback callback,
+) {
+    return callback(1, 2, 3, 4, 5, 6, 7, 8, 9,
+        cast(__vector(float[4])) [1.0f, 2.0f, 3.0f, 4.0f]);
+}
+
+private extern(C) float snakebite_ut_vector4_after_eight_doubles(
+    double a, double b, double c, double d,
+    double e, double f, double g, double h,
+    __vector(float[4]) value,
+) {
+    return cast(float) (a + b + c + d + e + f + g + h)
+        + value[0] + value[3];
+}
+
+private extern(C) int snakebite_ut_call_d_variadic_callback(
+    DVariadicCallback callback,
+) {
+    return callback(10, 32, 2.5, 4, 8, 16, 32);
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("callback.variadicC.nativeVaList." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg;
+            alias Callback = extern(C) int function(int, ...);
+
+            pragma(mangle, "snakebite_ut_call_c_variadic_callback")
+            extern(C) int callCVariadicCallback(
+                Callback,
+            );
+
+            extern(C) int guest(int fixed, ...) {
+                return fixed + va_arg!int(_argptr);
+            }
+
+            int answer() { return callCVariadicCallback(&guest); }
+        }, "answer");
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("callback.variadicC.mixedRegisterFiles." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        16.0.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg;
+            alias Callback = extern(C) double function(int, ...);
+            pragma(mangle, "snakebite_ut_call_mixed_c_variadic_callback")
+            extern(C) double invoke(Callback);
+            extern(C) double guest(int fixed, ...) {
+                return fixed + va_arg!double(_argptr)
+                    + va_arg!int(_argptr) + va_arg!double(_argptr);
+            }
+            double answer() { return invoke(&guest); }
+        }, "answer");
+    }
+
+    @("callback.variadicC.overflowStack." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        15.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg;
+            alias Callback = extern(C) int function(
+                int, int, int, int, int, int, int, ...);
+            pragma(mangle, "snakebite_ut_call_spilled_c_variadic_callback")
+            extern(C) int invoke(Callback);
+            extern(C) int guest(
+                int a, int b, int c, int d, int e, int f, int g, ...
+            ) { return g + va_arg!int(_argptr); }
+            int answer() { return invoke(&guest); }
+        }, "answer");
+    }
+
+    @("callback.variadicD.argumentsAndCursor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        104.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg;
+            import core.vararg: va_arg;
+            alias Callback = extern(D) int function(int, ...);
+            pragma(mangle, "snakebite_ut_call_d_variadic_callback")
+            extern(C) int invoke(Callback);
+            static extern(D) int guest(int fixed, ...) {
+                assert(_arguments.length == 6);
+                assert(_arguments[0] is typeid(int));
+                assert(_arguments[1] is typeid(double));
+                int total = fixed;
+                foreach (i; 0 .. _arguments.length) {
+                    if (_arguments[i] is typeid(double))
+                        total += cast(int) va_arg!double(_argptr);
+                    else
+                        total += va_arg!int(_argptr);
+                }
+                return total;
+            }
+            int answer() { return invoke(cast(Callback) &guest); }
+        }, "answer");
+    }
+
+    @("callback.vector4SpillsAfterEightSseArguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        41.0f.shouldBeRetOf!(backend, q{
+            alias Vector4 = __vector(float[4]);
+            alias Callback = extern(C) float function(
+                double, double, double, double, double, double, double, double,
+                Vector4,
+            );
+            pragma(mangle, "snakebite_ut_call_vector4_spilled_callback")
+            extern(C) float invoke(Callback);
+            static extern(C) float guest(
+                double a, double b, double c, double d,
+                double e, double f, double g, double h,
+                Vector4 value,
+            ) {
+                return cast(float) (a + b + c + d + e + f + g + h)
+                    + value[0] + value[3];
+            }
+            float answer() { return invoke(&guest); }
+        }, "answer");
+    }
+
+    @("vector4SpillsAfterEightSseArguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        41.0f.shouldBeRetOf!(backend, q{
+            alias Vector4 = __vector(float[4]);
+            pragma(mangle, "snakebite_ut_vector4_after_eight_doubles")
+            extern(C) float invoke(
+                double, double, double, double, double, double, double, double,
+                Vector4,
+            );
+            float answer() {
+                auto value = cast(Vector4) [1.0f, 2.0f, 3.0f, 4.0f];
+                return invoke(1, 2, 3, 4, 5, 6, 7, 8, value);
+            }
+        }, "answer");
+    }
+}
+
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
@@ -3150,27 +3344,10 @@ static foreach (Backend; AliasSeq!(Interpreter, Bytecode)) {
 }
 
 
-// A variadic callee reached through a function pointer parameter, not a
-// name: the interpreter resolves it dynamically (`calleeOf`), exactly as
-// it would a direct call, so this reuses the same weighted-sum callee
-// and expected total as `variadic.tenIntsFourSpillToTheStack` above.
-// `compileIndirectCall` never opts `arityMismatches` into `allowExtra`
-// the way `compileNativeCall` does for a statically resolved callee
-// (`snakebite.backends.calls`'s own doc - only the two variadic-aware
-// call sites opt in, and an indirect call cannot know at compile time
-// whether its own runtime target will turn out to be one): a call
-// through a function pointer with more arguments than the pointer
-// type's own declared parameter list is refused there as an ordinary
-// arity mismatch, the same as any other indirect call with too many
-// arguments (issue #334 step 5 review, function-pointer scenario).
+// The pointer type gives the fixed parameter prefix. C variadic calls
+// also take extra arguments, whose types shape the host call plan.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
-    Omit!(Bytecode, Because.unconfirmed,
-        "compileIndirectCall's own arityMismatches check never opts "
-            ~ "into allowExtra, so a call through a function pointer "
-            ~ "with more arguments than the pointer type's own declared "
-            ~ "parameter list is refused there as an ordinary arity "
-            ~ "mismatch, not routed to a native plan"),
 )) {
     @("variadic.calledThroughFunctionPointer." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -3182,6 +3359,36 @@ static foreach (backend; Matrix!(
                 extern(C) int nativeSum(int first, ...);
 
                 alias VariadicFp = extern(C) int function(int, ...);
+
+                int callThrough(VariadicFp fp) {
+                    return fp(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+                }
+
+                int answer() {
+                    return callThrough(&nativeSum);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// C++ functions use the System V C variadic convention on this target,
+// so their call sites must include the extra argument types in the plan.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("variadic.cppLinkage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        331.shouldBeRetOf!(
+            backend,
+            q{
+                pragma(mangle, "snakebite_ut_variadic_sum_ints_backend")
+                extern(C++) int nativeSum(int first, ...);
+
+                alias VariadicFp = extern(C++) int function(int, ...);
 
                 int callThrough(VariadicFp fp) {
                     return fp(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
@@ -3624,5 +3831,181 @@ static foreach (backend; Matrix!()) {
                 assert(make().e == E.a);
             }
         });
+    }
+}
+
+private union ReviewVectorUnion {
+    __vector(float[4]) vector;
+    ulong[2] words;
+}
+
+private extern(C) ulong snakebite_review_vector_union(ReviewVectorUnion value) {
+    return value.words[0] + value.words[1];
+}
+
+private extern(C) ReviewVectorUnion snakebite_review_vector_union_return() {
+    ReviewVectorUnion value;
+    value.words = [17UL, 25UL];
+    return value;
+}
+
+private extern(C) float snakebite_ut_vector4_after_odd_stack_word(
+    double a, double b, double c, double d, double e,
+    double f, double g, double h, double i, __vector(float[4]) value,
+) {
+    return value[0] + value[3];
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("ffi.vectorUnionUsesIntegerRegistersForArguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42UL.shouldBeRetOf!(backend, q{
+            union Value {
+                __vector(float[4]) vector;
+                ulong[2] words;
+            }
+            pragma(mangle, "snakebite_review_vector_union")
+            extern(C) ulong invoke(Value);
+            ulong answer() {
+                Value value;
+                value.words = [17UL, 25UL];
+                return invoke(value);
+            }
+        }, "answer");
+    }
+
+    @("ffi.vectorUnionUsesIntegerRegistersForReturns." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42UL.shouldBeRetOf!(backend, q{
+            union Value {
+                __vector(float[4]) vector;
+                ulong[2] words;
+            }
+            pragma(mangle, "snakebite_review_vector_union_return")
+            extern(C) Value invoke();
+            ulong answer() {
+                auto value = invoke();
+                return value.words[0] + value.words[1];
+            }
+        }, "answer");
+    }
+
+    @("ffi.vectorSpillsAfterOddStackWord." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        5.0f.shouldBeRetOf!(backend, q{
+            alias Vector = __vector(float[4]);
+            pragma(mangle, "snakebite_ut_vector4_after_odd_stack_word")
+            extern(C) float invoke(
+                double, double, double, double, double,
+                double, double, double, double, Vector);
+            float answer() {
+                auto value = cast(Vector) [1.0f, 2.0f, 3.0f, 4.0f];
+                return invoke(1, 2, 3, 4, 5, 6, 7, 8, 9, value);
+            }
+        }, "answer");
+    }
+
+    @("ffi.callbackVectorSpillsAfterOddStackWord." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        50.0f.shouldBeRetOf!(backend, q{
+            alias Vector4 = __vector(float[4]);
+            alias Callback = extern(C) float function(
+                double, double, double, double, double, double, double, double,
+                double, Vector4,
+            );
+            pragma(mangle, "snakebite_ut_call_vector4_after_odd_stack_word")
+            extern(C) float invoke(Callback);
+            static extern(C) float guest(
+                double a, double b, double c, double d, double e,
+                double f, double g, double h, double i, Vector4 value,
+            ) {
+                return cast(float) (a + b + c + d + e + f + g + h + i)
+                    + value[0] + value[3];
+            }
+            float answer() { return invoke(&guest); }
+        }, "answer");
+    }
+}
+
+private extern(C) creal snakebite_review_complex_return() {
+    return 17.0L + 25.0Li;
+}
+
+private alias ComplexRealCallback = extern(C) creal function();
+
+private extern(C) creal snakebite_ut_call_complex_real_callback(
+    ComplexRealCallback callback,
+) {
+    return callback();
+}
+
+private extern(C) int snakebite_ut_complex_real_argument(creal value) {
+    return cast(int) (value.re + value.im);
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("complexRealReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        84.shouldBeRetOf!(backend, q{
+            pragma(mangle, "snakebite_review_complex_return")
+            extern(C) creal invoke();
+            int answer() {
+                const first = invoke();
+                const second = invoke();
+                return cast(int) (first.re + first.im
+                    + second.re + second.im);
+            }
+        }, "answer");
+    }
+
+    @("complexRealCallbackReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        84.shouldBeRetOf!(backend, q{
+            alias Callback = extern(C) creal function();
+            pragma(mangle, "snakebite_ut_call_complex_real_callback")
+            extern(C) creal callCallback(Callback callback);
+            int answer() {
+                extern(C) creal guest() {
+                    return 17.0L + 25.0Li;
+                }
+                const first = callCallback(&guest);
+                const second = callCallback(&guest);
+                return cast(int) (first.re + first.im
+                    + second.re + second.im);
+            }
+        }, "answer");
+    }
+
+    @("complexRealArgument." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            pragma(mangle, "snakebite_ut_complex_real_argument")
+            extern(C) int invoke(creal value);
+            int answer() { return invoke(17.0L + 25.0Li); }
+        }, "answer");
+    }
+
+    @("variadic.hostFunctionPointerCallSitePlan." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        55.shouldBeRetOf!(backend, q{
+            pragma(mangle, "snakebite_ut_variadic_count_sum_backend")
+            extern(C) int invoke(int, ...);
+            int answer() {
+                auto function_ = &invoke;
+                return function_(1, 41) + function_(3, 1, 2, 3);
+            }
+        }, "answer");
     }
 }

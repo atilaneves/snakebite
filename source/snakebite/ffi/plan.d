@@ -60,7 +60,8 @@ public struct CallPlan {
     // so they share `word64`; `copy` is the rare aggregate eightbyte
     // narrower than 8 bytes, the only case that still needs a byte count.
     private enum Load : ubyte {
-        word64, zero8, zero16, zero32, sign8, sign16, sign32, copy, address,
+        word64, zero8, zero16, zero32, sign8, sign16, sign32, copy, copy16,
+        address,
     }
 
     // One eightbyte's source and destination, fixed at prepare time. The
@@ -85,7 +86,7 @@ public struct CallPlan {
     // from `_return` at `buildMoves` time instead of `abi.writeWord`'s
     // runtime dispatch (which also re-validated a width every plan here
     // already fixed at prepare time).
-    private enum Store : ubyte { byte1, byte2, byte4, byte8 }
+    private enum Store : ubyte { byte1, byte2, byte4, byte8, copy16 }
 
     private struct ResultMove {
         private ushort sourceOffset;
@@ -114,6 +115,7 @@ public struct CallPlan {
     // The moves `callAt` replays - see the module comment.
     private Move[] _moves;
     private size_t _moveCount;
+    private size_t _normalMoveCount;
     // One parameter whose value can carry a guest function word across
     // the barrier: a function pointer, a delegate, or a `lazy` parameter
     // (dmd's own implicit delegate). `callWithCallbacks` swaps such a word
@@ -140,12 +142,17 @@ public struct CallPlan {
     // `CallFrame.sseCount`: how many of the moves above land in an SSE
     // register, for a variadic callee's `%al`.
     private size_t _sseCount;
+    private size_t _integerArgumentCount;
+    private bool _callbackVariadic;
+    private bool _callbackDVariadic;
+    private size_t _callbackVariadicOffset = size_t.max;
     private size_t _stackWordCount;
+    private size_t _stackAlignment = 16;
     // At most two result eightbytes - one INTEGER/SSE register each, or a
     // pair when the return classifies to two eightbytes.
     private ResultMove[2] _resultMoves;
     private size_t _resultCount;
-    private bool _realResult;
+    private ubyte _realResultCount;
     // The stub entry this plan calls through - `snakebite_ffi_call_sysv_
     // amd64` or `snakebite_ffi_call_sysv_amd64_integer`, chosen once in
     // `buildMoves` from `_sseCount`/`_stackWordCount`. This is a
@@ -223,12 +230,23 @@ public struct CallPlan {
         if (_integerOnly) {
             CallFrame frame = void;
             auto frameBytes = cast(ubyte*) &frame;
-            fillFrame(frameBytes, returnPlace, arguments);
+            fillIntegerFrame(frameBytes, returnPlace, arguments);
             _entry(address, &frame);
             readResult(frameBytes, returnPlace);
             return;
         }
 
+        callGeneral(address, returnPlace, arguments);
+    }
+
+    // Keep the larger frame for SSE and stack arguments out of the
+    // integer-only call path's stack allocation.
+    pragma(inline, false)
+    private void callGeneral(
+        const(void)* address,
+        void* returnPlace,
+        scope const(void*)[] arguments,
+    ) const {
         Frame frame = void;
         // Keep small calls on the stack. The overflow storage has word
         // alignment and retains the flat offsets used by the prepared moves.
@@ -241,6 +259,7 @@ public struct CallPlan {
         callFrame.sseCount = _sseCount;
         callFrame.stack = cast(size_t*) (frameBytes + stackBase);
         callFrame.stackWords = _stackWordCount;
+        callFrame.stackAlignment = _stackAlignment;
         _entry(address, callFrame);
         readResult(frameBytes, returnPlace);
     }
@@ -356,6 +375,32 @@ public struct CallPlan {
         return _scratchBytes;
     }
 
+    package void* callbackVariadicCursor(
+        const(CallFrame)* frame, ubyte* scratch,
+    ) const {
+        if (!_callbackVariadic)
+            return null;
+        import snakebite.backends.variadic:
+            initializeNativeCursor;
+        import snakebite.ffi.abi:
+            maxFloatingArguments, maxIntegerArguments;
+        import std.algorithm.comparison: min;
+
+        auto cursor = scratch + _callbackVariadicOffset;
+        initializeNativeCursor(
+            cursor,
+            cast(uint) min(_integerArgumentCount, maxIntegerArguments) * 8,
+            cast(uint) (48 + min(_sseCount, maxFloatingArguments) * 16),
+            cast(void*) frame.stack + _stackWordCount * size_t.sizeof,
+            cast(void*) frame,
+        );
+        return cursor;
+    }
+
+    package size_t callbackVariadicTypesIndex() const {
+        return _callbackDVariadic ? (_hiddenContext ? 1 : 0) : size_t.max;
+    }
+
     // The forward moves replayed backwards, for a callback (ADR-0003):
     // every eightbyte the host placed in a register or a stack word is
     // read from `frame` - the registers spilled by
@@ -375,7 +420,7 @@ public struct CallPlan {
             addresses[i] = scratch + _argumentOffsets[i];
 
         auto frameBytes = cast(const(ubyte)*) frame;
-        foreach (ref move; _moves[0 .. _moveCount]) {
+        foreach (ref move; _moves[0 .. _normalMoveCount]) {
             const word = move.destinationOffset >= stackBase
                 ? frame.stack[
                     (move.destinationOffset - stackBase) / size_t.sizeof]
@@ -392,6 +437,10 @@ public struct CallPlan {
                 widthOf(move),
             );
         }
+        foreach (ref move; _moves[_normalMoveCount .. _moveCount])
+            memcpy(scratch + _argumentOffsets[move.parameterIndex]
+                + move.byteOffset,
+                frameBytes + move.destinationOffset, 16);
     }
 
     // Where the backend writes a callback's result: through the hidden
@@ -403,7 +452,7 @@ public struct CallPlan {
         if (_hiddenReturnPointer)
             return *cast(void**)
                 (cast(const(ubyte)*) frame + _returnPointerOffset);
-        if (_resultCount == 0 && !_realResult)
+        if (_resultCount == 0 && _realResultCount == 0)
             return null;
         return scratch + _returnOffset;
     }
@@ -415,11 +464,14 @@ public struct CallPlan {
     package void packResult(
         CallFrame* frame, const(void)* returnPlace,
     ) const {
-        frame.realResultUsed = _realResult;
-        if (_realResult) {
-            import core.stdc.string: memcpy;
+        import core.stdc.string: memcpy;
 
-            memcpy(&frame.realResult, returnPlace, real.sizeof);
+        frame.realResultCount = _realResultCount;
+        if (_realResultCount != 0) {
+            foreach (i; 0 .. _realResultCount)
+                memcpy(&frame.realResult[i],
+                    cast(const(ubyte)*) returnPlace + i * real.sizeof,
+                    real.sizeof);
             return;
         }
         if (_hiddenReturnPointer) {
@@ -430,6 +482,11 @@ public struct CallPlan {
         auto frameBytes = cast(ubyte*) frame;
         foreach (i; 0 .. _resultCount) {
             const register = _return.registers[i];
+            if (register.size == 16) {
+                memcpy(frameBytes + _resultMoves[i].sourceOffset,
+                    cast(const(ubyte)*) returnPlace + i * 16, 16);
+                continue;
+            }
             const move = Move(
                 0, 0, 0, loadOf(register), copyBytesOf(register));
             *cast(size_t*) (frameBytes + _resultMoves[i].sourceOffset) =
@@ -449,6 +506,7 @@ public struct CallPlan {
             case zero16, sign16: return 2;
             case zero32, sign32: return 4;
             case copy: return move.copyBytes;
+            case copy16: return 16;
         }
     }
 
@@ -465,6 +523,11 @@ public struct CallPlan {
         _returnOffset = offset;
         if (!_hiddenReturnPointer)
             offset += alignScratch(bytesOf(_return));
+        if (_callbackVariadic) {
+            import snakebite.backends.variadic: nativeCursorSize;
+            _callbackVariadicOffset = alignScratch(offset);
+            offset = _callbackVariadicOffset + nativeCursorSize;
+        }
         _scratchBytes = offset;
     }
 
@@ -494,18 +557,45 @@ public struct CallPlan {
         void* returnPlace,
         scope const(void*)[] arguments,
     ) const {
-        *cast(bool*) (frameBytes + CallFrame.realResultUsed.offsetof) =
-            _realResult;
+        if (!_integerOnly)
+            *cast(ubyte*) (frameBytes + CallFrame.realResultCount.offsetof) =
+                _realResultCount;
         if (_hiddenReturnPointer)
             *cast(size_t*) (frameBytes + _returnPointerOffset) =
                 cast(size_t) returnPlace;
-        if (_moveCount != 0) {
-            *cast(size_t*) (frameBytes + _moves[0].destinationOffset) =
-                loadValue(_moves[0], arguments);
-            foreach (ref move; _moves[1 .. _moveCount])
-                *cast(size_t*) (frameBytes + move.destinationOffset) =
-                    loadValue(move, arguments);
+        if (_normalMoveCount != 0) {
+            fillMove(frameBytes, _moves[0], arguments);
+            foreach (ref move; _moves[1 .. _normalMoveCount])
+                fillMove(frameBytes, move, arguments);
         }
+        foreach (ref move; _moves[_normalMoveCount .. _moveCount]) {
+            import core.stdc.string: memcpy;
+            memcpy(frameBytes + move.destinationOffset,
+                cast(const(ubyte)*) arguments[move.parameterIndex]
+                    + move.byteOffset, 16);
+        }
+    }
+
+    // `_integerOnly` proves that every move has a word-sized destination.
+    // This hot path does not inspect the wide-move partition.
+    pragma(inline, true)
+    private void fillIntegerFrame(
+        ubyte* frameBytes,
+        void* returnPlace,
+        scope const(void*)[] arguments,
+    ) const {
+        if (_hiddenReturnPointer)
+            *cast(size_t*) (frameBytes + _returnPointerOffset) =
+                cast(size_t) returnPlace;
+        foreach (ref move; _moves[0 .. _moveCount])
+            fillMove(frameBytes, move, arguments);
+    }
+
+    private static void fillMove(
+        ubyte* frameBytes, in Move move, scope const(void*)[] arguments,
+    ) {
+        *cast(size_t*) (frameBytes + move.destinationOffset) =
+            loadValue(move, arguments);
     }
 
     // Reads the call's result out of `frameBytes` into `returnPlace` - the
@@ -519,29 +609,38 @@ public struct CallPlan {
     // address, not the result.
     pragma(inline, true)
     private void readResult(ubyte* frameBytes, void* returnPlace) const {
-        if (_realResult) {
+        if (_realResultCount != 0) {
             if (returnPlace !is null) {
                 import core.stdc.string: memcpy;
 
-                memcpy(
-                    returnPlace,
-                    frameBytes + CallFrame.realResult.offsetof,
-                    real.sizeof,
-                );
+                foreach (i; 0 .. _realResultCount)
+                    memcpy(cast(ubyte*) returnPlace + i * real.sizeof,
+                        frameBytes + CallFrame.realResult.offsetof
+                            + i * real.sizeof,
+                        real.sizeof);
             }
             return;
         }
         if (returnPlace is null || _resultCount == 0)
             return;
 
+        import core.stdc.string: memcpy;
+
         auto bytes = cast(ubyte*) returnPlace;
-        storeResult(_resultMoves[0].store,
-            *cast(size_t*) (frameBytes + _resultMoves[0].sourceOffset),
-            bytes);
-        if (_resultCount > 1)
-            storeResult(_resultMoves[1].store,
-                *cast(size_t*) (frameBytes + _resultMoves[1].sourceOffset),
-                bytes + size_t.sizeof);
+        size_t returnOffset;
+        foreach (i; 0 .. _resultCount) {
+            const move = _resultMoves[i];
+            if (move.store == Store.copy16) {
+                memcpy(bytes + returnOffset,
+                    frameBytes + move.sourceOffset, 16);
+                returnOffset += 16;
+            } else {
+                storeResult(move.store,
+                    *cast(size_t*) (frameBytes + move.sourceOffset),
+                    bytes + returnOffset);
+                returnOffset += 8;
+            }
+        }
     }
 
     // `move`'s source bytes, widened or truncated as `move.load` says.
@@ -578,6 +677,7 @@ public struct CallPlan {
                 memcpy(&result, src, move.copyBytes);
                 return result;
             }
+            case copy16: assert(false, "16-byte load uses memcpy");
         }
     }
 
@@ -612,6 +712,7 @@ public struct CallPlan {
             case byte2: *cast(ushort*) place = cast(ushort) value; break;
             case byte4: *cast(uint*) place = cast(uint) value; break;
             case byte8: *cast(size_t*) place = value; break;
+            case copy16: assert(false, "16-byte result uses memcpy");
         }
     }
 
@@ -686,9 +787,15 @@ public struct CallPlan {
         // would undercount a plan with such an argument and overrun
         // `_moves` below.
         size_t totalMoves;
-        foreach (argument; _arguments)
-            totalMoves +=
-                argument.memory ? argument.memoryWords : argument.count;
+        foreach (argument; _arguments) {
+            if (argument.memory)
+                totalMoves += argument.memoryWords;
+            else
+                foreach (register; argument.registers[0 .. argument.count])
+                    totalMoves += register.kind == Register.Kind.sse
+                            && register.size == 16
+                        ? 2 : 1;
+        }
         _moves.length = totalMoves;
 
         void addRegisterMove(
@@ -698,7 +805,7 @@ public struct CallPlan {
             in bool toFloating,
         ) {
             const destinationOffset = toFloating
-                ? sseBase + (floatingCount++) * size_t.sizeof
+                ? sseBase + (floatingCount++) * 16
                 : integerBase + (integerCount++) * size_t.sizeof;
             _moves[moveCount++] = Move(
                 parameterIndex, destinationOffset, byteOffset,
@@ -724,13 +831,23 @@ public struct CallPlan {
         // all of them.
         void registerArgument(in size_t i) {
             const plan = _arguments[i];
+            size_t argumentOffset;
             foreach (j; 0 .. plan.count) {
                 const toFloating =
                     plan.registers[j].kind == Register.Kind.sse;
-                addRegisterMove(
-                    plan.registers[j], i, j * size_t.sizeof,
-                    toFloating,
-                );
+                const register = plan.registers[j];
+                if (toFloating && register.size == 16) {
+                    const destination = sseBase + floatingCount++ * 16;
+                    foreach (lane; 0 .. 2)
+                        _moves[moveCount++] = Move(
+                            i, destination + lane * size_t.sizeof,
+                            argumentOffset + lane * size_t.sizeof,
+                            Load.word64, 0,
+                        );
+                } else
+                    addRegisterMove(register, i, argumentOffset,
+                        toFloating);
+                argumentOffset += register.size;
             }
         }
 
@@ -810,6 +927,13 @@ public struct CallPlan {
         void addSpilled(in size_t i) {
             const plan = _arguments[i];
 
+            _stackAlignment = _stackAlignment > plan.stackAlignment
+                ? _stackAlignment : plan.stackAlignment;
+            const alignment = plan.stackAlignment / size_t.sizeof;
+            if (alignment > 1)
+                stackCount = (stackCount + alignment - 1)
+                    / alignment * alignment;
+
             // A MEMORY-class argument's eightbytes were never classified
             // into `plan.registers` (there is no register shape to read -
             // see `abi.ArgumentPlan`'s own doc), so each one is built here
@@ -820,10 +944,6 @@ public struct CallPlan {
             // register exactly that load - sized to only the bytes still
             // left, so it never reads past the argument's own storage.
             if (plan.memory) {
-                const alignment = plan.memoryAlignment / size_t.sizeof;
-                if (alignment > 1)
-                    stackCount = (stackCount + alignment - 1)
-                        / alignment * alignment;
                 const words = plan.memoryWords;
                 foreach (j; 0 .. words) {
                     const offset = j * size_t.sizeof;
@@ -838,8 +958,19 @@ public struct CallPlan {
                 return;
             }
 
-            foreach (j; 0 .. plan.count)
-                addStackMove(plan.registers[j], i, j * size_t.sizeof);
+            size_t argumentOffset;
+            foreach (register; plan.registers[0 .. plan.count]) {
+                if (register.kind == Register.Kind.sse
+                        && register.size == 16) {
+                    foreach (lane; 0 .. 2)
+                        addStackMove(
+                            Register(Register.Kind.integer, 8), i,
+                            argumentOffset + lane * size_t.sizeof,
+                        );
+                } else
+                    addStackMove(register, i, argumentOffset);
+                argumentOffset += register.size;
+            }
         }
 
         sort(spilled[0 .. spilledCount]);
@@ -854,14 +985,29 @@ public struct CallPlan {
             if (_arguments[move.parameterIndex].indirect)
                 move.load = Load.address;
 
+        Move[] wideMoves;
+        size_t normalMoveCount;
+        foreach (move; _moves[0 .. moveCount]) {
+            if (move.load == Load.copy16)
+                wideMoves ~= move;
+            else
+                _moves[normalMoveCount++] = move;
+        }
+        foreach (i, move; wideMoves)
+            _moves[normalMoveCount + i] = move;
+
         _moveCount = moveCount;
+        _normalMoveCount = normalMoveCount;
         _sseCount = floatingCount;
+        _integerArgumentCount = integerCount;
         _stackWordCount = stackCount;
-        _realResult = _return.count == 1
-            && _return.registers[0].kind == Register.Kind.x87;
+        _realResultCount = 0;
+        foreach (register; _return.registers[0 .. _return.count])
+            if (register.kind == Register.Kind.x87)
+                ++_realResultCount;
         // The leaner entry is safe exactly when this plan fills no SSE
         // register and spills no stack word - see `_entry`'s own doc.
-        _integerOnly = !_realResult
+        _integerOnly = _realResultCount == 0
             && _sseCount == 0 && _stackWordCount == 0;
         _entry = _integerOnly
             ? &snakebite_ffi_call_sysv_amd64_integer
@@ -871,13 +1017,13 @@ public struct CallPlan {
         // its own register file's next result slot - see `callAt`.
         size_t integerResultIndex;
         size_t floatingResultIndex;
-        if (!_realResult)
+        if (_realResultCount == 0)
             foreach (i; 0 .. _return.count) {
                 const fromSse = _return.registers[i].kind
                     == Register.Kind.sse;
                 const sourceOffset = fromSse
                     ? CallFrame.sseResult.offsetof
-                        + (floatingResultIndex++) * size_t.sizeof
+                        + (floatingResultIndex++) * 16
                     : CallFrame.integerResult.offsetof
                         + (integerResultIndex++) * size_t.sizeof;
                 _resultMoves[i] = ResultMove(
@@ -885,7 +1031,7 @@ public struct CallPlan {
                     storeOf(_return.registers[i].size),
                 );
             }
-        _resultCount = _realResult ? 0 : _return.count;
+        _resultCount = _realResultCount != 0 ? 0 : _return.count;
     }
 
     // `register`'s source bytes, as a `Load` tag - see `Load` and
@@ -922,12 +1068,17 @@ public struct CallPlan {
             // `memcpy`. Only a partial SSE-class aggregate eightbyte
             // (sizes 1-3 and 5-7) still needs `copy`.
             case sse:
+                if (register.size == 16)
+                    return Load.copy16;
                 if (register.size == 8)
                     return Load.word64;
                 return register.size == 4 ? Load.zero32 : Load.copy;
 
             case x87:
                 assert(false, "an x87 result has no argument load");
+
+            case sseup:
+                assert(false, "SSEUP shares its preceding register");
 
             case none:
                 assert(false, "a `void` argument has nothing to pass");
@@ -953,6 +1104,7 @@ public struct CallPlan {
             case 2: return Store.byte2;
             case 4: return Store.byte4;
             case 8: return Store.byte8;
+            case 16: return Store.copy16;
             default: assert(false, "unsupported result register size");
         }
     }
@@ -1052,6 +1204,17 @@ public struct PlanCache {
 
     public bool isGuestWord(const(void)* word) const {
         return _callbacks !is null && _callbacks.contains(word);
+    }
+
+    public void* addressOf(FuncDeclaration function_) {
+        import dmd.mangle: mangleExact;
+        import snakebite.druntime.constructoratomic: nativeTarget;
+        import std.string: fromStringz;
+
+        auto target = nativeTarget(function_);
+        if (target.address !is null)
+            return target.address;
+        return _resolver.resolve(mangleExact(function_).fromStringz);
     }
 
     // `TypeFunction`, not `const(TypeFunction)`: a `SharedTable` entry
@@ -1288,6 +1451,18 @@ public struct PlanCache {
         return plan;
     }
 
+    public const(CallPlan)* variadicAtAddress(
+        TypeFunction type, bool hasContext, const(void)* address,
+        scope Type[] extraArgumentTypes,
+    ) {
+        countPreparation;
+        auto plan = new CallPlan;
+        *plan = prepareVariadicAtAddress(type, hasContext, address,
+            extraArgumentTypes);
+        plan._callbacks = _callbacks;
+        return plan;
+    }
+
     // As `.of`, but for a raw address with no `FuncDeclaration` to key
     // on - see `CallPlan.ofRawAddress`. Keyed and cached by linker symbol
     // name instead, so a second bounds check anywhere in the guest
@@ -1367,6 +1542,18 @@ package CallPlan prepareVariadic(
     return prepareCommon(function_, resolver, extraArgumentTypes, true);
 }
 
+private CallPlan prepareVariadicAtAddress(
+    imported!"dmd.mtype".TypeFunction type,
+    bool hasContext,
+    const(void)* address,
+    scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+) {
+    auto plan = _shapeOf(type, hasContext, type.linkage,
+        extraArgumentTypes, true);
+    plan._address = cast(void*) address;
+    return plan;
+}
+
 private CallPlan prepareCommon(
     imported!"dmd.func".FuncDeclaration function_,
     ref Resolver resolver,
@@ -1425,12 +1612,12 @@ package CallPlan prepareCallback(
             text("ffi cannot make a callback entry for `",
                 function_.toString, "`: it is not a function"),
         );
-    if (type.parameterList.varargs == VarArg.variadic)
-        throw new Exception(
-            text("ffi cannot make a callback entry for `",
-                function_.toString, "`: it is variadic"),
-        );
-    auto plan = shapeOf(function_, function_.resolvedLinkage, null, false);
+    const isVariadic = type.parameterList.varargs == VarArg.variadic;
+    auto plan = shapeOf(function_, function_.resolvedLinkage, null,
+        isVariadic);
+    plan._callbackVariadic = isVariadic;
+    plan._callbackDVariadic = isVariadic
+        && function_.resolvedLinkage == imported!"dmd.astenums".LINK.d;
     plan.buildCallbackLayout;
     return plan;
 }
@@ -1518,7 +1705,8 @@ private CallPlan _shapeOf(
         // classifies like any other declared parameter below, through the
         // ordinary `prepare`/`.of` path.
         const isCVariadic = type.parameterList.varargs == VarArg.variadic
-            && linkage == LINK.c;
+            && (linkage == LINK.c || linkage == LINK.cpp
+                || linkage == LINK.system || linkage == LINK.objc);
         // dmd's own frontend semantic (`dmd.expressionsem.
         // functionParameters`) inserts `_arguments` - a `TypeInfo_Tuple`
         // reference describing the call's own extra argument types - as
@@ -1533,16 +1721,14 @@ private CallPlan _shapeOf(
             if (!isCVariadic && !isDVariadic)
                 throw new Exception(
                     text("ffi cannot call `", type.toString,
-                        "` as a variadic function: only an `extern(C)` ",
-                        "C-style or `extern(D)` untyped variadic callee ",
-                        "is supported"),
+                        "` as a variadic function: its linkage does not use ",
+                        "the System V C or D variadic convention"),
                 );
         } else if (type.parameterList.varargs == VarArg.variadic)
             throw new Exception(
                 text("ffi cannot call the variadic function `",
-                    type.toString, "`: only an `extern(C)` C-style ",
-                    "or `extern(D)` untyped variadic callee is supported, ",
-                    "and only at its own call site"),
+                    type.toString,
+                    "` without its call-site argument types"),
             );
 
         // An `extern(D)` untyped variadic callee's own hidden `_arguments`

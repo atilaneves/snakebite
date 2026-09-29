@@ -9,6 +9,16 @@ import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 
 
+private alias DVariadicCallback = extern(D) int function(int, ...);
+
+pragma(mangle, "snakebite_at_invoke_dvariadic_callback")
+private extern(C) int invokeDVariadicCallback(
+    DVariadicCallback callback,
+) {
+    return callback(10, 32);
+}
+
+
 // `bin/at` is built with ldc2 (`reggaefile.d`'s own `dubTarget` call for
 // the `"at"` output), unlike `bin/ut`, which dmd builds - so this callee
 // is the one place in this project's own test suites an `extern(D)`
@@ -77,6 +87,25 @@ private enum snippet = q{
 };
 
 
+private enum callbackSnippet = q{
+    import core.vararg;
+
+    alias Callback = extern(D) int function(int, ...);
+    pragma(mangle, "snakebite_at_invoke_dvariadic_callback")
+    extern(C) int invokeDVariadicCallback(Callback callback);
+
+    int guest(int fixed, ...) {
+        assert(_arguments.length == 1, "wrong callback _arguments.length");
+        assert(_arguments[0] is typeid(int), "wrong callback _arguments[0]");
+        return fixed + va_arg!int(_argptr);
+    }
+
+    int answer() {
+        return invokeDVariadicCallback(&guest);
+    }
+};
+
+
 @("dVariadicSliceOnLdcHost.Interpreter")
 @Tags("Interpreter")
 unittest {
@@ -89,6 +118,32 @@ unittest {
 
     // point (3 + 4) + extras 1 + 2 + extra struct (5 + 6).
     result.should == 21;
+}
+
+
+@("dVariadicCallbackSliceOnLdcHost.Interpreter")
+@Tags("Interpreter")
+unittest {
+    auto module_ = parseSnippet(callbackSnippet);
+    auto function_ = findFunction(module_, "answer");
+    assert(function_ !is null, "No `answer` in the guest program");
+
+    int result;
+    new Interpreter(Program([module_])).call(function_, &result, []);
+    result.should == 42;
+}
+
+
+@("dVariadicCallbackSliceOnLdcHost.Bytecode")
+@Tags("Bytecode")
+unittest {
+    auto module_ = parseSnippet(callbackSnippet);
+    auto function_ = findFunction(module_, "answer");
+    assert(function_ !is null, "No `answer` in the guest program");
+
+    int result;
+    new Bytecode(Program([module_])).call(function_, &result, []);
+    result.should == 42;
 }
 
 

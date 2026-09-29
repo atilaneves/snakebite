@@ -133,6 +133,22 @@ public struct CallAdapter {
             return plans.variadicOf(callee, extraTypes);
         }
 
+        public const(CallPlan)* prepareAtAddress(
+            ref PlanCache plans, const(void)* address, bool hasContext,
+        ) {
+            import dmd.astenums: VarArg;
+            import dmd.mtype: Type;
+
+            if (_type.parameterList.varargs != VarArg.variadic)
+                return null;
+
+            Type[] extraTypes;
+            foreach (expression; _expressions[extraOffset .. $])
+                extraTypes ~= expression.type;
+            return plans.variadicAtAddress(
+                _type, hasContext, address, extraTypes);
+        }
+
         public struct Value {
             public Expression expression;
             public TypeFacts facts;
@@ -181,6 +197,11 @@ public struct CallAdapter {
                     declared.expression, facts, declared.isReference,
                 ));
             }
+            foreach (expression; _expressions[extraOffset .. $])
+                emit(Value(expression, TypeFacts.of(expression.type)));
+        }
+
+        public void eachExtra(scope void delegate(Value) emit) {
             foreach (expression; _expressions[extraOffset .. $])
                 emit(Value(expression, TypeFacts.of(expression.type)));
         }

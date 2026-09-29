@@ -20,6 +20,37 @@ private size_t bitsOf(in double value) @trusted pure nothrow @nogc {
     return *cast(const size_t*) &value;
 }
 
+private void setSse(ref CallFrame frame, size_t index, double value)
+@trusted pure nothrow @nogc {
+    *cast(double*) frame.sse[index].ptr = value;
+}
+
+private double getSse(ref CallFrame frame, size_t index)
+@trusted pure nothrow @nogc {
+    return *cast(double*) frame.sseResult[index].ptr;
+}
+
+private alias Vector4 = __vector(float[4]);
+
+private extern(C) Vector4 snakebite_ut_sysv_vector4(Vector4 value) {
+    return value;
+}
+
+@("vectorArgumentAndReturn.xmm0")
+unittest {
+    CallFrame frame;
+    float[4] input = [1.25f, 2.5f, 5.0f, 10.0f];
+    import core.stdc.string: memcpy;
+    memcpy(frame.sse[0].ptr, input.ptr, 16);
+    frame.sseCount = 1;
+
+    call(cast(const void*) &snakebite_ut_sysv_vector4, frame);
+
+    float[4] output;
+    memcpy(output.ptr, frame.sseResult[0].ptr, 16);
+    output.should == input;
+}
+
 // Thin `@trusted` wrappers around the two entries above, kept here
 // rather than in `snakebite.ffi.sysv` itself: nothing outside this test
 // module calls either entry any other way (`plan.d` calls through its
@@ -126,12 +157,13 @@ private extern(C) double snakebite_ut_sysv_sum4d(
 @("fourDoubles.allInRegisters")
 unittest {
     CallFrame frame;
-    frame.sse = [1.5, 2.5, 3.5, 4.5, 0, 0, 0, 0];
+    foreach (i, value; [1.5, 2.5, 3.5, 4.5])
+        setSse(frame, i, value);
     frame.sseCount = 4;
 
     call(cast(const void*) &snakebite_ut_sysv_sum4d, frame);
 
-    frame.sseResult[0].should == 12.0;
+    getSse(frame, 0).should == 12.0;
 }
 
 
@@ -146,7 +178,8 @@ private extern(C) double snakebite_ut_sysv_sum10d(
 @("tenDoubles.twoOnTheStack")
 unittest {
     CallFrame frame;
-    frame.sse = [1, 2, 3, 4, 5, 6, 7, 8];
+    foreach (i, value; [1.0, 2, 3, 4, 5, 6, 7, 8])
+        setSse(frame, i, value);
     frame.sseCount = 8;
     size_t[2] stack = [bitsOf(9), bitsOf(10)];
     frame.stack = stack.ptr;
@@ -154,7 +187,7 @@ unittest {
 
     call(cast(const void*) &snakebite_ut_sysv_sum10d, frame);
 
-    frame.sseResult[0].should == 55.0;
+    getSse(frame, 0).should == 55.0;
 }
 
 
@@ -183,7 +216,8 @@ private extern(C) double snakebite_ut_sysv_mixedStack(
 unittest {
     CallFrame frame;
     frame.integer = [1, 2, 3, 4, 5, 6];
-    frame.sse = [10, 20, 30, 40, 50, 60, 70, 80];
+    foreach (i, value; [10.0, 20, 30, 40, 50, 60, 70, 80])
+        setSse(frame, i, value);
     frame.sseCount = 8;
     size_t[2] stack = [7, bitsOf(90)];
     frame.stack = stack.ptr;
@@ -192,7 +226,7 @@ unittest {
     call(cast(const void*) &snakebite_ut_sysv_mixedStack, frame);
 
     // (1+..+7) + (10+..+80) + 90 = 28 + 360 + 90
-    frame.sseResult[0].should == 478.0;
+    getSse(frame, 0).should == 478.0;
 }
 
 
@@ -259,14 +293,14 @@ private extern(C) TwoDoubleStruct snakebite_ut_sysv_twoDoubleStruct(
 @("returnTwoDoubles.xmm0Xmm1")
 unittest {
     CallFrame frame;
-    frame.sse[0] = 1.25;
-    frame.sse[1] = 2.75;
+    setSse(frame, 0, 1.25);
+    setSse(frame, 1, 2.75);
     frame.sseCount = 2;
 
     call(cast(const void*) &snakebite_ut_sysv_twoDoubleStruct, frame);
 
-    frame.sseResult[0].should == 1.25;
-    frame.sseResult[1].should == 2.75;
+    getSse(frame, 0).should == 1.25;
+    getSse(frame, 1).should == 2.75;
 }
 
 
@@ -291,13 +325,13 @@ private extern(C) MixedStruct snakebite_ut_sysv_mixedStruct(
 unittest {
     CallFrame frame;
     frame.integer[0] = 99;
-    frame.sse[0] = 6.5;
+    setSse(frame, 0, 6.5);
     frame.sseCount = 1;
 
     call(cast(const void*) &snakebite_ut_sysv_mixedStruct, frame);
 
     frame.integerResult[0].should == 99;
-    frame.sseResult[0].should == 6.5;
+    getSse(frame, 0).should == 6.5;
 }
 
 
@@ -388,7 +422,7 @@ unittest {
     frame.integer[1] = buffer.length;
     frame.integer[2] = cast(size_t) format.ptr;
     frame.integer[3] = 7;
-    frame.sse[0] = 3.5;
+    setSse(frame, 0, 3.5);
     frame.sseCount = 1;
 
     call(cast(const void*) &snprintf, frame);
@@ -520,7 +554,7 @@ unittest {
         frame,
     );
 
-    frame.sseResult[0].should == 6.0;
+    getSse(frame, 0).should == 6.0;
 }
 
 
