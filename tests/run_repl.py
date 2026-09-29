@@ -6,6 +6,7 @@
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 import pexpect
@@ -126,6 +127,84 @@ def test_project_module_is_not_analysed_until_imported(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert result.stderr == "repl_unused was analysed\n"
+
+
+# A bare directory whose modules call no dependency template needs no
+# dependency image. That answer is remembered the same way an image is,
+# so a warm start does not analyse the project: the module that takes
+# seconds of CTFE to analyse, and that no cell imports, costs nothing.
+def test_warm_start_does_not_analyse_a_project_without_an_image(
+    tmp_path: Path,
+) -> None:
+    write_project_without_image(tmp_path)
+
+    cold_seconds, cold = timed_run_sb(
+        "--project", str(tmp_path), input="import used;\nanswer()\n",
+        cwd=tmp_path, timeout_seconds=120,
+    )
+    warm_seconds, warm = timed_run_sb(
+        "--project", str(tmp_path), input="import used;\nanswer()\n",
+        cwd=tmp_path, timeout_seconds=120,
+    )
+
+    assert cold.returncode == 0
+    assert cold.stdout == "42\n"
+    assert warm.returncode == 0
+    assert warm.stdout == "42\n"
+    assert warm.stderr == ""
+    assert warm_seconds < cold_seconds / 4
+
+
+# A remembered "no image" answer holds only while the project's inputs
+# are unchanged: a new module is analysed on the next start.
+def test_project_without_an_image_notices_a_new_module(tmp_path: Path) -> None:
+    write_project_without_image(tmp_path)
+    warm = run_sb(
+        "--project", str(tmp_path), input="import used;\nanswer()\n",
+        cwd=tmp_path, timeout_seconds=120,
+    )
+    assert warm.returncode == 0
+    (tmp_path / "broken.d").write_text(
+        "module broken;\n"
+        'static assert(false, "broken was analysed");\n',
+        encoding="utf-8",
+    )
+
+    result = run_sb(
+        "--project", str(tmp_path), input="import used;\nanswer()\n",
+        cwd=tmp_path, timeout_seconds=120,
+    )
+
+    assert result.returncode != 0
+    assert "broken was analysed" in result.stdout
+
+
+def write_project_without_image(directory: Path) -> None:
+    (directory / "used.d").write_text(
+        "module used;\nint answer() { return 42; }\n", encoding="utf-8",
+    )
+    (directory / "slow.d").write_text(
+        "module slow;\n"
+        "ulong spin(ulong count) {\n"
+        "    ulong sum;\n"
+        "    foreach (i; 0 .. count)\n"
+        "        sum += i * i % 7;\n"
+        "    return sum;\n"
+        "}\n"
+        "enum spun = spin(3_000_000);\n",
+        encoding="utf-8",
+    )
+
+
+def timed_run_sb(
+    *args: str,
+    input: str = "",
+    timeout_seconds: int = TIMEOUT,
+    cwd: Path | None = None,
+) -> tuple[float, subprocess.CompletedProcess[str]]:
+    start = time.monotonic()
+    result = run_sb(*args, input=input, timeout_seconds=timeout_seconds, cwd=cwd)
+    return time.monotonic() - start, result
 
 
 # The project's versions and string imports apply to the project modules

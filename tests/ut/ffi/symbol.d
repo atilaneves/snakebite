@@ -1696,6 +1696,99 @@ unittest {
 }
 
 
+// "No image" is an answer like an image is: unchanged inputs give it back
+// without generating the source, and a changed input asks again, whichever
+// way the answer then goes.
+@("image.projectCacheRemembersNoImage")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("root.d", "root");
+    sandbox.writeFile("dependency.d", "before");
+    const root = sandbox.inSandboxPath("root.d");
+    const dependency = sandbox.inSandboxPath("dependency.d");
+    const directory = sandbox.sandboxPath;
+    const record = buildPath(directory, "project.json");
+    string[] dependencyInputs() {
+        return [dependency.idup];
+    }
+    DependencyImage makeImage(in string source) {
+        return prepareImage(source, directory, optimise: Optimise.no);
+    }
+    DependencyImage failImage(in string) {
+        throw new Exception("A project that needs no image must not build one");
+    }
+    size_t sources;
+    string countedSource(in string source) {
+        ++sources;
+        return source;
+    }
+    DependencyImage image;
+
+    ProjectImageCache(record, "settings", [root])
+        .prepare(image, () => countedSource(""), () {}, &failImage, false,
+            &dependencyInputs)
+        .should == false;
+    sources.should == 1;
+
+    ProjectImageCache(record, "settings", [root])
+        .prepare(image, () => countedSource(""), () {}, &failImage, false,
+            &dependencyInputs)
+        .should == false;
+    sources.should == 1;
+
+    // A root edit that still calls no dependency template.
+    sandbox.writeFile("root.d", "changed root");
+    ProjectImageCache(record, "settings", [root])
+        .prepare(image, () => countedSource(""), () {}, &failImage, false,
+            &dependencyInputs)
+        .should == false;
+    sources.should == 2;
+    ProjectImageCache(record, "settings", [root])
+        .prepare(image, () => countedSource(""), () {}, &failImage, false,
+            &dependencyInputs)
+        .should == false;
+    sources.should == 2;
+
+    // A root edit that now calls one.
+    sandbox.writeFile("root.d", "root that calls a dependency template");
+    ProjectImageCache(record, "settings", [root])
+        .prepare(image, () => countedSource(atomicSource), () {}, &makeImage,
+            false, &dependencyInputs)
+        .should == true;
+    sources.should == 3;
+    image.path.length.should.not == 0;
+
+    // And back again.
+    sandbox.writeFile("root.d", "root");
+    ProjectImageCache(record, "settings", [root])
+        .prepare(image, () => countedSource(""), () {}, &failImage, false,
+            &dependencyInputs)
+        .should == false;
+    sources.should == 4;
+
+    // A dependency edit asks again, even with the roots unchanged.
+    sandbox.writeFile("dependency.d", "after");
+    ProjectImageCache(record, "settings", [root])
+        .prepare(image, () => countedSource(atomicSource), () {}, &makeImage,
+            false, &dependencyInputs)
+        .should == true;
+    sources.should == 5;
+
+    // Settings are an input of the answer too.
+    sandbox.writeFile("dependency.d", "before");
+    ProjectImageCache(record, "settings", [root])
+        .prepare(image, () => countedSource(""), () {}, &failImage, false,
+            &dependencyInputs)
+        .should == false;
+    ProjectImageCache(record, "other settings", [root])
+        .prepare(image, () => countedSource(""), () {}, &failImage, false,
+            &dependencyInputs)
+        .should == false;
+    sources.should == 7;
+}
+
+
 // The recorded image is a function of the generator that built it, not
 // only of its inputs: a new snakebite binary must not reuse an image an
 // older binary produced, even when nothing about the project changed.
