@@ -67,6 +67,25 @@ unittest {
 }
 
 
+// Host code shares Phobos' caches (`std.functional.memoize` behind
+// `std.regex.regex`, which the import path search of the frontend's own
+// initialization also uses) with the frontend's setup. That setup must not
+// leave a cache's storage in the arena: the host then stores GC data in
+// it, and no collection looks there. Serial: the report is of the whole
+// arena.
+debug
+@("arenaHoldsNoGCPointers.hostLibraryCacheAfterInitialization")
+@Serial
+unittest {
+    import std.regex: matchFirst, regex;
+
+    const match = matchFirst("snippet_42", regex(`hostCacheProbe\d+|snippet_\d+`));
+    match.empty.should == false;
+
+    arenaReport.should == "";
+}
+
+
 // The report finds a GC pointer stored in the arena. Serial: every other
 // test that reads the report expects an empty one. `--lowmem` puts the
 // identifier itself on the GC heap, so the planted word never lands in

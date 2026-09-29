@@ -352,11 +352,27 @@ final class Compiler {
     }
 
     void initialize(in Snippets snippets) {
-        inside({
-            if (initialized)
-                return;
+        // The lock is recursive: `inside` takes it again.
+        mutex.lock;
+        scope(exit) mutex.unlock;
 
-            initializeDmdState(snippets);
+        if (initialized)
+            return;
+
+        // Host code, in the GC: the search reads the configuration with
+        // Phobos, whose caches (`std.functional.memoize`, behind
+        // `std.regex`) are shared with every later host use. Made
+        // inside the frontend, their storage would be arena memory that
+        // host code then fills with GC data no collection looks at.
+        // Only dmd's own setup runs inside; the paths are copied in.
+        import dmd.frontend: findImportPaths;
+
+        import std.array: array;
+
+        const importPaths = findImportPaths.array;
+
+        inside({
+            initializeDmdState(snippets, importPaths);
             initialized = true;
         });
     }
@@ -394,12 +410,15 @@ final class Compiler {
         );
     }
 
-    private void initializeDmdState(in Snippets snippets) {
+    private void initializeDmdState(
+        in Snippets snippets,
+        in string[] importPaths,
+    ) {
         import dmd.common.charactertables:
             IdentifierCharLookup,
             IdentifierTable;
         import dmd.errors: diagnostics, fatalErrorHandler;
-        import dmd.frontend: addImport, findImportPaths, initDMD;
+        import dmd.frontend: addImport, initDMD;
         import dmd.globals: global;
         import dmd.target: CPU, addDefaultVersionIdentifiers, target;
         import std.algorithm.iteration: each;
@@ -409,7 +428,7 @@ final class Compiler {
         target.cpu = CPU.baseline;
         target.setCPU;
         addDefaultVersionIdentifiers(global.params, target);
-        findImportPaths.each!addImport;
+        importPaths.each!(path => addImport(owned(path)));
 
         // Prevent DMD from calling exit() when too many cascading errors
         // accumulate. The shared parse path already checks global.errors after
