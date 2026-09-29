@@ -109,6 +109,57 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// A guest class subclasses a native class from a dependency image. The
+// native base declares a second virtual method whose return type dmd must
+// infer (`auto`) and that the guest never calls. Building the guest
+// subclass's class metadata (`classRuntimeInfo`) still walks every
+// inherited vtable slot, including the uncalled one, to resolve its
+// native address - that resolution must not depend on something else
+// having already driven semantic analysis of that method's body.
+static foreach (backend; Matrix!()) {
+    @("guestSubclassOfNativeClassSkipsUncalledInferredReturnMethod." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        sandbox.writeFile("dependency/dub.sdl", `name "vtable-dep"
+targetType "library"
+`);
+        sandbox.writeFile("dependency/source/vtable_dep.d", q{
+            module vtable_dep;
+            import std.algorithm.iteration: filter;
+
+            class Base {
+                private int _value;
+                this(int value) { _value = value; }
+                int value() { return _value; }
+                // Virtual, inferred return type, never called by the
+                // guest subclass or `main` below.
+                auto positives(int[] xs) {
+                    return xs.filter!(x => x > 0);
+                }
+            }
+        });
+        sandbox.writeFile("app/dub.sdl", dubProjectRecipe("vtable-app",
+            "dependency \"vtable-dep\" path=\"../dependency\"\n"));
+        sandbox.writeFile("app/source/vtable_app.d", q{
+            module vtable_app;
+            import vtable_dep;
+
+            class Derived : Base {
+                this(int value) { super(value); }
+                override int value() { return super.value() + 1; }
+            }
+
+            int main() {
+                auto derived = new Derived(41);
+                return derived.value() == 42 ? 0 : 1;
+            }
+        });
+        dubProjectMainShouldSucceed!backend(sandbox.inSandboxPath("app"));
+    }
+}
+
+
 // The CLI has the interpreter, bytecode, and CTFE backends. CTFE was
 // attempted, but it cannot interpret `open64` from `std.file.readText`.
 // The Native oracle runs compiled D without crossing the CLI boundary.
