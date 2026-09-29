@@ -107,6 +107,19 @@ unittest {
 }
 
 
+@("rawPlan.requiredSymbolReportsHostResolutionFailure")
+unittest {
+    PlanCache cache;
+
+    (() => cache.requiredRawPlanOf(
+        "snakebite_ut_missing_druntime_hook_439", [],
+    )).shouldThrowWithMessage(
+        "ffi cannot resolve the symbol `snakebite_ut_missing_druntime_hook_439`: " ~
+        "it is not in this process",
+    );
+}
+
+
 // Nothing but `bin/ut` itself defines this symbol: no dependency image, no
 // separately loaded shared object. `CallSelection.buildDecision`
 // (`snakebite.backends.calls`) asks `hasIndependentNativeSymbol`, never

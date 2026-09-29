@@ -1206,14 +1206,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         in Loc loc,
         scope const(void*)[] extraArguments,
     ) {
-        import snakebite.backends.druntimehooks: planOf, specOf;
+        import snakebite.backends.druntimehooks: planOf;
 
         auto plan = planOf(*_plans, hook);
-        if (plan is null)
-            throw new SnakebiteException(
-                text("interpreter cannot resolve the symbol `",
-                    specOf(hook).name, "`: it is not in this process"),
-            );
 
         const file = cast(const(char)*) loc.filename;
         const line = cast(uint) loc.linnum;
@@ -4605,17 +4600,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // no `FuncDeclaration` of its own - and called here with the object
     // reference as its one argument.
     private void callClassInvariant(void* objectPointer) {
-        import snakebite.backends.druntimehooks: planOf, specOf;
-        import std.conv: text;
+        import snakebite.backends.druntimehooks: planOf;
 
         countForeignNameLookup;
         auto plan = planOf(*_plans, DruntimeHook.classInvariant);
-        if (plan is null)
-            throw new SnakebiteException(
-                text("interpreter cannot resolve the symbol `",
-                    specOf(DruntimeHook.classInvariant).name,
-                    "`: it is not in this process"),
-            );
 
         const(void*)[1] arguments = [cast(const(void)*) &objectPointer];
         callPlan(plan, null, arguments[]);
@@ -5370,8 +5358,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // own storage instead.
     override void visitUnloweredCatDcharAssign(CatDcharAssignExp expression) {
         import core.stdc.string: memcpy;
-        import snakebite.backends.druntimehooks: planOf, specOf;
-        import std.conv: text;
+        import snakebite.backends.druntimehooks: planOf;
 
         auto elementType = expression.e1.type.nextOf;
         assert(elementType !is null);
@@ -5382,12 +5369,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         countForeignNameLookup;
         auto plan = planOf(*_plans, hook);
-        if (plan is null)
-            throw new SnakebiteException(
-                text("host setup: cannot resolve druntime symbol `",
-                    specOf(hook).name, "` for `", expression.toString,
-                    "`: it is not in this process"),
-            );
 
         auto array = addressOf(expression.e1);
         const value = cast(dchar) asIntegral(expression.e2);
