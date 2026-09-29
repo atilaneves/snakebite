@@ -18,6 +18,9 @@ public struct RuntimeTypes {
     import dmd.location: Loc;
     import dmd.dstruct: StructDeclaration;
     import dmd.dsymbol: Dsymbol;
+    import dmd.declaration: Declaration;
+    import dmd.expression: Expression;
+    import dmd.func: FuncDeclaration;
     import dmd.mtype: Type;
     import object:
         TypeInfo, TypeInfo_Class, TypeInfo_Interface, TypeInfo_Struct;
@@ -25,6 +28,7 @@ public struct RuntimeTypes {
 
     private bool delegate(Dsymbol) const _isRootOwned;
     private void* delegate(const(char)[]) _resolve;
+    private void* delegate(FuncDeclaration, ptrdiff_t) _methodAddress;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
     private const(void)[] delegate(Type, Loc) _initialValue;
     // Read without a lock by every thread that runs guest code
@@ -40,11 +44,13 @@ public struct RuntimeTypes {
     public this(
         bool delegate(Dsymbol) const isRootOwned,
         void* delegate(const(char)[]) resolve,
+        void* delegate(FuncDeclaration, ptrdiff_t) methodAddress,
         TypeInfo_Class delegate(ClassDeclaration) classInfo,
         const(void)[] delegate(Type, Loc) initialValue,
     ) {
         _isRootOwned = isRootOwned;
         _resolve = resolve;
+        _methodAddress = methodAddress;
         _classInfo = classInfo;
         _initialValue = initialValue;
     }
@@ -57,6 +63,59 @@ public struct RuntimeTypes {
         if (auto classDeclaration = declaration.isClassDeclaration)
             return _classInfo(classDeclaration).m_init;
         return _initialValue(declaration.type, declaration.loc);
+    }
+
+    public immutable(void)* rtInfo(AggregateDeclaration declaration) {
+        import dmd.common.outbuffer: OutBuffer;
+        import dmd.dsymbolsem;
+        import dmd.mangle: mangleToBuffer;
+        import dmd.typesem: hasPointers;
+
+        bool hasPointerData() {
+            if (auto classDeclaration = declaration.isClassDeclaration) {
+                for (auto parent = classDeclaration; parent !is null;
+                        parent = parent.baseClass)
+                    foreach (field; parent.fields)
+                        if (dmd.dsymbolsem.hasPointers(field))
+                            return true;
+                return false;
+            }
+            return declaration.type.hasPointers;
+        }
+
+        immutable(void)* resolve(Declaration symbol, ptrdiff_t offset) {
+            OutBuffer name;
+            mangleToBuffer(symbol, name);
+            auto address = _resolve(name[]);
+            return address is null ? null
+                : cast(immutable(void)*)(cast(ubyte*) address + offset);
+        }
+
+        auto expression = declaration.getRTInfo;
+        if (expression is null)
+            return cast(immutable(void)*)
+                (hasPointerData ? 1 : 0);
+        if (auto symbol = expression.isSymOffExp) {
+            if (auto info = resolve(
+                    symbol.var, cast(ptrdiff_t) symbol.offset))
+                return info;
+        }
+        if (auto address = expression.isAddrExp) {
+            if (auto variable = address.e1.isVarExp) {
+                if (auto info = resolve(variable.var, 0))
+                    return info;
+            }
+            if (auto symbol = address.e1.isSymOffExp) {
+                if (auto info = resolve(
+                        symbol.var, cast(ptrdiff_t) symbol.offset))
+                    return info;
+            }
+        }
+        if (auto integer = expression.isIntegerExp)
+            return cast(immutable(void)*) integer.getInteger;
+        if (expression.isNullExp)
+            return null;
+        return cast(immutable(void)*) (hasPointerData ? 1 : 0);
     }
 
     // `_types` caches by `Type` identity, not only for a struct, class or
@@ -299,15 +358,41 @@ public struct RuntimeTypes {
 
         import dmd.root.string: toDString;
         auto info = new TypeInfo_Struct;
+        _structs.insert(declaration, info);
         info.mangledName = declaration.type.deco.toDString.idup;
         info.m_init = cast(byte[]) _initialValue(
             declaration.type, declaration.loc,
         ).dup;
         info.m_align = declaration.alignsize;
-        if (declaration.hasPointerField)
+        import dmd.astenums: STC;
+        import dmd.semantic3: semanticTypeInfoMembers, search_toString;
+        import dmd.typesem: hasPointers;
+        semanticTypeInfoMembers(declaration);
+        if (declaration.xhash !is null)
+            info.xtoHash = cast(typeof(info.xtoHash))
+                _methodAddress(declaration.xhash, 0);
+        if (declaration.xeq !is null)
+            info.xopEquals = cast(typeof(info.xopEquals))
+                _methodAddress(declaration.xeq, 0);
+        if (declaration.xcmp !is null)
+            info.xopCmp = cast(typeof(info.xopCmp))
+                _methodAddress(declaration.xcmp, 0);
+        if (auto method = search_toString(declaration))
+            info.xtoString = cast(typeof(info.xtoString))
+                _methodAddress(method, 0);
+        if (declaration.tidtor !is null)
+            info.xdtor = cast(typeof(info.xdtor))
+                _methodAddress(declaration.tidtor, 0);
+        if (declaration.postblit !is null
+                && !(declaration.postblit.storage_class & STC.disable))
+            info.xpostblit = cast(typeof(info.xpostblit))
+                _methodAddress(declaration.postblit, 0);
+        const hasPointerData = declaration.type.hasPointers;
+        if (hasPointerData)
             info.m_flags = TypeInfo_Struct.StructFlags.hasPointers;
+        info.m_RTInfo = rtInfo(declaration);
         setSysVArgTypes(info, declaration.type);
-        return *_structs.insert(declaration, info);
+        return info;
     }
 }
 

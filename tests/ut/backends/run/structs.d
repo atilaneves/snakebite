@@ -11,6 +11,43 @@ import ut.backends;
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read runtime TypeInfo"),
 )) {
+    @("runtimeTypeInfoCallsGeneratedNestedLifetimeHooks." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner {
+                int* count;
+                this(this) { ++*count; }
+                ~this() { ++*count; }
+            }
+            struct Outer { Inner inner; }
+            void main() {
+                int count;
+                Outer value = Outer(Inner(&count));
+                typeid(Outer).postblit(&value);
+                typeid(Outer).destroy(&value);
+                assert(count == 2);
+            }
+        });
+    }
+
+    @("runtimeTypeInfoSkipsDisabledPostblit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Value {
+                int* count;
+                @disable this(this);
+            }
+            void main() {
+                int count;
+                Value value = Value(&count);
+                typeid(Value).postblit(&value);
+                assert(count == 0);
+            }
+        });
+    }
+
     @("runtimeTypeInfoCallsStructHash." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -304,9 +341,22 @@ static foreach (backend; Matrix!(
             struct Value {
                 int field = 42;
             }
+            struct InnerPointers { int* field; }
+            struct PointerValue {
+                int prefix;
+                InnerPointers nested;
+                InnerPointers[2] repeated;
+            }
+            enum pointerMap = __traits(getPointerBitmap, PointerValue);
             void main() {
                 auto structInfo = cast(TypeInfo_Struct) typeid(Value);
                 assert(*cast(int*) structInfo.m_init.ptr == 42);
+                assert(structInfo.rtInfo is null);
+                assert(typeid(PointerValue).rtInfo !is null);
+                auto runtimePointerMap = cast(size_t*)
+                    typeid(PointerValue).rtInfo;
+                foreach (i; 0 .. pointerMap.length)
+                    assert(runtimePointerMap[i] == pointerMap[i]);
                 auto enumInfo = cast(TypeInfo_Enum) typeid(Code);
                 assert(*cast(int*) enumInfo.m_init.ptr == 7);
                 assert((cast(TypeInfo_Pointer) typeid(int*)).m_next

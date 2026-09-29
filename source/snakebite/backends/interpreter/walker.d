@@ -248,6 +248,7 @@ private struct Shared {
             &classRuntimeInfo, &callNative);
         runtimeTypes = RuntimeTypes(&this.program.isRootOwned,
             (name) => plans.resolve(name),
+            &callableAddress,
             &classRuntimeInfo,
             (type, loc) => nativeData.initialValue(type, loc));
     }
@@ -289,6 +290,7 @@ private struct Shared {
                 &callableAddress,
                 (decl, base) => nativeData.fillFields(decl, base),
                 &runtimeTypes.linkedClassInfo,
+                (decl) => runtimeTypes.rtInfo(decl),
                 (decl, info) {
                     declarationOf.insert(cast(const(void)*) info, decl);
                 },

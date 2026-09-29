@@ -106,7 +106,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             (name) => _plans.resolveThreadLocal(name),
             &classRuntimeInfo, &callNative);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
-            (name) => _plans.resolve(name), &classRuntimeInfo,
+            (name) => _plans.resolve(name), &callableAddress,
+            &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
         _vms = PerThread!(Vm*, true)(
             () => new Vm(defaultFrameCapacity, _nativeData.tlsSlots));
@@ -356,6 +357,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 &callableAddress,
                 &fillFieldInits,
                 &_runtimeTypes.linkedClassInfo,
+                (decl) => _runtimeTypes.rtInfo(decl),
             ),
         ));
     }

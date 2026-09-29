@@ -12,6 +12,54 @@ import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.string: endsWith;
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read runtime TypeInfo"),
+)) {
+    @("classTypeInfoReportsNativeMetadata." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            abstract class Abstract { }
+            class PointerClass { int* field; }
+            enum pointerMap = __traits(getPointerBitmap, PointerClass);
+            class Disabled {
+                @disable this();
+                this(int) { }
+            }
+            void main() {
+                assert(typeid(Abstract).m_flags
+                    & TypeInfo_Class.ClassFlags.isAbstract);
+                assert(typeid(Abstract).depth == 2);
+                assert(typeid(Abstract).rtInfo is null);
+                assert(typeid(PointerClass).rtInfo !is null);
+                auto runtimePointerMap = cast(size_t*)
+                    typeid(PointerClass).rtInfo;
+                foreach (i; 0 .. pointerMap.length)
+                    assert(runtimePointerMap[i] == pointerMap[i]);
+                assert(typeid(Disabled).defaultConstructor is null);
+                assert(typeid(Disabled).m_flags
+                    & TypeInfo_Class.ClassFlags.hasCtor);
+            }
+        });
+    }
+
+    @("classTypeInfoCreatesWithDefaultConstructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Value {
+                int value = 7;
+                this() { value = 42; }
+            }
+            void main() {
+                auto value = cast(Value) typeid(Value).create();
+                assert(value !is null);
+                assert(value.value == 42);
+            }
+        });
+    }
+}
+
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,

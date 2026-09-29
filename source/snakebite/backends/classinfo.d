@@ -5,6 +5,7 @@ private:
 
 
 import core.sync.mutex: Mutex;
+import dmd.aggregate: AggregateDeclaration;
 import dmd.dclass: ClassDeclaration;
 import dmd.func: FuncDeclaration;
 import object: Interface, TypeInfo_Class;
@@ -31,6 +32,7 @@ public struct Hooks {
         fillFieldInits;
     public TypeInfo_Class delegate(ClassDeclaration declaration)
         linkedClassInfo;
+    public immutable(void)* delegate(AggregateDeclaration declaration) rtInfo;
     public void delegate(ClassDeclaration declaration, TypeInfo_Class info)
         registerGenerated;
 }
@@ -146,6 +148,7 @@ public TypeInfo_Class classRuntimeInfo(
     Hooks hooks,
 ) {
     import dmd.root.string: toDString;
+    import dmd.common.blake3: blake3;
 
     if (auto cached = declaration in cache)
         return *cached;
@@ -155,8 +158,39 @@ public TypeInfo_Class classRuntimeInfo(
     }
 
     auto info = new TypeInfo_Class;
-    info.m_flags = cast(TypeInfo_Class.ClassFlags) 0;
+    import dmd.astenums: STC;
+    import dmd.dsymbolsem: hasPointers, isAbstract;
+
+    info.m_flags = cast(TypeInfo_Class.ClassFlags)(
+        TypeInfo_Class.ClassFlags.hasOffTi
+        | TypeInfo_Class.ClassFlags.hasGetMembers
+        | TypeInfo_Class.ClassFlags.hasTypeInfo
+        | TypeInfo_Class.ClassFlags.hasNameSig);
+    if (declaration.ctor !is null)
+        info.m_flags |= TypeInfo_Class.ClassFlags.hasCtor;
+    if (declaration.isAbstract)
+        info.m_flags |= TypeInfo_Class.ClassFlags.isAbstract;
     info.name = cast(string) declaration.toPrettyChars.toDString;
+    info.nameSig = *cast(uint[4]*) blake3(
+        cast(const(ubyte)[]) info.name,
+    )[0 .. 16].ptr;
+    for (auto parent = declaration; parent !is null;
+            parent = parent.baseClass)
+        ++info.depth;
+    bool hasPointerData;
+    for (auto parent = declaration; parent !is null;
+            parent = parent.baseClass)
+        foreach (field; parent.fields)
+            hasPointerData |= hasPointers(field);
+    if (!hasPointerData)
+        info.m_flags |= TypeInfo_Class.ClassFlags.noPointers;
+    info.m_RTInfo = hooks.rtInfo(declaration);
+    for (auto parent = declaration; parent !is null;
+            parent = parent.baseClass)
+        if (parent.dtor !is null) {
+            info.m_flags |= TypeInfo_Class.ClassFlags.hasDtor;
+            break;
+        }
     // Compiling a method can read this class's initializer recursively.
     // Reserve its final storage before publishing the incomplete metadata.
     if (declaration.isInterfaceDeclaration is null) {
@@ -183,8 +217,12 @@ public TypeInfo_Class classRuntimeInfo(
         info.vtbl[0] = cast(void*) info;
 
     if (!isInterface) {
-        if (declaration.dtor !is null)
-            info.destructor = hooks.methodAddress(declaration.dtor, 0);
+        if (declaration.defaultCtor !is null
+                && !(declaration.defaultCtor.storage_class & STC.disable))
+            info.defaultConstructor = cast(void function(Object))
+                hooks.methodAddress(declaration.defaultCtor, 0);
+        if (declaration.tidtor !is null)
+            info.destructor = hooks.methodAddress(declaration.tidtor, 0);
         // Real compiled D (`glue/toobj.d`'s `ClassInfoToDt`) sets this
         // class's own `classInvariant` slot to `cd.inv`'s own compiled
         // address directly - the merged invariant `funcsem.addInvariant`
