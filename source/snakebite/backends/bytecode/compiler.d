@@ -8,6 +8,8 @@ import object: TypeInfo_Class;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
+import snakebite.backends.switchplan:
+    switchPlan, gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.fullexpression:
     FullExpressionKind, FullExpressionScope;
 import snakebite.backends.controlflow:
@@ -1508,33 +1510,27 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.nativelayout: TypeFacts;
 
         auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
+        auto plan = switchPlan(statement);
         const facts = TypeFacts.of(statement.condition.type);
-        if (!facts.isIntegral || !isIntegralSize(facts.size))
-            throw rejection(_function, statement.loc, statementText(statement));
+        assert(facts.isIntegral && isIntegralSize(facts.size));
 
         const conditionOffset = reserveTemp(facts);
         compileValue(statement.condition, conditionOffset, facts.size);
 
-        if (statement.cases !is null) {
-            foreach (case_; *statement.cases) {
-                if (case_.exp.isIntegerExp is null)
-                    throw rejection(_function, case_.loc, statementText(case_));
+        foreach (index, case_; plan.cases) {
+            const testOffset = reserveTemp(facts);
+            emit(&opCopy, testOffset, conditionOffset, facts.size);
+            const literalOffset = reserveTemp(facts);
+            emit(&opConstant, literalOffset,
+                addConstant(cast(ulong) plan.values[index]), facts.size);
+            emit(&opEqual, testOffset, literalOffset, facts.size);
 
-                const testOffset = reserveTemp(facts);
-                emit(&opCopy, testOffset, conditionOffset, facts.size);
-                const literalOffset = reserveTemp(facts);
-                emit(&opConstant, literalOffset,
-                    addConstant(case_.exp.toInteger), facts.size);
-                emit(&opEqual, testOffset, literalOffset, facts.size);
-
-                const branchIndex = _instructions.length;
-                emit(&opBranchTrue, testOffset, 0, 1);
-                jumpToCase(case_, branchIndex);
-            }
+            const branchIndex = _instructions.length;
+            emit(&opBranchTrue, testOffset, 0, 1);
+            jumpToCase(case_, branchIndex);
         }
 
-        if (statement.sdefault is null)
-            throw rejection(_function, statement.loc, statementText(statement));
+        assert(statement.sdefault !is null);
 
         const defaultJumpIndex = _instructions.length;
         emit(&opJump, 0, 0, 0);
@@ -1584,8 +1580,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(GotoCaseStatement statement) {
-        if (statement.cs is null)
-            throw rejection(_function, statement.loc, statementText(statement));
+        auto target = gotoCaseTarget(statement);
+        assert(target !is null);
 
         const cleanup = cleanupCount(
             activeScopePath,
@@ -1597,13 +1593,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const index = _instructions.length;
         emit(&opJump, 0, 0, 0);
-        jumpToCase(statement.cs, index);
+        jumpToCase(target, index);
         _finished = true;
     }
 
     override void visit(GotoDefaultStatement statement) {
-        if (statement.sw is null)
-            throw rejection(_function, statement.loc, statementText(statement));
+        auto target = gotoDefaultTarget(statement);
+        assert(statement.sw !is null && target !is null);
 
         const cleanup = cleanupCount(
             activeScopePath,
