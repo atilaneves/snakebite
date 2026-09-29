@@ -139,6 +139,8 @@ import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.comparison: ComparisonPlan;
 import snakebite.backends.controlflow: ControlFlowState,
     cleanupCount, scopePath;
+import snakebite.backends.switchplan: switchPlan, selectCase,
+    gotoCaseTarget, gotoDefaultTarget, containsTarget;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.backends.fullexpression: FullExpressionKind;
 
@@ -1721,20 +1723,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         Statement selected;
+        auto plan = switchPlan(statement);
         _temporaries.withExpression(FullExpressionKind.value,
             statement.condition, {
             const condition = asIntegral(statement.condition);
-            if (statement.cases !is null)
-                foreach (case_; *statement.cases) {
-                    if (asIntegral(case_.exp) == condition) {
-                        selected = case_;
-                        break;
-                    }
-                }
+            selected = selectCase(plan, condition,
+                (case_) => asIntegral(case_.exp));
             });
 
         if (selected is null)
-            selected = statement.sdefault;
+            selected = plan.defaultTarget;
         if (selected is null)
             return;
 
@@ -1754,17 +1752,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (target is null)
                 return;
 
-            bool belongs;
-            if (target is statement.sdefault)
-                belongs = true;
-            else if (statement.cases !is null)
-                foreach (case_; *statement.cases)
-                    if (target is case_) {
-                        belongs = true;
-                        break;
-                    }
-
-            if (!belongs)
+            if (!containsTarget(plan, cast(Statement) target))
                 return;
 
             _controlFlow.resume;
@@ -1788,18 +1776,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (_controlFlow.seeking)
             return;
 
-        if (statement.cs is null)
-            throw new SnakebiteException(
-                "interpreter cannot execute an unresolved `goto case`",
-            );
+        auto target = gotoCaseTarget(statement);
+        assert(target !is null);
 
-        if (_switchStatement is null)
-            throw new SnakebiteException(
-                "interpreter cannot execute `goto case` outside a switch",
-            );
+        assert(_switchStatement !is null);
 
         _controlFlow.transfer(
-            cast(void*) statement.cs,
+            cast(void*) target,
             cast(void*) _switchStatement.tryBody,
         );
     }
@@ -1808,13 +1791,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (_controlFlow.seeking)
             return;
 
-        if (statement.sw is null || statement.sw.sdefault is null)
-            throw new SnakebiteException(
-                "interpreter cannot execute an unresolved `goto default`",
-            );
+        auto target = gotoDefaultTarget(statement);
+        assert(statement.sw !is null && target !is null);
 
         _controlFlow.transfer(
-            cast(void*) statement.sw.sdefault,
+            cast(void*) target,
             cast(void*) statement.sw.tryBody,
         );
     }
