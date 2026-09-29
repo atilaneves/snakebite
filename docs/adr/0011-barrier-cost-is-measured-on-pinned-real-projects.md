@@ -26,9 +26,9 @@ limit was set. A time ratio on shared CI machines is not a reliable
 gate, so no micro benchmark gates the barrier now.
 
 A macro benchmark measures the barrier cost instead: a suite of real
-dub projects, each pinned to a commit. The bench harness fetches each project at its pin. No
-project's source is copied into `examples/`. The suite has three
-projects. Cerealed gives heavy template and range use over phobos,
+dub projects, each pinned to a commit. The bench harness fetches each
+project at its pin. No project's source is copied into `examples/`.
+The suite has three projects. Cerealed gives heavy template and range use over phobos,
 with no dependencies of its own. unit-threaded's own test suite gives
 nine subpackage archives and a task pool, so it exercises callbacks
 and threads. One project that binds a C library gives C variadics and
