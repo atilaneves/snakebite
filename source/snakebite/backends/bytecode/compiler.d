@@ -1366,6 +1366,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(TryCatchStatement statement) {
+        // DMD AST nodes stay mutable through this plan for code generation.
         auto plan = catchPlanOf(
             statement, catch_ => runtimeClassInfo(catch_.type),
         );
@@ -1591,6 +1592,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto target = gotoCaseTarget(statement);
         assert(target !is null);
 
+        // Finalizer bodies stay mutable DMD statements for code generation.
         auto unwind = unwindPlanOf(
             activeScopePath,
             scopePath(_switchStack[$ - 1].tryBody),
@@ -1609,6 +1611,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto plan = switchPlan(statement.sw);
         assert(target is plan.defaultTarget);
 
+        // Finalizer bodies stay mutable DMD statements for code generation.
         auto unwind = unwindPlanOf(
             activeScopePath,
             scopePath(statement.sw.tryBody),
@@ -1626,6 +1629,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, statement.loc, statementText(statement));
 
         auto target = statement.label.statement;
+        // Finalizer bodies stay mutable DMD statements for code generation.
         auto unwind = unwindPlanOf(
             scopePath(statement.tryBody), scopePath(target.tryBody),
         );

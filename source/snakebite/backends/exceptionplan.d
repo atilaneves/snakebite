@@ -50,8 +50,9 @@ public UnwindPlan unwindPlanOf(
 ) @safe {
     import snakebite.backends.unwindplan: resolve = unwindPlanOf;
 
-    size_t sourceEnd = source.length;
-    size_t destinationEnd = destination.length;
+    // The indices shrink while the common protected-scope suffix is removed.
+    auto sourceEnd = source.length;
+    auto destinationEnd = destination.length;
     while (sourceEnd != 0 && destinationEnd != 0
             && source[sourceEnd - 1].owner
                 == destination[destinationEnd - 1].owner) {

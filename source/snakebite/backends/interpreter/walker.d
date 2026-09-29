@@ -1484,7 +1484,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         else if (!_controlFlow.hasTransfer && source.length > 0)
             destination = source[1 .. $];
 
-        auto plan = unwindPlanOf(source, destination);
+        const plan = unwindPlanOf(source, destination);
         foreach (finalizer; plan.finalizers)
             if (finalizer.owner == cast(const(void)*) statement)
                 return true;
