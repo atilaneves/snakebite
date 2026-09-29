@@ -93,8 +93,8 @@ private extern(C++) class Collector
             return "";
         import std.algorithm: sort;
         import std.array: array;
-        import dmd.mangle: mangleExact;
         import snakebite.dependencyimage: DependencyImage;
+        import snakebite.frontend.dmd.mangle: completeFunctionType, mangledNameOf;
         // A dependency template can import a root module internally, even
         // when its template arguments contain no root-owned declarations.
         // Propagate through cycles before deciding which bodies can be linked.
@@ -123,6 +123,13 @@ private extern(C++) class Collector
             import std.algorithm: canFind;
             if (reference.functions.canFind!(function_ => function_ in _needsRoot))
                 continue;
+            // `addressGuard` below prints each function's own declared
+            // signature (its pointer type's `toChars`), so its type must
+            // already be complete the same way `mangledNameOf` needs it -
+            // forced here, once, for every use in this reference's own
+            // `guard`/`registry`/`result` text.
+            foreach (function_; reference.functions)
+                completeFunctionType(function_);
             // Diagnostic type spellings are not always valid D expressions.
             // Parse each candidate inside the guarded mixin so an inaccessible
             // instance can keep its normal guest fallback.
@@ -137,7 +144,7 @@ private extern(C++) class Collector
             // instance rather than the function returned by its address.
             foreach (function_; reference.functions)
                 registry ~= text("if (name == q{",
-                    mangleExact(function_).fromStringz,
+                    mangledNameOf(function_),
                     "}) return cast(void*) mixin(q{&", key, "});\n");
             registry ~= "}\n} else {\n";
             foreach (j, function_; reference.functions) {
@@ -197,15 +204,19 @@ private extern(C++) class Collector
     private extern(D) string overloadRegistry(
         FuncDeclaration function_, in string key,
     ) {
-        import dmd.mangle: mangleExact;
         import dmd.typesem: pointerTo;
+        import snakebite.frontend.dmd.mangle: mangledNameOf;
 
         if (function_.type.isTypeFunction is null)
             return "";
+        // Forces `function_`'s type complete first (`mangledNameOf`'s own
+        // doc): `pointerTo`/`toChars` below print its declared signature,
+        // an inferred return type or attribute set dmd has not resolved
+        // yet would otherwise print incomplete.
+        const mangled = mangledNameOf(function_);
         auto pointerType = function_.type.pointerTo; // DMD caches mutable type nodes.
         const pointer = text(sourceSpelling(pointerType.toChars.fromStringz),
             " pointer = &", key, ";");
-        const mangled = mangleExact(function_).fromStringz;
         const result = text("{\nstatic if (__traits(compiles, { mixin(q{", pointer,
             "}); })) {\nmixin(q{", pointer, "});\n",
             "if (name == q{", mangled,

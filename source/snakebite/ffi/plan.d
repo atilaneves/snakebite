@@ -1207,14 +1207,13 @@ public struct PlanCache {
     }
 
     public void* addressOf(FuncDeclaration function_) {
-        import dmd.mangle: mangleExact;
         import snakebite.druntime.constructoratomic: nativeTarget;
-        import std.string: fromStringz;
+        import snakebite.frontend.dmd.mangle: mangledNameOf;
 
         auto target = nativeTarget(function_);
         if (target.address !is null)
             return target.address;
-        return _resolver.resolve(mangleExact(function_).fromStringz);
+        return _resolver.resolve(mangledNameOf(function_));
     }
 
     // `TypeFunction`, not `const(TypeFunction)`: a `SharedTable` entry
@@ -1309,29 +1308,26 @@ public struct PlanCache {
     // Whether `function_` has machine code in this process. Missing symbols
     // are cached too because a synthesized function with a body can validly
     // have no native counterpart.
-    // No frontend lock: `nativeTarget` reads only a template instance's
-    // own already-resolved arguments (an AST structure walk, no forward
-    // reference to force), `mangleExact` mangles a declaration dmd has
-    // already given a real type and parameters (verified: dmd's own
-    // `mangle.d` never calls a struct's or an enum's own forcing
-    // functions), and `resolve` is a host symbol lookup, not a dmd one -
-    // nothing here ever touches dmd's own mutable state. `_nativeSymbols`
-    // is a `SharedTable` (ADR-0006).
+    // `nativeTarget` reads only a template instance's own already-resolved
+    // arguments (an AST structure walk, no forward reference to force),
+    // and `resolve` is a host symbol lookup, not a dmd one - `mangledNameOf`
+    // is the only call here that can still reach into dmd's own mutable
+    // state, and only takes the frontend lock (`snakebite.frontend.
+    // compiler.forceIfNeeded`) while `function_`'s type is not already
+    // complete. `_nativeSymbols` is a `SharedTable` (ADR-0006).
     public bool hasNativeSymbol(
         FuncDeclaration function_,
     ) {
-        import dmd.mangle: mangleExact;
         import snakebite.druntime.constructoratomic: nativeTarget;
-        import std.string: fromStringz;
+        import snakebite.frontend.dmd.mangle: mangledNameOf;
 
         if (auto cached = function_ in _nativeSymbols)
             return *cached;
 
         version(unittest) ++_nativeSymbolLookups;
         auto target = nativeTarget(function_);
-        const found = target.address !is null || resolve(
-            mangleExact(function_).fromStringz,
-        ) !is null;
+        const found = target.address !is null
+            || resolve(mangledNameOf(function_)) !is null;
         return *_nativeSymbols.insert(function_, found);
     }
 
@@ -1346,9 +1342,8 @@ public struct PlanCache {
     public bool hasIndependentNativeSymbol(
         FuncDeclaration function_,
     ) {
-        import dmd.mangle: mangleExact;
         import snakebite.druntime.constructoratomic: nativeTarget;
-        import std.string: fromStringz;
+        import snakebite.frontend.dmd.mangle: mangledNameOf;
 
         if (auto cached = function_ in _independentNativeSymbols)
             return *cached;
@@ -1363,7 +1358,7 @@ public struct PlanCache {
             }
             auto target = nativeTarget(function_);
             found = target.address !is null || _resolver.resolveIndependent(
-                mangleExact(function_).fromStringz,
+                mangledNameOf(function_),
             ) !is null;
             _independentNativeSymbols.insert(function_, found);
         });
@@ -1561,9 +1556,14 @@ private CallPlan prepareCommon(
     in bool isVariadicCall,
 ) {
     import snakebite.druntime.constructoratomic: nativeTarget;
-    import dmd.mangle: mangleExact;
+    import snakebite.frontend.dmd.mangle: mangledNameOf;
     import std.conv: text;
-    import std.string: fromStringz;
+
+    // Mangling forces `function_`'s type complete first (`mangledNameOf`'s
+    // own doc) - done before `shapeOf` reads `function_.type.nextOf` to
+    // classify the return value below, an inferred return type dmd has
+    // not resolved yet would otherwise be read as `null`.
+    const name = mangledNameOf(function_);
 
     auto target = nativeTarget(function_);
 
@@ -1579,13 +1579,12 @@ private CallPlan prepareCommon(
     auto plan = shapeOf(function_, linkage, extraArgumentTypes,
         isVariadicCall);
 
-    auto name = mangleExact(function_);
     void* address = target.address;
     if (address is null)
-        address = resolver.resolve(name.fromStringz);
+        address = resolver.resolve(name);
     if (address is null)
         throw new Exception(
-            text("ffi cannot resolve the symbol `", name.fromStringz,
+            text("ffi cannot resolve the symbol `", name,
                 "` declared by `", function_.toString,
                 "`: it is not in this process"),
         );
@@ -1604,7 +1603,13 @@ package CallPlan prepareCallback(
     imported!"dmd.func".FuncDeclaration function_,
 ) {
     import dmd.astenums: VarArg;
+    import snakebite.frontend.dmd.mangle: completeFunctionType;
     import std.conv: text;
+
+    // As `prepareCommon`: `shapeOf` below reads `function_.type.nextOf`
+    // to classify the return value, an inferred return type or attribute
+    // set dmd has not resolved yet would otherwise be read incomplete.
+    completeFunctionType(function_);
 
     auto type = function_.type.isTypeFunction;
     if (type is null)
