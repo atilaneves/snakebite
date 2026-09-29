@@ -2027,15 +2027,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, arrayValueSize,
             loadIntegral;
-        import std.conv: text;
 
         auto type = expression.type.toBasetype;
-        if (type.ty != Tarray)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "` as a dynamic array: its type is `", type.toString,
-                    "`"),
-            );
+        assert(type.ty == Tarray);
 
         assert(facts.size == arrayValueSize
                 && facts.alignment <= size_t.sizeof,
@@ -2083,15 +2077,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // expression evaluates to, not an integral value, hence the separate
     // path - though the bytes are read the same way either type is stored.
     private void* asPointer(Expression expression) {
-        import std.conv: text;
-
         auto type = expression.type;
         const kind = type.toBasetype.ty;
-        if (kind != Tpointer && kind != Tclass)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "` as a pointer: its type is `", type.toString, "`"),
-            );
+        assert(kind == Tpointer || kind == Tclass);
 
         const facts = factsOf(type);
         align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
@@ -4742,13 +4730,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto outerDollar = _dollar;
         scope(exit) if (lengthVar !is null) _dollar = outerDollar;
         if (lengthVar !is null) {
-            if (!knownLength)
-                throw new SnakebiteException(
-                    text("interpreter cannot evaluate `",
-                        expression.toString, "`: `$` has no meaning ",
-                        "slicing a pointer"),
-                );
-
+            assert(knownLength);
             _dollar = Dollar(lengthVar, sourceLength);
         }
 
@@ -4832,12 +4814,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        if (kind != Tarray)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "` as a `", _type.toString, "`: only a dynamic array ",
-                    "literal is supported"),
-            );
+        assert(kind == Tarray);
 
         auto elementType = _type.nextOf;
         const elementFacts = factsOf(elementType);
@@ -5363,20 +5340,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import std.conv: text;
 
         auto elementType = expression.e1.type.nextOf;
-        if (elementType.ty != Tchar && elementType.ty != Twchar)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "`: appending a `dchar` to `", expression.e1.type.toString,
-                    "` is neither `char[]` nor `wchar[]`"),
-            );
-        const hook = elementType.ty == Tchar
+        assert(elementType !is null);
+        auto elementBase = elementType.toBasetype;
+        assert(elementBase.ty == Tchar || elementBase.ty == Twchar);
+        const hook = elementBase.ty == Tchar
             ? DruntimeHook.arrayAppendChar : DruntimeHook.arrayAppendWchar;
 
         countForeignNameLookup;
         auto plan = planOf(*_plans, hook);
         if (plan is null)
             throw new SnakebiteException(
-                text("interpreter cannot resolve the symbol `",
+                text("host setup: cannot resolve druntime symbol `",
                     specOf(hook).name, "` for `", expression.toString,
                     "`: it is not in this process"),
             );
