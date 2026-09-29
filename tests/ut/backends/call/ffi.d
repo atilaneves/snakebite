@@ -3388,8 +3388,14 @@ static foreach (backend; Matrix!(
                 pragma(mangle, "snakebite_ut_variadic_sum_ints_backend")
                 extern(C++) int nativeSum(int first, ...);
 
+                alias VariadicFp = extern(C++) int function(int, ...);
+
+                int callThrough(VariadicFp fp) {
+                    return fp(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+                }
+
                 int answer() {
-                    return nativeSum(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+                    return callThrough(&nativeSum);
                 }
             },
             "answer",
