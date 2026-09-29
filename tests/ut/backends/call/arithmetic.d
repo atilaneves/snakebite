@@ -643,8 +643,8 @@ static foreach (backend; Matrix!()) {
 
 // A shift by the operand's own width or more is undefined in D, and the
 // host's shift instruction answers it by taking the count modulo the
-// register width - a plausible wrong answer. The interpreter refuses,
-// naming the expression, so this is pinned for the interpreter alone.
+// register width - a plausible wrong answer. The interpreter reports the
+// invalid count and expression, so this is pinned for the interpreter alone.
 @("arithmetic.leftShift.countTooLarge.Interpreter")
 @Tags("Interpreter")
 unittest {
@@ -661,7 +661,7 @@ unittest {
     int result;
     interpreter(module_).call(function_, &result, [])
         .shouldThrowWithMessage(
-            "interpreter cannot shift by 32 in `one() << width()`: " ~
+            "interpreter: invalid shift count 32 in `one() << width()`: " ~
             "the left operand has 32 bits");
 }
 
@@ -681,7 +681,7 @@ unittest {
     int result;
     interpreter(module_).call(function_, &result, [])
         .shouldThrowWithMessage(
-            "interpreter cannot shift by -1 in `one() >> back()`: " ~
+            "interpreter: invalid shift count -1 in `one() >> back()`: " ~
             "the left operand has 32 bits");
 }
 

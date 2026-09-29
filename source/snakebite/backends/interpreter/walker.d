@@ -6068,8 +6068,8 @@ private ulong divided(string op)(
 //
 // A count outside `[0, width)` is undefined in D, and the host's shift
 // instruction answers it by taking the count modulo the register width,
-// which is a plausible wrong answer rather than the guest's own. It is
-// refused instead.
+// which is a plausible wrong answer rather than the guest's own. Report
+// the invalid count instead.
 private ulong shifted(string op)(
     in long a,
     in long b,
@@ -6081,7 +6081,7 @@ private ulong shifted(string op)(
     const width = aFacts.size * 8;
     if (b < 0 || b >= width)
         throw new SnakebiteException(
-            text("interpreter cannot shift by ", b, " in `",
+            text("interpreter: invalid shift count ", b, " in `",
                 expression.toString, "`: the left operand has ", width,
                 " bits"),
         );
