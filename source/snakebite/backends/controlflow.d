@@ -171,25 +171,3 @@ public ScopeFrame[] scopePath(imported!"dmd.statement".Statement scope_)
     }
     return result;
 }
-
-public size_t cleanupCount(
-    scope const(ScopeFrame)[] source,
-    scope const(ScopeFrame)[] destination,
-) @safe @nogc nothrow pure scope {
-    size_t sourceEnd = source.length;
-    size_t destinationEnd = destination.length;
-    while (sourceEnd != 0 && destinationEnd != 0
-            && source[sourceEnd - 1].owner
-                == destination[destinationEnd - 1].owner) {
-        --sourceEnd;
-        --destinationEnd;
-    }
-
-    if (destinationEnd != 0)
-        return size_t.max;
-
-    size_t count;
-    foreach (frame; source[0 .. sourceEnd])
-        count += frame.cleanup;
-    return count;
-}
