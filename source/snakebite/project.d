@@ -317,11 +317,18 @@ private string dmdFlagsForOption(in string option) {
 }
 
 
-public void prepareDependencies(
-    ref Project project,
+// The analysed program is an input of the dependency image only when the
+// image has to be built: on a cache hit `program` never runs, and on a miss
+// it runs once. A caller that has not run the frontend yet (the REPL) passes
+// the analysis itself; one that has (bin/sb) passes the result.
+public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDependencies(
+    in string directory,
+    in SourceSet sources,
+    scope imported!"snakebite.backends".Program delegate() program,
     in imported!"snakebite.dependencyimage".Optimise optimise
         = imported!"snakebite.dependencyimage".Optimise.yes,
 ) {
+    import snakebite.backends: Program;
     import snakebite.frontend.imagesource: imageSource, imageInputs;
     import snakebite.dependencyimage:
         DependencyImage, ProjectImageCache, prepareImage, defaultCompiler;
@@ -331,15 +338,25 @@ public void prepareDependencies(
     import std.json: JSONValue;
     import std.process: environment;
 
-    const stateDirectory = projectStateDirectory(project.directory);
-    const directory = buildPath(stateDirectory, "images");
-    const settings = text(project.sources.flags, project.sources.importPaths,
-        project.sources.stringImportPaths, project.sources.linkerFlags,
-        project.sources.linkerFiles, JSONValue(project.sources.sourceOverrides),
-        project.sources.dubDescription.value, environment.get("DFLAGS", ""),
+    Program analysed;
+    bool analysedOnce;
+    Program analysedProgram() {
+        if (!analysedOnce) {
+            analysed = program();
+            analysedOnce = true;
+        }
+        return analysed;
+    }
+
+    const stateDirectory = projectStateDirectory(directory);
+    const imageDirectory = buildPath(stateDirectory, "images");
+    const settings = text(sources.flags, sources.importPaths,
+        sources.stringImportPaths, sources.linkerFlags,
+        sources.linkerFiles, JSONValue(sources.sourceOverrides),
+        sources.dubDescription.value, environment.get("DFLAGS", ""),
         environment.get("LFLAGS", ""), "\noptimise:", optimise);
-    auto cache = ProjectImageCache(buildPath(directory, "project.json"),
-        settings, project.sources.files);
+    auto cache = ProjectImageCache(buildPath(imageDirectory, "project.json"),
+        settings, sources.files);
     auto image = new DependencyImage;
     // Computed once and reused by both the build step and the input list
     // below: both only run on a cache miss, but the program does not change
@@ -348,38 +365,34 @@ public void prepareDependencies(
     bool dependencyInputsComputed;
     string[] cachedDependencyInputs() {
         if (!dependencyInputsComputed) {
-            dependencyInputs = imageInputs(project.program);
+            dependencyInputs = imageInputs(analysedProgram);
             dependencyInputsComputed = true;
         }
         return dependencyInputs;
     }
     const prepared = cache.prepare(*image,
-        () => imageSource(project.program),
+        () => imageSource(analysedProgram),
         () {
-            if (project.sources.linkerFiles.length
-                    && isDubProject(project.directory)) {
+            if (sources.linkerFiles.length && isDubProject(directory)) {
                 import snakebite.dub: buildDubDependencies;
 
-                buildDubDependencies(project.directory, stateDirectory,
-                    project.sources.dubDescription, project.sources.linkerFiles);
+                buildDubDependencies(directory, stateDirectory,
+                    sources.dubDescription, sources.linkerFiles);
             }
         },
-        source => prepareImage(source, directory, defaultCompiler,
-            cachedDependencyInputs(), project.sources.importPaths,
-            project.sources.stringImportPaths,
-            project.sources.flags.compilerArguments,
-            project.sources.linkerFiles, project.sources.linkerFlags,
+        source => prepareImage(source, imageDirectory, defaultCompiler,
+            cachedDependencyInputs(), sources.importPaths,
+            sources.stringImportPaths,
+            sources.flags.compilerArguments,
+            sources.linkerFiles, sources.linkerFlags,
             optimise: optimise),
-        project.sources.linkerFiles.length != 0,
+        sources.linkerFiles.length != 0,
         () {
             import snakebite.dub: dubInputs;
 
-            return cachedDependencyInputs() ~ project.sources.linkerFiles
-                ~ (isDubProject(project.directory)
-                    ? dubInputs(project.directory,
-                        project.sources.dubDescription) : null);
+            return cachedDependencyInputs() ~ sources.linkerFiles
+                ~ (isDubProject(directory)
+                    ? dubInputs(directory, sources.dubDescription) : null);
         });
-    if (prepared) {
-        project.program.dependencyImage = image;
-    }
+    return prepared ? image : null;
 }

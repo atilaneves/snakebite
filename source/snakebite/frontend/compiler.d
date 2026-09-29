@@ -67,11 +67,15 @@ public imported!"dmd.dmodule".Module[] parseRootModules(
 // `Program.isRootOwned` treats a cell's own imports as root-owned under
 // (see `driveSharedSemantic`). A plain snippet (bin/ut, a REPL session
 // with no project) leaves it empty and behaves exactly as before.
+// `flags` apply to this parse only, as `parseRootModules`' flags do: a
+// cell and every project module it imports compile with the project's
+// flags.
 public imported!"dmd.dmodule".Module parseSnippet(
     in string source,
     in string[] rootImportPaths = null,
+    in FrontendFlags flags = FrontendFlags.init,
 ) {
-    return compiler.parseSnippet(source, rootImportPaths);
+    return compiler.parseSnippet(source, rootImportPaths, flags);
 }
 
 // Parse several whole guest programs, driving the shared semantic phases
@@ -463,12 +467,17 @@ final class Compiler {
     Module parseSnippet(
         in string source,
         in string[] rootImportPaths,
+        in FrontendFlags flags,
     ) {
         mutex.lock;
         scope(exit) mutex.unlock;
         requireInitialized;
 
-        return parseSourceLocked(source, rootImportPaths);
+        const savedFlags = saveFrontendFlags;
+        scope(exit) restoreFrontendFlags(savedFlags);
+        applyFrontendFlags(flags);
+
+        return parseSourceLocked(source, rootImportPaths, flags);
     }
 
     Module[] parseSnippets(in string[] sources) {
@@ -482,6 +491,7 @@ final class Compiler {
     private Module parseSourceLocked(
         in string source,
         in string[] rootImportPaths,
+        in FrontendFlags flags,
     ) {
         import core.atomic: atomicFetchAdd;
         import dmd.errors: diagnostics;
@@ -493,10 +503,13 @@ final class Compiler {
         // parse used; a REPL cell's `rootImportPaths` can differ across
         // `Repl` sessions in the same process even when the cell's source
         // text is byte-identical (e.g. two sessions' first cell), so a hit
-        // here would silently reuse the wrong session's gating. Only the
-        // plain-snippet callers (empty `rootImportPaths`) benefit from the
-        // cache; they are unaffected by this.
-        if (rootImportPaths.length == 0) {
+        // here would silently reuse the wrong session's gating. The same
+        // holds for a session's flags. Only the plain-snippet callers (empty
+        // `rootImportPaths`, no flags) benefit from the cache; they are
+        // unaffected by this.
+        const cacheable = rootImportPaths.length == 0
+            && flags.compilerArguments.length == 0;
+        if (cacheable) {
             if (auto cached = source in sourceCache)
                 return *cached;
         }
@@ -530,7 +543,7 @@ final class Compiler {
 
         captured.replay;
 
-        if (rootImportPaths.length == 0)
+        if (cacheable)
             sourceCache[source] = moduleResult.module_;
 
         return moduleResult.module_;

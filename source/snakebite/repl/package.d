@@ -24,9 +24,11 @@ private alias DependencyImage =
 public struct Repl {
     import dmd.dmodule: Module;
     import snakebite.backends: Backend, BackendName;
+    import snakebite.frontend.compiler: FrontendFlags;
 
     private BackendName _backendName;
     private string[] _importPaths;
+    private FrontendFlags _flags;
     private const(DependencyImage)* _dependencyImage;
     private string _accumulatedSource;
     private string _pendingInput;
@@ -38,12 +40,14 @@ public struct Repl {
         BackendName backendName,
         in string[] importPaths = [],
         in string[] stringImportPaths = [],
+        in FrontendFlags flags = FrontendFlags.init,
         const(DependencyImage)* dependencyImage = null,
     ) {
         import dmd.frontend: addImport, addStringImport;
 
         _backendName = backendName;
         _importPaths = importPaths.dup;
+        _flags = FrontendFlags(flags.compilerArguments.dup);
         _dependencyImage = dependencyImage;
         foreach (importPath; _importPaths)
             addImport(importPath);
@@ -130,7 +134,7 @@ public struct Repl {
 
         Module module_;
         try
-            module_ = parseSnippet(fullSource, _importPaths);
+            module_ = parseSnippet(fullSource, _importPaths, _flags);
         catch (Exception exception) {
             _pendingInput = null;
             return SubmitResult(SubmitResult.Kind.error, exception.msg.withoutDuplicateLines);
@@ -185,7 +189,7 @@ public struct Repl {
 
         Module module_;
         try
-            module_ = parseSnippet(fullSource, _importPaths);
+            module_ = parseSnippet(fullSource, _importPaths, _flags);
         catch (Exception exception) {
             _pendingInput = null;
             return SubmitResult(SubmitResult.Kind.error, exception.msg.withoutDuplicateLines);

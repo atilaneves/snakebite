@@ -81,6 +81,69 @@ def test_project_import_without_semicolon(tmp_path: Path, backend: str) -> None:
     assert child.exitstatus == 0
 
 
+def write_versioned_project(directory: Path) -> None:
+    (directory / "dub.sdl").write_text(
+        'name "repl-lazy-project"\n'
+        'versions "ReplProjectVersion"\n'
+        'stringImportPaths "views"\n',
+        encoding="utf-8",
+    )
+    views = directory / "views"
+    views.mkdir()
+    (views / "greeting.txt").write_text("hello", encoding="utf-8")
+    source = directory / "source"
+    source.mkdir()
+    (source / "repl_used.d").write_text(
+        "module repl_used;\n"
+        "version (ReplProjectVersion) int answer() { return 42; }\n"
+        'string greeting() { return import("greeting.txt"); }\n',
+        encoding="utf-8",
+    )
+    (source / "repl_unused.d").write_text(
+        "module repl_unused;\n"
+        'pragma(msg, "repl_unused was analysed");\n',
+        encoding="utf-8",
+    )
+
+
+# The frontend analyses what a cell reaches, not the whole project, once
+# the project's dependency image is on disk. A module that no cell
+# imports has no compile-time effect.
+def test_project_module_is_not_analysed_until_imported(tmp_path: Path) -> None:
+    write_versioned_project(tmp_path)
+    warm = run_sb("--project", str(tmp_path), "-c", "1 + 1", cwd=tmp_path)
+    assert warm.returncode == 0
+
+    result = run_sb("--project", str(tmp_path), "-c", "1 + 1", cwd=tmp_path)
+
+    assert result.returncode == 0
+    assert result.stdout == "2\n"
+    assert result.stderr == ""
+
+    result = run_sb(
+        "--project", str(tmp_path), "-c", "import repl_unused;", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == "repl_unused was analysed\n"
+
+
+# The project's versions and string imports apply to the project modules
+# a cell imports, whether or not the dependency image was already built.
+def test_project_import_sees_project_versions(tmp_path: Path) -> None:
+    write_versioned_project(tmp_path)
+
+    for _ in range(2):
+        result = run_sb(
+            "--project", str(tmp_path),
+            input="import repl_used;\nanswer()\ngreeting()\n",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout == "42\nhello\n"
+
+
 def test_piped_blank_line_is_silent_noop() -> None:
     result = run_sb(input="\n")
 
@@ -324,6 +387,7 @@ def run_sb(
     *args: str,
     input: str = "",
     timeout_seconds: int = TIMEOUT,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sb_path(), *args],
@@ -332,6 +396,7 @@ def run_sb(
         check=False,
         text=True,
         timeout=timeout_seconds,
+        cwd=cwd,
     )
 
 

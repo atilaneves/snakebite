@@ -5,7 +5,7 @@ private:
 
 
 public int main(string[] args) {
-    import snakebite.frontend.compiler: initialize, Snippets;
+    import snakebite.frontend.compiler: FrontendFlags, initialize, Snippets;
     import snakebite.dependencyimage: DependencyImage;
     import snakebite.dub: fetchProject;
     import snakebite.project: loadProject, prepareDependencies, sourceSet;
@@ -30,6 +30,7 @@ public int main(string[] args) {
     try {
         string[] importPaths = parsed.options.importPaths.dup;
         string[] stringImportPaths;
+        FrontendFlags flags;
         const(DependencyImage)* dependencyImage;
         string projectDirectory = parsed.options.projectDirectory;
         if (parsed.options.dubProject.length != 0) {
@@ -38,22 +39,26 @@ public int main(string[] args) {
             projectDirectory = fetchProject(parsed.options.dubProject);
         }
         if (projectDirectory.length != 0) {
+            // Mutable: `loadProject` keeps these in the `Project` it returns.
             auto projectSources = sourceSet(
                 projectDirectory, [], [], parsed.options.versions,
             );
-            auto project = loadProject(
+            // The frontend analyses what the cells reach, as they reach
+            // it; the whole project only when its image must be built.
+            dependencyImage = prepareDependencies(
                 projectDirectory, projectSources,
+                () => loadProject(projectDirectory, projectSources).program,
             );
-            prepareDependencies(project);
-            importPaths = project.sources.importPaths ~ importPaths;
-            stringImportPaths = project.sources.stringImportPaths;
-            dependencyImage = project.program.dependencyImage;
+            importPaths = projectSources.importPaths ~ importPaths;
+            stringImportPaths = projectSources.stringImportPaths;
+            flags = projectSources.flags;
         }
 
         auto repl = Repl(
             parsed.options.backend,
             importPaths,
             stringImportPaths,
+            flags,
             dependencyImage,
         );
 
