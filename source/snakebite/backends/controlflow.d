@@ -143,8 +143,11 @@ public struct ControlFlowState {
 }
 
 public struct ScopeFrame {
+    import dmd.statement: Statement;
+
     public const(void)* owner;
     public bool cleanup;
+    public Statement finallyBody;
 }
 
 public ScopeFrame[] scopePath(imported!"dmd.statement".Statement scope_)
@@ -153,11 +156,13 @@ public ScopeFrame[] scopePath(imported!"dmd.statement".Statement scope_)
     ScopeFrame[] result;
     while (scope_ !is null) {
         if (auto finally_ = scope_.isTryFinallyStatement()) {
-            result ~= ScopeFrame(cast(void*) finally_, true);
+            result ~= ScopeFrame(
+                cast(void*) finally_, true, finally_.finalbody,
+            );
             scope_ = finally_.tryBody;
         }
         else if (auto catch_ = scope_.isTryCatchStatement()) {
-            result ~= ScopeFrame(cast(void*) catch_, false);
+            result ~= ScopeFrame(cast(void*) catch_, false, null);
             scope_ = catch_.tryBody;
         }
         else {

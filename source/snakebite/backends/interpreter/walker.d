@@ -138,7 +138,7 @@ import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.comparison: ComparisonPlan;
 import snakebite.backends.controlflow: ControlFlowState,
-    cleanupCount, scopePath;
+    scopePath;
 import snakebite.backends.switchplan: switchPlan, selectCase,
     gotoCaseTarget, gotoDefaultTarget, containsTarget;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
@@ -1377,12 +1377,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 if (statement._body !is null)
                     statement._body.accept(this);
             } catch (GuestException exception) {
-                foreach (catch_; *statement.catches) {
-                    if (!matchesThrowable(catch_, exception))
-                        continue;
-
+                if (auto catch_ = matchingCatch(statement, exception)) {
                     bindCatchVariable(catch_, exception.take);
-                    catch_.handler.accept(this);
+                    if (catch_.handler !is null)
+                        catch_.handler.accept(this);
                     return;
                 }
 
@@ -1398,12 +1396,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         try {
             statement._body.accept(this);
         } catch (GuestException exception) {
-            foreach (catch_; *statement.catches) {
-                if (!matchesThrowable(catch_, exception))
-                    continue;
-
+            if (auto catch_ = matchingCatch(statement, exception)) {
                 bindCatchVariable(catch_, exception.take);
-                catch_.handler.accept(this);
+                if (catch_.handler !is null)
+                    catch_.handler.accept(this);
                 return;
             }
 
@@ -1420,10 +1416,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         if (target is null)
             return false;
 
-        return cleanupCount(
+        import snakebite.backends.exceptionplan: unwindPlanOf;
+
+        return unwindPlanOf(
             scopePath(statement),
             scopePath(cast(Statement) _controlFlow.destinationScope),
-        ) != 0;
+        ).finalizers.length != 0;
     }
 
     override void visit(TryFinallyStatement statement) {
@@ -1491,30 +1489,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
     }
 
-    // Whether `catch_`'s own declared type accepts `exception`'s actual
-    // thrown object. A guest throwable's actual declaration is already
-    // known (`declarationOf`, the reverse of `classRuntimeInfo`'s own
-    // cache), so this stays the AST-level comparison it always was for
-    // that case - no runtime metadata to build while unwinding a guest
-    // `throw`, the hot path every guest exception takes. A native
-    // throwable has no such declaration; matching it reads the same
-    // native `TypeInfo_Class` the bytecode VM's `findHandler` already
-    // compares by identity, in place of the name string this used to
-    // compare instead.
-    private bool matchesThrowable(Catch catch_, GuestException exception) {
-        auto typeClass = catch_.type.toBasetype.isTypeClass;
-        if (typeClass is null)
-            return false;
+    private Catch matchingCatch(
+        TryCatchStatement statement,
+        GuestException exception,
+    ) {
+        import snakebite.backends.exceptionplan: catchPlanOf;
 
-        auto actual = exception._guest.classinfo;
-        auto declaration = declarationOf(actual);
-        if (declaration !is null)
-            return typeClass.sym is *declaration
-                || typeClass.sym.isBaseOf(*declaration, null);
-
-        import snakebite.backends.exceptions: catchMatches;
-
-        return catchMatches(catchRuntimeInfo(catch_), actual);
+        auto plan = catchPlanOf(
+            statement, catch_ => catchRuntimeInfo(catch_),
+        );
+        const index = plan.matchingClause(exception._guest.classinfo);
+        return index == size_t.max ? null : plan.clauses[index].syntax;
     }
 
     private TypeInfo_Class catchRuntimeInfo(Catch catch_) {
