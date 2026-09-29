@@ -1800,7 +1800,7 @@ private const(Instruction)* runCastWidenUnsigned(Decoded)(
 // packs that bit into the same field's own top bit, the way
 // `indirectStorage` above already tells an address slot from a plain
 // displacement, rather than spending an `execution.constants` entry
-// on it. Only `classReference`, `zero`, and `unsupported` still reach
+// on it. Only `classReference` and `zero` still reach
 // for a `CastExp` opcode of their own.
 package alias opCastAs(CastKind kind) =
     execute!(runCastAs, OperandKind.storage, OperandKind.storage, kind);

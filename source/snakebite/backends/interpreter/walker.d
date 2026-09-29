@@ -4190,6 +4190,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
+        case pointerToFloat: {
+            align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
+            evaluate(expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            applyCast(layoutOf(plan), buffer.ptr, _place);
+            return;
+        }
+
         // `cast(void*) someDelegate`: `applyCast` reads the same
         // context word `dg.ptr` itself reads (`visitDelegateWord`
         // above), out of the delegate's own two evaluated words.
@@ -4228,6 +4235,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         case sliceToPointer:
             applyCast(layoutOf(plan), addressOf(expression.e1), _place);
             return;
+
+        // A pointer cast to a dynamic array reads the array's native
+        // `{length, ptr}` value from the address in the pointer.
+        case pointerToArray: {
+            align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
+            evaluate(expression.e1, sourceType, plan.sourceFacts, buffer.ptr);
+            applyCast(layoutOf(plan), buffer.ptr, _place);
+            return;
+        }
 
         // D reinterprets the same bytes at the new element width, so the
         // byte count - not the element count - is what has to stay the
@@ -4295,6 +4311,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // dispatched by type instead of size.
         case integralToFloat:
         case floatToIntegral:
+        case floatToPointer:
         case floatToBool:
         case floatWidth: {
             align(real.alignof) ubyte[real.sizeof] buffer = void;
@@ -4306,12 +4323,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         // A pointer reinterpreted as a dynamic array's own
         // `{length, ptr}` header.
-        case pointerToArray:
-        case unsupported:
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate a `", expression.op,
-                    "` expression: `", expression.toString, "`"),
-            );
         }
     }
 

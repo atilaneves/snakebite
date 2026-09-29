@@ -27,6 +27,24 @@ public struct CastPlan {
     public int referenceOffset;
 }
 
+private enum TypeKind {
+    dynamicArray,
+    staticArray,
+    associativeArray,
+    pointer,
+    functionPointer,
+    classReference,
+    structure,
+    delegateValue,
+    floating,
+    imaginary,
+    complex,
+    integral,
+    nullValue,
+    vector,
+    other,
+}
+
 // The single decision both backends' cast adapters read: `sourceType` and
 // `destType` are `CastExp.e1.type` and `CastExp.type`, both already typed
 // by dmd. The expression overload below owns the source-shape exception for
@@ -35,240 +53,94 @@ public struct CastPlan {
 public CastPlan classify(
     imported!"dmd.mtype".Type sourceType, imported!"dmd.mtype".Type destType,
 ) {
-    import dmd.astenums:
-        Tbool, Taarray, Tclass, Tdelegate, Tnull, Tpointer, Tsarray;
-    import dmd.expressionsem: toInteger;
-    import dmd.typesem: mutableOf, nextOf, toBasetype;
-    import snakebite.nativelayout: isIntegralSize;
+    import dmd.typesem: toBasetype;
 
-    // An enum's own representation is its base type's - unwrapping once
-    // here, rather than inside every structural (`.ty`) check below, is
-    // what already lets `TypeFacts.of` (which does the same) answer for
-    // an enum without a case of its own; the structural checks need the
-    // same unwrapping to reach a `Tcomplex*`/`Timaginary*`/`Tstruct`/...
-    // base the same way.
     sourceType = sourceType.toBasetype;
     destType = destType.toBasetype;
 
-    const sourceFacts = TypeFacts.of(sourceType);
-    const destFacts = TypeFacts.of(destType);
+    return classifyByKind(
+        kindOf(sourceType), kindOf(destType), sourceType, destType,
+        TypeFacts.of(sourceType), TypeFacts.of(destType),
+    );
+}
 
-    if (sourceType.ty == Tnull)
+
+private CastPlan classifyByKind(
+    TypeKind sourceKind,
+    TypeKind destKind,
+    imported!"dmd.mtype".Type sourceType,
+    imported!"dmd.mtype".Type destType,
+    in TypeFacts sourceFacts,
+    in TypeFacts destFacts,
+) {
+    final switch (sourceKind) with (TypeKind) {
+    case nullValue:
         return CastPlan(CastKind.zero, sourceFacts, destFacts);
-
-    if (sourceType.ty == Tclass && destType.ty == Tclass) {
-        auto plan = CastPlan(
-            CastKind.classReference, sourceFacts, destFacts);
-        destType.isTypeClass.sym.isBaseOf(
-            sourceType.isTypeClass.sym, &plan.referenceOffset);
-        return plan;
+    case integral:
+        return classifyIntegral(
+            destKind, destType, sourceFacts, destFacts);
+    case floating:
+        return classifyFloating(
+            destKind, destType, sourceFacts, destFacts);
+    case imaginary:
+        return classifyImaginary(
+            destKind, destType, sourceFacts, destFacts);
+    case complex:
+        return classifyComplex(
+            destKind, destType, sourceFacts, destFacts);
+    case pointer, functionPointer:
+        return classifyPointer(
+            destKind, destType, sourceFacts, destFacts);
+    case classReference:
+        return classifyClass(
+            destKind, sourceType, destType, sourceFacts, destFacts);
+    case associativeArray:
+        return classifyAssociativeArray(
+            destKind, sourceFacts, destFacts);
+    case delegateValue:
+        return classifyDelegate(destKind, sourceFacts, destFacts);
+    case dynamicArray:
+        return classifyDynamicArray(
+            destKind, sourceFacts, destFacts);
+    case staticArray:
+        return classifyStaticArray(
+            destKind, sourceType, destType, sourceFacts, destFacts);
+    case structure, vector:
+        return classifyFatValue(
+            destKind, sourceFacts, destFacts);
+    case other:
+        assert(0, "DMD rejects this cast type pair");
     }
+}
 
-    if (sourceType.ty == Taarray && destType.ty == Taarray)
-        return CastPlan(CastKind.copy, sourceFacts, destFacts);
+private CastPlan classifyIntegral(
+    TypeKind destKind,
+    imported!"dmd.mtype".Type destType,
+    in TypeFacts sourceFacts,
+    in TypeFacts destFacts,
+) {
+    import dmd.astenums: Tbool;
 
-    // dmd's own `dcast.d` (bugzilla 3133) reinterprets the bytes of two
-    // equal-size "fat values" - a `struct`, a static array, or a
-    // vector - into one another once no `aliasthis`/implicit-constructor
-    // rewrite claims the cast first (`S(x)`, tried before a `Tstruct`
-    // destination ever reaches this classifier): `struct S{int x;}
-    // S(int)`'s own constructor intercepts `cast(S) someInt`, but
-    // `cast(ubyte[S.sizeof]) someS` has no such rewrite to claim it, so
-    // it is a real reinterpret by the time it gets here. One rule for
-    // every combination - including a vector, itself equal-size-only
-    // already - rather than a case each for `struct`-`sarray`,
-    // `sarray`-`sarray`, `struct`-`struct` and vector's own former
-    // special case.
-    if (isFatValue(sourceType) && isFatValue(destType)
-            && sourceFacts.size == destFacts.size)
-        return CastPlan(CastKind.copy, sourceFacts, destFacts);
-
-    // DMD has checked the conversion. Function attributes do not change
-    // a delegate's context and function words.
-    if (sourceType.ty == Tdelegate && destType.ty == Tdelegate)
-        return CastPlan(CastKind.copy, sourceFacts, destFacts);
-
-    // `cast(void*) someDelegate` (deprecated, still accepted): the
-    // reverse (`cast(SomeDelegate) somePointer`) and `cast(bool)`/an
-    // integral destination are dmd frontend errors, so only this one
-    // direction is reached.
-    if (sourceType.ty == Tdelegate && destType.ty == Tpointer)
+    final switch (destKind) with (TypeKind) {
+    case integral:
+        if (destType.ty == Tbool)
+            return CastPlan(CastKind.toBool, sourceFacts, destFacts);
+        if (destFacts.size == sourceFacts.size)
+            return CastPlan(CastKind.copy, sourceFacts, destFacts);
+        if (destFacts.size < sourceFacts.size)
+            return CastPlan(CastKind.narrow, sourceFacts, destFacts);
         return CastPlan(
-            CastKind.delegateToPointer, sourceFacts, destFacts);
-
-    if ((sourceType.ty == Tclass && destType.ty == Tpointer)
-            || (sourceType.ty == Tpointer && destType.ty == Tclass))
-        return CastPlan(CastKind.copy, sourceFacts, destFacts);
-
-    // An associative array is one pointer-sized handle natively, the same
-    // shape `Tclass`-`Tpointer` already gets `copy` for above.
-    // `cast(bool)`/an integral destination other than a pointer are dmd
-    // frontend errors for an AA, so this is only ever `Tpointer` on the
-    // other side.
-    if ((sourceType.ty == Taarray && destType.ty == Tpointer)
-            || (sourceType.ty == Tpointer && destType.ty == Taarray))
-        return CastPlan(CastKind.copy, sourceFacts, destFacts);
-
-    // `complex`/`imaginary` are deprecated but still full members of the
-    // language dmd accepts, with their own cast rules: a `complex` value
-    // is a `{re, im}` pair of the matching `float`/`double`/`real`
-    // width; an `imaginary` value is one such component on its own, with
-    // no real axis at all. Both are checked before `isFloatingType`
-    // below, which answers `false` for either - a plain `float`,
-    // `double` or `real` has neither a second component nor a missing
-    // real one, so the two families never collide.
-    if (isComplexType(destType)) {
-        if (isComplexType(sourceType))
-            return CastPlan(
-                sourceFacts.size == destFacts.size
-                    ? CastKind.copy : CastKind.complexWidth,
-                sourceFacts, destFacts,
-            );
-
-        if (isImaginaryType(sourceType))
-            return CastPlan(
-                CastKind.imaginaryToComplex, sourceFacts, destFacts);
-
-        if (isFloatingType(sourceType))
-            return CastPlan(
-                CastKind.realToComplex, sourceFacts, destFacts);
-
-        if (sourceFacts.isIntegral && isIntegralSize(sourceFacts.size))
-            return CastPlan(
-                CastKind.integralToComplex, sourceFacts, destFacts);
-
-        return CastPlan(CastKind.unsupported, sourceFacts, destFacts);
-    }
-
-    if (isImaginaryType(destType)) {
-        if (isImaginaryType(sourceType))
-            return CastPlan(
-                sourceFacts.size == destFacts.size
-                    ? CastKind.copy : CastKind.floatWidth,
-                sourceFacts, destFacts,
-            );
-
-        if (isComplexType(sourceType))
-            return CastPlan(
-                CastKind.complexToImaginary, sourceFacts, destFacts);
-
-        // Neither a real value nor an integral (`bool`/`char` included)
-        // has an imaginary component to carry over: dmd's own constant
-        // folding (`toImaginary`, `expressionsem.d`) answers `0` for
-        // either the same way it does for a real-typed `.im` - a
-        // side-effect-preserving zero fill is that same answer at run
-        // time.
-        if (isFloatingType(sourceType)
-                || (sourceFacts.isIntegral && isIntegralSize(sourceFacts.size)))
-            return CastPlan(CastKind.zero, sourceFacts, destFacts);
-
-        return CastPlan(CastKind.unsupported, sourceFacts, destFacts);
-    }
-
-    if (isFloatingType(destType)) {
-        if (isFloatingType(sourceType))
-            return CastPlan(
-                sourceFacts.size == destFacts.size
-                    ? CastKind.copy : CastKind.floatWidth,
-                sourceFacts, destFacts,
-            );
-
-        if (isComplexType(sourceType))
-            return CastPlan(
-                CastKind.complexToReal, sourceFacts, destFacts);
-
-        // The reverse of the imaginary-destination zero fill above: a
-        // real value has no imaginary axis to read back either.
-        if (isImaginaryType(sourceType))
-            return CastPlan(CastKind.zero, sourceFacts, destFacts);
-
-        if (sourceFacts.isIntegral && isIntegralSize(sourceFacts.size))
-            return CastPlan(
-                CastKind.integralToFloat, sourceFacts, destFacts);
-
-        return CastPlan(CastKind.unsupported, sourceFacts, destFacts);
-    }
-
-    if (isComplexType(sourceType)) {
-        if (destType.ty == Tbool)
-            return CastPlan(
-                CastKind.complexToBool, sourceFacts, destFacts);
-
-        if (destFacts.isIntegral && isIntegralSize(destFacts.size))
-            return CastPlan(
-                CastKind.complexToIntegral, sourceFacts, destFacts);
-
-        return CastPlan(CastKind.unsupported, sourceFacts, destFacts);
-    }
-
-    if (isImaginaryType(sourceType)) {
-        // The imaginary magnitude's own nonzero test - the same bytes,
-        // at the same offset, `floatToBool` already reads for a real
-        // operand.
-        if (destType.ty == Tbool)
-            return CastPlan(
-                CastKind.floatToBool, sourceFacts, destFacts);
-
-        // No real projection to convert, same as the imaginary
-        // destination case above.
-        if (destFacts.isIntegral && isIntegralSize(destFacts.size))
-            return CastPlan(CastKind.zero, sourceFacts, destFacts);
-
-        return CastPlan(CastKind.unsupported, sourceFacts, destFacts);
-    }
-
-    if (isFloatingType(sourceType)) {
-        if (destType.ty == Tbool)
-            return CastPlan(
-                CastKind.floatToBool, sourceFacts, destFacts);
-
-        if (destFacts.isIntegral && isIntegralSize(destFacts.size))
-            return CastPlan(
-                CastKind.floatToIntegral, sourceFacts, destFacts);
-
-        return CastPlan(CastKind.unsupported, sourceFacts, destFacts);
-    }
-
-    if (sourceType.ty == Tpointer && destType.ty == Tpointer)
-        return CastPlan(CastKind.copy, sourceFacts, destFacts);
-
-    if (sourceType.ty == Tpointer && destFacts.isDynamicArray)
-        return CastPlan(CastKind.pointerToArray, sourceFacts, destFacts);
-
-    // `cast(bool)` on a pointer (a plain pointer or a function pointer,
-    // both `Tpointer`) tests the same nonzero bytes an integral `toBool`
-    // cast does. A class reference or a delegate cast to `bool` is a dmd
-    // frontend error (`Error: cannot cast expression ... to bool`), so
-    // this is reached only for `Tpointer` - `bool`'s truth-conversion
-    // semantics have to be checked before `pointerToIntegral` below,
-    // which is why it stays out of that byte-preserving kind.
-    if (sourceType.ty == Tpointer && destType.ty == Tbool)
-        return CastPlan(CastKind.toBool, sourceFacts, destFacts);
-
-    // An explicit pointer-to-integral cast preserves the native address
-    // bits; `bool` has truth-conversion semantics instead, so it stays
-    // out of this byte-preserving kind.
-    if (sourceType.ty == Tpointer && destFacts.isIntegral
-            && destType.ty != Tbool)
-        return CastPlan(
-            CastKind.pointerToIntegral, sourceFacts, destFacts);
-
-    // The reverse of `pointerToIntegral`: an explicit integral-to-pointer
-    // cast (`cast(void*) someInt`, `core.stdc.stdarg.alignUp`'s own
-    // `return cast(T) b;`) preserves the operand's own bits, sign- or
-    // zero-extended to the pointer's width exactly as widening that same
-    // operand to a wider integral would - `bool`'s 0/1 values included,
-    // since dmd classifies it as an unsigned integral. `size_t` is
-    // already the pointer's own width, so that particular round trip is
-    // the same plain move an equal-width integral cast already uses.
-    // Sharing `copy`/`widenSigned`/`widenUnsigned` here, rather than a
-    // kind of its own, is the same reuse `pointerToIntegral` above gets
-    // for free from the ordinary integral-to-integral kinds below - a
-    // pointer's destination facts differ from an integral's only in
-    // `isIntegral` itself, never in the size or signedness arithmetic
-    // that picks between them.
-    if (destType.ty == Tpointer && sourceFacts.isIntegral
-            && isIntegralSize(sourceFacts.size))
+            sourceFacts.isUnsigned
+                ? CastKind.widenUnsigned : CastKind.widenSigned,
+            sourceFacts, destFacts,
+        );
+    case floating:
+        return CastPlan(CastKind.integralToFloat, sourceFacts, destFacts);
+    case complex:
+        return CastPlan(CastKind.integralToComplex, sourceFacts, destFacts);
+    case imaginary:
+        return CastPlan(CastKind.zero, sourceFacts, destFacts);
+    case pointer, functionPointer:
         return CastPlan(
             destFacts.size == sourceFacts.size
                 ? CastKind.copy
@@ -276,57 +148,295 @@ public CastPlan classify(
                     ? CastKind.widenUnsigned : CastKind.widenSigned,
             sourceFacts, destFacts,
         );
+    case dynamicArray, staticArray, associativeArray, classReference,
+        structure, delegateValue, nullValue, vector, other:
+        assert(0, "DMD rejects this cast type pair");
+    }
+}
 
-    if (sourceType.ty == Tsarray && destFacts.isDynamicArray
-            && destType.nextOf !is null
-            && sourceType.nextOf.mutableOf.equals(destType.nextOf.mutableOf)) {
+private CastPlan classifyFloating(
+    TypeKind destKind,
+    imported!"dmd.mtype".Type destType,
+    in TypeFacts sourceFacts,
+    in TypeFacts destFacts,
+) {
+    import dmd.astenums: Tbool;
+
+    final switch (destKind) with (TypeKind) {
+    case integral:
+        return CastPlan(
+            destType.ty == Tbool
+                ? CastKind.floatToBool : CastKind.floatToIntegral,
+            sourceFacts, destFacts,
+        );
+    case floating:
+        return CastPlan(
+            sourceFacts.size == destFacts.size
+                ? CastKind.copy : CastKind.floatWidth,
+            sourceFacts, destFacts,
+        );
+    case imaginary:
+        return CastPlan(CastKind.zero, sourceFacts, destFacts);
+    case complex:
+        return CastPlan(CastKind.realToComplex, sourceFacts, destFacts);
+    case pointer, functionPointer:
+        return CastPlan(CastKind.floatToPointer, sourceFacts, destFacts);
+    case dynamicArray, staticArray, associativeArray, classReference,
+        structure, delegateValue, nullValue, vector, other:
+        assert(0, "DMD rejects this cast type pair");
+    }
+}
+
+private CastPlan classifyImaginary(
+    TypeKind destKind,
+    imported!"dmd.mtype".Type destType,
+    in TypeFacts sourceFacts,
+    in TypeFacts destFacts,
+) {
+    import dmd.astenums: Tbool;
+
+    final switch (destKind) with (TypeKind) {
+    case integral:
+        return CastPlan(
+            destType.ty == Tbool
+                ? CastKind.floatToBool : CastKind.zero,
+            sourceFacts, destFacts,
+        );
+    case floating:
+        return CastPlan(CastKind.zero, sourceFacts, destFacts);
+    case imaginary:
+        return CastPlan(
+            sourceFacts.size == destFacts.size
+                ? CastKind.copy : CastKind.floatWidth,
+            sourceFacts, destFacts,
+        );
+    case complex:
+        return CastPlan(CastKind.imaginaryToComplex, sourceFacts, destFacts);
+    case pointer, functionPointer:
+        return CastPlan(CastKind.zero, sourceFacts, destFacts);
+    case dynamicArray, staticArray, associativeArray, classReference,
+        structure, delegateValue,
+        nullValue, vector, other:
+        assert(0, "DMD rejects this cast type pair");
+    }
+}
+
+private CastPlan classifyComplex(
+    TypeKind destKind,
+    imported!"dmd.mtype".Type destType,
+    in TypeFacts sourceFacts,
+    in TypeFacts destFacts,
+) {
+    import dmd.astenums: Tbool;
+
+    final switch (destKind) with (TypeKind) {
+    case integral:
+        return CastPlan(
+            destType.ty == Tbool
+                ? CastKind.complexToBool : CastKind.complexToIntegral,
+            sourceFacts, destFacts,
+        );
+    case floating:
+        return CastPlan(CastKind.complexToReal, sourceFacts, destFacts);
+    case imaginary:
+        return CastPlan(CastKind.complexToImaginary, sourceFacts, destFacts);
+    case complex:
+        return CastPlan(
+            sourceFacts.size == destFacts.size
+                ? CastKind.copy : CastKind.complexWidth,
+            sourceFacts, destFacts,
+        );
+    case pointer, functionPointer:
+        return CastPlan(
+            CastKind.complexToIntegral, sourceFacts, destFacts);
+    case dynamicArray, staticArray, associativeArray, classReference,
+        structure, delegateValue,
+        nullValue, vector, other:
+        assert(0, "DMD rejects this cast type pair");
+    }
+}
+
+private CastPlan classifyPointer(
+    TypeKind destKind,
+    imported!"dmd.mtype".Type destType,
+    in TypeFacts sourceFacts,
+    in TypeFacts destFacts,
+) {
+    import dmd.astenums: Tbool;
+
+    final switch (destKind) with (TypeKind) {
+    case integral:
+        return CastPlan(
+            destType.ty == Tbool
+                ? CastKind.toBool : CastKind.pointerToIntegral,
+            sourceFacts, destFacts,
+        );
+    case floating:
+        return CastPlan(CastKind.pointerToFloat, sourceFacts, destFacts);
+    case dynamicArray:
+        return CastPlan(CastKind.pointerToArray, sourceFacts, destFacts);
+    case imaginary:
+        return CastPlan(CastKind.zero, sourceFacts, destFacts);
+    case complex:
+        return CastPlan(CastKind.integralToComplex, sourceFacts, destFacts);
+    case pointer, functionPointer, classReference, associativeArray:
+        return CastPlan(CastKind.copy, sourceFacts, destFacts);
+    case staticArray, structure, delegateValue, nullValue, vector, other:
+        assert(0, "DMD rejects this cast type pair");
+    }
+}
+
+private CastPlan classifyClass(
+    TypeKind destKind,
+    imported!"dmd.mtype".Type sourceType,
+    imported!"dmd.mtype".Type destType,
+    in TypeFacts sourceFacts,
+    in TypeFacts destFacts,
+) {
+    if (destKind == TypeKind.classReference) {
         auto plan = CastPlan(
-            CastKind.sarrayToSlice, sourceFacts, destFacts);
-        plan.staticLength =
-            cast(size_t) sourceType.isTypeSArray.dim.toInteger;
+            CastKind.classReference, sourceFacts, destFacts);
+        destType.isTypeClass.sym.isBaseOf(
+            sourceType.isTypeClass.sym, &plan.referenceOffset);
         return plan;
     }
 
-    // `xs.ptr`: dmd's own semantic pass for `Id.ptr` on a static array
-    // casts straight to a pointer to its element type.
-    if (sourceType.ty == Tsarray && destType.ty == Tpointer
-            && destType.nextOf !is null
-            && sourceType.nextOf.mutableOf.equals(destType.nextOf.mutableOf))
-        return CastPlan(CastKind.sarrayToPointer, sourceFacts, destFacts);
+    final switch (destKind) with (TypeKind) {
+    case pointer, functionPointer, associativeArray:
+        return CastPlan(CastKind.copy, sourceFacts, destFacts);
+    case dynamicArray, staticArray, classReference, structure,
+        delegateValue, floating, imaginary, complex, integral, nullValue,
+        vector, other:
+        assert(0, "DMD rejects this cast type pair");
+    }
+}
 
-    // Explicit array-to-pointer casts preserve the data address even when
-    // the pointed-to type differs from the array's element type.
-    if (sourceFacts.isDynamicArray && destType.ty == Tpointer)
-        return CastPlan(CastKind.sliceToPointer, sourceFacts, destFacts);
+private CastPlan classifyAssociativeArray(
+    TypeKind destKind, in TypeFacts sourceFacts, in TypeFacts destFacts,
+) {
+    final switch (destKind) with (TypeKind) {
+    case pointer, functionPointer, classReference, associativeArray:
+        return CastPlan(CastKind.copy, sourceFacts, destFacts);
+    case dynamicArray, staticArray, structure, delegateValue, floating,
+        imaginary, complex, integral, nullValue, vector, other:
+        assert(0, "DMD rejects this cast type pair");
+    }
+}
 
-    if (sourceFacts.isDynamicArray && destFacts.isDynamicArray)
+private CastPlan classifyDelegate(
+    TypeKind destKind, in TypeFacts sourceFacts, in TypeFacts destFacts,
+) {
+    final switch (destKind) with (TypeKind) {
+    case delegateValue:
+        return CastPlan(CastKind.copy, sourceFacts, destFacts);
+    case pointer, functionPointer:
+        return CastPlan(CastKind.delegateToPointer, sourceFacts, destFacts);
+    case dynamicArray, staticArray, associativeArray, classReference,
+        structure, floating, imaginary, complex, integral, nullValue, vector,
+        other:
+        assert(0, "DMD rejects this cast type pair");
+    }
+}
+
+private CastPlan classifyDynamicArray(
+    TypeKind destKind, in TypeFacts sourceFacts, in TypeFacts destFacts,
+) {
+    final switch (destKind) with (TypeKind) {
+    case dynamicArray:
         return CastPlan(
             sourceFacts.elementSize == destFacts.elementSize
                 ? CastKind.copy : CastKind.reinterpretSlice,
             sourceFacts, destFacts,
         );
+    case pointer, functionPointer:
+        return CastPlan(CastKind.sliceToPointer, sourceFacts, destFacts);
+    case staticArray, associativeArray, classReference, structure,
+        delegateValue, floating, imaginary, complex, integral, nullValue,
+        vector, other:
+        assert(0, "DMD rejects this cast type pair");
+    }
+}
 
-    if (!sourceFacts.isIntegral || !isIntegralSize(sourceFacts.size)
-            || !destFacts.isIntegral)
-        return CastPlan(CastKind.unsupported, sourceFacts, destFacts);
+private CastPlan classifyStaticArray(
+    TypeKind destKind,
+    imported!"dmd.mtype".Type sourceType,
+    imported!"dmd.mtype".Type destType,
+    in TypeFacts sourceFacts,
+    in TypeFacts destFacts,
+) {
+    import dmd.expressionsem: toInteger;
+    import dmd.typesem: nextOf, size;
 
-    // dmd classifies `bool` as `integral | unsigned`, so this has to be
-    // checked before the general integral resize below: `cast(bool) x`
-    // means `x != 0`, not "keep the low byte".
-    if (destType.ty == Tbool)
-        return CastPlan(CastKind.toBool, sourceFacts, destFacts);
+    final switch (destKind) with (TypeKind) {
+    case dynamicArray: {
+        const sourceElementSize = sourceType.nextOf.size;
+        const destElementSize = destType.nextOf.size;
+        auto plan = CastPlan(CastKind.sarrayToSlice, sourceFacts, destFacts);
+        if (sourceElementSize == destElementSize) {
+            plan.staticLength = cast(size_t) sourceType.isTypeSArray.dim
+                .toInteger;
+        } else {
+            assert(destElementSize != 0
+                && (sourceType.isTypeSArray.dim.toInteger
+                    * sourceElementSize) % destElementSize == 0);
+            plan.staticLength = cast(size_t)(
+                sourceType.isTypeSArray.dim.toInteger * sourceElementSize
+                    / destElementSize);
+        }
+        return plan;
+    }
+    case pointer, functionPointer:
+        return CastPlan(CastKind.sarrayToPointer, sourceFacts, destFacts);
+    case staticArray, structure, vector:
+        if (sourceFacts.size == destFacts.size)
+            return CastPlan(CastKind.copy, sourceFacts, destFacts);
+        assert(0, "DMD rejects this cast type pair");
+    case associativeArray, classReference, delegateValue, floating,
+        imaginary, complex, integral, nullValue, other:
+        assert(0, "DMD rejects this cast type pair");
+    }
+}
 
-    if (destFacts.size == sourceFacts.size)
-        return CastPlan(CastKind.copy, sourceFacts, destFacts);
+private CastPlan classifyFatValue(
+    TypeKind destKind, in TypeFacts sourceFacts, in TypeFacts destFacts,
+) {
+    final switch (destKind) with (TypeKind) {
+    case staticArray, structure, vector:
+        if (sourceFacts.size == destFacts.size)
+            return CastPlan(CastKind.copy, sourceFacts, destFacts);
+        assert(0, "DMD rejects this cast type pair");
+    case dynamicArray, associativeArray, pointer, functionPointer,
+        classReference, delegateValue, floating, imaginary, complex,
+        integral, nullValue, other:
+        assert(0, "DMD rejects this cast type pair");
+    }
+}
 
-    if (destFacts.size < sourceFacts.size)
-        return CastPlan(CastKind.narrow, sourceFacts, destFacts);
+private TypeKind kindOf(imported!"dmd.mtype".Type type) {
+    import dmd.astenums: TY;
 
-    return CastPlan(
-        sourceFacts.isUnsigned
-            ? CastKind.widenUnsigned : CastKind.widenSigned,
-        sourceFacts, destFacts,
-    );
+    final switch (type.ty) with (TY) {
+    case Tarray: return TypeKind.dynamicArray;
+    case Tsarray: return TypeKind.staticArray;
+    case Taarray: return TypeKind.associativeArray;
+    case Tpointer: return TypeKind.pointer;
+    case Tfunction: return TypeKind.functionPointer;
+    case Tclass: return TypeKind.classReference;
+    case Tstruct: return TypeKind.structure;
+    case Tdelegate: return TypeKind.delegateValue;
+    case Tfloat32, Tfloat64, Tfloat80: return TypeKind.floating;
+    case Timaginary32, Timaginary64, Timaginary80:
+        return TypeKind.imaginary;
+    case Tcomplex32, Tcomplex64, Tcomplex80: return TypeKind.complex;
+    case Tint8, Tuns8, Tint16, Tuns16, Tint32, Tuns32, Tint64, Tuns64,
+        Tbool, Tchar, Twchar, Tdchar, Tint128, Tuns128, Tenum:
+        return TypeKind.integral;
+    case Tnull: return TypeKind.nullValue;
+    case Tvector: return TypeKind.vector;
+    case Treference, Tident, Tnone, Tvoid, Terror, Tinstance, Ttypeof,
+        Ttuple, Tslice, Treturn, Ttraits, Tmixin, Tnoreturn, Ttag:
+        return TypeKind.other;
+    }
 }
 
 // A null expression has no source representation to classify. Its cast
@@ -350,7 +460,7 @@ public CastPlan classify(
 // `CastKind` `applyCast` takes, so it carries straight over with no
 // mapping. Only meaningful for a `plan.kind` `applyCast` accepts;
 // neither backend calls this for `copy`, `classReference`, `zero`, or
-// `unsupported`, each of which needs its own control flow instead.
+// each of which needs its own control flow instead.
 public CastLayout layoutOf(in CastPlan plan) @safe pure nothrow @nogc {
     return CastLayout(
         plan.kind,

@@ -113,6 +113,49 @@ unittest {
 }
 
 
+@("kind.pointerToFloat")
+unittest {
+    auto function_ = castFunctionOf(q{
+        double cast_(int* value) { return cast(double) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastKind.pointerToFloat;
+}
+
+
+@("kind.floatToPointer")
+unittest {
+    auto function_ = castFunctionOf(q{
+        int* cast_(double value) { return cast(int*) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastKind.floatToPointer;
+}
+
+
+@("kind.sarrayToVoidSliceLength")
+unittest {
+    auto function_ = castFunctionOf(q{
+        int[2] values;
+        void[] cast_() { return cast(void[]) values; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastKind.sarrayToSlice;
+    plan.staticLength.should == 8;
+}
+
+
+
+
 // The reverse of `kind.pointerToIntegral`: `size_t` and a pointer are both
 // `size_t.sizeof` bytes wide, so preserving the value's own bits across the
 // cast is the same plain move `copy` already covers for two equal-width
@@ -316,6 +359,35 @@ unittest {
 unittest {
     auto function_ = castFunctionOf(q{
         int[int] cast_(void* value) { return cast(int[int]) value; }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastKind.copy;
+}
+
+
+@("kind.copy.functionPointerToPointer")
+unittest {
+    auto function_ = castFunctionOf(q{
+        void* cast_(int function(int) callback) {
+            return cast(void*) callback;
+        }
+    });
+    auto cast_ = castOf(function_);
+
+    const plan = classify(cast_.e1.type, cast_.type);
+
+    plan.kind.should == CastKind.copy;
+}
+
+
+@("kind.copy.aaToClass")
+unittest {
+    auto function_ = castFunctionOf(q{
+        class C {}
+        C cast_(int[int] value) { return cast(C) value; }
     });
     auto cast_ = castOf(function_);
 

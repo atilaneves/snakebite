@@ -9,6 +9,89 @@ module ut.backends.run.operators;
 import ut.backends;
 
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast a floating value to a pointer"),
+)) {
+    @("pointerFloatingCastsConvertNumericValues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            double asNumber(int* value) { return cast(double) value; }
+            int* asPointer(double value) { return cast(int*) value; }
+
+            void main() {
+                int* pointer = asPointer(12.0);
+                assert(cast(size_t) pointer == 12);
+                assert(asNumber(pointer) == 12.0);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("functionPointerCastsPreserveCallableAddress." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int twice(int value) { return value * 2; }
+
+            void main() {
+                alias Function = int function(int);
+                Function original = &twice;
+                void* address = cast(void*) original;
+                Function restored = cast(Function) address;
+
+                assert(restored(21) == 42);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static array variable in this cast"),
+)) {
+    @("staticArrayToVoidSliceUsesByteLength." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int[2] values;
+
+            void main() {
+                values = [0x01020304, 0x05060708];
+                void[] bytes = cast(void[]) values;
+
+                assert(bytes.length == 2 * int.sizeof);
+                assert(bytes.ptr == cast(void*) values.ptr);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not form a byte-length slice from a static array"),
+)) {
+    @("localStaticArrayToVoidSlicePreservesLengthAndStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[2] values = [0x01020304, 0x05060708];
+                void[] bytes = cast(void[]) values;
+
+                assert(bytes.length == 2 * int.sizeof);
+                assert(bytes.ptr == cast(void*) values.ptr);
+            }
+        });
+    }
+}
+
+
 // Shifting a value into bytes and back reconstructs it, which pins the
 // shift amounts and the truncation each `cast(ubyte)` does.
 static foreach (backend; Matrix!()) {
@@ -65,6 +148,28 @@ static foreach (backend; Matrix!()) {
                 assert(reader.readEnum == MyEnum.bar);
                 assert(reader.readEnum == MyEnum.baz);
                 assert(reader.readEnum == MyEnum.foo);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast an associative array to a class reference"),
+)) {
+    @("associativeArrayClassCastsKeepTheHandle." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class C {}
+            C asClass(int[int] value) { return cast(C) value; }
+
+            void main() {
+                int[int] value;
+                value[1] = 2;
+                C object = asClass(value);
+                assert(cast(void*) object == cast(void*) value);
             }
         });
     }
@@ -1095,6 +1200,67 @@ static foreach (backend; Matrix!()) {
                     assert(arr[1] == false && arr[0] == true
                         && arr[2] == false && arr[3] == true);
                 }
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot cast an imaginary value to a pointer"),
+)) {
+    @("imaginaryAndComplexPointerCasts." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void* fromIfloat(ifloat value) { return cast(void*) value; }
+            void* fromIdouble(idouble value) { return cast(void*) value; }
+            void* fromIreal(ireal value) { return cast(void*) value; }
+            void* fromCfloat(cfloat value) { return cast(void*) value; }
+            void* fromCdouble(cdouble value) { return cast(void*) value; }
+            void* fromCreal(creal value) { return cast(void*) value; }
+            ifloat toIfloat(void* value) { return cast(ifloat) value; }
+            idouble toIdouble(void* value) { return cast(idouble) value; }
+            ireal toIreal(void* value) { return cast(ireal) value; }
+            cfloat toCfloat(void* value) { return cast(cfloat) value; }
+            cdouble toCdouble(void* value) { return cast(cdouble) value; }
+            creal toCreal(void* value) { return cast(creal) value; }
+            void main() {
+                assert(fromIfloat(3.0i) == null);
+                assert(fromIdouble(3.0i) == null);
+                assert(fromIreal(3.0Li) == null);
+                assert(fromCfloat(12.0f + 3.0fi) == cast(void*) 12);
+                assert(fromCdouble(12.0 + 3.0i) == cast(void*) 12);
+                assert(fromCreal(12.0L + 3.0Li) == cast(void*) 12);
+                assert(toIfloat(cast(void*) 12) == 0.0fi);
+                assert(toIdouble(cast(void*) 12) == 0.0i);
+                assert(toIreal(cast(void*) 12) == 0.0Li);
+                assert(toCfloat(cast(void*) 12) == 12.0f + 0.0fi);
+                assert(toCdouble(cast(void*) 12) == 12.0 + 0.0i);
+                assert(toCreal(cast(void*) 12) == 12.0L + 0.0Li);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a zero-size static array in this cast"),
+)) {
+    @("staticArrayOfZeroSizedElementsRetainsSliceLength." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int[0][] asSlice(ref int[0][2] values) {
+                return cast(int[0][]) values;
+            }
+            void main() {
+                int[0][2] values;
+                auto slice = asSlice(values);
+                assert(slice.length == 2);
+                assert(cast(void*) slice.ptr == cast(void*) &values);
             }
         });
     }
