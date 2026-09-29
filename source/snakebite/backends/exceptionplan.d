@@ -12,7 +12,9 @@ import snakebite.backends.unwindplan:
 
 public struct CatchPlan {
     public struct Clause {
-        public imported!"dmd.statement".Catch syntax;
+        import dmd.statement: Catch;
+
+        public Catch syntax;
         public TypeInfo_Class type;
     }
 
@@ -32,8 +34,10 @@ public CatchPlan catchPlanOf(
 
 public struct UnwindPlan {
     public struct Finalizer {
+        import dmd.statement: Statement;
+
         public const(void)* owner;
-        public imported!"dmd.statement".Statement body;
+        public Statement body;
     }
 
     // D runs inner cleanup before outer cleanup.
