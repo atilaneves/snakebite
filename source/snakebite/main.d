@@ -13,6 +13,8 @@ public int main(string[] args) {
     import snakebite.dependencyimage: Optimise;
     import snakebite.dub: fetchProject;
     import snakebite.execution: executeBackend, prepareProject;
+    import std.algorithm.iteration: map;
+    import std.array: array;
     import std.file: chdir, exists, getcwd, isDir;
     import std.path: absolutePath;
     import std.stdio: stderr, stdout, write;
@@ -29,17 +31,21 @@ public int main(string[] args) {
         if (!projectDirectory.exists || !projectDirectory.isDir)
             projectDirectory = fetchProject(projectDirectory);
         projectDirectory = projectDirectory.absolutePath;
+        const originalDirectory = getcwd;
+        const importPaths = parsed.options.importPaths
+            .map!(path => path.absolutePath).array;
+        const stringImportPaths = parsed.options.stringImportPaths
+            .map!(path => path.absolutePath).array;
+        chdir(projectDirectory);
+        scope (exit) chdir(originalDirectory);
         auto preparation = prepareProject(
             projectDirectory,
-            parsed.options.importPaths,
-            parsed.options.stringImportPaths,
+            importPaths,
+            stringImportPaths,
             parsed.options.backend != BackendName.ctfe,
             parsed.options.versions,
             parsed.options.noOptimiseImage ? Optimise.no : Optimise.yes,
         );
-        const originalDirectory = getcwd;
-        chdir(projectDirectory);
-        scope (exit) chdir(originalDirectory);
         const report = executeBackend(
             parsed.options.backend,
             preparation.project.program,

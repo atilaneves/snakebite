@@ -42,6 +42,10 @@ and build the project again. The first run also makes this check to establish
 archives for the host compiler and shared image. Dub build hooks run when dub
 builds the project; they do not run on a dependency cache hit.
 
+The CLI changes its working directory to the project before preparation, so
+its cache partition is under the project directory. Direct calls to
+`prepareProject` use the caller's working directory.
+
 The image remains mapped until the executable exits, including after the
 loading thread exits. `Project`, `Program`, and `Resolver` hold descriptions of
 that image. The benchmark reports image preparation time separately from
@@ -112,7 +116,8 @@ loader.
 ## Cache and errors
 
 Project images are cached in the current working directory under
-`.snakebite/<project-path-hash>/images`. Startup images and DUB dependency
+`.snakebite/<project-path-hash>/images`. For CLI runs, the current working
+directory is the project directory. Startup images and DUB dependency
 state use the same project partition. The project path hash is the SHA-256
 hash of the normalized absolute project path. Project preparation supplies
 imported source files as cache inputs.

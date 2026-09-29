@@ -159,8 +159,6 @@ static foreach (backend; CliBackendMatrix) {
     @("cli.moduleConstructorUsesProjectDirectory." ~ backend.stringof)
     @Serial
     unittest {
-        import std.process: Config, execute;
-
         const sandbox = Sandbox();
         sandbox.writeFile("outside/.keep");
         sandbox.writeFile("app/dub.sdl", dubProjectRecipe("project-cwd"));
@@ -194,6 +192,109 @@ static foreach (backend; CliBackendMatrix) {
         sandbox.inSandboxPath("app/constructor-result.txt")
             .readText.should == "yes";
         sandbox.inSandboxPath("app/test-ran.txt").exists.should == true;
+    }
+}
+
+
+static foreach (backend; CliBackendMatrix) {
+    @("cli.dependencyConstructorUsesProjectDirectory." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        sandbox.writeFile("outside/.keep");
+        sandbox.writeFile("app/dub.json", q{
+            {
+                "name": "cwd-app",
+                "targetType": "executable",
+                "sourcePaths": ["source"],
+                "importPaths": ["source"],
+                "dependencies": {
+                    "cwd-dep": {"path": "../dependency"}
+                },
+                "configurations": [
+                    {"name": "unittest", "targetType": "executable"}
+                ]
+            }
+        });
+        sandbox.writeFile("app/source/main.d", q{
+            module main;
+            import dep;
+            import std.file: readText;
+            unittest {
+                assert("dependency-constructor.txt".readText == "ran");
+                assert(answer() == 42);
+            }
+            int main() { return 0; }
+        });
+        sandbox.writeFile("dependency/dub.json", q{
+            {
+                "name": "cwd-dep",
+                "targetType": "library",
+                "sourcePaths": ["source"],
+                "importPaths": ["source"]
+            }
+        });
+        sandbox.writeFile("dependency/source/dep.d", q{
+            module dep;
+            import std.file: write;
+            shared static this() {
+                write("dependency-constructor.txt", "ran");
+            }
+            int answer() { return 42; }
+        });
+
+        const executable = buildPath(getcwd, "bin", "sb");
+        const projectDirectory = sandbox.inSandboxPath("app");
+        enum backendName = is(backend == Bytecode) ? "bytecode" : "interpreter";
+        const result = execute(
+            [executable, "--backend=" ~ backendName, "--no-optimise-image",
+                projectDirectory],
+            null,
+            Config.none,
+            size_t.max,
+            sandbox.inSandboxPath("outside"),
+        );
+
+        result.status.should == 0;
+        sandbox.inSandboxPath("app/dependency-constructor.txt")
+            .readText.should == "ran";
+    }
+}
+
+
+static foreach (backend; AliasSeq!(Bytecode, Interpreter, Ctfe)) {
+    @("cli.importPathsStayRelativeToCaller." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        sandbox.writeFile("outside/imports/helper.d", q{
+            module helper;
+            enum answer = 42;
+        });
+        sandbox.writeFile("outside/strings/payload.txt", "payload");
+        sandbox.writeFile("app/main.d", q{
+            module main;
+            import helper: answer;
+            static assert(import("payload.txt") == "payload\n");
+            static assert(answer == 42);
+            int main() { return 0; }
+        });
+
+        const executable = buildPath(getcwd, "bin", "sb");
+        const projectDirectory = sandbox.inSandboxPath("app");
+        enum backendName = is(backend == Ctfe) ? "ctfe"
+            : is(backend == Bytecode) ? "bytecode" : "interpreter";
+        const result = execute(
+            [executable, "--backend=" ~ backendName,
+                "--import-path=imports",
+                "--string-import-path=strings", projectDirectory],
+            null,
+            Config.none,
+            size_t.max,
+            sandbox.inSandboxPath("outside"),
+        );
+
+        result.status.should == 0;
     }
 }
 
