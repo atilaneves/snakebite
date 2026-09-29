@@ -43,6 +43,9 @@ configuration "unittest" {
     importPaths "."
 
     dependency "unit-threaded" version="*"
+    // The REPL's console loop is library code (`snakebite.repl.cli`),
+    // and every configuration compiles the whole library.
+    dependency "readline" version="0.3.0"
 }
 
 configuration "acceptance-test" {
@@ -53,7 +56,7 @@ configuration "acceptance-test" {
 
     mainSourceFile "acceptance/main.d"
     sourcePaths "acceptance"
-    sourceFiles "tests/ut/ffi/symbol.d"
+    sourceFiles "tests/ut/ffi/symbol.d" "tests/ut/process.d"
     sourceFiles "tests/ut/package.d" "tests/ut/backends/package.d"
     sourcePaths "bench"
     excludedSourceFiles "bench/main.d"
@@ -62,6 +65,9 @@ configuration "acceptance-test" {
     importPaths "."
 
     dependency "unit-threaded" version="*"
+    // The REPL's console loop is library code (`snakebite.repl.cli`),
+    // and every configuration compiles the whole library.
+    dependency "readline" version="0.3.0"
 }
 
 // The test runner: `build/sb.sh` produces `bin/sb` with LDC in release mode.
