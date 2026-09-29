@@ -25,7 +25,7 @@ public int main(string[] args) {
         return parsed.status;
 
     try {
-        string projectDirectory = parsed.options.projectDirectory.absolutePath;
+        string projectDirectory = parsed.options.projectDirectory;
         if (!projectDirectory.exists || !projectDirectory.isDir)
             projectDirectory = fetchProject(projectDirectory);
         projectDirectory = projectDirectory.absolutePath;

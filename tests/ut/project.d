@@ -13,9 +13,11 @@ import snakebite.project: dubSourceSetFromDescription,
 import std.algorithm.searching: any, endsWith;
 import std.digest.sha: sha256Of;
 import std.digest: toHexString;
-import std.file: exists, getcwd, readText, write;
+import std.file: exists, getcwd, getAttributes, readText, setAttributes, write;
+import std.conv: octal;
 import std.path: absolutePath, buildNormalizedPath, buildPath, dirName;
 import std.meta: AliasSeq, Filter;
+import std.process: Config, execute, environment;
 import std.traits: isInstanceOf;
 import ut;
 import ut.backends;
@@ -119,6 +121,38 @@ private alias CliBackendMatrix = Filter!(isCliBackend, AliasSeq!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot interpret open64 in std.file.readText"),
 ));
+
+
+@("cli.fetchKeepsPackageName")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("outside/.keep");
+    sandbox.writeFile("bin/dub",
+        "#!/bin/sh\n"
+        ~ "echo \"fake dub received: $*\"\n"
+        ~ "exit 1\n");
+    const dubPath = sandbox.inSandboxPath("bin/dub");
+    dubPath.setAttributes(dubPath.getAttributes | octal!700);
+
+    const oldPath = environment.get("PATH", "");
+    scope (exit) environment["PATH"] = oldPath;
+    environment["PATH"] = sandbox.inSandboxPath("bin") ~ ":" ~ oldPath;
+
+    const executable = buildPath(getcwd, "bin", "sb");
+    foreach (backend; ["interpreter", "bytecode", "ctfe"]) {
+        const result = execute(
+            [executable, "--backend=" ~ backend, "unit-threaded"],
+            null,
+            Config.none,
+            size_t.max,
+            sandbox.inSandboxPath("outside"),
+        );
+
+        result.status.should == 1;
+        "fake dub received: fetch unit-threaded".should.be in result.output;
+    }
+}
 
 
 static foreach (backend; CliBackendMatrix) {
