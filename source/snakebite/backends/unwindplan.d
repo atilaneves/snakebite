@@ -47,20 +47,22 @@ public UnwindPlan unwindPlanOf(
     foreach (index; startCandidate .. candidates.length) {
         auto candidate = candidates[index];
         plan.nextCandidate = index + 1;
-        if (candidate.kind == ExceptionCandidate.Kind.finally_) {
+        with (ExceptionCandidate.Kind) final switch (candidate.kind) {
+        case finally_:
             plan.finalizers ~= UnwindPlan.Step(
                 candidate.owner, candidate.kind, candidate.payload, index,
             );
             continue;
+        case catch_:
+            if (!catchMatches(candidate.type, actual))
+                continue;
+
+            plan.handler = UnwindPlan.Step(
+                candidate.owner, candidate.kind, candidate.payload, index,
+            );
+            plan.hasHandler = true;
+            break;
         }
-
-        if (!catchMatches(candidate.type, actual))
-            continue;
-
-        plan.handler = UnwindPlan.Step(
-            candidate.owner, candidate.kind, candidate.payload, index,
-        );
-        plan.hasHandler = true;
         break;
     }
 
