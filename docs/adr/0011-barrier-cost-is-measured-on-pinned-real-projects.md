@@ -25,8 +25,8 @@ it could not see a doubled dispatch, which read 5.2 to 5.4 when the
 limit was set. A time ratio on shared CI machines is not a reliable
 gate, so no micro benchmark gates the barrier now.
 
-A macro benchmark joins it: a suite of real dub projects, each pinned
-to a commit. The bench harness fetches each project at its pin. No
+A macro benchmark measures the barrier cost instead: a suite of real
+dub projects, each pinned to a commit. The bench harness fetches each project at its pin. No
 project's source is copied into `examples/`. The suite has three
 projects. Cerealed gives heavy template and range use over phobos,
 with no dependencies of its own. unit-threaded's own test suite gives
