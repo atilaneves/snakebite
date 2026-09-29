@@ -4506,22 +4506,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // value: a passing assertion produces nothing, it only has to let the
     // walk continue.
     //
-    // dmd gives `assert(0)`/`assert(false)` the type `noreturn` because
-    // the spec makes it a halt rather than an assertion - it stays in the
-    // program under `-release`, where every other assertion is gone. A
-    // halt is not something this backend can produce, so it is refused by
-    // name instead of being answered with the ordinary failure below,
-    // which would be a different thing wearing the same words.
+    // dmd types `assert(0)` as `noreturn`, but with assertions enabled it
+    // still raises the same guest-visible `AssertError` as any failed
+    // assertion.
     override void visit(AssertExp expression) {
-        import std.conv: text;
         import snakebite.backends.exceptions:
             AssertInvariantPlan, assertInvariantPlanOf;
-
-        if (expression.type !is null && expression.type.ty == Tnoreturn)
-            throw new SnakebiteException(
-                text("interpreter cannot execute the halt `",
-                    expression.toString, "`"),
-            );
 
         // `assertInvariantPlanOf` answers the same question dmd's own
         // glue layer (`e2ir.d`'s `visitAssert`) asks of `e1`'s type alone,
