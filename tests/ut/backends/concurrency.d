@@ -23,10 +23,10 @@ import std.conv: text;
 // `ClassDeclaration`'s bases, identifiers, parent module) the same way any
 // other frontend call does, so it is dmd-touching work like any other and
 // needs the frontend lock - but neither `linkedInfo` nor its caller
-// `classinfo.classRuntimeInfo` (guarded only by `ClassRuntimeCache`'s own
-// per-instance lock, deliberately not the frontend one - its own doc says
-// `make` never itself needs the frontend lock, an assumption that held
-// only while `linkedClassInfo` was unreachable without it) take it.
+// `classinfo.classRuntimeInfo` (then guarded only by `ClassRuntimeCache`'s
+// own per-instance lock, deliberately not the frontend one - its own doc
+// said `make` never itself needs the frontend lock, an assumption that
+// held only while `linkedClassInfo` was unreachable without it) take it.
 //
 // `NativeData.classValue` still wraps its whole body, `linkedClassInfo`
 // included, in the frontend lock - a compile-time class literal
