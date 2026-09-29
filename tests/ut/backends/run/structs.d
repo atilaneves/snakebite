@@ -1178,7 +1178,10 @@ static foreach (backend; Matrix!()) {
 // Placement `new` initializes the object at the lvalue's address and
 // returns that same address. The storage and initializer are each
 // evaluated once, even when both have visible effects.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE cannot evaluate placement `NewExp` expressions"),
+)) {
     @("placementNew.scalarUsesStorageOnce." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1217,7 +1220,10 @@ static foreach (backend; Matrix!()) {
 // D's named struct arguments choose fields by name, while omitted fields
 // receive their declared initializer. Placement construction must preserve
 // the caller's object identity through both writes.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE cannot evaluate placement `NewExp` expressions"),
+)) {
     @("placementNew.structNamedFieldUsesDefault." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -1242,7 +1248,10 @@ static foreach (backend; Matrix!()) {
 // A user-defined constructor writes directly into the supplied storage.
 // Its untouched fields keep the caller's old bytes, since placement does
 // not first copy the struct's `.init` value over that storage.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE cannot evaluate placement `NewExp` expressions"),
+)) {
     @("placementNew.structConstructorKeepsUntouchedBytes." ~
         backend.stringof)
     @Tags(backend.stringof)

@@ -678,7 +678,10 @@ static foreach (backend; Matrix!(
 // Class placement construction writes the class init image into the
 // supplied bytes before it runs the constructor, then returns a reference
 // to those same bytes.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE cannot evaluate placement `NewExp` expressions"),
+)) {
     @("placementNew.classInitializesCallerStorage." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -712,7 +715,10 @@ static foreach (backend; Matrix!()) {
 // D lowers an anonymous class expression to its declaration followed by
 // the same class construction as a named type. Placement keeps that
 // generated class object in the supplied bytes.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE cannot evaluate placement `NewExp` expressions"),
+)) {
     @("placementNew.anonymousClassUsesCallerStorage." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -734,7 +740,10 @@ static foreach (backend; Matrix!()) {
 // Placement does not remove the explicit outer object from a nested class
 // allocation. The constructor and later method must both use that same
 // outer object, while the class itself stays in caller storage.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE cannot evaluate placement `NewExp` expressions"),
+)) {
     @("placementNew.nestedClassUsesExplicitOuter." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -764,7 +773,10 @@ static foreach (backend; Matrix!()) {
 
 // The on-stack route must also initialize the explicit outer context before
 // it calls a nested class constructor.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE leaves a nested class's `this.this` null"),
+)) {
     @("scopeNestedClassUsesExplicitOuter." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -794,7 +806,10 @@ static foreach (backend; Matrix!()) {
 // A nested class in a function has no explicit outer-object expression.
 // Its constructor must receive the captured function context for both
 // placement and stack allocation.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE cannot evaluate placement `NewExp` expressions"),
+)) {
     @("nestedClassConstructorUsesCapturedContext." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
