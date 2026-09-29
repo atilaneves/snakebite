@@ -79,7 +79,7 @@ public UnwindPlan unwindPlanOf(
         finalizerFrames ~= frame;
     }
 
-    auto resolved = resolve(candidates, null);
+    const resolved = resolve(candidates, null);
     UnwindPlan plan;
     foreach (finalizer; resolved.finalizers)
         plan.finalizers ~= UnwindPlan.Finalizer(

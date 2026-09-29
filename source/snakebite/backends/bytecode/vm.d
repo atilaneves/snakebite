@@ -576,7 +576,7 @@ private Activation* handleException(
         } catch (Throwable chained) {
             throwable = chained;
         }
-        auto plan = exceptionPlanOf(
+        const plan = exceptionPlanOf(
             active.exceptionHandlers[firstHandler .. $], active.pc,
             throwable.classinfo);
         const step = plan.finalizers.length != 0

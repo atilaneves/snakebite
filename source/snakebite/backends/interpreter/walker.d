@@ -1379,6 +1379,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(TryCatchStatement statement) {
+        // Candidate construction needs dmd's mutable TypeInfo_Class values.
         auto catches = catchPlanOf(
             statement, catch_ => catchRuntimeInfo(catch_),
         );
@@ -1392,7 +1393,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             );
 
         _activeExceptionScopes ~= ActiveExceptionScope(candidates);
-        bool scopeActive = true;
+        auto scopeActive = true; // Cleared after the scope is removed explicitly.
         scope (exit)
             if (scopeActive)
                 _activeExceptionScopes.length -= 1;
@@ -1402,7 +1403,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 if (statement._body !is null)
                     statement._body.accept(this);
             } catch (GuestException exception) {
-                auto plan = exceptionPlan(exception._guest.classinfo);
+                const plan = exceptionPlan(exception._guest.classinfo);
+                // Binding and visiting the handler mutate dmd's Catch node.
                 auto catch_ = selectedCatch(plan, statement);
                 _activeExceptionScopes.length -= 1;
                 scopeActive = false;
@@ -1427,7 +1429,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         try {
             statement._body.accept(this);
         } catch (GuestException exception) {
-            auto plan = exceptionPlan(exception._guest.classinfo);
+            const plan = exceptionPlan(exception._guest.classinfo);
+            // Binding and visiting the handler mutate dmd's Catch node.
             auto catch_ = selectedCatch(plan, statement);
             _activeExceptionScopes.length -= 1;
             scopeActive = false;
@@ -1458,7 +1461,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     private Catch selectedCatch(
-        ExceptionUnwindPlan plan,
+        const(ExceptionUnwindPlan) plan,
         TryCatchStatement statement,
     ) {
         if (plan.finalizers.length != 0 || !plan.hasHandler
@@ -1475,6 +1478,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private bool runsFinally(TryFinallyStatement statement) {
         import snakebite.backends.exceptionplan: unwindPlanOf;
 
+        // The unwind planner takes mutable ScopeFrame arrays from dmd.
         auto source = scopePath(statement);
         ScopeFrame[] destination;
         if (_controlFlow.hasGoto)
@@ -1500,7 +1504,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 cast(const(void)*) statement.finalbody,
             ),
         ]);
-        bool scopeActive = true;
+        auto scopeActive = true; // Cleared after the scope is removed explicitly.
         scope (exit)
             if (scopeActive)
                 _activeExceptionScopes.length -= 1;
@@ -1529,7 +1533,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             }
         } catch (GuestException exception) {
             pendingException = exception.take;
-            auto plan = exceptionPlan(pendingException.classinfo);
+            const plan = exceptionPlan(pendingException.classinfo);
             assert(plan.finalizers.length != 0);
             assert(plan.finalizers[0].owner == cast(const(void)*) statement);
             runFinalizer = true;

@@ -45,7 +45,7 @@ public UnwindPlan unwindPlanOf(
     UnwindPlan plan;
     plan.nextCandidate = startCandidate;
     foreach (index; startCandidate .. candidates.length) {
-        auto candidate = candidates[index];
+        const candidate = candidates[index];
         plan.nextCandidate = index + 1;
         with (ExceptionCandidate.Kind) final switch (candidate.kind) {
         case finally_:
