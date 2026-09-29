@@ -165,7 +165,7 @@ private struct Shared {
     import snakebite.backends.classinfo: ClassRuntimeCache;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.runtimetypes: RuntimeTypes;
-    import snakebite.backends.staticchain: Hop;
+    import snakebite.backends.closureplan: ClosurePlan, Hop;
     import snakebite.ffi: PlanCache;
     import snakebite.nativelayout: NativeData, TypeFacts;
     import snakebite.sharedtable: SharedTable;
@@ -213,11 +213,7 @@ private struct Shared {
     SharedTable!(FuncDeclaration, CallShape) calls;
     // Storage for locals that dmd moves out of an activation frame when
     // it decides that the frame must survive its call.
-    SharedTable!(FuncDeclaration, ClosureLayout) closures;
-    // DMD's closure analysis is stable after semantic analysis. Keep both
-    // answers so execution does not repeat the same AST walk for
-    // functions that stay in this program.
-    SharedTable!(FuncDeclaration, bool) needsClosure;
+    SharedTable!(FuncDeclaration, ClosurePlan) closurePlans;
     // The static-chain hops from one function's frame to an enclosing
     // function's context, keyed by that pair. Working the hops out builds
     // the frame layout of every function on the way, so it is done once
@@ -374,7 +370,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.backends.backend: Program;
     import snakebite.frontend.dmd.delegates: DelegateTarget, outerFunctionOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
-    import snakebite.backends.staticchain: Hop;
+    import snakebite.backends.closureplan: ClosurePlan, Hop;
     import snakebite.backends.classinfo;
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
@@ -437,8 +433,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // The backing bytes of a closure are kept in `_allocations`, so a
     // delegate can retain this context after the frame stack has popped
     // the call.
-    private Cache!(FuncDeclaration, ClosureLayout) _closures;
-    private Cache!(FuncDeclaration, bool) _needsClosure;
+    private Cache!(FuncDeclaration, ClosurePlan) _closurePlans;
     private Cache!(StaticChainKey, Hop[]) _staticChains;
     private CallSelection* _callSelection;
     version(unittest) private size_t _staticLookups;
@@ -542,8 +537,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _callSelection = &shared_.callSelection;
         _layouts = Cache!(FuncDeclaration, FrameLayout)(&shared_.layouts);
         _calls = Cache!(FuncDeclaration, CallShape)(&shared_.calls);
-        _closures = Cache!(FuncDeclaration, ClosureLayout)(&shared_.closures);
-        _needsClosure = Cache!(FuncDeclaration, bool)(&shared_.needsClosure);
+        _closurePlans =
+            Cache!(FuncDeclaration, ClosurePlan)(&shared_.closurePlans);
         _staticChains =
             Cache!(StaticChainKey, Hop[])(&shared_.staticChains);
         _catchTypes = Cache!(Catch, TypeInfo_Class)(&shared_.catchTypes);
@@ -957,19 +952,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         return CallShape(CallAdapter.of(function_), arguments);
     }
 
-    // `ClosureLayout.of` reads `function_.closureVars`, which semantic3
-    // (body semantic) populates - safe unlocked here because every
-    // caller of `closureLayoutOf` (`allocateClosure`, only ever reached
-    // after `functionNeedsClosure(function_)` answered `true`) already
-    // forced that pass, under the frontend lock where it still needed
-    // one, to get that very answer.
+    // DMD fills `closureVars` while analyzing the body. This plan reads
+    // that list with the closure decision after the same semantic pass.
+    private const(ClosurePlan)* closurePlanOf(
+        FuncDeclaration function_,
+    ) {
+        if (auto cached = function_ in _closurePlans)
+            return cached;
+
+        return _closurePlans.build(function_, () => ClosurePlan.of(function_));
+    }
+
     private const(ClosureLayout)* closureLayoutOf(
         FuncDeclaration function_,
     ) {
-        if (auto cached = function_ in _closures)
-            return cached;
-
-        return _closures.build(function_, () => ClosureLayout.of(function_));
+        return &closurePlanOf(function_).layout;
     }
 
     private ubyte* allocateClosure(
@@ -1136,7 +1133,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const guard = CallStateGuard(this);
 
         _closureBase = null;
-        if (functionNeedsClosure(function_))
+        if (closurePlanOf(function_).needsClosure)
             _closureBase = allocateClosure(function_, frameBase, layout);
 
         _type = function_.type.nextOf;
@@ -2473,15 +2470,13 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // force semantic3 themselves, guarded, wherever they are called from
     // - so nothing extra is forced here.
     extern(D) private const(Hop)[] staticChainOf(FuncDeclaration owner) {
-        import snakebite.backends.staticchain: staticChainPath;
-
         const key = StaticChainKey(
             cast(const(void)*) _function, cast(const(void)*) owner);
         if (auto cached = key in _staticChains)
             return *cached;
 
         return *_staticChains.build(key,
-            () => staticChainPath(_function, owner));
+            () => ClosurePlan.staticChainPath(_function, owner));
     }
 
     // The answer shared with the bytecode compiler
@@ -2490,14 +2485,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // time it is asked, and this evaluator asks on every reach of a
     // variable.
     private bool functionNeedsClosure(FuncDeclaration function_) {
-        if (auto cached = function_ in _needsClosure)
-            return *cached;
-
-        import snakebite.frontend.dmd.delegates:
-            sharedFunctionNeedsClosure = functionNeedsClosure;
-
-        return *_needsClosure.build(function_,
-            () => sharedFunctionNeedsClosure(function_));
+        return closurePlanOf(function_).needsClosure;
     }
 
     // Where the variable read or written by `expression` lives: the

@@ -633,11 +633,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf, toBasetype;
     import snakebite.frontend.dmd.delegates:
-        DelegateTarget, delegateTargetOf, functionNeedsClosure,
+        DelegateTarget, delegateTargetOf,
         outerFunctionOf;
     import snakebite.backends.aggregateinit: InitStep;
     import snakebite.backends.builtins: BuiltinCall;
     import snakebite.backends.calls: CallSelection;
+    import snakebite.backends.closureplan: ClosurePlan;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
     import snakebite.exception: SnakebiteException;
@@ -654,6 +655,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private FuncDeclaration _function;
     private const FrameLayout _layout;
     private ClosureLayout _closureLayout;
+    private ClosurePlan[FuncDeclaration] _closurePlans;
     private TypeFacts _returnFacts;
     private bool _isVoidReturn;
     // Whether this function returns by `ref`: `compileReturn` then compiles
@@ -874,9 +876,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _tempSize = layout.size;
         _tempAlignment = layout.alignment;
 
-        import dmd.funcsem: needsClosure;
-        if (function_.needsClosure()) {
-            _closureLayout = ClosureLayout.of(function_);
+        auto closurePlan = closurePlanOf(function_);
+        if (closurePlan.needsClosure) {
+            _closureLayout = closurePlan.layout;
             _closureOffset = reserveTemp(pointerFacts);
         }
     }
@@ -2595,8 +2597,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // at compile time - every later hop indirects through a pointer value
     // already sitting in `result`.
     private size_t contextAddressOf(FuncDeclaration owner) {
-        import snakebite.backends.staticchain: staticChainPath;
-
         if (owner is _function) {
             if (_closureOffset != size_t.max)
                 return _closureOffset;
@@ -2606,7 +2606,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return result;
         }
 
-        const path = staticChainPath(_function, owner);
+        const path = ClosurePlan.staticChainPath(_function, owner);
         if (path is null)
             throw rejection(_function, _function.loc, "a static chain");
 
@@ -2619,6 +2619,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         return result;
+    }
+
+    private ref ClosurePlan closurePlanOf(FuncDeclaration function_) {
+        if (auto cached = function_ in _closurePlans)
+            return *cached;
+
+        _closurePlans[function_] = ClosurePlan.of(function_);
+        return _closurePlans[function_];
     }
 
     // The address of a variable's storage as a pointer value in a frame
@@ -2648,8 +2656,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, variable.loc, "a local variable");
 
         auto context = contextAddressOf(owner);
-        if (functionNeedsClosure(owner)) {
-            const closure = ClosureLayout.of(owner);
+        const closurePlan = closurePlanOf(owner);
+        if (closurePlan.needsClosure) {
+            const closure = closurePlan.layout;
             if (closure.hasSlot(variable)) {
                 const slot = closure.slotOf(variable);
                 context = addPointerOffset(context, slot.offset);
@@ -2686,8 +2695,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, variable.loc, "a local variable");
 
         auto context = contextAddressOf(owner);
-        if (functionNeedsClosure(owner)) {
-            const closure = ClosureLayout.of(owner);
+        const closurePlan = closurePlanOf(owner);
+        if (closurePlan.needsClosure) {
+            const closure = closurePlan.layout;
             if (!closure.hasSlot(variable))
                 throw rejection(_function, variable.loc, "a local variable");
             return addPointerOffset(context, closure.slotOf(variable).offset);
@@ -2751,8 +2761,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, _function.loc, "a `this`");
 
         auto context = contextAddressOf(owner);
-        if (functionNeedsClosure(owner)) {
-            const closure = ClosureLayout.of(owner);
+        const closurePlan = closurePlanOf(owner);
+        if (closurePlan.needsClosure) {
+            const closure = closurePlan.layout;
             if (!closure.hasSlot(hiddenThis))
                 throw rejection(_function, _function.loc, "a `this`");
 
