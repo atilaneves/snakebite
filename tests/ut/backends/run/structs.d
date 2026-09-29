@@ -8,6 +8,93 @@ module ut.backends.run.structs;
 
 import ut.backends;
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read runtime TypeInfo"),
+)) {
+    @("runtimeTypeInfoCallsStructHash." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Key {
+                int value;
+                size_t toHash() const nothrow @safe {
+                    return 12345;
+                }
+            }
+            void main() {
+                Key key = Key(7);
+                assert(typeid(Key).getHash(&key) == 12345);
+            }
+        });
+    }
+    @("runtimeTypeInfoCallsStructEquality." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Key {
+                int value;
+                bool opEquals(ref const Key other) const {
+                    return value % 10 == other.value % 10;
+                }
+            }
+            void main() {
+                Key a = Key(1), b = Key(11);
+                assert(typeid(Key).equals(&a, &b));
+            }
+        });
+    }
+
+    @("runtimeTypeInfoCallsStructComparison." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Key {
+                int value;
+                int opCmp(ref const Key other) const {
+                    return other.value - value;
+                }
+            }
+            void main() {
+                Key a = Key(1), b = Key(2);
+                assert(typeid(Key).compare(&a, &b) > 0);
+            }
+        });
+    }
+
+    @("runtimeTypeInfoCallsStructDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Value {
+                int* count;
+                ~this() { ++*count; }
+            }
+            void main() {
+                int count;
+                Value value = Value(&count);
+                typeid(Value).destroy(&value);
+                assert(count == 1);
+            }
+        });
+    }
+
+    @("runtimeTypeInfoCallsStructPostblit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Value {
+                int* count;
+                this(this) { ++*count; }
+            }
+            void main() {
+                int count;
+                Value value = Value(&count);
+                typeid(Value).postblit(&value);
+                assert(count == 1);
+            }
+        });
+    }
+}
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read runtime TypeInfo"),
