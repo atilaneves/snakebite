@@ -13,8 +13,10 @@ import snakebite.project: dubSourceSetFromDescription,
 import std.algorithm.searching: any, endsWith;
 import std.digest.sha: sha256Of;
 import std.digest: toHexString;
-import std.file: getcwd, write;
+import std.file: exists, getcwd, readText, write;
 import std.path: absolutePath, buildNormalizedPath, buildPath, dirName;
+import std.meta: AliasSeq, Filter;
+import std.traits: isInstanceOf;
 import ut;
 import ut.backends;
 
@@ -101,6 +103,63 @@ static foreach (backend; Matrix!()) {
             "module " ~ moduleName ~ ";\n"
             ~ "int main() { return __FILE__ == \"" ~ relativePath ~ "\" ? 0 : 1; }\n");
         dubProjectMainShouldSucceed!backend(sandbox.inSandboxPath("app"));
+    }
+}
+
+
+// The CLI has the interpreter, bytecode, and CTFE backends. CTFE was
+// attempted, but it cannot interpret `open64` from `std.file.readText`.
+// The Native oracle runs compiled D without crossing the CLI boundary.
+private template isCliBackend(T) {
+    enum isCliBackend = !isInstanceOf!(Omit, T);
+}
+private alias CliBackendMatrix = Filter!(isCliBackend, AliasSeq!(
+    Bytecode,
+    Interpreter,
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot interpret open64 in std.file.readText"),
+));
+
+
+static foreach (backend; CliBackendMatrix) {
+    @("cli.moduleConstructorUsesProjectDirectory." ~ backend.stringof)
+    @Serial
+    unittest {
+        import std.process: Config, execute;
+
+        const sandbox = Sandbox();
+        sandbox.writeFile("outside/.keep");
+        sandbox.writeFile("app/dub.sdl", dubProjectRecipe("project-cwd"));
+        sandbox.writeFile("app/project-relative.txt", "ready");
+        sandbox.writeFile("app/source/main.d", q{
+            module main;
+            import std.file: readText, write;
+            private bool initialized;
+            shared static this() {
+                initialized = "project-relative.txt".readText == "ready\n";
+                "constructor-result.txt".write(
+                    initialized ? "yes" : "no");
+            }
+            unittest { "test-ran.txt".write("yes"); }
+            int main() { return 0; }
+        });
+
+        const executable = buildPath(getcwd, "bin", "sb");
+        const projectDirectory = sandbox.inSandboxPath("app");
+        enum backendName = is(backend == Bytecode) ? "bytecode" : "interpreter";
+        const result = execute(
+            [executable, "--backend=" ~ backendName, "--no-optimise-image",
+                projectDirectory],
+            null,
+            Config.none,
+            size_t.max,
+            sandbox.inSandboxPath("outside"),
+        );
+
+        result.status.should == 0;
+        sandbox.inSandboxPath("app/constructor-result.txt")
+            .readText.should == "yes";
+        sandbox.inSandboxPath("app/test-ran.txt").exists.should == true;
     }
 }
 
