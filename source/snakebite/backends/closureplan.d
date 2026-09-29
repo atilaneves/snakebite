@@ -1,0 +1,104 @@
+module snakebite.backends.closureplan;
+
+
+private:
+
+
+import snakebite.backends.layout: ClosureLayout, FrameLayout;
+
+
+public:
+
+
+struct Hop {
+    public enum Kind {
+        closureWord,
+        frameSlot,
+        structField,
+    }
+
+    public Kind kind;
+    public size_t offset;
+}
+
+public struct ClosurePlan {
+    import snakebite.backends.layout: ClosureLayout;
+    import dmd.func: FuncDeclaration;
+
+    public bool needsClosure;
+    public ClosureLayout layout;
+
+    public static ClosurePlan of(FuncDeclaration function_) {
+        import snakebite.frontend.dmd.delegates:
+            functionNeedsClosure;
+
+        const needed = functionNeedsClosure(function_);
+        return ClosurePlan(
+            needed,
+            needed ? ClosureLayout.of(function_) : ClosureLayout.init,
+        );
+    }
+
+    public static Hop[] staticChainPath(
+        FuncDeclaration from,
+        FuncDeclaration to,
+    ) {
+        import dmd.aggregate: AggregateDeclaration;
+
+        if (from is to)
+            return null;
+
+        const layout = FrameLayout.of(from);
+        if (layout.hiddenThis.variable is null)
+            return null;
+
+        Hop[] hops = [Hop(Hop.Kind.frameSlot,
+            layout.hiddenThis.parameter.offset)];
+
+        auto parent = from.toParent2();
+        auto currentFunction = parent is null ? null : parent.isFuncDeclaration;
+        auto currentAggregate =
+            parent is null ? null : parent.isAggregateDeclaration;
+
+        while (currentFunction !is to) {
+            if (currentAggregate !is null) {
+                if (!currentAggregate.isNested()
+                        || currentAggregate.vthis is null)
+                    return null;
+
+                hops ~= Hop(Hop.Kind.structField,
+                    currentAggregate.vthis.offset);
+
+                auto next = currentAggregate.toParent2();
+                currentFunction = next is null
+                    ? null : next.isFuncDeclaration;
+                currentAggregate = next is null
+                    ? null : next.isAggregateDeclaration;
+                continue;
+            }
+
+            if (currentFunction is null)
+                return null;
+
+            if (of(currentFunction).needsClosure)
+                hops ~= Hop(Hop.Kind.closureWord, 0);
+            else {
+                const currentLayout = FrameLayout.of(currentFunction);
+                if (currentLayout.hiddenThis.variable is null)
+                    return null;
+
+                hops ~= Hop(
+                    Hop.Kind.frameSlot,
+                    currentLayout.hiddenThis.parameter.offset,
+                );
+            }
+
+            auto next = currentFunction.toParent2();
+            currentFunction = next is null ? null : next.isFuncDeclaration;
+            currentAggregate =
+                next is null ? null : next.isAggregateDeclaration;
+        }
+
+        return hops;
+    }
+}

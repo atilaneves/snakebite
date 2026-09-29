@@ -141,7 +141,7 @@ public DependencyImage prepareImage(
     import std.conv: text;
     import std.digest.sha: sha256Of;
     import std.digest: toHexString;
-    import std.file: exists, mkdirRecurse, read, rename, rmdirRecurse, write;
+    import std.file: exists, mkdirRecurse, rename, rmdirRecurse, write;
     import std.path: absolutePath, buildPath;
     import std.uuid: randomUUID;
 
@@ -249,13 +249,13 @@ public DependencyImage prepareImage(
         require(identityOutput.startsWith("LDC"), "Image compiler must be LDC");
 
     string fingerprint = text("snakebite-image-v1\n", executable, "\n",
-        read(executable).sha256Of.toHexString, "\n", identityOutput,
+        fileDigest(executable), "\n", identityOutput,
         "\n", __VERSION__, "\n", compileFlags, "\n", linkFlags,
         "\n", importFlags, "\n", dependencyFlags, "\n", linkerArguments,
         "\n", source.length, ":", source);
     foreach (input; inputs ~ linkerFiles)
         fingerprint ~= text("\n", input.absolutePath.length, ":",
-            input.absolutePath, ":", read(input).sha256Of.toHexString);
+            input.absolutePath, ":", fileDigest(input));
 
     string cxxRuntimeLibrary;
     if (hasCppSource) {
@@ -271,7 +271,7 @@ public DependencyImage prepareImage(
         // - is right for any compiler and configuration.
         cxxRuntimeLibrary = probeCxxRuntimeLibrary(cxxCommand);
         fingerprint ~= text("\ncxx:", cxxCommand, "\n",
-            read(cxxExecutable).sha256Of.toHexString, "\n", cxxIdentity,
+            fileDigest(cxxExecutable), "\n", cxxIdentity,
             "\n", cxxCompileFlags, "\n", cxxCompilerArguments,
             "\n", cxxRuntimeLibrary, "\n", cppSource.length, ":", cppSource);
     }
@@ -627,6 +627,21 @@ public struct ProjectImageCache {
         record["image"] = path;
         publish(record.toString);
     }
+}
+
+
+// The digest of a file's contents, read in chunks. Compilers and
+// libraries are megabytes; reading one whole would leave that much
+// garbage in the process GC heap, which the guest shares.
+private string fileDigest(in string path) {
+    import std.digest.sha: SHA256;
+    import std.digest: toHexString;
+    import std.stdio: File;
+
+    SHA256 digest;
+    foreach (chunk; File(path, "rb").byChunk(64 * 1024))
+        digest.put(chunk);
+    return digest.finish.toHexString.idup;
 }
 
 

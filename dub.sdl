@@ -32,7 +32,7 @@ configuration "unittest" {
     // A non-root guest declaration runs as the native symbol the host
     // already links, druntime template instantiations included, so the
     // executable's own symbols must be visible to `dlsym`.
-    lflags "--export-dynamic" platform="linux"
+    lflags "--export-dynamic" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
 
     mainSourceFile "tests/main.d"
     sourcePaths "tests"
@@ -43,17 +43,20 @@ configuration "unittest" {
     importPaths "."
 
     dependency "unit-threaded" version="*"
+    // The REPL's console loop is library code (`snakebite.repl.cli`),
+    // and every configuration compiles the whole library.
+    dependency "readline" version="0.3.0"
 }
 
 configuration "acceptance-test" {
     targetType "executable"
     targetName "at"
     targetPath "bin"
-    lflags "--export-dynamic" platform="linux"
+    lflags "--export-dynamic" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
 
     mainSourceFile "acceptance/main.d"
     sourcePaths "acceptance"
-    sourceFiles "tests/ut/ffi/symbol.d"
+    sourceFiles "tests/ut/ffi/symbol.d" "tests/ut/process.d"
     sourceFiles "tests/ut/package.d" "tests/ut/backends/package.d"
     sourcePaths "bench"
     excludedSourceFiles "bench/main.d"
@@ -62,6 +65,9 @@ configuration "acceptance-test" {
     importPaths "."
 
     dependency "unit-threaded" version="*"
+    // The REPL's console loop is library code (`snakebite.repl.cli`),
+    // and every configuration compiles the whole library.
+    dependency "readline" version="0.3.0"
 }
 
 // The test runner: `build/sb.sh` produces `bin/sb` with LDC in release mode.
@@ -69,7 +75,7 @@ configuration "sb" {
     targetType "executable"
     targetName "sb"
     targetPath "bin"
-    lflags "--export-dynamic" platform="linux"
+    lflags "--export-dynamic" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
 
     mainSourceFile "source/snakebite/main.d"
     dependency "readline" version="0.3.0"
@@ -81,7 +87,7 @@ configuration "sb-repl" {
     targetType "executable"
     targetName "sb-repl"
     targetPath "bin"
-    lflags "--export-dynamic" platform="linux"
+    lflags "--export-dynamic" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
 
     mainSourceFile "source/snakebite/repl/main.d"
     importPaths "."
@@ -95,7 +101,7 @@ configuration "bench" {
     targetType "executable"
     targetName "bench"
     targetPath "bin"
-    lflags "--export-dynamic" platform="linux"
+    lflags "--export-dynamic" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
 
     mainSourceFile "bench/main.d"
     sourcePaths "bench"

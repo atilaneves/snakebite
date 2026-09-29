@@ -85,11 +85,160 @@ public imported!"dmd.dmodule".Module[] parseSnippets(in string[] sources) {
     return compiler.parseSnippets(sources);
 }
 
+// Runs host code under the frontend lock, so it sees dmd's state
+// settled and excludes every other thread's dmd work. It is still host
+// code: it allocates from the GC, and it reaches dmd only through
+// `newInFrontend`.
 public void withCompilerLock(scope void delegate() action) {
     compiler.withLock(action);
 }
 
-// Runs `force` under the frontend lock, but only when `ready` - a cheap,
+// Calls `dmdSymbol` - a function dmd declares, or a dmd class, which is
+// then constructed - with `arguments`, inside the frontend: under the
+// frontend lock, with every allocation from the frontend arena, the way
+// dmd allocates (`snakebite.gc`). This is how host code reaches dmd for
+// anything that can make or change AST: semantic, forcing a forward
+// reference, CTFE, a type's derived types (`pointerTo`...), a mangled
+// name, a new node. Only dmd code runs inside, so host data never lands
+// in the arena; each array argument is copied in, so the AST never keeps
+// a pointer to host GC memory. What dmd returns is arena memory, which
+// is never freed, so host code may keep it; host code that writes into
+// the AST writes only other AST (frontend memory) into it.
+//
+// A debug build stops at the first dmd object made outside the frontend
+// (`snakebite.gc.requireInsideFrontend`).
+public auto newInFrontend(alias dmdSymbol, Args...)(auto ref Args arguments) {
+    static assert(
+        declaredByDmd!dmdSymbol,
+        __traits(identifier, dmdSymbol)
+            ~ " is not dmd code: only dmd runs inside the frontend",
+    );
+    static foreach (Argument; Args)
+        static assert(
+            crossesIntoFrontend!Argument,
+            Argument.stringof ~ " is host data dmd could keep",
+        );
+
+    return compiler.inside(() {
+        static if (is(dmdSymbol == class))
+            return mixin("new dmdSymbol(", frontendArguments(Args.length), ")");
+        else
+            return mixin("dmdSymbol(", frontendArguments(Args.length), ")");
+    });
+}
+
+// `source` parsed as one statement, the way the REPL probes a cell. The
+// caller holds the frontend lock and reads the result before it lets go:
+// the diagnostics are dmd's own until the next parse.
+public struct ParsedStatement {
+    import dmd.statement: Statement;
+
+    Statement statement;
+    // Whether the statement is all of `source` and parsed without error.
+    bool whole;
+}
+
+public ParsedStatement parseStatement(in string source) {
+    return compiler.inside(() {
+        import dmd.astcodegen: ASTCodegen;
+        import dmd.globals: global;
+        import dmd.parse: Parser;
+        import dmd.tokens: TOK;
+
+        scope parser = new Parser!ASTCodegen(
+            null,
+            owned(source) ~ '\0',
+            false,
+            global.errorSink,
+            &global.compileEnv,
+            true,
+        );
+        parser.nextToken;
+        auto statement = parser.parseStatement(0);
+        return ParsedStatement(
+            statement,
+            parser.token.value == TOK.endOfFile && global.errors == 0,
+        );
+    });
+}
+
+// One token of source text as dmd's lexer reads it: its kind, and the
+// offset in the text where it starts.
+public struct SourceToken {
+    import dmd.tokens: TOK;
+
+    TOK value;
+    size_t offset;
+}
+
+// Every token of `source`, the last one `TOK.endOfFile`. Lexing is dmd
+// work: the lexer adds each identifier it reads to dmd's identifier table.
+public const(SourceToken)[] lex(in char[] source) {
+    return compiler.inside(() {
+        import dmd.globals: global;
+        import dmd.lexer: Lexer;
+        import dmd.tokens: TOK;
+
+        const input = source ~ '\0';
+        scope lexer = new Lexer(null, input.ptr, 0, source.length,
+            false, false, global.errorSink, &global.compileEnv);
+        SourceToken[] tokens;
+        do {
+            lexer.nextToken;
+            tokens ~= SourceToken(lexer.token.value, lexer.token.ptr - input.ptr);
+        } while (lexer.token.value != TOK.endOfFile);
+        return cast(const) tokens;
+    });
+}
+
+// `snakebite.gc.arenaPointersIntoGC`, with the frontend lock held so
+// the arena does not grow during the walk.
+debug public string arenaReport() {
+    import snakebite.gc: arenaPointersIntoGC;
+
+    string report;
+    withCompilerLock({ report = arenaPointersIntoGC; });
+    return report;
+}
+
+private enum declaredByDmd(alias symbol) = {
+    import std.algorithm.searching: startsWith;
+    import std.traits: moduleName;
+
+    return moduleName!symbol.startsWith("dmd.");
+}();
+
+// What host code may hand dmd: a value, a dmd node or type, a pointer to
+// dmd data, or an array (copied in by `owned`). A host class or a
+// delegate could be kept by dmd and so reach GC memory from the arena.
+private template crossesIntoFrontend(T) {
+    import std.traits: isArray, isPointer, isScalarType, PointerTarget, Unqual;
+
+    static if (isScalarType!T || is(T == typeof(null)))
+        enum crossesIntoFrontend = true;
+    else static if (isArray!T)
+        enum crossesIntoFrontend = crossesIntoFrontend!(typeof(T.init[0]));
+    else static if (isPointer!T)
+        enum crossesIntoFrontend = is(Unqual!(PointerTarget!T) == void)
+            || crossesIntoFrontend!(PointerTarget!T);
+    else static if (is(T == class) || is(T == interface) || is(T == struct)
+            || is(T == union))
+        enum crossesIntoFrontend = declaredByDmd!(Unqual!T);
+    else
+        enum crossesIntoFrontend = false;
+}
+
+private string frontendArguments(in size_t count) {
+    import std.conv: text;
+
+    string list;
+    foreach (i; 0 .. count)
+        list ~= text("owned(arguments[", i, "]), ");
+    return list;
+}
+
+// Runs `force`, host code that reaches dmd through `newInFrontend`, under
+// the frontend lock, but only when `ready` - a cheap,
 // lock-free read of the one dmd field a forward-reference forcing call
 // itself gates on (`FuncDeclaration.semanticRun`, `AggregateDeclaration.
 // sizeok`, a `Dsymbol._scope`...) - says dmd has not already finished
@@ -128,7 +277,7 @@ public void withCompilerLock(scope void delegate() action) {
 // read from memory at some point.
 //
 // This is safe as the standard "flag publish" pattern, not a guess:
-// every dmd write `force` performs runs inside `withCompilerLock`,
+// every dmd write `force` performs runs under the frontend lock,
 // strictly before that call's `scope(exit) mutex.unlock`. `mutex.
 // unlock` is an opaque call the compiler cannot see through, so it can
 // never hoist dmd's plain writes past it (a basic property of every
@@ -171,19 +320,30 @@ public void forceIfNeeded(
     withCompilerLock(force);
 }
 
+// `forceIfNeeded` for a force that is one dmd call, made inside the
+// frontend (`newInFrontend`).
+public void forceIfNeeded(alias dmdFunction, Args...)(
+    scope bool delegate() ready,
+    auto ref Args arguments,
+) {
+    if (!ready())
+        newInFrontend!dmdFunction(arguments);
+}
+
 final class Compiler {
     import core.sync.mutex: Mutex;
     import dmd.dmodule: Module;
 
     private bool initialized;
+    // The one lock around dmd's process-global state. It only excludes
+    // other threads: code that holds it allocates from the GC. dmd code
+    // runs inside the frontend (`inside`).
     private Mutex mutex;
     // Keyed by source content; prevents re-registering the same root module
     // in DMD's process-global table.
     private Module[string] sourceCache;
 
     private this() {
-        import core.sync.mutex: Mutex;
-
         // Construct only. DMD's process-global state (allInst, the lightning
         // rod) depends on whether this process compiles snippets or a whole
         // program, which getopt has not seen yet at module-ctor time, so the
@@ -192,14 +352,54 @@ final class Compiler {
     }
 
     void initialize(in Snippets snippets) {
+        // The lock is recursive: `inside` takes it again.
         mutex.lock;
         scope(exit) mutex.unlock;
 
         if (initialized)
             return;
 
-        initializeDmdState(snippets);
-        initialized = true;
+        // Host code, in the GC: the search reads the configuration with
+        // Phobos, whose caches (`std.functional.memoize`, behind
+        // `std.regex`) are shared with every later host use. Made
+        // inside the frontend, their storage would be arena memory that
+        // host code then fills with GC data no collection looks at.
+        // Only dmd's own setup runs inside; the paths are copied in.
+        import dmd.frontend: findImportPaths;
+
+        import std.array: array;
+
+        const importPaths = findImportPaths.array;
+
+        inside({
+            initializeDmdState(snippets, importPaths);
+            initialized = true;
+        });
+    }
+
+    // Runs `work`, which is dmd code or this module's own code around
+    // it, inside the frontend: under the lock, with every allocation of
+    // this thread from the frontend arena (`snakebite.gc`), the way dmd
+    // allocates. What `work` returns is arena memory, which is never
+    // freed, so host code may keep it. An exception is made again
+    // outside, so the host never gets an arena object that druntime's
+    // unwinding could chain a GC exception onto.
+    T inside(T)(scope T delegate() work) {
+        import snakebite.gc: enterFrontend, leaveFrontend;
+
+        mutex.lock;
+        scope(exit) mutex.unlock;
+
+        Exception thrown;
+        {
+            enterFrontend;
+            scope(exit) leaveFrontend;
+            try
+                return work();
+            catch (Exception exception)
+                thrown = exception;
+        }
+        throw new Exception(thrown.msg, thrown.file, thrown.line);
     }
 
     private void requireInitialized() const {
@@ -210,21 +410,25 @@ final class Compiler {
         );
     }
 
-    private void initializeDmdState(in Snippets snippets) {
+    private void initializeDmdState(
+        in Snippets snippets,
+        in string[] importPaths,
+    ) {
         import dmd.common.charactertables:
             IdentifierCharLookup,
             IdentifierTable;
         import dmd.errors: diagnostics, fatalErrorHandler;
-        import dmd.frontend: addImport, findImportPaths, initDMD;
+        import dmd.frontend: addImport, initDMD;
         import dmd.globals: global;
         import dmd.target: CPU, addDefaultVersionIdentifiers, target;
         import std.algorithm.iteration: each;
 
+        rebuildIdentifierTable;
         initDMD;
         target.cpu = CPU.baseline;
         target.setCPU;
         addDefaultVersionIdentifiers(global.params, target);
-        findImportPaths.each!addImport;
+        importPaths.each!(path => addImport(owned(path)));
 
         // Prevent DMD from calling exit() when too many cascading errors
         // accumulate. The shared parse path already checks global.errors after
@@ -308,6 +512,34 @@ final class Compiler {
         }
     }
 
+    // dmd's own module constructor (`dmd.tokens`) fills the identifier
+    // table with the keywords before `main`, so in the GC, and every AST
+    // node that names a keyword or any later identifier refers to that
+    // table. Fill it again here, inside the frontend, with the same
+    // keywords: then the table and every identifier are frontend memory,
+    // and the GC-owned table the constructor made is garbage.
+    private void rebuildIdentifierTable() {
+        import dmd.identifier: Identifier;
+        import dmd.tokens: TOK, Token;
+        import std.traits: EnumMembers;
+
+        TOK[] keywords;
+        // Not `TOK.min .. TOK.max`: `TOK.min` is the `-` token.
+        foreach (token; [EnumMembers!TOK]) {
+            const name = Token.toString(token);
+            if (name.length == 0)
+                continue;
+            if (auto identifier = Identifier.lookup(name))
+                if (identifier.getValue == token)
+                    keywords ~= token;
+        }
+        assert(keywords.length != 0, "dmd.tokens filled the identifier table");
+
+        Identifier.initTable;
+        foreach (keyword; keywords)
+            Identifier.idPool(Token.toString(keyword), keyword);
+    }
+
     // With allInst on, DMD parks a template instance on the root module
     // reached through the declaring module's importedFrom. The rod's own
     // semantic loads object/druntime, so those instances home here; a Phobos
@@ -346,26 +578,28 @@ final class Compiler {
     void shutdown() {
         import dmd.frontend: deinitializeDMD;
 
-        mutex.lock;
-        scope(exit) mutex.unlock;
+        inside({
+            if (!initialized)
+                return;
 
-        if (!initialized)
-            return;
-
-        deinitializeDMD;
-        initialized = false;
+            deinitializeDMD;
+            initialized = false;
+        });
     }
 
+    // Host code under the lock is outside the frontend even when dmd is
+    // on this thread's stack.
     void withLock(scope void delegate() action) {
-        import dmd.errors: diagnostics;
-        import dmd.globals: global;
+        import snakebite.gc: resumeFrontend, suspendFrontend;
 
         mutex.lock;
-        resetErrors;
+        const depth = suspendFrontend;
         scope(exit) {
-            resetErrors;
+            resumeFrontend(depth);
             mutex.unlock;
         }
+        resetErrors;
+        scope(exit) resetErrors;
         action();
     }
 
@@ -376,17 +610,13 @@ final class Compiler {
         in string[string] sourceOverrides,
         in string rootDirectory,
     ) {
-        mutex.lock;
-        scope(exit) mutex.unlock;
-        requireInitialized;
-
-        return parseRootModulesLocked(
+        return inside(() => parseRootModulesLocked(
             filePaths,
-            importPaths,
+            owned(importPaths),
             flags,
             sourceOverrides,
             rootDirectory,
-        );
+        ));
     }
 
     private Module[] parseRootModulesLocked(
@@ -400,6 +630,8 @@ final class Compiler {
         import dmd.frontend: addImport, dmdParseModule = parseModule;
         import dmd.globals: global;
         import std.file: readText;
+
+        requireInitialized;
 
         const originalPathLength = global.path.length;
         scope(exit) global.path.setDim(originalPathLength);
@@ -436,11 +668,11 @@ final class Compiler {
             const sourceOverride = filePath in sourceOverrides;
             const source = sourceOverride is null
                 ? filePath.readText
-                : *sourceOverride;
+                : owned(*sourceOverride);
             // DMD treats null as a request to reopen the filename, which
             // is relative for __FILE__ and may not exist in the current directory.
             auto result = dmdParseModule(
-                dmdFileName(filePath, importPaths, rootDirectory),
+                owned(dmdFileName(filePath, importPaths, rootDirectory)),
                 source is null ? "" : source,
             );
             if (result.diagnostics.hasErrors)
@@ -464,19 +696,12 @@ final class Compiler {
         in string source,
         in string[] rootImportPaths,
     ) {
-        mutex.lock;
-        scope(exit) mutex.unlock;
-        requireInitialized;
-
-        return parseSourceLocked(source, rootImportPaths);
+        return inside(() => parseSourceLocked(
+            owned(source), owned(rootImportPaths)));
     }
 
     Module[] parseSnippets(in string[] sources) {
-        mutex.lock;
-        scope(exit) mutex.unlock;
-        requireInitialized;
-
-        return parseSnippetsLocked(sources);
+        return inside(() => parseSnippetsLocked(owned(sources)));
     }
 
     private Module parseSourceLocked(
@@ -488,6 +713,8 @@ final class Compiler {
         import dmd.frontend: dmdParseModule = parseModule;
         import dmd.globals: global;
         import std.conv: text;
+
+        requireInitialized;
 
         // A cached module was gated for whichever `rootImportPaths` its own
         // parse used; a REPL cell's `rootImportPaths` can differ across
@@ -557,6 +784,8 @@ final class Compiler {
         import dmd.frontend: dmdParseModule = parseModule;
         import dmd.globals: global;
         import std.conv: text;
+
+        requireInitialized;
 
         resetErrors;
 
@@ -979,7 +1208,7 @@ private void applyFrontendFlags(in FrontendFlags flags) {
     if (flags.compilerArguments.length == 0)
         return;
 
-    auto argumentText = ["dmd"] ~ flags.compilerArguments.dup;
+    auto argumentText = ["dmd"] ~ owned(flags.compilerArguments);
     auto arguments = Strings(argumentText.length);
     foreach (i, argument; argumentText)
         arguments[i] = argument.toStringz;
@@ -1148,6 +1377,26 @@ public string diagnosticMessageWithLocations() {
         return "DMD reported an error without a diagnostic message.";
 
     return messages.join("\n");
+}
+
+// A copy of `value` made inside the frontend, so frontend memory: dmd
+// keeps what the host gives it (a module's source text and file name,
+// import paths, command-line arguments), and nothing in the arena may be
+// the only reference to GC memory (`snakebite.gc`). A string copy ends
+// in a zero byte past its length: dmd reads some of the strings it is
+// given as C strings.
+private auto ref owned(T)(auto ref return scope T value) {
+    import std.traits: isDynamicArray, isSomeString;
+
+    static if (isSomeString!T)
+        return cast(T) (value ~ '\0')[0 .. $ - 1];
+    else static if (isDynamicArray!T) {
+        auto copy = new typeof(cast() value[0])[value.length];
+        foreach (i, ref element; value)
+            copy[i] = owned(element);
+        return cast(T) copy;
+    } else
+        return value;
 }
 
 public void resetErrors() {
