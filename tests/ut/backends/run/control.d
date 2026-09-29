@@ -8,6 +8,28 @@ module ut.backends.run.control;
 
 import ut.backends;
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not catch this assertion failure"),
+)) {
+    @("assertZeroThrowsAssertError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: AssertError;
+
+            int main() {
+                try {
+                    assert(0, "Oh noes");
+                } catch (AssertError error) {
+                    return error.msg == "Oh noes" ? 0 : 1;
+                }
+                return 2;
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("staticForeachSwitchCases." ~ backend.stringof)
     @Tags(backend.stringof)

@@ -321,6 +321,39 @@ static foreach (backend; CliBackendMatrix) {
 }
 
 
+// Guest code runs in the project directory, but snakebite's own state
+// stays in the directory it was started from.
+static foreach (backend; CliBackendMatrix) {
+    @("cli.stateDirectoryStaysInCallerDirectory." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        sandbox.writeFile("outside/.keep");
+        sandbox.writeFile("app/dub.sdl", dubProjectRecipe("state-cwd"));
+        sandbox.writeFile("app/source/main.d", q{
+            module main;
+            int main() { return 0; }
+        });
+
+        const executable = buildPath(getcwd, "bin", "sb");
+        const projectDirectory = sandbox.inSandboxPath("app");
+        enum backendName = is(backend == Bytecode) ? "bytecode" : "interpreter";
+        const result = execute(
+            [executable, "--backend=" ~ backendName, "--no-optimise-image",
+                projectDirectory],
+            null,
+            Config.none,
+            size_t.max,
+            sandbox.inSandboxPath("outside"),
+        );
+
+        result.status.should == 0;
+        sandbox.inSandboxPath("outside/.snakebite").exists.should == true;
+        sandbox.inSandboxPath("app/.snakebite").exists.should == false;
+    }
+}
+
+
 static foreach (backend; CliBackendMatrix) {
     @("cli.dependencyConstructorUsesProjectDirectory." ~ backend.stringof)
     @Serial
