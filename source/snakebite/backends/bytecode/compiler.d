@@ -16,7 +16,7 @@ import snakebite.backends.controlflow:
     ScopeFrame, scopePath;
 import snakebite.backends.exceptionplan:
     UnwindPlan, catchPlanOf, unwindPlanOf;
-import snakebite.backends.druntimehooks: DruntimeHook, planOf, specOf;
+import snakebite.backends.druntimehooks: DruntimeHook, planOf;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
 
 
@@ -312,11 +312,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         // same value; the store just needs to be visible to a later
         // reader.
         auto plan = planOf(_plans, DruntimeHook.gcMalloc);
-        if (plan is null)
-            throw new SnakebiteException(
-                "bytecode compiler cannot resolve druntime's " ~
-                    "`gc_malloc`",
-            );
         atomicStore!(MemoryOrder.rel)(_allocatorPlan, plan);
         return plan;
     }
@@ -1957,7 +1952,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case none:
                 return;
             case class_:
-                compileClassInvariantCall(expression, objectOffset);
+                compileClassInvariantCall(objectOffset);
                 return;
             case struct_:
                 compileResolvedCall(plan.structInvariant, null,
@@ -1975,12 +1970,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // through the FFI barrier - and called here with the object reference
     // as its one argument.
     private void compileClassInvariantCall(
-        AssertExp expression, in size_t objectOffset,
+        in size_t objectOffset,
     ) {
         auto plan = planOf(_bytecode._plans, DruntimeHook.classInvariant);
-        if (plan is null)
-            throw rejection(
-                _function, expression.loc, expressionText(expression));
 
         _callSites ~= CallSite.native(
             plan, [Arg(objectOffset, 0, size_t.sizeof)], 0);
@@ -4707,9 +4699,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const hook = elementBase.ty == Twchar
             ? DruntimeHook.arrayAppendWchar : DruntimeHook.arrayAppendChar;
         auto plan = planOf(_bytecode._plans, hook);
-        if (plan is null)
-            throw rejection(_function, expression.loc,
-                "host setup: druntime append hook is not available");
 
         const arrayOffset = compileAddress(expression.e1);
 
@@ -6663,8 +6652,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in Loc loc,
     ) {
         auto plan = planOf(_bytecode._plans, hook);
-        if (plan is null)
-            throw rejection(_function, loc, specOf(hook).name);
 
         const branchIndex = _instructions.length;
         emit(&opBranchTrue, inBoundsOffset, 0, 1);

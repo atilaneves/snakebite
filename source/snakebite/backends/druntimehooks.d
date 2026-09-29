@@ -125,16 +125,15 @@ public DruntimeHookSpec specOf(in DruntimeHook hook) @safe @nogc nothrow pure {
 }
 
 
-// The resolved `CallPlan` for `hook`, the same `null`-on-miss contract
-// `PlanCache.rawPlanOf` itself returns - `null` when the symbol is not
-// in this process. Every backend reaches a druntime hook through this,
-// instead of hand-writing the hook's own register shape at the call
-// site.
+// The resolved `CallPlan` for `hook`. A missing required druntime symbol
+// is reported through the FFI resolver as a host/link failure. Every
+// backend reaches a druntime hook through this, instead of hand-writing
+// the hook's own register shape at the call site.
 public const(imported!"snakebite.ffi.plan".CallPlan)* planOf(
     ref imported!"snakebite.ffi.plan".PlanCache plans,
     in DruntimeHook hook,
 ) {
     const spec = specOf(hook);
-    return plans.rawPlanOf(
+    return plans.requiredRawPlanOf(
         spec.name, spec.parameterRegisters, spec.returnRegister);
 }
