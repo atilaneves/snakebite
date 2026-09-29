@@ -3286,10 +3286,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
-    private ScalarStorage scalarStorage(
-        Expression target, in Loc loc,
-        in string operation,
-    ) {
+    private ScalarStorage scalarStorage(Expression target) {
         import snakebite.backends.arithmetic: arithmeticKind;
 
         const facts = TypeFacts.of(target.type);
@@ -3297,8 +3294,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (auto dot = target.isDotVarExp) {
             auto field = dot.var.isVarDeclaration;
-            if (field is null)
-                throw rejection(_function, loc, operation);
+            assert(field !is null,
+                "a scalar DotVarExp target denotes a field variable");
             const address = compileFieldAddress(dot);
             return ScalarStorage(
                 field.isBitFieldDeclaration is null
@@ -3311,8 +3308,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (auto var = target.isVarExp) {
             auto variable = var.var.isVarDeclaration;
-            if (variable is null)
-                throw rejection(_function, loc, operation);
+            assert(variable !is null,
+                "a scalar VarExp target denotes a variable");
             if (isThisField(variable))
                 return ScalarStorage(
                     ScalarStorage.Kind.indirect, facts,
@@ -3500,8 +3497,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import std.conv: text;
 
         const plan = arithmeticPlan(expression);
-        auto storage = scalarStorage(
-            expression.e1, expression.loc, expressionText(expression));
+        auto storage = scalarStorage(expression.e1);
         const valueOffset = readScalar(storage, storage.facts);
 
         if (destOffset != discardResult)
