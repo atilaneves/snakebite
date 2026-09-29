@@ -101,7 +101,7 @@ public struct Repl {
         if (_pendingInput.length == 0) {
             import snakebite.repl.cell: isExpressionCell;
 
-            if (isExpressionCell(candidate))
+            if (isExpressionCell(candidate, _flags))
                 return submitExpression(candidate);
         }
 
@@ -109,7 +109,7 @@ public struct Repl {
 
         // A newline keeps the terminator outside any trailing line comment.
         const terminated = candidate ~ "\n;";
-        return submitDeclaration(isImportCell(terminated) ? terminated : candidate);
+        return submitDeclaration(isImportCell(terminated, _flags) ? terminated : candidate);
     }
 
     private SubmitResult submitExpression(in string source) {
@@ -179,7 +179,7 @@ public struct Repl {
             isStandalonePragmaMessageStatement,
             replCellLineDirective;
 
-        if (isIncompleteDeclaration(source)) {
+        if (isIncompleteDeclaration(source, _flags)) {
             _pendingInput = source;
             return SubmitResult.init;
         }
@@ -206,7 +206,7 @@ public struct Repl {
         // standalone form to be handled; covering pragmas embedded in a
         // larger declaration cell is tracked in
         // https://github.com/atilaneves/snakebite/issues/154.
-        if (isStandalonePragmaMessageStatement(source)) {
+        if (isStandalonePragmaMessageStatement(source, _flags)) {
             ++_cellCount;
             _pendingInput = null;
             return SubmitResult.init;
@@ -284,6 +284,7 @@ private imported!"dmd.dmodule".Module[] interpretedModules(
     in string[] importPaths,
 ) {
     import dmd.dmodule: Module;
+    import snakebite.frontend.compiler: isUnderAnyPath;
 
     bool[Module] visited;
     Module[] result;
@@ -301,32 +302,6 @@ private imported!"dmd.dmodule".Module[] interpretedModules(
 
     visit(module_);
     return result;
-}
-
-
-private bool isUnderAnyPath(
-    imported!"dmd.dmodule".Module module_,
-    in string[] paths,
-) {
-    import std.algorithm.searching: startsWith;
-    import std.path: absolutePath, buildNormalizedPath, dirSeparator;
-    import std.string: fromStringz;
-
-    const sourcePath = module_.srcfile.toString.fromStringz.idup
-        .absolutePath.buildNormalizedPath;
-
-    foreach (path; paths) {
-        const normalizedPath = path.absolutePath.buildNormalizedPath;
-        // A bare prefix match would also claim a sibling directory whose
-        // name merely starts with `path` (`-I /a/b` matching `/a/bc`), so
-        // the source must equal the path itself or sit under it as a
-        // whole directory component.
-        if (sourcePath == normalizedPath
-            || sourcePath.startsWith(normalizedPath ~ dirSeparator))
-            return true;
-    }
-
-    return false;
 }
 
 

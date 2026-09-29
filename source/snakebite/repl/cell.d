@@ -33,7 +33,11 @@ private string escapedLineDirectiveFilePath(in string filePath) @safe pure {
 // wrapped in a synthetic `auto f() { return <input>; }` and evaluated.
 // Anything that fails this (a declaration, an import, a unittest block) is
 // module-level source instead, appended to the session's source as-is.
-public bool isExpressionCell(in string input) {
+public bool isExpressionCell(
+    in string input,
+    in imported!"snakebite.frontend.compiler".FrontendFlags flags
+        = imported!"snakebite.frontend.compiler".FrontendFlags.init,
+) {
     import dmd.astcodegen: ASTCodegen;
     import dmd.globals: global;
     import dmd.parse: Parser;
@@ -67,12 +71,16 @@ public bool isExpressionCell(in string input) {
         result = isExpressionStatement
             && parser.token.value == TOK.endOfFile
             && global.errors == 0;
-    });
+    }, flags);
 
     return result;
 }
 
-public bool isImportCell(in string input) {
+public bool isImportCell(
+    in string input,
+    in imported!"snakebite.frontend.compiler".FrontendFlags flags
+        = imported!"snakebite.frontend.compiler".FrontendFlags.init,
+) {
     import dmd.astcodegen: ASTCodegen;
     import dmd.globals: global;
     import dmd.parse: Parser;
@@ -99,7 +107,7 @@ public bool isImportCell(in string input) {
             && statement.isImportStatement !is null
             && parser.token.value == TOK.endOfFile
             && global.errors == 0;
-    });
+    }, flags);
 
     return result;
 }
@@ -109,7 +117,11 @@ public bool isImportCell(in string input) {
 // the parse fails with its last diagnostic sitting exactly at end of input.
 // The REPL keeps accumulating lines while this holds, and only reports a
 // real syntax error once the diagnostic moves earlier than the end.
-public bool isIncompleteDeclaration(in string input) {
+public bool isIncompleteDeclaration(
+    in string input,
+    in imported!"snakebite.frontend.compiler".FrontendFlags flags
+        = imported!"snakebite.frontend.compiler".FrontendFlags.init,
+) {
     import dmd.errors: diagnostics, ErrorKind;
     import dmd.frontend: parseModule;
     import snakebite.frontend.compiler: resetErrors, withCompilerLock;
@@ -137,7 +149,7 @@ public bool isIncompleteDeclaration(in string input) {
                 return;
             }
         }
-    });
+    }, flags);
 
     return result;
 }
@@ -148,7 +160,11 @@ public bool isIncompleteDeclaration(in string input) {
 // cell if this source stays in the session's accumulated buffer. It is
 // dropped from the buffer after its one-time side effect instead of being
 // kept.
-public bool isStandalonePragmaMessageStatement(in string input) {
+public bool isStandalonePragmaMessageStatement(
+    in string input,
+    in imported!"snakebite.frontend.compiler".FrontendFlags flags
+        = imported!"snakebite.frontend.compiler".FrontendFlags.init,
+) {
     import dmd.astcodegen: ASTCodegen;
     import dmd.globals: global;
     import dmd.id: Id;
@@ -177,7 +193,7 @@ public bool isStandalonePragmaMessageStatement(in string input) {
             && pragma_.ident is Id.msg
             && parser.token.value == TOK.endOfFile
             && global.errors == 0;
-    });
+    }, flags);
 
     return result;
 }

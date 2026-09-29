@@ -223,6 +223,92 @@ def test_project_import_sees_project_versions(tmp_path: Path) -> None:
         assert result.stdout == "42\nhello\n"
 
 
+def write_versioned_package(directory: Path) -> None:
+    (directory / "dub.sdl").write_text(
+        'name "repl-versioned-package"\nversions "ProjV"\n',
+        encoding="utf-8",
+    )
+    package = directory / "source" / "pkg"
+    package.mkdir(parents=True)
+    (package / "package.d").write_text(
+        "module pkg;\npublic import pkg.foo;\n", encoding="utf-8",
+    )
+    (package / "foo.d").write_text(
+        "module pkg.foo;\n"
+        "version (ProjV) int top() { return 42; }\n"
+        "int answer() { version (ProjV) return 42; else return 0; }\n",
+        encoding="utf-8",
+    )
+
+
+# `dub build` compiles every module of the project with the project's
+# versions, however a module is reached: here through a package's
+# `package.d` and its `public import`.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode", "ctfe"])
+def test_package_module_sees_project_versions(
+    tmp_path: Path, backend: str,
+) -> None:
+    write_versioned_package(tmp_path)
+
+    for _ in range(2):
+        result = run_sb(
+            "--project", str(tmp_path), "-b", backend,
+            input="import pkg;\ntop()\nanswer()\n",
+            cwd=tmp_path,
+            timeout_seconds=60,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout == "42\n42\n"
+
+
+def write_nested_import_project(directory: Path) -> None:
+    (directory / "dub.sdl").write_text(
+        'name "repl-nested-import"\nversions "ProjV"\n', encoding="utf-8",
+    )
+    source = directory / "source"
+    source.mkdir()
+    (source / "outer.d").write_text(
+        "module outer;\n"
+        "version (ProjV) import conditional;\n"
+        "int local() { import inner; return innerAnswer(); }\n"
+        "int viaVersion() { return conditionalAnswer(); }\n",
+        encoding="utf-8",
+    )
+    (source / "inner.d").write_text(
+        "module inner;\n"
+        "int innerAnswer() { version (ProjV) return 42; else return 0; }\n",
+        encoding="utf-8",
+    )
+    (source / "conditional.d").write_text(
+        "module conditional;\n"
+        "int conditionalAnswer() {\n"
+        "    version (ProjV) return 43; else return 0;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+
+# A project module imported inside a function body or a `version` block
+# is compiled with the project's versions too, as `dub build` does.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode", "ctfe"])
+def test_nested_import_sees_project_versions(
+    tmp_path: Path, backend: str,
+) -> None:
+    write_nested_import_project(tmp_path)
+
+    for _ in range(2):
+        result = run_sb(
+            "--project", str(tmp_path), "-b", backend,
+            input="import outer;\nlocal()\nviaVersion()\n",
+            cwd=tmp_path,
+            timeout_seconds=60,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout == "42\n43\n"
+
+
 # A session runs the same whether or not the project's dependency image is
 # already built, from any working directory. It works in the project
 # directory, as `dub build` does, so a project module's `__FILE__` is the

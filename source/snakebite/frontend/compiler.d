@@ -68,8 +68,9 @@ public imported!"dmd.dmodule".Module[] parseRootModules(
 // (see `driveSharedSemantic`). A plain snippet (bin/ut, a REPL session
 // with no project) leaves it empty and behaves exactly as before.
 // `flags` apply to this parse only, as `parseRootModules`' flags do: a
-// cell and every project module it imports compile with the project's
-// flags.
+// cell and every project module it loads, however it loads it, are
+// analysed in full here, with the project's flags, so no analysis after
+// the parse needs them.
 public imported!"dmd.dmodule".Module parseSnippet(
     in string source,
     in string[] rootImportPaths = null,
@@ -89,8 +90,13 @@ public imported!"dmd.dmodule".Module[] parseSnippets(in string[] sources) {
     return compiler.parseSnippets(sources);
 }
 
-public void withCompilerLock(scope void delegate() action) {
-    compiler.withLock(action);
+// `flags` are in effect for `action` only, as for a parse: a REPL session
+// hands its project's flags to every frontend call it makes.
+public void withCompilerLock(
+    scope void delegate() action,
+    in FrontendFlags flags = FrontendFlags.init,
+) {
+    compiler.withLock(action, flags);
 }
 
 // Run `action`, then put the frontend back in the state `initialize` left
@@ -264,6 +270,10 @@ final class Compiler {
             return;
 
         deinitializeDMD;
+        // `deinitializeDMD` leaves `Module.amodules`, dmd's list of every
+        // module parsed, as it was, so the modules `reset` drops would
+        // still be found there.
+        Module.amodules.setDim(0);
         sourceCache = null;
         initializeDmdState(snippets);
         initialModuleCount = Module.amodules.length;
@@ -423,16 +433,16 @@ final class Compiler {
         initialized = false;
     }
 
-    void withLock(scope void delegate() action) {
-        import dmd.errors: diagnostics;
-        import dmd.globals: global;
-
+    void withLock(scope void delegate() action, in FrontendFlags flags) {
         mutex.lock;
         resetErrors;
+        const savedFlags = saveFrontendFlags;
         scope(exit) {
+            restoreFrontendFlags(savedFlags);
             resetErrors;
             mutex.unlock;
         }
+        applyFrontendFlags(flags);
         action();
     }
 
@@ -796,9 +806,76 @@ private void driveSharedSemantic(
     runDeferredSemantic2;
     foreach (m; rootModules) m.semantic3(null);
     runDeferredSemantic3;
+    if (rootImportPaths.length)
+        rootModules ~= analyseLoadedRootOwnedImports(rootImportPaths);
 
     if (global.errors == 0)
         reportInlineAsmDiagnostics(rootModules);
+}
+
+// Every module under `rootImportPaths` that the phases above loaded and
+// `discoverRootOwnedImports` did not find: one imported inside a function
+// body, a `version`/`static if` block or a `mixin`. dmd loads it as a
+// non-root import, so no phase analysed its function bodies, and the
+// backends would force that analysis later, outside this parse and
+// without its frontend flags. `dmd -i` compiles such an import as a root
+// (`Compiler.onImport`) and runs semantic3 on it after the roots'
+// (`dmd.main`'s `compiledImports` loop); do the same here, so every
+// root-owned module is analysed in the same parse, with the same flags.
+// A module's semantic3 can load further modules, hence the loop.
+private imported!"dmd.dmodule".Module[] analyseLoadedRootOwnedImports(
+    in string[] rootImportPaths,
+) {
+    import dmd.dmodule: Module;
+    import dmd.dsymbolsem: runDeferredSemantic3;
+    import dmd.semantic3: semantic3;
+    import snakebite.frontend.inlineasm: disableInlineAsmVersion;
+
+    Module[] promoted;
+    for (;;) {
+        Module[] loaded;
+        foreach (module_; Module.amodules)
+            if (!module_.isRoot && isUnderAnyPath(module_, rootImportPaths))
+                loaded ~= module_;
+        if (loaded.length == 0)
+            return promoted;
+
+        foreach (module_; loaded) {
+            disableInlineAsmVersion(module_);
+            module_.importedFrom = module_;
+            module_.semantic3(null);
+        }
+        runDeferredSemantic3;
+        promoted ~= loaded;
+    }
+}
+
+// Whether `module_` was read from a file under one of `paths`: a module of
+// the project a REPL session loads, as opposed to druntime, Phobos or any
+// other import the session calls natively.
+public bool isUnderAnyPath(
+    imported!"dmd.dmodule".Module module_,
+    in string[] paths,
+) {
+    import std.algorithm.searching: startsWith;
+    import std.path: absolutePath, buildNormalizedPath, dirSeparator;
+    import std.string: fromStringz;
+
+    const sourcePath = module_.srcfile.toString.fromStringz.idup
+        .absolutePath.buildNormalizedPath;
+
+    foreach (path; paths) {
+        const normalizedPath = path.absolutePath.buildNormalizedPath;
+        // A bare prefix match would also claim a sibling directory whose
+        // name merely starts with `path` (`-I /a/b` matching `/a/bc`), so
+        // the source must equal the path itself or sit under it as a
+        // whole directory component.
+        if (sourcePath == normalizedPath
+            || sourcePath.startsWith(normalizedPath ~ dirSeparator))
+            return true;
+    }
+
+    return false;
 }
 
 // A project module reached only through `import`, not one of `modules`
@@ -816,10 +893,14 @@ private void driveSharedSemantic(
 // against `Module.amodules` the same way, so a later `import` resolves to
 // this same, already-parsed module instead of a fresh, ungated one),
 // gating each one immediately.
-// Known gap, the same shape as the string-mixin gap in docs/adr/0012: an
-// import nested inside a `version`/`static if`/`mixin` at module scope is
-// not discovered here, only a plain module-scope `import` declaration;
-// neither is one resolved through a package's `package.d`.
+// Only a plain module-scope `import` declaration, of a module file or of
+// a package's `package.d`, is discovered here: one inside a function
+// body, a `version`/`static if` block or a `mixin` needs semantic
+// analysis to resolve. dmd loads such a module during the phases, and
+// `analyseLoadedRootOwnedImports` analyses it as root-owned afterwards;
+// its module-scope `D_InlineAsm_X86_64` conditions are then already
+// resolved as dmd resolves them, the same shape as the string-mixin gap
+// in docs/adr/0012.
 private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
     imported!"dmd.dmodule".Module[] modules,
     in string[] rootImportPaths,
@@ -852,17 +933,24 @@ private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
                 .map!(id => id.toString.fromStringz.idup)
                 .array
                 ~ import_.id.toString.fromStringz.idup;
-            const relativePath = buildPath(segments) ~ ".d";
-
             // Named as dmd's own import lookup names it: the import path
-            // as dmd was handed it, joined with the module's path.
+            // as dmd was handed it, joined with the module's file, or with
+            // the package's `package.d` when there is no such file.
+            const relativePaths = [
+                buildPath(segments) ~ ".d",
+                buildPath(segments ~ "package.d"),
+            ];
             string matchedPath;
             foreach (rootPath; rootImportPaths) {
-                const candidate = buildPath(rootPath, relativePath);
-                if (candidate.exists) {
-                    matchedPath = candidate;
-                    break;
+                foreach (relativePath; relativePaths) {
+                    const candidate = buildPath(rootPath, relativePath);
+                    if (candidate.exists) {
+                        matchedPath = candidate;
+                        break;
+                    }
                 }
+                if (matchedPath !is null)
+                    break;
             }
             if (matchedPath is null)
                 continue;
