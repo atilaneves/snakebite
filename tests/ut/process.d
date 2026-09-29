@@ -12,6 +12,7 @@ unittest {
 
     config.cleanup.should == "none";
     config.gc.should == "snakebite";
+    config.heapSizeFactor.should == 4;
 }
 
 
