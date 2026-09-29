@@ -58,11 +58,11 @@ public void completeFunctionType(
             // function's type. `mangleExact` has no such guard - it
             // caches whatever the type looks like right now
             // (`fd.mangleString`) forever, so mangling past a failure
-            // would poison that cache with a wrong name. The reviewer
-            // found no reachable trigger for this in snakebite today
-            // (every dependency compiles natively, so its bodies already
-            // passed semantic before snakebite ever sees them); read
-            // dmd's own captured diagnostic here, before `withCompilerLock`
+            // would poison that cache with a wrong name. No trigger is
+            // reachable: every dependency is compiled natively, so its
+            // bodies already passed semantic before snakebite ever sees
+            // them; read dmd's own captured diagnostic here, before
+            // `withCompilerLock`
             // resets it on exit, so the message carries dmd's real error
             // rather than a made-up one.
             if (!functionSemantic(function_)) {
