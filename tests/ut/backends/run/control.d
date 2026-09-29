@@ -140,6 +140,31 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A case expression can read a function parameter. Evaluate it for each
+// switch execution, just like the condition expression.
+static foreach (backend; Matrix!()) {
+    @("switchEvaluatesDynamicCaseValues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int select(int value, const int caseValue) {
+                switch (value) {
+                case caseValue:
+                    return 1;
+                default:
+                    return 2;
+                }
+            }
+
+            void main() {
+                assert(select(7, 7) == 1);
+                assert(select(7, 8) == 2);
+                assert(select(8, 8) == 1);
+            }
+        });
+    }
+}
+
 // A string switch is lowered by dmd to a call to druntime's `__switch`, so
 // the interpreter must route that call through the normal native boundary.
 static foreach (backend; Matrix!()) {

@@ -4,38 +4,32 @@ private:
 
 package struct SwitchPlan {
     imported!"dmd.statement".CaseStatement[] cases;
-    long[] values;
     imported!"dmd.statement".DefaultStatement defaultTarget;
 }
 
 // Semantic analysis has converted string switches to integer dispatch and
-// expanded case ranges. Keep the resulting comparison values and targets
-// in one plan so both backends select the same case.
+// expanded case ranges. Keep the cases and default target in one plan so
+// both backends select the same case.
 package SwitchPlan switchPlan(
     imported!"dmd.statement".SwitchStatement statement,
 ) {
     import dmd.statement: CaseStatement;
-    import dmd.expressionsem: toInteger;
 
     CaseStatement[] cases;
-    long[] values;
-    if (statement.cases !is null) {
-        foreach (case_; *statement.cases) {
-            cases ~= case_;
-            values ~= cast(long) case_.exp.toInteger;
-        }
-    }
-    return SwitchPlan(cases, values, statement.sdefault);
+    if (statement.cases !is null)
+        cases = (*statement.cases)[];
+    return SwitchPlan(cases, statement.sdefault);
 }
 
 package imported!"dmd.statement".CaseStatement selectCase(
     SwitchPlan plan,
     long value,
-)
-    @safe @nogc nothrow scope
-{
-    foreach (index, case_; plan.cases)
-        if (plan.values[index] == value)
+    scope long delegate(
+        imported!"dmd.statement".CaseStatement,
+    ) caseValue,
+) {
+    foreach (case_; plan.cases)
+        if (switchCaseMatches(value, caseValue(case_)))
             return case_;
     return null;
 }
@@ -52,6 +46,12 @@ package bool containsTarget(
         if (target is case_)
             return true;
     return false;
+}
+
+package bool switchCaseMatches(long value, long caseValue)
+    @safe @nogc nothrow pure scope
+{
+    return value == caseValue;
 }
 
 package imported!"dmd.statement".CaseStatement gotoCaseTarget(

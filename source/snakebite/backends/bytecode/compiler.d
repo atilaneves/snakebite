@@ -1517,12 +1517,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const conditionOffset = reserveTemp(facts);
         compileValue(statement.condition, conditionOffset, facts.size);
 
-        foreach (index, case_; plan.cases) {
+        foreach (case_; plan.cases) {
             const testOffset = reserveTemp(facts);
             emit(&opCopy, testOffset, conditionOffset, facts.size);
             const literalOffset = reserveTemp(facts);
-            emit(&opConstant, literalOffset,
-                addConstant(cast(ulong) plan.values[index]), facts.size);
+            compileValue(case_.exp, literalOffset, facts.size);
             emit(&opEqual, testOffset, literalOffset, facts.size);
 
             const branchIndex = _instructions.length;
@@ -1530,7 +1529,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             jumpToCase(case_, branchIndex);
         }
 
-        assert(statement.sdefault !is null);
+        assert(plan.defaultTarget !is null);
 
         const defaultJumpIndex = _instructions.length;
         emit(&opJump, 0, 0, 0);
@@ -1600,6 +1599,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(GotoDefaultStatement statement) {
         auto target = gotoDefaultTarget(statement);
         assert(statement.sw !is null && target !is null);
+        auto plan = switchPlan(statement.sw);
+        assert(target is plan.defaultTarget);
 
         const cleanup = cleanupCount(
             activeScopePath,

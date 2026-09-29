@@ -1727,7 +1727,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _temporaries.withExpression(FullExpressionKind.value,
             statement.condition, {
             const condition = asIntegral(statement.condition);
-            selected = selectCase(plan, condition);
+            selected = selectCase(plan, condition,
+                (case_) => asIntegral(case_.exp));
             });
 
         if (selected is null)
