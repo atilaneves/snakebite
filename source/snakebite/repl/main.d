@@ -5,12 +5,17 @@ private:
 
 
 public int main(string[] args) {
-    import snakebite.frontend.compiler: FrontendFlags, initialize, Snippets;
+    import snakebite.frontend.compiler:
+        compilerPath, FrontendFlags, initialize, Snippets, withScratchFrontend;
     import snakebite.dependencyimage: DependencyImage;
     import snakebite.dub: fetchProject;
     import snakebite.project: loadProject, prepareDependencies, sourceSet;
     import snakebite.repl: Repl;
     import snakebite.repl.cli: parseReplArgs;
+    import std.algorithm.iteration: map;
+    import std.array: array;
+    import std.file: chdir;
+    import std.path: absolutePath;
     import std.stdio: stderr, writeln;
 
     // The REPL evaluates single snippets, so it is the snippet world.
@@ -29,6 +34,7 @@ public int main(string[] args) {
 
     try {
         string[] importPaths = parsed.options.importPaths.dup;
+        string[] files = parsed.options.files.dup;
         string[] stringImportPaths;
         FrontendFlags flags;
         const(DependencyImage)* dependencyImage;
@@ -39,18 +45,32 @@ public int main(string[] args) {
             projectDirectory = fetchProject(parsed.options.dubProject);
         }
         if (projectDirectory.length != 0) {
+            // Like sb, the session works in the project directory, where
+            // dub builds the project: a project module's `__FILE__` is
+            // relative to it and dmd resolves that name against it.
+            projectDirectory = projectDirectory.absolutePath;
+            importPaths = importPaths.map!(path => path.absolutePath).array;
+            files = files.map!(file => file.absolutePath).array;
+            chdir(projectDirectory);
+
             // Mutable: `loadProject` keeps these in the `Project` it returns.
             auto projectSources = sourceSet(
                 projectDirectory, [], [], parsed.options.versions,
             );
             // The frontend analyses what the cells reach, as they reach
-            // it; the whole project only when its image must be built.
-            dependencyImage = prepareDependencies(
-                projectDirectory, projectSources,
-                () => loadProject(projectDirectory, projectSources).program,
+            // it; the whole project only when its image must be built, and
+            // that analysis leaves nothing behind for the cells to reuse.
+            dependencyImage = withScratchFrontend(
+                () => prepareDependencies(
+                    projectDirectory, projectSources,
+                    () => loadProject(projectDirectory, projectSources).program,
+                ),
             );
-            importPaths = projectSources.importPaths ~ importPaths;
-            stringImportPaths = projectSources.stringImportPaths;
+            const inProject = (string path) => compilerPath(path, projectDirectory);
+            importPaths = projectSources.importPaths.map!inProject.array
+                ~ importPaths;
+            stringImportPaths = projectSources.stringImportPaths
+                .map!inProject.array;
             flags = projectSources.flags;
         }
 
@@ -62,7 +82,7 @@ public int main(string[] args) {
             dependencyImage,
         );
 
-        foreach (file; parsed.options.files)
+        foreach (file; files)
             repl.loadModuleFile(file);
 
         if (parsed.options.hasCommand)

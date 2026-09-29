@@ -144,6 +144,84 @@ def test_project_import_sees_project_versions(tmp_path: Path) -> None:
         assert result.stdout == "42\nhello\n"
 
 
+# A session runs the same whether or not the project's dependency image is
+# already built, from any working directory. It works in the project
+# directory, as `dub build` does, so a project module's `__FILE__` is the
+# path dub hands the compiler: relative to the project directory.
+@pytest.mark.parametrize("working_directory", ["project", "elsewhere"])
+def test_project_session_is_the_same_on_a_cold_and_a_warm_image_cache(
+    tmp_path: Path, working_directory: str,
+) -> None:
+    project = tmp_path / "project"
+    source = project / "source"
+    source.mkdir(parents=True)
+    (tmp_path / "elsewhere").mkdir()
+    (project / "dub.sdl").write_text('name "good"\n', encoding="utf-8")
+    (source / "good.d").write_text(
+        "module good;\n"
+        "string file() { return __FILE__; }\n"
+        "string fullPath() { return __FILE_FULL_PATH__; }\n"
+        "int answer() { return 42; }\n",
+        encoding="utf-8",
+    )
+    (source / "unused.d").write_text(
+        "module unused;\n"
+        'pragma(msg, "unused was analysed");\n',
+        encoding="utf-8",
+    )
+    full_path = os.path.realpath(source / "good.d")
+
+    for _ in range(2):
+        result = run_sb(
+            "--project", str(project),
+            input="import good;\nfile()\nfullPath()\nanswer()\nimport unused;\n",
+            cwd=tmp_path / working_directory,
+            timeout_seconds=60,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout == f"source/good.d\n{full_path}\n42\n"
+        assert result.stderr == "unused was analysed\n"
+
+
+# Paths on the command line are relative to where the session starts,
+# even though a project session works in the project directory.
+def test_project_session_resolves_arguments_from_its_start_directory(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "project" / "source"
+    source.mkdir(parents=True)
+    (tmp_path / "project" / "dub.sdl").write_text(
+        'name "arguments"\n', encoding="utf-8",
+    )
+    (source / "arguments.d").write_text(
+        "module arguments;\nint fromProject() { return 1; }\n",
+        encoding="utf-8",
+    )
+    imports = tmp_path / "imports"
+    imports.mkdir()
+    (imports / "extra.d").write_text(
+        "module extra;\nint fromImportPath() { return 2; }\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "loaded.d").write_text(
+        "import arguments;\nimport extra;\n"
+        "int loadedValue() { return fromProject() + fromImportPath(); }\n",
+        encoding="utf-8",
+    )
+
+    result = run_sb(
+        "--project", "project", "-I", "imports", "loaded.d",
+        "-c", "loadedValue()",
+        cwd=tmp_path,
+        timeout_seconds=60,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "3\n"
+    assert result.stderr == ""
+
+
 def test_piped_blank_line_is_silent_noop() -> None:
     result = run_sb(input="\n")
 

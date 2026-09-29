@@ -93,6 +93,45 @@ public void withCompilerLock(scope void delegate() action) {
     compiler.withLock(action);
 }
 
+// Run `action`, then put the frontend back in the state `initialize` left
+// it in: every module `action` parsed is gone, and so is what the frontend
+// printed while it ran, unless `action` throws. For an analysis whose only
+// product is `action`'s own result, such as the program a dependency image
+// is built from, so that what the process compiles afterwards does not
+// depend on whether that analysis ran.
+public T withScratchFrontend(T)(scope T delegate() action) {
+    auto captured = capturedStderr;
+    scope(failure) captured.replay;
+    scope(exit) compiler.reset;
+
+    auto result = action();
+    captured.discard;
+    return result;
+}
+
+// The path dmd is handed for `path` when it compiles from `directory`, and
+// so the `__FILE__` of a module read from it: relative to `directory` when
+// it is under it, as dub names a package's files when it builds from the
+// package's own directory; otherwise `path` itself.
+public string compilerPath(in string path, in string directory) {
+    const relative = pathUnder(path, directory);
+    return relative is null ? path : relative;
+}
+
+// `path` relative to `directory`, or null when it is not under it.
+private string pathUnder(in string path, in string directory) {
+    import std.algorithm.searching: startsWith;
+    import std.path: absolutePath, buildNormalizedPath, relativePath;
+
+    if (directory.length == 0)
+        return null;
+
+    const relative = path.absolutePath.buildNormalizedPath.relativePath(
+        directory.absolutePath.buildNormalizedPath,
+    );
+    return relative.startsWith("..") ? null : relative;
+}
+
 // Runs `force` under the frontend lock, but only when `ready` - a cheap,
 // lock-free read of the one dmd field a forward-reference forcing call
 // itself gates on (`FuncDeclaration.semanticRun`, `AggregateDeclaration.
@@ -184,6 +223,10 @@ final class Compiler {
     // Keyed by source content; prevents re-registering the same root module
     // in DMD's process-global table.
     private Module[string] sourceCache;
+    // What `initialize` was asked for and how many modules it left parsed,
+    // so `reset` can tell whether anything was parsed since and redo it.
+    private Snippets snippets;
+    private size_t initialModuleCount;
 
     private this() {
         import core.sync.mutex: Mutex;
@@ -202,8 +245,28 @@ final class Compiler {
         if (initialized)
             return;
 
+        this.snippets = snippets;
         initializeDmdState(snippets);
+        initialModuleCount = Module.amodules.length;
         initialized = true;
+    }
+
+    // Return dmd to the state `initialize` left it in. A no-op when nothing
+    // was parsed since, so it costs nothing on the path that parsed nothing.
+    void reset() {
+        import dmd.frontend: deinitializeDMD;
+
+        mutex.lock;
+        scope(exit) mutex.unlock;
+        requireInitialized;
+
+        if (Module.amodules.length == initialModuleCount)
+            return;
+
+        deinitializeDMD;
+        sourceCache = null;
+        initializeDmdState(snippets);
+        initialModuleCount = Module.amodules.length;
     }
 
     private void requireInitialized() const {
@@ -667,23 +730,11 @@ final class Compiler {
         in string[] importPaths,
         in string rootDirectory,
     ) const {
-        import std.algorithm.searching: startsWith;
-        import std.path: absolutePath, buildNormalizedPath, relativePath;
-
-        const absPath = filePath.absolutePath.buildNormalizedPath;
-        if (rootDirectory.length) {
-            const relPath = absPath.relativePath(
-                rootDirectory.absolutePath.buildNormalizedPath,
-            );
-            if (!relPath.startsWith(".."))
-                return relPath;
-        }
+        if (const underRoot = pathUnder(filePath, rootDirectory))
+            return underRoot;
         foreach (importPath; importPaths) {
-            const relPath = absPath.relativePath(
-                importPath.absolutePath.buildNormalizedPath,
-            );
-            if (!relPath.startsWith(".."))
-                return relPath;
+            if (const underImportPath = pathUnder(filePath, importPath))
+                return underImportPath;
         }
 
         return filePath;
@@ -779,7 +830,7 @@ private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
     import std.algorithm.iteration: map;
     import std.array: array;
     import std.file: exists, readText;
-    import std.path: absolutePath, buildNormalizedPath, buildPath;
+    import std.path: buildPath;
     import std.string: fromStringz;
 
     bool[Module] known;
@@ -803,10 +854,11 @@ private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
                 ~ import_.id.toString.fromStringz.idup;
             const relativePath = buildPath(segments) ~ ".d";
 
+            // Named as dmd's own import lookup names it: the import path
+            // as dmd was handed it, joined with the module's path.
             string matchedPath;
             foreach (rootPath; rootImportPaths) {
-                const candidate =
-                    buildPath(rootPath, relativePath).absolutePath.buildNormalizedPath;
+                const candidate = buildPath(rootPath, relativePath);
                 if (candidate.exists) {
                     matchedPath = candidate;
                     break;
