@@ -30,7 +30,7 @@ public void unwindFinally(
 // clause matches nothing.
 public bool catchMatches(
     const TypeInfo_Class expected, const TypeInfo_Class actual,
-) @nogc nothrow pure {
+) @safe @nogc nothrow pure {
     return expected !is null && actual !is null && expected.isBaseOf(actual);
 }
 

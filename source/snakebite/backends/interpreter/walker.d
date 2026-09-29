@@ -138,7 +138,10 @@ import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.comparison: ComparisonPlan;
 import snakebite.backends.controlflow: ControlFlowState,
-    scopePath;
+    ScopeFrame, scopePath;
+import snakebite.backends.exceptionplan: catchPlanOf;
+import snakebite.backends.unwindplan:
+    ExceptionCandidate, ExceptionUnwindPlan = UnwindPlan;
 import snakebite.backends.switchplan: switchPlan, selectCase,
     gotoCaseTarget, gotoDefaultTarget, containsTarget;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
@@ -443,6 +446,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // each backing allocation reachable for as long as guest state can be.
     private void[][] _allocations;
     private Cache!(Catch, TypeInfo_Class) _catchTypes;
+    private struct ActiveExceptionScope {
+        private ExceptionCandidate[] _candidates;
+    }
+    private ActiveExceptionScope[] _activeExceptionScopes;
     private RuntimeTypes* _runtimeTypes;
     // dmd gives every `arr[... $ ...]` a `lengthVar` declaration for its
     // `$`, which no statement declares and which therefore has no frame
@@ -1372,12 +1379,34 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     override void visit(TryCatchStatement statement) {
+        auto catches = catchPlanOf(
+            statement, catch_ => catchRuntimeInfo(catch_),
+        );
+        ExceptionCandidate[] candidates;
+        foreach (clause; catches.clauses)
+            candidates ~= ExceptionCandidate(
+                cast(const(void)*) statement,
+                ExceptionCandidate.Kind.catch_,
+                clause.type,
+                cast(const(void)*) clause.syntax,
+            );
+
+        _activeExceptionScopes ~= ActiveExceptionScope(candidates);
+        bool scopeActive = true;
+        scope (exit)
+            if (scopeActive)
+                _activeExceptionScopes.length -= 1;
+
         if (_controlFlow.seeking) {
             try {
                 if (statement._body !is null)
                     statement._body.accept(this);
             } catch (GuestException exception) {
-                if (auto catch_ = matchingCatch(statement, exception)) {
+                auto plan = exceptionPlan(exception._guest.classinfo);
+                auto catch_ = selectedCatch(plan, statement);
+                _activeExceptionScopes.length -= 1;
+                scopeActive = false;
+                if (catch_ !is null) {
                     bindCatchVariable(catch_, exception.take);
                     if (catch_.handler !is null)
                         catch_.handler.accept(this);
@@ -1386,6 +1415,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
                 throw exception;
             }
+            _activeExceptionScopes.length -= 1;
+            scopeActive = false;
             if (_controlFlow.seeking)
                 foreach (catch_; *statement.catches)
                     if (catch_.handler !is null)
@@ -1396,7 +1427,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         try {
             statement._body.accept(this);
         } catch (GuestException exception) {
-            if (auto catch_ = matchingCatch(statement, exception)) {
+            auto plan = exceptionPlan(exception._guest.classinfo);
+            auto catch_ = selectedCatch(plan, statement);
+            _activeExceptionScopes.length -= 1;
+            scopeActive = false;
+            if (catch_ !is null) {
                 bindCatchVariable(catch_, exception.take);
                 if (catch_.handler !is null)
                     catch_.handler.accept(this);
@@ -1407,26 +1442,72 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
     }
 
+    extern(D) private ExceptionCandidate[] activeExceptionCandidates() {
+        ExceptionCandidate[] candidates;
+        foreach_reverse (scope_; _activeExceptionScopes)
+            candidates ~= scope_._candidates;
+        return candidates;
+    }
+
+    extern(D) private ExceptionUnwindPlan exceptionPlan(
+        TypeInfo_Class actual,
+    ) {
+        import snakebite.backends.unwindplan: unwindPlanOf;
+
+        return unwindPlanOf(activeExceptionCandidates(), actual);
+    }
+
+    private Catch selectedCatch(
+        ExceptionUnwindPlan plan,
+        TryCatchStatement statement,
+    ) {
+        if (plan.finalizers.length != 0 || !plan.hasHandler
+                || plan.handler.owner != cast(const(void)*) statement)
+            return null;
+
+        return cast(Catch) cast(void*) plan.handler.payload;
+    }
+
     private Statement controlTarget() const {
         return cast(Statement) _controlFlow.target;
     }
 
-    private bool exitsFinally(TryFinallyStatement statement) const {
-        auto target = controlTarget;
-        if (target is null)
-            return false;
-
+    private bool runsFinally(TryFinallyStatement statement) {
         import snakebite.backends.exceptionplan: unwindPlanOf;
 
-        return unwindPlanOf(
-            scopePath(statement),
-            scopePath(cast(Statement) _controlFlow.destinationScope),
-        ).finalizers.length != 0;
+        auto source = scopePath(statement);
+        ScopeFrame[] destination;
+        if (_controlFlow.hasGoto)
+            destination = scopePath(
+                cast(Statement) _controlFlow.destinationScope,
+            );
+        else if (!_controlFlow.hasTransfer && source.length > 0)
+            destination = source[1 .. $];
+
+        auto plan = unwindPlanOf(source, destination);
+        foreach (finalizer; plan.finalizers)
+            if (finalizer.owner == cast(const(void)*) statement)
+                return true;
+        return false;
     }
 
     override void visit(TryFinallyStatement statement) {
+        _activeExceptionScopes ~= ActiveExceptionScope([
+            ExceptionCandidate(
+                cast(const(void)*) statement,
+                ExceptionCandidate.Kind.finally_,
+                null,
+                cast(const(void)*) statement.finalbody,
+            ),
+        ]);
+        bool scopeActive = true;
+        scope (exit)
+            if (scopeActive)
+                _activeExceptionScopes.length -= 1;
+
         bool bodyRan;
         Throwable pendingException;
+        bool runFinalizer;
         if (_controlFlow.seeking) {
             if (statement._body !is null)
                 statement._body.accept(this);
@@ -1441,17 +1522,26 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (!bodyRan && statement._body !is null)
                 statement._body.accept(this);
 
-            while (_controlFlow.hasGoto && !exitsFinally(statement)) {
+            while (_controlFlow.hasGoto && !runsFinally(statement)) {
                 _controlFlow.resume;
                 if (statement._body !is null)
                     statement._body.accept(this);
             }
         } catch (GuestException exception) {
             pendingException = exception.take;
+            auto plan = exceptionPlan(pendingException.classinfo);
+            assert(plan.finalizers.length != 0);
+            assert(plan.finalizers[0].owner == cast(const(void)*) statement);
+            runFinalizer = true;
         } finally {
-            _controlFlow.withCleanup({
-                runFinallyBody(statement.finalbody, pendingException);
-            });
+            _activeExceptionScopes.length -= 1;
+            scopeActive = false;
+            if (pendingException is null)
+                runFinalizer = runsFinally(statement);
+            if (runFinalizer)
+                _controlFlow.withCleanup({
+                    runFinallyBody(statement.finalbody, pendingException);
+                });
         }
     }
 
@@ -1487,19 +1577,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             _controlFlow.resume;
             finalbody.accept(this);
         }
-    }
-
-    private Catch matchingCatch(
-        TryCatchStatement statement,
-        GuestException exception,
-    ) {
-        import snakebite.backends.exceptionplan: catchPlanOf;
-
-        auto plan = catchPlanOf(
-            statement, catch_ => catchRuntimeInfo(catch_),
-        );
-        const index = plan.matchingClause(exception._guest.classinfo);
-        return index == size_t.max ? null : plan.clauses[index].syntax;
     }
 
     private TypeInfo_Class catchRuntimeInfo(Catch catch_) {

@@ -6,7 +6,8 @@ private:
 
 import object: TypeInfo_Class;
 import snakebite.backends.controlflow: ScopeFrame;
-import snakebite.backends.exceptions: catchMatches;
+import snakebite.backends.unwindplan:
+    ExceptionCandidate;
 
 
 public struct CatchPlan {
@@ -17,15 +18,6 @@ public struct CatchPlan {
 
     public Clause[] clauses;
 
-    public size_t matchingClause(TypeInfo_Class actual)
-        const @nogc nothrow pure scope
-    {
-        foreach (index, clause; clauses)
-            if (catchMatches(clause.type, actual))
-                return index;
-
-        return size_t.max;
-    }
 }
 
 public CatchPlan catchPlanOf(
@@ -52,6 +44,8 @@ public UnwindPlan unwindPlanOf(
     scope ScopeFrame[] source,
     scope ScopeFrame[] destination,
 ) @safe {
+    import snakebite.backends.unwindplan: resolve = unwindPlanOf;
+
     size_t sourceEnd = source.length;
     size_t destinationEnd = destination.length;
     while (sourceEnd != 0 && destinationEnd != 0
@@ -66,15 +60,27 @@ public UnwindPlan unwindPlanOf(
     // source path.
     assert(destinationEnd == 0);
 
-    UnwindPlan plan;
+    ExceptionCandidate[] candidates;
+    ScopeFrame[] finalizerFrames;
     foreach (frame; source[0 .. sourceEnd]) {
         if (!frame.cleanup)
             continue;
 
-        plan.finalizers ~= UnwindPlan.Finalizer(
-            frame.owner, frame.finallyBody,
+        candidates ~= ExceptionCandidate(
+            frame.owner,
+            ExceptionCandidate.Kind.finally_,
+            null,
         );
+        finalizerFrames ~= frame;
     }
+
+    auto resolved = resolve(candidates, null);
+    UnwindPlan plan;
+    foreach (finalizer; resolved.finalizers)
+        plan.finalizers ~= UnwindPlan.Finalizer(
+            finalizerFrames[finalizer.candidateIndex].owner,
+            finalizerFrames[finalizer.candidateIndex].finallyBody,
+        );
     return plan;
 }
 
