@@ -5341,7 +5341,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         auto elementType = expression.e1.type.nextOf;
         assert(elementType !is null);
-        auto elementBase = elementType.toBasetype;
+        const elementBase = elementType.toBasetype;
         assert(elementBase.ty == Tchar || elementBase.ty == Twchar);
         const hook = elementBase.ty == Tchar
             ? DruntimeHook.arrayAppendChar : DruntimeHook.arrayAppendWchar;

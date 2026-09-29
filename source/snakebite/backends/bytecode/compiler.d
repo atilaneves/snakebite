@@ -3081,7 +3081,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto elementType = target.type.nextOf;
         assert(elementType !is null);
-        auto elementBase = elementType.toBasetype;
+        const elementBase = elementType.toBasetype;
         const elementSize =
             elementBase.ty == Tvoid ? 1 : TypeFacts.of(elementType).size;
 
@@ -3094,7 +3094,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto sourceElementType = expression.e2.type.nextOf;
         assert(sourceElementType !is null);
-        auto sourceElementBase = sourceElementType.toBasetype;
+        const sourceElementBase = sourceElementType.toBasetype;
 
         const sourceElementSize = sourceElementBase.ty == Tvoid
             ? 1 : TypeFacts.of(sourceElementType).size;
@@ -4713,7 +4713,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto elementType = expression.e1.type.nextOf;
         assert(elementType !is null);
-        auto elementBase = elementType.toBasetype;
+        const elementBase = elementType.toBasetype;
         assert(elementBase.ty == Tchar || elementBase.ty == Twchar);
         const hook = elementBase.ty == Twchar
             ? DruntimeHook.arrayAppendWchar : DruntimeHook.arrayAppendChar;
