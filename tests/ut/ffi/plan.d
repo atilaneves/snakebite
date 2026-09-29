@@ -110,10 +110,11 @@ unittest {
 @("rawPlan.requiredSymbolReportsHostResolutionFailure")
 unittest {
     PlanCache cache;
+    const symbol = "snakebite_ut_missing_druntime_hook_439";
 
     (() => cache.requiredRawPlanOf(
-        "snakebite_ut_missing_druntime_hook_439", [],
-    )).shouldThrowWithMessage(
+        symbol, [],
+    ))().shouldThrowWithMessage(
         "ffi cannot resolve the symbol `snakebite_ut_missing_druntime_hook_439`: " ~
         "it is not in this process",
     );
