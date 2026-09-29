@@ -47,9 +47,12 @@ unittest {
 
 
 // The GC never scans the arena, so a GC block that only the arena points
-// to would be freed while the AST still uses it.
+// to would be freed while the AST still uses it. Serial: ordered
+// against reportsAPointerIntoTheGCHeap below, so it never reads the
+// report while that test's planted pointer is still in the arena.
 debug
 @("arenaHoldsNoGCPointers.largeImport")
+@Serial
 unittest {
     parseSnippet(q{
         module arenaHoldsNoGCPointersLargeImport;
