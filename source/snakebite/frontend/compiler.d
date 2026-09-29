@@ -413,6 +413,7 @@ final class Compiler {
             return;
 
         this.snippets = snippets;
+        inside(&rebuildIdentifierTable); // Not in `setUpDmd`: `reset` runs it.
         setUpDmd;
         initialized = true;
     }
@@ -505,7 +506,6 @@ final class Compiler {
         import dmd.target: CPU, addDefaultVersionIdentifiers, target;
         import std.algorithm.iteration: each;
 
-        rebuildIdentifierTable;
         initDMD;
         target.cpu = CPU.baseline;
         target.setCPU;
@@ -600,6 +600,14 @@ final class Compiler {
     // table. Fill it again here, inside the frontend, with the same
     // keywords: then the table and every identifier are frontend memory,
     // and the GC-owned table the constructor made is garbage.
+    //
+    // Once per process, from `initialize` only, never from `reset`. dmd
+    // interns identifiers and compares them by address, and identifiers
+    // outlive a reset: in a static cache, or in what an analysis in
+    // `withScratchFrontend` returns. A second table would intern a
+    // different identifier for the same name, and lookups that mix the
+    // two fail (`undefined identifier pow in module std.math`).
+    // `deinitializeDMD` does not clear the table either.
     private void rebuildIdentifierTable() {
         import dmd.identifier: Identifier;
         import dmd.tokens: TOK, Token;

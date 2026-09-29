@@ -563,6 +563,8 @@ def test_dub_option_loads_module_from_fetched_project(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
+    # A fresh start directory has no dependency image yet, so the session
+    # builds one first and must then still resolve Phobos.
     result = run_sb(
         "--dub",
         "automem@0.6.11",
@@ -570,6 +572,7 @@ def test_dub_option_loads_module_from_fetched_project(tmp_path: Path) -> None:
         "-c",
         "loadedValue()",
         timeout_seconds=30,
+        cwd=tmp_path,
     )
 
     assert result.returncode == 0
