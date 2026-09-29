@@ -131,7 +131,9 @@ public auto frontend(alias dmdSymbol, Args...)(auto ref Args arguments) {
 // caller holds the frontend lock and reads the result before it lets go:
 // the diagnostics are dmd's own until the next parse.
 public struct ParsedStatement {
-    imported!"dmd.statement".Statement statement;
+    import dmd.statement: Statement;
+
+    Statement statement;
     // Whether the statement is all of `source` and parsed without error.
     bool whole;
 }
@@ -163,7 +165,9 @@ public ParsedStatement parseStatement(in string source) {
 // One token of source text as dmd's lexer reads it: its kind, and the
 // offset in the text where it starts.
 public struct SourceToken {
-    imported!"dmd.tokens".TOK value;
+    import dmd.tokens: TOK;
+
+    TOK value;
     size_t offset;
 }
 
