@@ -284,6 +284,7 @@ public struct RuntimeTypes {
     private TypeInfo linkedInfo(Type type) {
         import dmd.common.outbuffer: OutBuffer;
         import dmd.mangle: mangleToBuffer;
+        import snakebite.frontend.dmd.mangle: completeMangleTargets;
         import std.conv: text;
 
         if (type.vtinfo is null)
@@ -296,6 +297,10 @@ public struct RuntimeTypes {
             // Codegen aliases an unqualified class's TypeInfo declaration
             // to its __Class symbol. The frontend alone leaves the alias
             // unresolved.
+            // `classType.sym` can be a class declared local to a function
+            // (nested inside it), whose mangled name recurses through that
+            // function's own mangled signature - see `completeMangleTargets`.
+            completeMangleTargets(classType.sym);
             OutBuffer mangled;
             mangleToBuffer(classType.sym, mangled);
             name = text("_D", mangled[], "7__ClassZ");

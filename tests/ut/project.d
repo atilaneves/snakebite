@@ -109,6 +109,131 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// A guest class subclasses a native class from a dependency image. The
+// native base declares a second virtual method whose return type dmd must
+// infer (`auto`) and that the guest never calls. Resolving that inherited
+// vtable slot's native address must not depend on something else having
+// already driven semantic analysis of that method's body.
+static foreach (backend; Matrix!()) {
+    @("guestSubclassOfNativeClassWithInferredVirtualMethod." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        sandbox.writeFile("dependency/dub.sdl", `name "vtable-dep"
+targetType "library"
+`);
+        sandbox.writeFile("dependency/source/vtable_dep.d", q{
+            module vtable_dep;
+            import std.algorithm.iteration: filter;
+
+            class Base {
+                private int _value;
+                this(int value) { _value = value; }
+                int value() { return _value; }
+                // Virtual, inferred return type, never called by the
+                // guest subclass or `main` below.
+                auto positives(int[] xs) {
+                    return xs.filter!(x => x > 0);
+                }
+            }
+        });
+        sandbox.writeFile("app/dub.sdl", dubProjectRecipe("vtable-app",
+            "dependency \"vtable-dep\" path=\"../dependency\"\n"));
+        sandbox.writeFile("app/source/vtable_app.d", q{
+            module vtable_app;
+            import vtable_dep;
+
+            class Derived : Base {
+                this(int value) { super(value); }
+                override int value() { return super.value() + 1; }
+            }
+
+            int main() {
+                auto derived = new Derived(41);
+                return derived.value() == 42 ? 0 : 1;
+            }
+        });
+        dubProjectMainShouldSucceed!backend(sandbox.inSandboxPath("app"));
+    }
+}
+
+
+// A native module-scope `auto` free function: its return type and
+// attributes are inferred the same way as the vtable slot above, here for
+// a plain function pointer the guest itself takes and calls - reaching
+// `snakebite.ffi.plan.PlanCache.addressOf`/`prepareCommon` directly,
+// never a class's vtable.
+static foreach (backend; Matrix!()) {
+    @("guestTakesAddressOfNativeInferredFreeFunction." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        sandbox.writeFile("dependency/dub.sdl", `name "fnptr-dep"
+targetType "library"
+`);
+        sandbox.writeFile("dependency/source/fnptr_dep.d", q{
+            module fnptr_dep;
+
+            // Inferred return type and attributes, never called or
+            // addressed anywhere in this module itself.
+            auto increment(int x) { return x + 1; }
+        });
+        sandbox.writeFile("app/dub.sdl", dubProjectRecipe("fnptr-app",
+            "dependency \"fnptr-dep\" path=\"../dependency\"\n"));
+        sandbox.writeFile("app/source/fnptr_app.d", q{
+            module fnptr_app;
+            import fnptr_dep;
+
+            int main() {
+                auto fp = &increment;
+                return fp(41) == 42 ? 0 : 1;
+            }
+        });
+        dubProjectMainShouldSucceed!backend(sandbox.inSandboxPath("app"));
+    }
+}
+
+
+// A native class's `auto` method, resolved through a delegate the guest
+// itself takes (`&instance.answer`), not through a subclass's vtable -
+// `snakebite.frontend.dmd.delegates.delegateTargetOf` decides the call's
+// shape, and the method's own inferred return type and attributes still
+// have to be complete before `snakebite.ffi.plan` resolves its address.
+static foreach (backend; Matrix!()) {
+    @("guestCallsNativeInferredMethodThroughDelegate." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        sandbox.writeFile("dependency/dub.sdl", `name "delegate-dep"
+targetType "library"
+`);
+        sandbox.writeFile("dependency/source/delegate_dep.d", q{
+            module delegate_dep;
+
+            class Greeter {
+                private int _base;
+                this(int base) { _base = base; }
+                // Inferred return type and attributes.
+                auto answer(int x) { return _base + x; }
+            }
+        });
+        sandbox.writeFile("app/dub.sdl", dubProjectRecipe("delegate-app",
+            "dependency \"delegate-dep\" path=\"../dependency\"\n"));
+        sandbox.writeFile("app/source/delegate_app.d", q{
+            module delegate_app;
+            import delegate_dep;
+
+            int main() {
+                auto instance = new Greeter(40);
+                auto dg = &instance.answer;
+                return dg(2) == 42 ? 0 : 1;
+            }
+        });
+        dubProjectMainShouldSucceed!backend(sandbox.inSandboxPath("app"));
+    }
+}
+
+
 // The CLI has the interpreter, bytecode, and CTFE backends. CTFE was
 // attempted, but it cannot interpret `open64` from `std.file.readText`.
 // The Native oracle runs compiled D without crossing the CLI boundary.

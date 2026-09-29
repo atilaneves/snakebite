@@ -357,6 +357,43 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A native module-scope function template, instantiated only by the guest
+// call below - the dependency's own compile never instantiates `doubled!
+// int` itself, so nothing but the guest's own call drives this instance's
+// attribute inference before `snakebite.frontend.imagesource` mangles it
+// into the dependency image's registry.
+static foreach (backend; Matrix!()) {
+    @("image.guestCallsNativeTemplateInstantiatedOnlyByGuest." ~ backend.stringof)
+    @Serial
+    unittest {
+        const sandbox = Sandbox();
+        enum moduleName = "image_template_only_guest_" ~ backend.stringof;
+        sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+            "module " ~ moduleName ~ ";\n" ~ q{
+                auto doubled(T)(T x) { return cast(T) (x + x); }
+            });
+        sandbox.writeFile("app/root_" ~ moduleName ~ ".d", "module root_" ~ moduleName ~ ";\nimport "
+            ~ moduleName ~ ";\n" ~ q{
+                int main() {
+                    return doubled(21) == 42 ? 0 : 1;
+                }
+            });
+        const directory = sandbox.inSandboxPath("app");
+        const imports = [sandbox.inSandboxPath("deps")];
+        static if (is(backend == Native)) {
+            const executable = sandbox.inSandboxPath("test");
+            const result = execute([defaultCompiler, "-I" ~ imports[0],
+                sandbox.inSandboxPath("app/root_" ~ moduleName ~ ".d"), "-of=" ~ executable]);
+            result.status.shouldEqual(0, result.output);
+            execute([executable]).status.should == 0;
+        } else {
+            auto project = prepareProject(directory, imports, optimise: Optimise.no).project;
+            scope instance = new backend(project.program);
+            run(instance, project.program).should == 0;
+        }
+    }
+}
+
 // `pick(S)(S value)` and `pick(S : C[], C)(S[] values)` are two distinct
 // module-scope function templates, not two members of one eponymous
 // template (that shape is `image.overloadRegistryAnswersEachOverload`,
