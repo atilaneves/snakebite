@@ -96,11 +96,11 @@ debug
 @Serial
 unittest {
     import dmd.identifier: Identifier;
-    import snakebite.frontend.compiler: frontend;
+    import snakebite.frontend.compiler: newInFrontend;
     import snakebite.gc: lowmem;
 
     // An identifier's name is arena memory the test can write a word to.
-    auto identifier = frontend!(Identifier.idPool)(
+    auto identifier = newInFrontend!(Identifier.idPool)(
         "reportsAPointerIntoTheGCHeapWithRoomForAWord");
     auto word = cast(void**) identifier.toChars;
     auto block = new ubyte[64];

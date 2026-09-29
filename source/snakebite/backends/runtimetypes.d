@@ -70,7 +70,7 @@ public struct RuntimeTypes {
         import dmd.dsymbolsem;
         import dmd.mangle: mangleToBuffer;
         import dmd.typesem: hasPointers;
-        import snakebite.frontend.compiler: frontend;
+        import snakebite.frontend.compiler: newInFrontend;
 
         bool hasPointerData() {
             if (auto classDeclaration = declaration.isClassDeclaration) {
@@ -86,7 +86,7 @@ public struct RuntimeTypes {
 
         immutable(void)* resolve(Declaration symbol, ptrdiff_t offset) {
             OutBuffer name;
-            frontend!mangleToBuffer(symbol, name);
+            newInFrontend!mangleToBuffer(symbol, name);
             auto address = _resolve(name[]);
             return address is null ? null
                 : cast(immutable(void)*)(cast(ubyte*) address + offset);
@@ -153,7 +153,7 @@ public struct RuntimeTypes {
     private TypeInfo build(Type type) {
         import dmd.astenums;
         import dmd.typesem: mutableOf, nextOf, unSharedOf;
-        import snakebite.frontend.compiler: frontend;
+        import snakebite.frontend.compiler: newInFrontend;
         import dmd.root.string: toDString;
         import object: TypeInfo_Array, TypeInfo_AssociativeArray,
             TypeInfo_Const, TypeInfo_Delegate, TypeInfo_Enum,
@@ -172,8 +172,8 @@ public struct RuntimeTypes {
         }
         if (type.mod != 0) {
             auto baseType = type.isShared
-                ? frontend!unSharedOf(type)
-                : frontend!mutableOf(type);
+                ? newInFrontend!unSharedOf(type)
+                : newInFrontend!mutableOf(type);
             return qualified(type, get(baseType));
         }
 
@@ -287,7 +287,7 @@ public struct RuntimeTypes {
         import dmd.common.outbuffer: OutBuffer;
         import dmd.mangle: mangleToBuffer;
         import snakebite.frontend.dmd.mangle: completeMangleTargets;
-        import snakebite.frontend.compiler: frontend;
+        import snakebite.frontend.compiler: newInFrontend;
         import std.conv: text;
 
         if (type.vtinfo is null)
@@ -305,7 +305,7 @@ public struct RuntimeTypes {
             // function's own mangled signature - see `completeMangleTargets`.
             completeMangleTargets(classType.sym);
             OutBuffer mangled;
-            frontend!mangleToBuffer(classType.sym, mangled);
+            newInFrontend!mangleToBuffer(classType.sym, mangled);
             name = text("_D", mangled[], "7__ClassZ");
         }
         return cast(TypeInfo) _resolve(name);
@@ -375,8 +375,8 @@ public struct RuntimeTypes {
         import dmd.astenums: STC;
         import dmd.semantic3: semanticTypeInfoMembers, search_toString;
         import dmd.typesem: hasPointers;
-        import snakebite.frontend.compiler: frontend;
-        frontend!semanticTypeInfoMembers(declaration);
+        import snakebite.frontend.compiler: newInFrontend;
+        newInFrontend!semanticTypeInfoMembers(declaration);
         if (declaration.xhash !is null)
             info.xtoHash = cast(typeof(info.xtoHash))
                 _methodAddress(declaration.xhash, 0);
@@ -386,7 +386,7 @@ public struct RuntimeTypes {
         if (declaration.xcmp !is null)
             info.xopCmp = cast(typeof(info.xopCmp))
                 _methodAddress(declaration.xcmp, 0);
-        if (auto method = frontend!search_toString(declaration))
+        if (auto method = newInFrontend!search_toString(declaration))
             info.xtoString = cast(typeof(info.xtoString))
                 _methodAddress(method, 0);
         if (declaration.tidtor !is null)

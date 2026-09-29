@@ -186,14 +186,14 @@ private extern(C++) class Collector
     // parse into a nested mixin makes it happen speculatively too.
     private extern(D) string addressGuard(Reference reference, in string key) {
         import dmd.typesem: pointerTo;
-        import snakebite.frontend.compiler: frontend;
+        import snakebite.frontend.compiler: newInFrontend;
 
         const untyped = text("mixin(q{&", key, "})");
         string guard = text("__traits(compiles, { auto pointer = ", untyped, "; })");
         foreach (function_; reference.functions) {
             if (function_.type.isTypeFunction is null)
                 continue;
-            auto pointerType = frontend!pointerTo(function_.type);
+            auto pointerType = newInFrontend!pointerTo(function_.type);
             const declaration = text(sourceSpelling(pointerType.toChars.fromStringz),
                 " matched = pointer;");
             guard ~= text(" && __traits(compiles, { auto pointer = ", untyped,
@@ -206,7 +206,7 @@ private extern(C++) class Collector
         FuncDeclaration function_, in string key,
     ) {
         import dmd.typesem: pointerTo;
-        import snakebite.frontend.compiler: frontend;
+        import snakebite.frontend.compiler: newInFrontend;
         import snakebite.frontend.dmd.mangle: mangledNameOf;
 
         if (function_.type.isTypeFunction is null)
@@ -216,7 +216,7 @@ private extern(C++) class Collector
         // an inferred return type or attribute set dmd has not resolved
         // yet would otherwise print incomplete.
         const mangled = mangledNameOf(function_);
-        auto pointerType = frontend!pointerTo(function_.type);
+        auto pointerType = newInFrontend!pointerTo(function_.type);
         const pointer = text(sourceSpelling(pointerType.toChars.fromStringz),
             " pointer = &", key, ";");
         const result = text("{\nstatic if (__traits(compiles, { mixin(q{", pointer,

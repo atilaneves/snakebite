@@ -35,7 +35,7 @@ public void completeFunctionType(
     import dmd.dsymbol: PASS;
     import dmd.funcsem: functionSemantic;
     import snakebite.frontend.compiler:
-        diagnosticMessage, forceIfNeeded, frontend;
+        diagnosticMessage, forceIfNeeded, newInFrontend;
 
     // Acquire load - see `snakebite.frontend.compiler.forceIfNeeded`'s
     // own doc for why the unlocked check needs that much, not a plain
@@ -66,7 +66,7 @@ public void completeFunctionType(
             // `withCompilerLock`
             // resets it on exit, so the message carries dmd's real error
             // rather than a made-up one.
-            if (!frontend!functionSemantic(function_)) {
+            if (!newInFrontend!functionSemantic(function_)) {
                 import std.string: fromStringz;
 
                 assert(0, "dmd failed to complete " ~
@@ -101,9 +101,9 @@ public const(char)[] mangledNameOf(
     imported!"dmd.func".FuncDeclaration function_,
 ) {
     import dmd.mangle: mangleExact;
-    import snakebite.frontend.compiler: frontend;
+    import snakebite.frontend.compiler: newInFrontend;
     import std.string: fromStringz;
 
     completeMangleTargets(function_);
-    return frontend!mangleExact(function_).fromStringz;
+    return newInFrontend!mangleExact(function_).fromStringz;
 }

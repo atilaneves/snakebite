@@ -88,7 +88,7 @@ public imported!"dmd.dmodule".Module[] parseSnippets(in string[] sources) {
 // Runs host code under the frontend lock, so it sees dmd's state
 // settled and excludes every other thread's dmd work. It is still host
 // code: it allocates from the GC, and it reaches dmd only through
-// `frontend`.
+// `newInFrontend`.
 public void withCompilerLock(scope void delegate() action) {
     compiler.withLock(action);
 }
@@ -107,7 +107,7 @@ public void withCompilerLock(scope void delegate() action) {
 //
 // A debug build stops at the first dmd object made outside the frontend
 // (`snakebite.gc.requireInsideFrontend`).
-public auto frontend(alias dmdSymbol, Args...)(auto ref Args arguments) {
+public auto newInFrontend(alias dmdSymbol, Args...)(auto ref Args arguments) {
     static assert(
         declaredByDmd!dmdSymbol,
         __traits(identifier, dmdSymbol)
@@ -237,7 +237,7 @@ private string frontendArguments(in size_t count) {
     return list;
 }
 
-// Runs `force`, host code that reaches dmd through `frontend`, under
+// Runs `force`, host code that reaches dmd through `newInFrontend`, under
 // the frontend lock, but only when `ready` - a cheap,
 // lock-free read of the one dmd field a forward-reference forcing call
 // itself gates on (`FuncDeclaration.semanticRun`, `AggregateDeclaration.
@@ -321,13 +321,13 @@ public void forceIfNeeded(
 }
 
 // `forceIfNeeded` for a force that is one dmd call, made inside the
-// frontend (`frontend`).
+// frontend (`newInFrontend`).
 public void forceIfNeeded(alias dmdFunction, Args...)(
     scope bool delegate() ready,
     auto ref Args arguments,
 ) {
     if (!ready())
-        frontend!dmdFunction(arguments);
+        newInFrontend!dmdFunction(arguments);
 }
 
 final class Compiler {

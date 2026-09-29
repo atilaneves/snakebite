@@ -2,7 +2,7 @@ module ut.backends.run.inlineasm;
 
 
 import ut.backends;
-import snakebite.frontend.compiler: frontend, parseSnippet;
+import snakebite.frontend.compiler: newInFrontend, parseSnippet;
 import std.conv: text;
 import std.file: mkdirRecurse, rmdirRecurse, tempDir, write;
 import std.path: buildPath;
@@ -294,7 +294,7 @@ unittest {
     // list `rootImportPaths` below does not itself populate; add it
     // the same way `snakebite.repl.Repl.this()` does for a real
     // session.
-    frontend!addImport(directory);
+    newInFrontend!addImport(directory);
 
     parseSnippet(
         "import " ~ moduleName ~ ";",

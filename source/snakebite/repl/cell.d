@@ -79,7 +79,8 @@ public bool isImportCell(in string input) {
 public bool isIncompleteDeclaration(in string input) {
     import dmd.errors: diagnostics, ErrorKind;
     import dmd.frontend: parseModule;
-    import snakebite.frontend.compiler: frontend, resetErrors, withCompilerLock;
+    import snakebite.frontend.compiler:
+        newInFrontend, resetErrors, withCompilerLock;
     import std.conv: text;
 
     bool result;
@@ -88,7 +89,7 @@ public bool isIncompleteDeclaration(in string input) {
 
         resetErrors;
 
-        auto moduleResult = frontend!parseModule(
+        auto moduleResult = newInFrontend!parseModule(
             text("repl_probe_", atomicFetchAdd(_probeCounter, 1u), ".d"),
             input,
         );
