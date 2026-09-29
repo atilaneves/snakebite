@@ -8,6 +8,130 @@ module ut.backends.run.structs;
 
 import ut.backends;
 
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read runtime TypeInfo"),
+)) {
+    @("runtimeTypeInfoCallsGeneratedNestedLifetimeHooks." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Inner {
+                int* count;
+                this(this) { ++*count; }
+                ~this() { ++*count; }
+            }
+            struct Outer { Inner inner; }
+            void main() {
+                int count;
+                Outer value = Outer(Inner(&count));
+                typeid(Outer).postblit(&value);
+                typeid(Outer).destroy(&value);
+                assert(count == 2);
+            }
+        });
+    }
+
+    @("runtimeTypeInfoSkipsDisabledPostblit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Value {
+                int* count;
+                @disable this(this);
+            }
+            void main() {
+                int count;
+                Value value = Value(&count);
+                typeid(Value).postblit(&value);
+                assert(count == 0);
+            }
+        });
+    }
+
+    @("runtimeTypeInfoCallsStructHash." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Key {
+                int value;
+                size_t toHash() const nothrow @safe {
+                    return 12345;
+                }
+            }
+            void main() {
+                Key key = Key(7);
+                assert(typeid(Key).getHash(&key) == 12345);
+            }
+        });
+    }
+    @("runtimeTypeInfoCallsStructEquality." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Key {
+                int value;
+                bool opEquals(ref const Key other) const {
+                    return value % 10 == other.value % 10;
+                }
+            }
+            void main() {
+                Key a = Key(1), b = Key(11);
+                assert(typeid(Key).equals(&a, &b));
+            }
+        });
+    }
+
+    @("runtimeTypeInfoCallsStructComparison." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Key {
+                int value;
+                int opCmp(ref const Key other) const {
+                    return other.value - value;
+                }
+            }
+            void main() {
+                Key a = Key(1), b = Key(2);
+                assert(typeid(Key).compare(&a, &b) > 0);
+            }
+        });
+    }
+
+    @("runtimeTypeInfoCallsStructDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Value {
+                int* count;
+                ~this() { ++*count; }
+            }
+            void main() {
+                int count;
+                Value value = Value(&count);
+                typeid(Value).destroy(&value);
+                assert(count == 1);
+            }
+        });
+    }
+
+    @("runtimeTypeInfoCallsStructPostblit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Value {
+                int* count;
+                this(this) { ++*count; }
+            }
+            void main() {
+                int count;
+                Value value = Value(&count);
+                typeid(Value).postblit(&value);
+                assert(count == 1);
+            }
+        });
+    }
+}
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read runtime TypeInfo"),
@@ -217,9 +341,22 @@ static foreach (backend; Matrix!(
             struct Value {
                 int field = 42;
             }
+            struct InnerPointers { int* field; }
+            struct PointerValue {
+                int prefix;
+                InnerPointers nested;
+                InnerPointers[2] repeated;
+            }
+            enum pointerMap = __traits(getPointerBitmap, PointerValue);
             void main() {
                 auto structInfo = cast(TypeInfo_Struct) typeid(Value);
                 assert(*cast(int*) structInfo.m_init.ptr == 42);
+                assert(structInfo.rtInfo is null);
+                assert(typeid(PointerValue).rtInfo !is null);
+                auto runtimePointerMap = cast(size_t*)
+                    typeid(PointerValue).rtInfo;
+                foreach (i; 0 .. pointerMap.length)
+                    assert(runtimePointerMap[i] == pointerMap[i]);
                 auto enumInfo = cast(TypeInfo_Enum) typeid(Code);
                 assert(*cast(int*) enumInfo.m_init.ptr == 7);
                 assert((cast(TypeInfo_Pointer) typeid(int*)).m_next
