@@ -632,7 +632,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, delegateTargetOf,
         outerFunctionOf;
-    import snakebite.backends.aggregateinit: InitStep;
+    import snakebite.backends.aggregateinit: InitStep, NewPlan;
     import snakebite.backends.builtins: BuiltinCall;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.closureplan: ClosurePlan;
@@ -2303,6 +2303,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         withFullExpression(FullExpressionKind.effect, expression,
             { expression.accept(this); },
         );
+    }
+
+    // `NewExp.argprefix` stages constructor arguments before the call. Its
+    // declarations and any destructible values must stay alive until the
+    // enclosing `NewExp` finishes, so execute it in the current full
+    // expression instead of opening a nested one that would clean them up
+    // before the constructor reads its arguments.
+    private void compileEffectInCurrentLifetime(Expression expression) {
+        const destination = _destination;
+        const width = _width;
+        scope (exit) {
+            _destination = destination;
+            _width = width;
+        }
+
+        _destination = discardResult;
+        _width = 0;
+        expression.accept(this);
     }
 
     private void compileValue(
@@ -4513,22 +4531,52 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _valueType = destination.type;
     }
 
-    protected override void visitUnloweredNew(NewExp expression) {
-        auto classType = expression.newtype.isTypeClass;
-        if (!expression.onstack || classType is null
-                || expression.placement !is null || expression.thisexp !is null)
+    protected override void visitUnloweredNew(
+        NewExp expression, NewPlan plan,
+    ) {
+        if (expression.thisexp !is null)
+            return visit(cast(Expression) expression);
+
+        if (plan.destination == NewPlan.Destination.lowering)
             return visit(cast(Expression) expression);
 
         prepareNewDestination(expression);
         scope (exit) restoreNew;
-        auto declaration = classType.sym;
-        auto runtime = _bytecode.classRuntimeInfo(declaration);
-        const alignment = declaration.alignsize == 0
-            ? 1 : declaration.alignsize;
-        const object = reserveTemp(TypeFacts(declaration.structsize, alignment));
-        emit(&opStaticLoad, object, cast(size_t) runtime.m_init.ptr,
-            runtime.m_init.length);
-        emit(&opFrameAddress, _destination, object, size_t.sizeof);
+
+        if (plan.destination == NewPlan.Destination.placement) {
+            const address = compileAddress(plan.placement);
+            emit(&opCopy, _destination, address, size_t.sizeof);
+        } else {
+            assert(plan.destination == NewPlan.Destination.stack
+                && plan.objectKind == NewPlan.ObjectKind.class_);
+            auto classType = expression.newtype.toBasetype.isTypeClass;
+            assert(classType !is null);
+            auto declaration = classType.sym;
+            auto runtime = _bytecode.classRuntimeInfo(declaration);
+            const alignment = declaration.alignsize == 0
+                ? 1 : declaration.alignsize;
+            const object = reserveTemp(
+                TypeFacts(declaration.structsize, alignment));
+            emit(&opStaticLoad, object, cast(size_t) runtime.m_init.ptr,
+                runtime.m_init.length);
+            emit(&opFrameAddress, _destination, object, size_t.sizeof);
+        }
+
+        if (plan.objectKind == NewPlan.ObjectKind.class_
+                && plan.destination == NewPlan.Destination.placement) {
+            auto classType = expression.newtype.toBasetype.isTypeClass;
+            assert(classType !is null);
+            auto declaration = classType.sym;
+            auto runtime = _bytecode.classRuntimeInfo(declaration);
+            const image = reserveTemp(TypeFacts(
+                runtime.m_init.length, declaration.alignsize == 0
+                    ? 1 : declaration.alignsize));
+            emit(&opStaticLoad, image, cast(size_t) runtime.m_init.ptr,
+                runtime.m_init.length);
+            emit(&opStoreIndirect, _destination, image,
+                runtime.m_init.length);
+        }
+
         visitLoweredNew(expression);
     }
 
@@ -4566,8 +4614,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // arguments at all) get a real context rather than `.init`'s zero.
     private void compileNew(NewExp expression) {
         import snakebite.backends.aggregateinit:
-            driveInit, planClassContext, planPositionalFields;
+            driveInit, planClassContext, planNew, planPositionalFields;
 
+        auto newPlan = planNew(expression);
         auto structType = expression.newtype.toBasetype.isTypeStruct;
         const objectOffset = _destination;
         const storage = indirectStorage(objectOffset);
@@ -4579,10 +4628,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto hooks = AggregateInitHooks(this, expression.loc, storage);
         driveInit(hooks, plan, expression.member !is null,
-            () => compileResolvedCall(
-                expression.member, expression.arguments, expression.loc,
-                expressionText(expression), true, () => objectOffset,
-                discardResult));
+            () {
+                if (newPlan.argumentPrefix !is null)
+                    compileEffectInCurrentLifetime(
+                        newPlan.argumentPrefix);
+                compileResolvedCall(
+                    expression.member, expression.arguments, expression.loc,
+                    expressionText(expression), true, () => objectOffset,
+                    discardResult);
+            });
     }
 
     override void visit(DeleteExp expression) {

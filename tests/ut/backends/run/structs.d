@@ -1174,6 +1174,101 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+
+// Placement `new` initializes the object at the lvalue's address and
+// returns that same address. The storage and initializer are each
+// evaluated once, even when both have visible effects.
+static foreach (backend; Matrix!()) {
+    @("placementNew.scalarUsesStorageOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int storageEvaluations;
+            int argumentEvaluations;
+            int value;
+
+            ref int storage() {
+                ++storageEvaluations;
+                return value;
+            }
+
+            int argument() {
+                ++argumentEvaluations;
+                return 73;
+            }
+
+            void main() {
+                int unchanged = 31;
+                int* defaultResult = new (unchanged) int;
+                assert(defaultResult == &unchanged);
+                assert(unchanged == 31);
+
+                int* result = new (storage()) int(argument());
+                assert(result == &value);
+                assert(*result == 73);
+                assert(storageEvaluations == 1);
+                assert(argumentEvaluations == 1);
+            }
+        });
+    }
+}
+
+
+// D's named struct arguments choose fields by name, while omitted fields
+// receive their declared initializer. Placement construction must preserve
+// the caller's object identity through both writes.
+static foreach (backend; Matrix!()) {
+    @("placementNew.structNamedFieldUsesDefault." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Value {
+                int first = 41;
+                int second = 7;
+            }
+
+            void main() {
+                Value storage = void;
+                Value* result = new (storage) Value(second: 73);
+                assert(result == &storage);
+                assert(storage.first == 41);
+                assert(storage.second == 73);
+            }
+        });
+    }
+}
+
+
+// A user-defined constructor writes directly into the supplied storage.
+// Its untouched fields keep the caller's old bytes, since placement does
+// not first copy the struct's `.init` value over that storage.
+static foreach (backend; Matrix!()) {
+    @("placementNew.structConstructorKeepsUntouchedBytes." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Value {
+                int initialized;
+                int untouched;
+
+                this(int value) {
+                    initialized = value;
+                }
+            }
+
+            void main() {
+                Value storage = void;
+                storage.untouched = 29;
+                Value* result = new (storage) Value(73);
+                assert(result == &storage);
+                assert(storage.initialized == 73);
+                assert(storage.untouched == 29);
+            }
+        });
+    }
+}
+
 // A discarded allocation still runs its constructor exactly once.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,

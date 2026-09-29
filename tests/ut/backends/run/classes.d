@@ -674,6 +674,62 @@ static foreach (backend; Matrix!(
     }
 }
 
+
+// Class placement construction writes the class init image into the
+// supplied bytes before it runs the constructor, then returns a reference
+// to those same bytes.
+static foreach (backend; Matrix!()) {
+    @("placementNew.classInitializesCallerStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class DefaultValue {
+                int value = 41;
+            }
+
+            class ConstructedValue {
+                int value;
+                this(int value) { this.value = value; }
+            }
+
+            void main() {
+                void*[4] defaultStorage;
+                void*[4] constructedStorage;
+                auto defaultValue = new (defaultStorage) DefaultValue;
+                auto constructedValue =
+                    new (constructedStorage) ConstructedValue(73);
+
+                assert(cast(void*) defaultValue == defaultStorage.ptr);
+                assert(defaultValue.value == 41);
+                assert(cast(void*) constructedValue == constructedStorage.ptr);
+                assert(constructedValue.value == 73);
+            }
+        });
+    }
+}
+
+
+// D lowers an anonymous class expression to its declaration followed by
+// the same class construction as a named type. Placement keeps that
+// generated class object in the supplied bytes.
+static foreach (backend; Matrix!()) {
+    @("placementNew.anonymousClassUsesCallerStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                void*[4] storage;
+                auto value = new (storage) class {
+                    int number = 41;
+                };
+
+                assert(cast(void*) value == storage.ptr);
+                assert(value.number == 41);
+            }
+        });
+    }
+}
+
 // `scope` on the variable, not the class, still runs the destructor at
 // scope exit and allocates off the GC heap. `resource`'s type is inferred
 // (dmd's dsymbolsem.d runs a full expressionSemantic on the initialiser

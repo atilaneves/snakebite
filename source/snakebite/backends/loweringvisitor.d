@@ -12,6 +12,7 @@ import dmd.expression:
 import dmd.statement: ThrowStatement;
 import snakebite.backends.identity: IdentityPlan, identityPlan;
 import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
+import snakebite.backends.aggregateinit: NewPlan, planNew;
 import dmd.visitor: Visitor;
 import dmd.mtype: Type;
 import snakebite.nativelayout: TypeFacts;
@@ -172,13 +173,14 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // run the heap-allocating lowering for a `scope` variable of an
     // ordinary (non-`scope`) class instead of taking the on-stack path.
     final override void visit(NewExp expression) {
-        if (expression.onstack || expression.placement !is null) {
-            visitUnloweredNew(expression);
+        auto plan = planNew(expression);
+        if (plan.destination != NewPlan.Destination.lowering) {
+            visitUnloweredNew(expression, plan);
             return;
         }
 
         if (expression.lowering is null) {
-            visitUnloweredNew(expression);
+            visitUnloweredNew(expression, plan);
             return;
         }
 
@@ -188,7 +190,9 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
         visitLoweredNew(expression);
     }
 
-    protected abstract void visitUnloweredNew(NewExp expression);
+    protected abstract void visitUnloweredNew(
+        NewExp expression, NewPlan plan,
+    );
 
     protected abstract void prepareNew(NewExp expression);
     protected abstract void restoreNew();
