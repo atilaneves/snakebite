@@ -4534,7 +4534,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     protected override void visitUnloweredNew(
         NewExp expression, NewPlan plan,
     ) {
-        if (expression.thisexp !is null)
+        if (expression.thisexp !is null
+                && plan.destination != NewPlan.Destination.placement
+                && plan.destination != NewPlan.Destination.stack)
             return visit(cast(Expression) expression);
 
         if (plan.destination == NewPlan.Destination.lowering)

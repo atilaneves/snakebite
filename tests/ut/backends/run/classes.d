@@ -730,6 +730,98 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+
+// Placement does not remove the explicit outer object from a nested class
+// allocation. The constructor and later method must both use that same
+// outer object, while the class itself stays in caller storage.
+static foreach (backend; Matrix!()) {
+    @("placementNew.nestedClassUsesExplicitOuter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Outer {
+                int value = 7;
+
+                final class Inner {
+                    this(int increment) { value += increment; }
+                    int get() { return value; }
+                }
+            }
+
+            void main() {
+                auto outer = new Outer;
+                void*[4] storage;
+                auto inner = outer.new (storage) Inner(5);
+
+                assert(cast(void*) inner == storage.ptr);
+                assert(inner.get() == 12);
+                assert(outer.value == 12);
+            }
+        });
+    }
+}
+
+
+// The on-stack route must also initialize the explicit outer context before
+// it calls a nested class constructor.
+static foreach (backend; Matrix!()) {
+    @("scopeNestedClassUsesExplicitOuter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Outer {
+                int value = 7;
+
+                final class Inner {
+                    this(int increment) { value += increment; }
+                    int get() { return value; }
+                }
+            }
+
+            void main() {
+                auto outer = new Outer;
+                {
+                    scope inner = outer.new Inner(5);
+                    assert(inner.get() == 12);
+                }
+                assert(outer.value == 12);
+            }
+        });
+    }
+}
+
+
+// A nested class in a function has no explicit outer-object expression.
+// Its constructor must receive the captured function context for both
+// placement and stack allocation.
+static foreach (backend; Matrix!()) {
+    @("nestedClassConstructorUsesCapturedContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int value = 7;
+
+                final class Inner {
+                    this(int increment) { value += increment; }
+                    int get() { return value; }
+                }
+
+                void*[4] storage;
+                auto placed = new (storage) Inner(5);
+                assert(cast(void*) placed == storage.ptr);
+                assert(placed.get() == 12);
+
+                {
+                    scope stacked = new Inner(3);
+                    assert(stacked.get() == 15);
+                }
+                assert(value == 15);
+            }
+        });
+    }
+}
+
 // `scope` on the variable, not the class, still runs the destructor at
 // scope exit and allocates off the GC heap. `resource`'s type is inferred
 // (dmd's dsymbolsem.d runs a full expressionSemantic on the initialiser

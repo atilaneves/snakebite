@@ -5010,8 +5010,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import core.stdc.string: memcpy;
         import snakebite.nativelayout: storeIntegral;
 
-        if (expression.thisexp !is null
-                || plan.destination == NewPlan.Destination.lowering)
+        if (plan.destination == NewPlan.Destination.lowering
+                || (expression.thisexp !is null
+                    && plan.destination != NewPlan.Destination.placement
+                    && plan.destination != NewPlan.Destination.stack))
             return visit(cast(Expression) expression);
 
         if (plan.destination == NewPlan.Destination.stack) {
