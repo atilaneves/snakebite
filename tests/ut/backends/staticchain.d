@@ -5,12 +5,13 @@ import ut;
 import dmd.dsymbol: Dsymbol;
 import dmd.func: FuncDeclaration;
 import dmd.statement: Statement;
-import snakebite.backends.staticchain: Hop, staticChainPath;
+import snakebite.backends.closureplan: ClosurePlan, Hop;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 
 
-// `staticChainPath` is a pure function of two `FuncDeclaration`s, decided
+// `ClosurePlan.staticChainPath` is a pure function of two
+// `FuncDeclaration`s, decided
 // once and read by both backends the way `ut.backends.casts` pins
 // `classify`'s `CastExp` counterpart. A local function or struct declared
 // directly inside a function body reaches dmd's semantic pass as a
@@ -94,7 +95,7 @@ unittest {
         }
     }, "outer", "inner");
 
-    const path = staticChainPath(nesting.target, nesting.outer);
+    const path = ClosurePlan.staticChainPath(nesting.target, nesting.outer);
 
     path.length.should == 1;
     path[0].kind.should == Hop.Kind.frameSlot;
@@ -117,7 +118,7 @@ unittest {
         }
     }, "outer", "m");
 
-    const path = staticChainPath(nesting.target, nesting.outer);
+    const path = ClosurePlan.staticChainPath(nesting.target, nesting.outer);
 
     path.length.should == 2;
     path[0].kind.should == Hop.Kind.frameSlot;
@@ -147,7 +148,7 @@ unittest {
         }
     }, "outer", "leaf");
 
-    const path = staticChainPath(nesting.target, nesting.outer);
+    const path = ClosurePlan.staticChainPath(nesting.target, nesting.outer);
 
     path.length.should == 2;
     path[0].kind.should == Hop.Kind.frameSlot;
@@ -165,5 +166,6 @@ unittest {
         }
     }, "outer", "inner");
 
-    (staticChainPath(nesting.outer, nesting.outer) is null).should == true;
+    (ClosurePlan.staticChainPath(nesting.outer, nesting.outer) is null)
+        .should == true;
 }
