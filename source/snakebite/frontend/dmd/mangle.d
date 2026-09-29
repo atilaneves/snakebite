@@ -34,7 +34,7 @@ public void completeFunctionType(
     import core.atomic: atomicLoad, MemoryOrder;
     import dmd.dsymbol: PASS;
     import dmd.funcsem: functionSemantic;
-    import snakebite.frontend.compiler: forceIfNeeded;
+    import snakebite.frontend.compiler: diagnosticMessage, forceIfNeeded;
 
     // Acquire load - see `snakebite.frontend.compiler.forceIfNeeded`'s
     // own doc for why the unlocked check needs that much, not a plain
@@ -50,7 +50,29 @@ public void completeFunctionType(
     forceIfNeeded(
         () => atomicLoad!(MemoryOrder.acq)(function_.semanticRun)
             >= PASS.semantic3done,
-        () { functionSemantic(function_); },
+        () {
+            // dmd's own callers never mangle past a failed
+            // `functionSemantic`: `glue/toobj.d`'s `finishVtbl` fails the
+            // whole compile, and `expressionsem.d` replaces the
+            // expression with an `ErrorExp` instead of reading the
+            // function's type. `mangleExact` has no such guard - it
+            // caches whatever the type looks like right now
+            // (`fd.mangleString`) forever, so mangling past a failure
+            // would poison that cache with a wrong name. The reviewer
+            // found no reachable trigger for this in snakebite today
+            // (every dependency compiles natively, so its bodies already
+            // passed semantic before snakebite ever sees them); read
+            // dmd's own captured diagnostic here, before `withCompilerLock`
+            // resets it on exit, so the message carries dmd's real error
+            // rather than a made-up one.
+            if (!functionSemantic(function_)) {
+                import std.string: fromStringz;
+
+                assert(0, "dmd failed to complete " ~
+                    function_.toChars.fromStringz.idup ~
+                    "'s semantic before mangling: " ~ diagnosticMessage);
+            }
+        },
     );
 }
 
