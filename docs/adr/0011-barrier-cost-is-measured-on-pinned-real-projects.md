@@ -25,16 +25,16 @@ it could not see a doubled dispatch, which read 5.2 to 5.4 when the
 limit was set. A time ratio on shared CI machines is not a reliable
 gate, so no micro benchmark gates the barrier now.
 
-A macro benchmark measures the barrier cost instead: a suite of real
-dub projects, each pinned to a commit. The bench harness fetches each
-project at its pin. No project's source is copied into `examples/`.
-The suite has three projects. Cerealed gives heavy template and range use over phobos,
-with no dependencies of its own. unit-threaded's own test suite gives
-nine subpackage archives and a task pool, so it exercises callbacks
-and threads. One project that binds a C library gives C variadics and
-C callback entries. Each project runs on both backends, with `dub
-test` as the oracle for correctness. Each run reports the barrier's
-share of total run time as its own row, and image build time
+A macro benchmark measures the barrier cost instead: a suite of real dub
+projects, each pinned to a commit. The bench harness fetches each
+project at its pin. No project's source is copied into `examples/`. The
+suite has three projects. Cerealed gives heavy template and range use
+over phobos, with no dependencies of its own. unit-threaded's own test
+suite gives nine subpackage archives and a task pool, so it exercises
+callbacks and threads. One project that binds a C library gives C
+variadics and C callback entries. Each project runs on both backends,
+with `dub test` as the oracle for correctness. Each run reports the
+barrier's share of total run time as its own row, and image build time
 (ADR-0007) as another row.
 
 The first pass over this suite only reports numbers. No macro gate
