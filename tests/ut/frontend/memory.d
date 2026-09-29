@@ -68,13 +68,17 @@ unittest {
 
 
 // The report finds a GC pointer stored in the arena. Serial: every other
-// test that reads the report expects an empty one.
+// test that reads the report expects an empty one. `--lowmem` puts the
+// identifier itself on the GC heap, so the planted word never lands in
+// the arena and the report stays empty; the report only ever names GC
+// pointers that the arena holds.
 debug
 @("arenaHoldsNoGCPointers.reportsAPointerIntoTheGCHeap")
 @Serial
 unittest {
     import dmd.identifier: Identifier;
     import snakebite.frontend.compiler: frontend;
+    import snakebite.gc: lowmem;
 
     // An identifier's name is arena memory the test can write a word to.
     auto identifier = frontend!(Identifier.idPool)(
@@ -85,7 +89,10 @@ unittest {
     *word = block.ptr;
     scope(exit) *word = saved;
 
-    "1 arena words point into the GC heap".should.be in arenaReport;
+    if (lowmem)
+        arenaReport.should == "";
+    else
+        "1 arena words point into the GC heap".should.be in arenaReport;
 }
 
 
