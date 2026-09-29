@@ -13,7 +13,9 @@ import snakebite.backends.switchplan:
 import snakebite.backends.fullexpression:
     FullExpressionKind, FullExpressionScope;
 import snakebite.backends.controlflow:
-    ScopeFrame, cleanupCount, scopePath;
+    ScopeFrame, scopePath;
+import snakebite.backends.exceptionplan:
+    UnwindPlan, catchPlanOf, unwindPlanOf;
 import snakebite.backends.druntimehooks: DruntimeHook, planOf, specOf;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
 
@@ -1363,6 +1365,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(TryCatchStatement statement) {
+        // DMD AST nodes stay mutable through this plan for code generation.
+        auto plan = catchPlanOf(
+            statement, catch_ => runtimeClassInfo(catch_.type),
+        );
         const finallyDepthAtStart = _pendingFinallyBodies.length;
         const bodyStart = _instructions.length;
         _activeScopePath ~= ScopeFrame(cast(void*) statement, false);
@@ -1385,16 +1391,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // The last handler needs none: whatever follows the whole
         // statement already sits right after it.
         size_t[] skipRemainingHandlers;
-        const catchCount = statement.catches.length;
-        foreach (i, catch_; *statement.catches) {
+        const catchCount = plan.clauses.length;
+        foreach (i, clause; plan.clauses) {
+            auto catch_ = clause.syntax;
             const handler = _instructions.length;
             const catchOffset = catch_.var is null
                 ? size_t.max
                 : _layout.offsetOf(catch_.var);
-            auto type = runtimeClassInfo(catch_.type);
             foreach (range; protectedRanges(bodyStart, bodyEnd, finallyDepthAtStart))
                 _exceptionHandlers ~= PendingExceptionHandler(
-                    type, range.start, range.end, handler, catchOffset,
+                    clause.type, range.start, range.end, handler, catchOffset,
                 );
 
             _finished = false;
@@ -1420,7 +1426,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _pendingFinallyBodies ~= statement.finalbody;
         const finallyDepth = _pendingFinallyBodies.length;
         const bodyStart = _instructions.length;
-        _activeScopePath ~= ScopeFrame(cast(void*) statement, true);
+        _activeScopePath ~= ScopeFrame(
+            cast(void*) statement, true, statement.finalbody,
+        );
         compileStatement(statement._body);
         const bodyEnd = _instructions.length;
         const bodyFinished = _finished;
@@ -1583,13 +1591,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto target = gotoCaseTarget(statement);
         assert(target !is null);
 
-        const cleanup = cleanupCount(
+        // Finalizer bodies stay mutable DMD statements for code generation.
+        auto unwind = unwindPlanOf(
             activeScopePath,
             scopePath(_switchStack[$ - 1].tryBody),
         );
-        if (cleanup == size_t.max)
-            throw rejection(_function, statement.loc, statementText(statement));
-        runPendingFinallyBodies(cleanup);
+        runPendingFinallyBodies(unwind);
 
         const index = _instructions.length;
         emit(&opJump, 0, 0, 0);
@@ -1603,13 +1610,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto plan = switchPlan(statement.sw);
         assert(target is plan.defaultTarget);
 
-        const cleanup = cleanupCount(
+        // Finalizer bodies stay mutable DMD statements for code generation.
+        auto unwind = unwindPlanOf(
             activeScopePath,
             scopePath(statement.sw.tryBody),
         );
-        if (cleanup == size_t.max)
-            throw rejection(_function, statement.loc, statementText(statement));
-        runPendingFinallyBodies(cleanup);
+        runPendingFinallyBodies(unwind);
 
         const index = _instructions.length;
         emit(&opJump, 0, 0, 0);
@@ -1622,13 +1628,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             throw rejection(_function, statement.loc, statementText(statement));
 
         auto target = statement.label.statement;
-        const cleanup = cleanupCount(
+        // Finalizer bodies stay mutable DMD statements for code generation.
+        auto unwind = unwindPlanOf(
             scopePath(statement.tryBody), scopePath(target.tryBody),
         );
-        if (cleanup == size_t.max)
-            throw rejection(_function, statement.loc, statementText(statement));
-
-        runPendingFinallyBodies(cleanup);
+        runPendingFinallyBodies(unwind);
         if (_finished)
             return;
 
@@ -1671,7 +1675,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (target == size_t.max)
             throw rejection(_function, statement.loc, statementText(statement));
 
-        runPendingFinallyBodies(cleanupCount(
+        runPendingFinallyBodies(unwindPlanOf(
             activeScopePath, _breakables[target].scopePath,
         ));
         if (_finished)
@@ -1687,14 +1691,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private TypeInfo_Class runtimeClassInfo(Type declared) {
         import dmd.astenums: Tclass;
-        import std.conv: text;
 
         auto type = declared.toBasetype;
-        if (type.ty != Tclass)
-            throw new SnakebiteException(text(
-                "bytecode compiler cannot compile a non-class catch type `",
-                type.toString, "`",
-            ));
+        assert(type.ty == Tclass);
 
         return cast(TypeInfo_Class) cast() _bytecode._runtimeTypes.get(type);
     }
@@ -1704,7 +1703,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // synthetic `0` dmd appends to `main` - nowhere to write it, so it
         // is discarded the same way the interpreter discards it.
         if (_isVoidReturn || statement.exp is null) {
-            runPendingFinallyBodies();
+            runPendingFinallyBodies(unwindPlanOf(activeScopePath));
             if (_finished)
                 return;
             emit(&opReturnVoid, 0, 0, 0);
@@ -1714,7 +1713,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (_isRefReturn) {
             const addressOffset = compileAddress(statement.exp);
-            runPendingFinallyBodies();
+            runPendingFinallyBodies(unwindPlanOf(activeScopePath));
             if (_finished)
                 return;
             emit(&opReturn, 0, addressOffset, size_t.sizeof);
@@ -1729,7 +1728,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // way out.
         const offset = reserveTemp(_returnFacts);
         compileValue(statement.exp, offset, _returnFacts.size);
-        runPendingFinallyBodies();
+        runPendingFinallyBodies(unwindPlanOf(activeScopePath));
         if (_finished)
             return;
         emit(&opReturn, 0, offset, _returnFacts.size);
@@ -1739,12 +1738,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // Each exit emits the shared scope plan's cleanup sequence. Temporarily
     // leave each scope before compiling its cleanup: transfers and failures
     // inside that cleanup must see only the scopes that still enclose it.
-    private void runPendingFinallyBodies(
-        in size_t count = size_t.max,
-    ) {
-        const actualCount = count == size_t.max
-            ? cleanupCount(activeScopePath, null) : count;
-        if (actualCount == 0)
+    private void runPendingFinallyBodies(UnwindPlan plan) {
+        if (plan.finalizers.length == 0)
             return;
 
         auto bodies = _pendingFinallyBodies.dup; // Restored to mutable compiler state.
@@ -1754,13 +1749,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _activeScopePath = scopes;
         }
         auto scopeEnd = scopes.length;
-        foreach (offset; 0 .. actualCount) {
+        foreach (offset, finalizer; plan.finalizers) {
             const index = bodies.length - offset - 1;
-            while (scopeEnd != 0 && !scopes[--scopeEnd].cleanup) {}
+            assert(bodies[index] is finalizer.body);
+            while (scopeEnd != 0
+                    && scopes[scopeEnd - 1].owner != finalizer.owner)
+                --scopeEnd;
+            assert(scopeEnd != 0);
+            --scopeEnd;
             _pendingFinallyBodies = bodies[0 .. index].dup;
             _activeScopePath = scopes[0 .. scopeEnd].dup;
             const start = _instructions.length;
-            compileFinallyBody(bodies[index]);
+            compileFinallyBody(finalizer.body);
             _finallyHoles ~= FinallyHole(start, _instructions.length, index);
             if (_finished)
                 return;
@@ -2145,7 +2145,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (index == size_t.max)
             throw rejection(_function, statement.loc, statementText(statement));
 
-        runPendingFinallyBodies(cleanupCount(
+        runPendingFinallyBodies(unwindPlanOf(
             activeScopePath, _loops[index].scopePath,
         ));
         if (_finished)

@@ -143,8 +143,11 @@ public struct ControlFlowState {
 }
 
 public struct ScopeFrame {
+    import dmd.statement: Statement;
+
     public const(void)* owner;
     public bool cleanup;
+    public Statement finallyBody;
 }
 
 public ScopeFrame[] scopePath(imported!"dmd.statement".Statement scope_)
@@ -153,11 +156,13 @@ public ScopeFrame[] scopePath(imported!"dmd.statement".Statement scope_)
     ScopeFrame[] result;
     while (scope_ !is null) {
         if (auto finally_ = scope_.isTryFinallyStatement()) {
-            result ~= ScopeFrame(cast(void*) finally_, true);
+            result ~= ScopeFrame(
+                cast(void*) finally_, true, finally_.finalbody,
+            );
             scope_ = finally_.tryBody;
         }
         else if (auto catch_ = scope_.isTryCatchStatement()) {
-            result ~= ScopeFrame(cast(void*) catch_, false);
+            result ~= ScopeFrame(cast(void*) catch_, false, null);
             scope_ = catch_.tryBody;
         }
         else {
@@ -165,26 +170,4 @@ public ScopeFrame[] scopePath(imported!"dmd.statement".Statement scope_)
         }
     }
     return result;
-}
-
-public size_t cleanupCount(
-    scope const(ScopeFrame)[] source,
-    scope const(ScopeFrame)[] destination,
-) @safe @nogc nothrow pure scope {
-    size_t sourceEnd = source.length;
-    size_t destinationEnd = destination.length;
-    while (sourceEnd != 0 && destinationEnd != 0
-            && source[sourceEnd - 1].owner
-                == destination[destinationEnd - 1].owner) {
-        --sourceEnd;
-        --destinationEnd;
-    }
-
-    if (destinationEnd != 0)
-        return size_t.max;
-
-    size_t count;
-    foreach (frame; source[0 .. sourceEnd])
-        count += frame.cleanup;
-    return count;
 }
