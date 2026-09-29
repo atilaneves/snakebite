@@ -2059,14 +2059,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     private long asIntegral(Expression expression, in TypeFacts facts) {
         import snakebite.nativelayout: loadIntegral;
-        import std.conv: text;
 
         auto type = expression.type;
-        if (!facts.isIntegral)
-            throw new SnakebiteException(
-                text("interpreter cannot evaluate `", expression.toString,
-                    "` as an integral: its type is `", type.toString, "`"),
-            );
+        assert(facts.isIntegral,
+            "asIntegral receives an integral expression");
 
         align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;
         assert(facts.size <= buffer.sizeof && facts.alignment <= buffer.alignof,
@@ -3246,20 +3242,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     ) {
         import snakebite.frontend.storage: compoundTarget;
         import snakebite.nativevalue: loadFloating, storeFloating;
-        import std.conv: text;
 
         auto target_ = compoundTarget(expression);
         auto target = resolvedTarget;
         if (target is null)
-            try {
-                target = addressOf(target_);
-            } catch (SnakebiteException) {
-                throw new SnakebiteException(
-                    text("interpreter cannot assign to `",
-                        expression.e1.toString, "`: ",
-                        expression.toString),
-                );
-            }
+            target = addressOf(target_);
 
         const targetFacts = factsOf(target_.type);
         const operationFacts = factsOf(expression.e1.type);
@@ -3312,7 +3299,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     ) {
         import snakebite.frontend.storage: compoundTarget;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
-        import std.conv: text;
 
         auto target_ = compoundTarget(expression);
         const targetFacts = factsOf(target_.type);
@@ -3328,15 +3314,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             targetFacts.alignment, true, operationFacts.isUnsigned);
         auto target = resolvedTarget;
         if (target is null)
-            try {
-                target = addressOf(expression.e1);
-            } catch (SnakebiteException) {
-                throw new SnakebiteException(
-                    text("interpreter cannot assign to `",
-                        expression.e1.toString, "`: `", expression.toString,
-                        "`"),
-                );
-            }
+            target = addressOf(expression.e1);
 
         // A narrow target (`ubyte`, `short`, ...) arrives wrapped in the
         // `CastExp` dmd's `integralPromotions` adds for the operation
@@ -6014,7 +5992,7 @@ private ulong combine(string op)(
         return shifted!op(a, b, aFacts, expression);
     else static if (op == "/" || op == "%")
         return divided!op(
-            a, b, sharedSignedness(aFacts, bFacts, expression), expression);
+            a, b, sharedSignedness(aFacts, bFacts), expression);
     else
         // `+`, `-`, `*`, `&`, `|` and `^` leave the same low bits
         // whichever way the operands were widened, so no signedness
@@ -6025,21 +6003,13 @@ private ulong combine(string op)(
 // The signedness that governs an operation whose answer depends on it.
 // dmd's usual arithmetic conversions bring both operands to one common
 // type before the interpreter sees the node - a narrower or differently
-// signed operand arrives wrapped in a `CastExp` - so the two agree. If
-// they ever do not, nothing here could pick between them, so this
-// refuses instead of answering from one of them.
+// signed operand arrives wrapped in a `CastExp` - so the two agree.
 private bool sharedSignedness(
     in imported!"snakebite.nativelayout".TypeFacts a,
     in imported!"snakebite.nativelayout".TypeFacts b,
-    imported!"dmd.expression".Expression expression,
 ) {
-    import std.conv: text;
-
-    if (a.isUnsigned != b.isUnsigned)
-        throw new SnakebiteException(
-            text("interpreter cannot evaluate `", expression.toString,
-                "`: its operands differ in signedness"),
-        );
+    assert(a.isUnsigned == b.isUnsigned,
+        "D arithmetic conversions give both operands one signedness");
 
     return a.isUnsigned;
 }
@@ -6088,8 +6058,8 @@ private ulong divided(string op)(
 //
 // A count outside `[0, width)` is undefined in D, and the host's shift
 // instruction answers it by taking the count modulo the register width,
-// which is a plausible wrong answer rather than the guest's own. It is
-// refused instead.
+// which is a plausible wrong answer rather than the guest's own. Report
+// the invalid count instead.
 private ulong shifted(string op)(
     in long a,
     in long b,
@@ -6101,7 +6071,7 @@ private ulong shifted(string op)(
     const width = aFacts.size * 8;
     if (b < 0 || b >= width)
         throw new SnakebiteException(
-            text("interpreter cannot shift by ", b, " in `",
+            text("interpreter: invalid shift count ", b, " in `",
                 expression.toString, "`: the left operand has ", width,
                 " bits"),
         );
