@@ -3076,17 +3076,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
 
         const targetKind = target.e1.type.toBasetype.ty;
-        if (targetKind != Tarray && targetKind != Tpointer
-                && targetKind != Tsarray)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+        assert(targetKind == Tarray || targetKind == Tpointer
+                || targetKind == Tsarray);
 
         auto elementType = target.type.nextOf;
-        if (elementType is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+        assert(elementType !is null);
+        const elementBase = elementType.toBasetype;
         const elementSize =
-            elementType.ty == Tvoid ? 1 : TypeFacts.of(elementType).size;
+            elementBase.ty == Tvoid ? 1 : TypeFacts.of(elementType).size;
 
         const arrayFacts = TypeFacts.of(target.type);
         const destSliceOffset = resolvedTarget == size_t.max
@@ -3096,15 +3093,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto(target, destSliceOffset, arrayFacts.size);
 
         auto sourceElementType = expression.e2.type.nextOf;
-        if (sourceElementType is null)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+        assert(sourceElementType !is null);
+        const sourceElementBase = sourceElementType.toBasetype;
 
-        const sourceElementSize = sourceElementType.ty == Tvoid
+        const sourceElementSize = sourceElementBase.ty == Tvoid
             ? 1 : TypeFacts.of(sourceElementType).size;
-        if (elementSize != sourceElementSize)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+        assert(elementSize == sourceElementSize);
 
         const sourceFacts = TypeFacts.of(expression.e2.type);
         const sourceSliceOffset = reserveTemp(sourceFacts);
@@ -4111,8 +4105,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         requireDestination(expression);
 
         const facts = TypeFacts.of(expression.e1.type);
-        if (!facts.isDynamicArray)
-            return visit(cast(Expression) expression);
+        assert(facts.isDynamicArray);
 
         const arrayOffset = reserveTemp(facts);
         evalInto(expression.e1, arrayOffset, facts.size);
@@ -4715,14 +4708,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.nativelayout: arrayValueSize;
 
         auto elementType = expression.e1.type.nextOf;
-        const validElement =
-            elementType.ty == Tchar || elementType.ty == Twchar;
-        const hook = elementType.ty == Twchar
+        assert(elementType !is null);
+        const elementBase = elementType.toBasetype;
+        assert(elementBase.ty == Tchar || elementBase.ty == Twchar);
+        const hook = elementBase.ty == Twchar
             ? DruntimeHook.arrayAppendWchar : DruntimeHook.arrayAppendChar;
-        auto plan = validElement ? planOf(_bytecode._plans, hook) : null;
+        auto plan = planOf(_bytecode._plans, hook);
         if (plan is null)
             throw rejection(_function, expression.loc,
-                expressionText(expression));
+                "host setup: druntime append hook is not available");
 
         const arrayOffset = compileAddress(expression.e1);
 
@@ -7111,9 +7105,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return compileStaticArrayLiteral(expression, destOffset);
 
         const facts = TypeFacts.of(expression.type);
-        if (!facts.isDynamicArray)
-            throw rejection(_function, expression.loc,
-                expressionText(expression));
+        assert(facts.isDynamicArray);
 
         const elementFacts = TypeFacts.of(expression.type.nextOf);
 
