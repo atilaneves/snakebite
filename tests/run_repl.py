@@ -183,6 +183,25 @@ def test_command_uses_requested_backend(backend: str) -> None:
     assert result.stderr == ""
 
 
+# A REPL session holds the whole frontend heap. A garbage collection at
+# exit only finds garbage that the OS reclaims anyway, and over that heap
+# it costs more than the rest of a `-c` run's shutdown. The GC profile
+# printed at exit counts every collection, so a count equal to the one the
+# command saw means that no collection ran after it.
+def test_exit_does_not_collect_garbage() -> None:
+    result = run_sb(
+        "--DRT-gcopt=profile:1",
+        "-c",
+        'imported!"core.memory".GC.profileStats.numCollections',
+    )
+
+    assert result.returncode == 0
+    seen, summary = result.stdout.split("\n", 1)
+    at_exit = re.search(r"Number of collections:\s+(\d+)", summary)
+    assert at_exit is not None
+    assert int(at_exit.group(1)) == int(seen)
+
+
 def test_command_can_use_several_file_arguments(tmp_path: Path) -> None:
     first = tmp_path / "first.d"
     second = tmp_path / "second.d"

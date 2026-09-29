@@ -65,15 +65,6 @@ static import ut.backends.run.main,
     ut.repl.cell,
     ut.repl.session;
 
-// Fewer GC collections during `bin/ut`'s frontend-heavy startup: the
-// default heap-to-used ratio (2.0) triggers a collection on almost
-// every pool growth while DMD's AST accumulates. Measured (3 runs each,
-// default -j, `--DRT-gcopt=profile:1`): the default does 88 collections
-// for 19.6 s of total GC time; `heapSizeFactor:4` does 76 for 17.3 s, a
-// repeated wall-time win (paired runs, same load: -4 s to -9 s) over
-// the default with only a modest heap increase (287 MB -> 376 MB).
-extern(C) __gshared string[] rt_options = ["gcopt=heapSizeFactor:4"];
-
 int main(string[] args) {
     import unit_threaded;
     import snakebite.frontend.compiler: Snippets, initialize;

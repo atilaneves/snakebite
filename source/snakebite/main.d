@@ -1,9 +1,6 @@
 module snakebite.main;
 
 
-extern(C) __gshared string[] rt_options = ["gcopt=cleanup:none"];
-
-
 private:
 
 
