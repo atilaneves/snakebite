@@ -101,14 +101,24 @@ public bool isDubProject(in string directory) {
 }
 
 
+// Project state lives under the directory snakebite started in. The CLI
+// changes into the project directory so that guest code sees the files
+// it expects, and that must not move the state with it.
+private immutable string startDirectory;
+
+shared static this() {
+    import std.file: getcwd;
+    startDirectory = getcwd;
+}
+
+
 public string projectStateDirectory(in string projectDirectory) {
     import std.digest.sha: sha256Of;
     import std.digest: toHexString;
-    import std.file: getcwd;
     import std.path: absolutePath, buildNormalizedPath, buildPath;
 
     const absolute = projectDirectory.absolutePath.buildNormalizedPath;
-    return buildPath(getcwd, ".snakebite",
+    return buildPath(startDirectory, ".snakebite",
         absolute.sha256Of.toHexString.idup);
 }
 
