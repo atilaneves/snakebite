@@ -31,7 +31,6 @@ private imported!"snakebite.nativelayout".TypeFacts pointerFactsOf() {
 }
 
 public final class Bytecode: imported!"snakebite.backends.backend".Backend {
-    import core.sync.mutex: Mutex;
     import core.time: Duration;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
@@ -89,19 +88,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // through the same object, one thread's call and another thread's
     // callback among them (ADR-0006).
     private SharedTable!(FuncDeclaration, FrameLayout) _hostLayouts;
-    // `compileFunction`'s own lock, not the frontend one: it guards
-    // `_compiled`'s bookkeeping (a plain AA, and the placeholder
-    // recursion needs - see `compileFunction`'s own doc), which several
-    // host threads calling back into this one guest program can reach
-    // at once (ADR-0006). Recursive (`core.sync.mutex.Mutex`'s default):
-    // `compileFunction` can re-enter itself on the same thread through
-    // `callableAddress`'s own recursive call for a variadic function
-    // that takes its own address inside its own body.
-    private Mutex _compileLock;
 
     public this(const Program program) {
         super(program);
-        _compileLock = new Mutex;
         _plans = PlanCache(program.dependencyImage);
         _nativeData = NativeData(&_program.isRootOwned,
             &constantSymbolAddress,
@@ -147,17 +136,13 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         void* returnPlace,
         void*[] args,
     ) {
-        // No frontend lock here (measured: 1,211 acquisitions, 58.6s
-        // wait, in a parallel `bin/ut` run before this fix) -
-        // `compileFunction` now takes its own, backend-local lock only
-        // around its own bookkeeping (`_compileLock`, held for one
-        // function's whole compile, not the frontend-wide one every
-        // other backend and cache also went through); the dmd frontend
-        // helpers it calls while walking a body (`TypeFacts.of`,
-        // `FrameLayout.of`, `functionNeedsClosure`, ...) each take the
-        // frontend lock themselves, only while a dmd forward reference
-        // is still unresolved (`forceIfNeeded`). See `compileFunction`'s
-        // own doc.
+        // `compileFunction` takes the frontend (compiler) lock itself,
+        // for its own whole compile, the same lock every other
+        // dmd-touching entry point on every backend takes
+        // (`snakebite.frontend.compiler.withCompilerLock`) - see
+        // `compileFunction`'s own doc for why a second, backend-local
+        // lock cannot give class-runtime building and function
+        // compilation one consistent order.
         const(Function)* compiled = compileFunction(function_);
         runHostToGuest(compiled, function_, returnPlace, args);
     }
@@ -457,29 +442,47 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // reached while this very function is still being compiled can point
     // at it too.
     //
-    // Locked on `_compileLock`, this instance's own mutex, not the dmd
-    // frontend one (measured together with `call`'s own doc: `Bytecode.
-    // call`'s 1,211/58.6s, and this same lock reached again through
-    // `Deferred.get` below, 1,884 acquisitions/19.7s wait). `_compiled`
-    // is a plain AA, not a `SharedTable`: it needs the placeholder
-    // registered below to keep one fixed address for as long as a
-    // recursive or concurrent reach of the same function might already
-    // be holding a `CallSite` that points at it (this function's own
-    // first doc paragraph), which a `SharedTable`'s "first write wins,
-    // never overwritten" insert does not provide - so both the miss
-    // check and the whole compile stay under one lock, held for this
-    // one function's own duration, the same shape `withCompilerLock`
-    // used to give it, just no longer shared with every other backend's
-    // and cache's own dmd-touching lock. The frontend lock itself is
-    // reached again, only when still needed, by each dmd-touching call
-    // this makes while walking the body (`TypeFacts.of`, `FrameLayout.
-    // of`, `functionNeedsClosure`, ... - each guarded by their own
-    // `forceIfNeeded`), never wrapped around this whole function.
+    // Locked on the frontend (compiler) lock (`snakebite.frontend.
+    // compiler.withCompilerLock`), not a lock of this backend's own: a
+    // guest class's runtime info (`snakebite.backends.classinfo.
+    // ClassRuntimeCache.build`) already runs its `make` callback under
+    // this same lock, and `make` can reach `callableAddress` -> here,
+    // compiling a method for the first time to fill a vtable slot. A
+    // second, backend-local lock taken here (`_compileLock`, this
+    // function's own mutex before this fix) gave the two paths opposite
+    // orders: `build` held the compiler lock and waited on
+    // `_compileLock`, while this, walking a body, could hold
+    // `_compileLock` and wait on the compiler lock instead - through a
+    // forced dmd forward reference (`TypeFacts.of`, `FrameLayout.of`,
+    // ... - `forceIfNeeded`) or through `visitUnloweredNew` reaching
+    // `classRuntimeInfo` -> `build` for a class not yet built. Two
+    // threads, one in each order, could deadlock forever - the same
+    // shape `ClassRuntimeCache`'s own lock used to hit against this
+    // same compiler lock before it was removed in favour of this one
+    // (`classinfo.d`'s own history). The compiler lock's recursion
+    // (`core.sync.mutex.Mutex`'s default) makes reusing it here free of
+    // extra cost on every path that already holds it - `build`'s `make`
+    // reaching back in here nests for free, and this function's own
+    // recursive reach of itself through `callableAddress`'s call for a
+    // variadic function that takes its own address inside its own body
+    // nests for free too - at the cost of serialising every unrelated
+    // `Bytecode` instance's first compile of any function against every
+    // other's, which the removed backend-local lock did not.
+    //
+    // `_compiled` is a plain AA, not a `SharedTable`: it needs the
+    // placeholder registered below to keep one fixed address for as
+    // long as a recursive or concurrent reach of the same function
+    // might already be holding a `CallSite` that points at it (this
+    // function's own first doc paragraph), which a `SharedTable`'s
+    // "first write wins, never overwritten" insert does not provide -
+    // so both the miss check and the whole compile stay under the one
+    // lock, held for this one function's own duration.
     package const(Function)* compileFunction(FuncDeclaration function_) {
         import dmd.astenums: STC, Tvoid;
         import dmd.funcsem: needsClosure;
         import dmd.typesem: nextOf;
         import snakebite.backends.layout: FrameLayout;
+        import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import snakebite.nativelayout: TypeFacts;
         import std.conv: text;
@@ -489,73 +492,78 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 "bytecode compiler cannot compile a null function",
             );
 
-        _compileLock.lock;
-        scope(exit) _compileLock.unlock;
+        const(Function)* result;
+        withCompilerLock({
+            if (auto found = function_ in _compiled) {
+                result = *found;
+                return;
+            }
 
-        if (auto found = function_ in _compiled)
-            return *found;
+            import std.datetime.stopwatch: AutoStart, StopWatch;
 
-        import std.datetime.stopwatch: AutoStart, StopWatch;
+            const outermost = _compilationDepth == 0;
+            ++_compilationDepth;
+            ++_cacheMisses;
+            auto stopWatch = StopWatch(AutoStart.yes);
+            scope (exit) {
+                --_compilationDepth;
+                if (outermost)
+                    _compilationTime += stopWatch.peek;
+            }
 
-        const outermost = _compilationDepth == 0;
-        ++_compilationDepth;
-        ++_cacheMisses;
-        auto stopWatch = StopWatch(AutoStart.yes);
-        scope (exit) {
-            --_compilationDepth;
+            // A struct method's hidden `this` is a pointer to the receiver,
+            // and a class method's is a class reference - both are one
+            // pointer wide in `FrameLayout.of`, so a class method's own body
+            // compiles the same way. A nested function uses the same DMD
+            // slot for its static chain, which the bytecode frame carries
+            // as a context pointer.
+
+            auto functionType = typeFunctionOf(function_);
+            auto returnType = function_.type.nextOf;
+            const isVoidReturn = returnType !is null && returnType.ty == Tvoid;
+            // A `ref` return hands the caller the returned storage's own
+            // address rather than a copy of its value - see `compileReturn`
+            // and `compileAddress` - so the frame slot a caller reads it
+            // into is one pointer wide regardless of what the returned type
+            // itself would otherwise need, the same convention `snakebite.
+            // ffi.plan` already uses for a native `ref`-returning callee.
+            const isRefReturn = functionType.isRef;
+            const pointeeFacts =
+                isVoidReturn ? TypeFacts.init : TypeFacts.of(returnType);
+            const returnFacts = isRefReturn ? pointerFactsOf : pointeeFacts;
+
+            auto body_ = function_.fbody;
+            if (body_ is null)
+                throw rejection(function_, function_.loc,
+                    "a function with no body");
+
+            auto layout = FrameLayout.of(function_);
+
+            // Registered before the body is walked, not after: a call
+            // inside this very body to `function_` itself finds this
+            // placeholder through `_compiled` above instead of recompiling
+            // forever. Its fields are filled in below, once `build`
+            // returns; nothing reads them before then, since a `CallSite`'s
+            // callee is only ever dereferenced when the VM actually runs
+            // the call, which cannot happen before `compile`/`call` returns
+            // from the top-level compile that reached here.
+            auto placeholder = new Function;
+            _compiled[function_] = placeholder;
+            // A rejected body must not stay cached as an empty function
+            // that a later call would run.
+            scope(failure) _compiled.remove(function_);
+            registerGuestWord(function_, placeholder);
+
+            scope compiler = new FunctionCompiler(
+                this, function_, layout, returnFacts, isVoidReturn,
+                isRefReturn);
+            *placeholder = compiler.build(body_);
             if (outermost)
-                _compilationTime += stopWatch.peek;
-        }
+                prepareCallbackBodies;
 
-        // A struct method's hidden `this` is a pointer to the receiver, and
-        // a class method's is a class reference - both are one pointer wide
-        // in `FrameLayout.of`, so a class method's own body compiles the
-        // same way. A nested function uses the same DMD slot for its
-        // static chain, which the bytecode frame carries as a context
-        // pointer.
-
-        auto functionType = typeFunctionOf(function_);
-        auto returnType = function_.type.nextOf;
-        const isVoidReturn = returnType !is null && returnType.ty == Tvoid;
-        // A `ref` return hands the caller the returned storage's own
-        // address rather than a copy of its value - see `compileReturn` and
-        // `compileAddress` - so the frame slot a caller reads it into is
-        // one pointer wide regardless of what the returned type itself
-        // would otherwise need, the same convention `snakebite.ffi.plan`
-        // already uses for a native `ref`-returning callee.
-        const isRefReturn = functionType.isRef;
-        const pointeeFacts = isVoidReturn ? TypeFacts.init : TypeFacts.of(returnType);
-        const returnFacts = isRefReturn ? pointerFactsOf : pointeeFacts;
-
-        auto body_ = function_.fbody;
-        if (body_ is null)
-            throw rejection(function_, function_.loc,
-                "a function with no body");
-
-        auto layout = FrameLayout.of(function_);
-
-        // Registered before the body is walked, not after: a call inside
-        // this very body to `function_` itself finds this placeholder
-        // through `_compiled` above instead of recompiling forever. Its
-        // fields are filled in below, once `build` returns; nothing reads
-        // them before then, since a `CallSite`'s callee is only ever
-        // dereferenced when the VM actually runs the call, which cannot
-        // happen before `compile`/`call` returns from the top-level
-        // compile that reached here.
-        auto placeholder = new Function;
-        _compiled[function_] = placeholder;
-        // A rejected body must not stay cached as an empty function that a
-        // later call would run.
-        scope(failure) _compiled.remove(function_);
-        registerGuestWord(function_, placeholder);
-
-        scope compiler = new FunctionCompiler(
-            this, function_, layout, returnFacts, isVoidReturn, isRefReturn);
-        *placeholder = compiler.build(body_);
-        if (outermost)
-            prepareCallbackBodies;
-
-        return placeholder;
+            result = placeholder;
+        });
+        return result;
     }
 }
 
@@ -6294,14 +6302,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // captured locals, so that `compute` is seen to escape and its
     // closure is not placed on the caller's stack.
     //
-    // No lock of its own any more (measured: 1,884 acquisitions, 19.7s
-    // wait, against the frontend lock this used to take): two threads
-    // racing this same call site's first execution now simply both call
-    // `compute` - `compileFunction`'s own lock (`Bytecode._compileLock`,
-    // its own doc) is what makes that safe and gives both of them the
-    // same finished pointer back, not an extra lock here, so there is
-    // nothing left for a second one to protect beyond publishing the
-    // result, which the atomic store below already does.
+    // No lock of its own: two threads racing this same call site's first
+    // execution simply both call `compute` - `compileFunction`'s own
+    // lock (the frontend/compiler lock, its own doc) is what makes that
+    // safe and gives both of them the same finished pointer back, not an
+    // extra lock here, so there is nothing left for a second one to
+    // protect beyond publishing the result, which the atomic store
+    // below already does.
     private static T delegate() deferred(T)(T delegate() compute)
     if (is(T: const(void)*)) {
         return &(new Deferred!T(compute)).get;
