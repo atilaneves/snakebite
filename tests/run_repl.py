@@ -109,19 +109,29 @@ def write_versioned_project(directory: Path) -> None:
 # The frontend analyses what a cell reaches, not the whole project, once
 # the project's dependency image is on disk. A module that no cell
 # imports has no compile-time effect.
-def test_project_module_is_not_analysed_until_imported(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode", "ctfe"])
+def test_project_module_is_not_analysed_until_imported(
+    tmp_path: Path, backend: str,
+) -> None:
     write_versioned_project(tmp_path)
-    warm = run_sb("--project", str(tmp_path), "-c", "1 + 1", cwd=tmp_path)
+    warm = run_sb(
+        "--project", str(tmp_path), "-b", backend, "-c", "1 + 1",
+        cwd=tmp_path,
+    )
     assert warm.returncode == 0
 
-    result = run_sb("--project", str(tmp_path), "-c", "1 + 1", cwd=tmp_path)
+    result = run_sb(
+        "--project", str(tmp_path), "-b", backend, "-c", "1 + 1",
+        cwd=tmp_path,
+    )
 
     assert result.returncode == 0
     assert result.stdout == "2\n"
     assert result.stderr == ""
 
     result = run_sb(
-        "--project", str(tmp_path), "-c", "import repl_unused;", cwd=tmp_path,
+        "--project", str(tmp_path), "-b", backend, "-c", "import repl_unused;",
+        cwd=tmp_path,
     )
 
     assert result.returncode == 0
@@ -134,8 +144,9 @@ def test_project_module_is_not_analysed_until_imported(tmp_path: Path) -> None:
 # module fails semantic analysis at any `__TIME__` but midnight, and
 # `SOURCE_DATE_EPOCH` sets `__TIME__` without changing any input the
 # image cache records: the warm start fails if it analyses the project.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode", "ctfe"])
 def test_warm_start_does_not_analyse_a_project_without_an_image(
-    tmp_path: Path,
+    tmp_path: Path, backend: str,
 ) -> None:
     write_project_without_image(tmp_path)
     (tmp_path / "clock.d").write_text(
@@ -145,11 +156,13 @@ def test_warm_start_does_not_analyse_a_project_without_an_image(
     )
 
     cold = run_sb(
-        "--project", str(tmp_path), input="import used;\nanswer()\n",
+        "--project", str(tmp_path), "-b", backend,
+        input="import used;\nanswer()\n",
         cwd=tmp_path, timeout_seconds=120, env={"SOURCE_DATE_EPOCH": "0"},
     )
     warm = run_sb(
-        "--project", str(tmp_path), input="import used;\nanswer()\n",
+        "--project", str(tmp_path), "-b", backend,
+        input="import used;\nanswer()\n",
         cwd=tmp_path, timeout_seconds=120, env={"SOURCE_DATE_EPOCH": "3600"},
     )
 
@@ -162,10 +175,14 @@ def test_warm_start_does_not_analyse_a_project_without_an_image(
 
 # A remembered "no image" answer holds only while the project's inputs
 # are unchanged: a new module is analysed on the next start.
-def test_project_without_an_image_notices_a_new_module(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode", "ctfe"])
+def test_project_without_an_image_notices_a_new_module(
+    tmp_path: Path, backend: str,
+) -> None:
     write_project_without_image(tmp_path)
     warm = run_sb(
-        "--project", str(tmp_path), input="import used;\nanswer()\n",
+        "--project", str(tmp_path), "-b", backend,
+        input="import used;\nanswer()\n",
         cwd=tmp_path, timeout_seconds=120,
     )
     assert warm.returncode == 0
@@ -176,7 +193,8 @@ def test_project_without_an_image_notices_a_new_module(tmp_path: Path) -> None:
     )
 
     result = run_sb(
-        "--project", str(tmp_path), input="import used;\nanswer()\n",
+        "--project", str(tmp_path), "-b", backend,
+        input="import used;\nanswer()\n",
         cwd=tmp_path, timeout_seconds=120,
     )
 
@@ -192,12 +210,15 @@ def write_project_without_image(directory: Path) -> None:
 
 # The project's versions and string imports apply to the project modules
 # a cell imports, whether or not the dependency image was already built.
-def test_project_import_sees_project_versions(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode", "ctfe"])
+def test_project_import_sees_project_versions(
+    tmp_path: Path, backend: str,
+) -> None:
     write_versioned_project(tmp_path)
 
     for _ in range(2):
         result = run_sb(
-            "--project", str(tmp_path),
+            "--project", str(tmp_path), "-b", backend,
             input="import repl_used;\nanswer()\ngreeting()\n",
             cwd=tmp_path,
         )
@@ -296,9 +317,10 @@ def test_nested_import_sees_project_versions(
 # already built, from any working directory. It works in the project
 # directory, as `dub build` does, so a project module's `__FILE__` is the
 # path dub hands the compiler: relative to the project directory.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode", "ctfe"])
 @pytest.mark.parametrize("working_directory", ["project", "elsewhere"])
 def test_project_session_is_the_same_on_a_cold_and_a_warm_image_cache(
-    tmp_path: Path, working_directory: str,
+    tmp_path: Path, working_directory: str, backend: str,
 ) -> None:
     project = tmp_path / "project"
     source = project / "source"
@@ -321,7 +343,7 @@ def test_project_session_is_the_same_on_a_cold_and_a_warm_image_cache(
 
     for _ in range(2):
         result = run_sb(
-            "--project", str(project),
+            "--project", str(project), "-b", backend,
             input="import good;\nfile()\nfullPath()\nanswer()\nimport unused;\n",
             cwd=tmp_path / working_directory,
             timeout_seconds=60,
@@ -334,8 +356,9 @@ def test_project_session_is_the_same_on_a_cold_and_a_warm_image_cache(
 
 # Paths on the command line are relative to where the session starts,
 # even though a project session works in the project directory.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode", "ctfe"])
 def test_project_session_resolves_arguments_from_its_start_directory(
-    tmp_path: Path,
+    tmp_path: Path, backend: str,
 ) -> None:
     source = tmp_path / "project" / "source"
     source.mkdir(parents=True)
@@ -359,7 +382,7 @@ def test_project_session_resolves_arguments_from_its_start_directory(
     )
 
     result = run_sb(
-        "--project", "project", "-I", "imports", "loaded.d",
+        "--project", "project", "-b", backend, "-I", "imports", "loaded.d",
         "-c", "loadedValue()",
         cwd=tmp_path,
         timeout_seconds=60,
