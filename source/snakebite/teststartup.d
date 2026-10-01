@@ -137,9 +137,8 @@ public TestStartupReport runTestsAndMain(
     watch.install(TestHooks.current);
     scope(exit) watch.restore;
     report.status = _d_run_main(_runtimeCArgs.argc, cArguments.ptr, &callMain);
-    // The guest's destructors follow the guest's threads, and precede the
-    // host's own `rt_term` below.
-    if (runModuleDestructors(backend, program, true) && report.status == 0)
+    // The guest's destructors precede the host's own `rt_term` below.
+    if (runModuleDestructors(backend, program) && report.status == 0)
         report.status = 1;
     if (watch.escaped)
         rt_term();

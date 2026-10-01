@@ -285,28 +285,21 @@ public int run(
         return 1;
 
     const status = runMain(backend, program, hostArguments);
-    const destructorStatus = runModuleDestructors(backend, program, false);
+    const destructorStatus = runModuleDestructors(backend, program);
     return status != 0 ? status : destructorStatus;
 }
 
 // What druntime does at program end, once `main` returned or threw: the
 // main thread's thread-local destructors, then the shared ones. An
 // exception from one ends the phase, skips the rest and fails the program.
-// A caller that owns the process joins the other threads first, as druntime
-// does; one that runs on a thread a test runner owns cannot, because that
-// thread would wait for itself.
+// Unlike druntime this does not wait for the other threads first: a caller
+// on a test runner's thread would wait for itself.
 package(snakebite) int runModuleDestructors(
     Backend backend,
     Program program,
-    in bool joinThreads,
 ) {
-    import core.thread: thread_joinAll;
-
     return failing(() {
         backend._threadModules.current.finish;
-        if (joinThreads)
-            thread_joinAll;
-
         foreach (destructor; program.sharedDestructors)
             backend.call(destructor, null, []);
     }) ? 1 : 0;
