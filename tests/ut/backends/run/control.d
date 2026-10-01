@@ -1063,3 +1063,58 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("functionEndAfterBackwardGotoAfterIfReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int x) { lbl: x++; if (x > 3) return x; goto lbl; }
+            void main() { assert(f(0) == 4); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("functionEndAfterGotoThenIfReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int x) { lbl: if (x > 3) return x; x++; goto lbl; }
+            void main() { assert(f(0) == 4); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("functionEndAfterInfiniteFor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int x) { for (;;) { if (x > 3) return x; x++; } }
+            void main() { assert(f(0) == 4); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("functionEndAfterThrow." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int x) { if (x > 3) return x; throw new Exception("no"); }
+            void main() { assert(f(5) == 5); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("functionEndAfterSwitchAllCasesReturn." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int f(int x) { switch (x) { case 0: return 10; case 1: return 11; default: return 12; } }
+            void main() { assert(f(1) == 11); }
+        });
+    }
+}

@@ -887,11 +887,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileStatement(body_);
 
         if (!_finished) {
-            if (!_isVoidReturn)
-                throw rejection(_function, _function.loc,
-                    "a body that does not return on every path");
-
-            emit(&opReturnVoid, 0, 0, 0);
+            if (_isVoidReturn)
+                emit(&opReturnVoid, 0, 0, 0);
+            else
+                emitUnreachableTrap;
         }
 
         // A `goto case`, or the `switch` itself, jumping to a
@@ -965,6 +964,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             closureSlots,
             parameterOffsets,
         );
+    }
+
+    // dmd only accepts a non-void function whose end it proved
+    // unreachable. The compiler's own `_finished` tracking is less precise
+    // (a `goto` leaves it unset), so the end gets the `assert(0)` dmd would
+    // have put there rather than a rejection.
+    private void emitUnreachableTrap() {
+        import std.string: fromStringz;
+
+        const zero = reserveTemp(pointerFacts);
+        emit(&opConstant, zero, addConstant(0), size_t.sizeof);
+        _assertSites ~= AssertSite(
+            "Assertion failure",
+            _function.loc.filename.fromStringz.idup,
+            _function.loc.linnum,
+        );
+        emit(&opAssert, zero, _assertSites.length - 1, size_t.sizeof);
     }
 
     private const(Instruction)* instructionAt(in size_t index) const {
