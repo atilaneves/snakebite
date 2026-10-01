@@ -143,7 +143,7 @@ import snakebite.backends.exceptionplan: catchPlanOf;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, ExceptionUnwindPlan = UnwindPlan;
 import snakebite.backends.switchplan: switchPlan, selectCase,
-    gotoCaseTarget, gotoDefaultTarget, containsTarget;
+    gotoCaseTarget, gotoDefaultTarget;
 import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.backends.fullexpression: FullExpressionKind;
 
@@ -1774,47 +1774,52 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     override void visit(SwitchStatement statement) {
         _pendingLoopLabel = null;
 
-        if (_controlFlow.seeking) {
-            if (statement._body !is null)
-                statement._body.accept(this);
-            return;
-        }
-
-        Statement selected;
         auto plan = switchPlan(statement);
-        _temporaries.withExpression(FullExpressionKind.value,
-            statement.condition, {
-            const condition = asIntegral(statement.condition);
-            selected = selectCase(plan, condition,
-                (case_) => asIntegral(case_.exp));
-            });
+        if (!_controlFlow.seeking) {
+            Statement selected;
+            _temporaries.withExpression(FullExpressionKind.value,
+                statement.condition, {
+                const condition = asIntegral(statement.condition);
+                selected = selectCase(plan, condition,
+                    (case_) => asIntegral(case_.exp));
+                });
 
-        if (selected is null)
-            selected = plan.defaultTarget;
-        if (selected is null)
-            return;
+            if (selected is null)
+                selected = plan.defaultTarget;
+            if (selected is null)
+                return;
+
+            _controlFlow.seek(cast(void*) selected);
+        }
 
         auto outerSwitch = _switchStatement;
         _switchStatement = statement;
         scope (exit)
             _switchStatement = outerSwitch;
 
+        statement._body.accept(this);
+
         while (true) {
-            _controlFlow.seek(cast(void*) selected);
-            statement._body.accept(this);
+            // The target of a pending `goto` or of an enclosing seek is
+            // outside this `switch`.
+            if (_controlFlow.seeking)
+                return;
 
             if (_controlFlow.leavesSwitch)
                 return;
 
-            auto target = controlTarget;
-            if (target is null)
+            if (controlTarget is null)
                 return;
 
-            if (!containsTarget(plan, cast(Statement) target))
-                return;
-
+            // Seeking is the only way to tell whether a `goto` target,
+            // a `case` or a label alike, is inside this `switch`.
+            auto pending = _controlFlow; // Restoring needs mutable identifiers.
             _controlFlow.resume;
-            selected = target;
+            statement._body.accept(this);
+            if (_controlFlow.seeking) {
+                _controlFlow = pending;
+                return;
+            }
         }
     }
 
