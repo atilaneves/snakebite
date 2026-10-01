@@ -51,6 +51,11 @@ public struct FrameStack {
     // stack used alone creates its own slots on first access.
     private TlsSlots* _tls;
 
+    // The innermost guest activation that the bytecode VM runs on this
+    // stack, so that the call stack of a fault goes through native frames
+    // that called the guest back. The VM owns it; here it is opaque.
+    public void* innermostActivation;
+
     @disable this(this);
 
     public this(size_t capacity, TlsSlots* tls) @system {

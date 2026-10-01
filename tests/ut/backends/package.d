@@ -10,6 +10,7 @@ import core.sync.mutex: Mutex;
 import dmd.dmodule: Module;
 import dmd.func: FuncDeclaration;
 import snakebite.backends.backend: Program, run;
+import snakebite.backends.guestfault: GuestFault, GuestFaultException;
 import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction, findStruct;
 import std.conv: text;
@@ -155,6 +156,58 @@ public void shouldBeStatusOf(
         asTestFailure(run(new BackendType(program), program), file, line)
             .should == expected;
     }
+}
+
+// UFCS assertion: `GuestFault.Kind.nullPointer.shouldBeFaultOf!(backend,
+// code)(4)` runs `main` of the whole guest program `code` on the backend and
+// checks that the guest faults the way compiled D would die of a signal: the
+// fault names `expected`, at `line` of `code`. `Native` is not in this
+// matrix: compiled D dies of the signal, and no in-process test survives it.
+// No host installs an action here, so the fault is thrown to this test, as
+// it is to a REPL cell, and the process under test goes on.
+public void shouldBeFaultOf(
+    BackendType, string code, string module_ = __MODULE__,
+)(
+    in GuestFault.Kind expected,
+    in size_t line,
+    in string file = __FILE__,
+    in size_t sourceLine = __LINE__,
+) {
+    const fault = guestFaultOf!(BackendType, code, module_)(file, sourceLine);
+    fault.kind.should == expected;
+    fault.line.should == line;
+}
+
+// The fault that `main` of the guest program `code` ends in, for a test that
+// asserts more than the kind and the line. A program that runs to its end
+// fails the test.
+public const(GuestFaultException) guestFaultOf(
+    BackendType, string code, string module_ = __MODULE__,
+)(
+    in string file = __FILE__,
+    in size_t sourceLine = __LINE__,
+) {
+    import dmd.astenums: Tvoid;
+    import dmd.typesem: nextOf;
+    import std.string: strip;
+
+    static assert(!is(BackendType == Native),
+        "compiled D dies of a signal: no in-process test can run it");
+    enum program_ = RegisterProgram!(module_, code).program;
+    auto program = Program([parsedProgram(program_)], "snakebite");
+    auto main_ = program.main.func;
+    int status;
+    try
+        (new BackendType(program)).call(
+            main_, main_.type.nextOf.ty == Tvoid ? null : &status, []);
+    catch (GuestFaultException fault)
+        return fault;
+    catch (Exception exception)
+        throw new UnitTestException(exception.msg.strip, file, sourceLine);
+
+    throw new UnitTestException(
+        "the guest program ran to its end: it did not fault",
+        file, sourceLine);
 }
 
 // `main`'s exit status, run natively, mirroring the backend-side semantics

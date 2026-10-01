@@ -561,6 +561,424 @@ def test_missing_c_preprocessor_is_reported_once(
 # A dub recipe whose unittest configuration is an executable: dub's own
 # synthetic unittest configuration would put a generated stub with its
 # own `main` first, and a program takes the first root `main` it finds.
+# Guest faults: code that compiled D kills with a signal. `bin/sb` ends
+# with the message on stderr, `<file>(<line>): fatal: <message>`, and exit
+# status 1. The cases of each kind of fault are in `bin/ut`, in-process;
+# these need the real process.
+FAULT_BACKENDS = ["interpreter", "bytecode"]
+
+
+def run_program(
+    tmp_path: Path, backend: str, code: str,
+) -> subprocess.CompletedProcess[str]:
+    write(tmp_path / "outside" / ".keep")
+    write(tmp_path / "app" / "app.d", code)
+    return run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path / "outside",
+    )
+
+
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+@pytest.mark.parametrize(
+    "statement, message",
+    [
+        ("int* p; int x = *p;", "null pointer dereference"),
+        ("int z = 0; int x = 5 / z;", "integer division by zero"),
+    ],
+)
+def test_guest_fault_ends_the_process_with_a_message(
+    tmp_path: Path, backend: str, statement: str, message: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend, "void main() {\n    " + statement + "\n}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert f"app.d(2): fatal: {message}" in result.stderr.splitlines()
+
+
+# The process dies as it does when compiled D gets the signal: no `finally`
+# or `scope(exit)` runs, and no guest `catch` sees an exception.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+def test_guest_fault_runs_no_guest_cleanup(
+    tmp_path: Path, backend: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "import core.stdc.stdio: puts;\n"
+        "int zero() { return 0; }\n"
+        "void main() {\n"
+        "    scope(exit) puts(\"scope exit ran\");\n"
+        "    try {\n"
+        "        try {\n"
+        "            int x = 5 / zero();\n"
+        "        } finally {\n"
+        "            puts(\"finally ran\");\n"
+        "        }\n"
+        "    } catch (Throwable) {\n"
+        "        puts(\"catch ran\");\n"
+        "    }\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert "ran" not in output(result)
+
+
+# Output that the guest wrote comes before the message, also a line with no
+# newline: the host flushes what the guest left in its buffers.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+def test_guest_fault_flushes_guest_output_first(
+    tmp_path: Path, backend: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "import core.stdc.stdio: printf;\n"
+        "void main() {\n"
+        "    printf(\"before\\n\");\n"
+        "    int* p;\n"
+        "    *p = 1;\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert "before\n" in result.stdout
+
+
+# The file in the message is the file of the faulting code.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+def test_guest_fault_names_the_file_of_the_faulting_module(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(tmp_path / "app" / "helper.d",
+        "module helper;\n"
+        "int target(int* p) {\n"
+        "    return *p;\n"
+        "}\n")
+    result = run_program(
+        tmp_path, backend,
+        "import helper;\n"
+        "void main() {\n"
+        "    target(null);\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert "helper.d(3): fatal: null pointer dereference" in result.stderr
+
+
+# The fault of a guest function that native code calls back is a fault of
+# the guest too.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+def test_guest_fault_in_a_native_callback_ends_the_process(
+    tmp_path: Path, backend: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "import core.stdc.stdlib: qsort;\n"
+        "extern(C) int compare(const(void)* a, const(void)* b) {\n"
+        "    int* p;\n"
+        "    return *p;\n"
+        "}\n"
+        "void main() {\n"
+        "    int[2] values = [2, 1];\n"
+        "    qsort(values.ptr, values.length, int.sizeof, &compare);\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert (
+        "app.d(4): fatal: null pointer dereference"
+        in result.stderr.splitlines()
+    )
+
+
+# An array operation divides element by element in native code of the
+# dependency image: a zero element is the same hardware trap as a scalar
+# division by zero, and it is reported at the statement.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+@pytest.mark.parametrize("statement", ["c[] = a[] / b[];", "a[] /= b[1];"])
+def test_array_operation_division_by_zero_is_a_fault(
+    tmp_path: Path, backend: str, statement: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "void main() {\n"
+        "    int[] a = [4, 6];\n"
+        "    int[] b = [2, 0];\n"
+        "    int[2] c;\n"
+        f"    {statement}\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert (
+        "app.d(5): fatal: integer division by zero"
+        in result.stderr.splitlines()
+    )
+
+
+# The same trap for the other operators and element types: the elements are
+# divided at the promoted type, as scalars are.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+@pytest.mark.parametrize(
+    "type_, dividends, divisors, statement, message",
+    [
+        ("int", "[4, 6]", "[2, 0]", "c[] = a[] % b[];",
+            "integer division by zero"),
+        ("int", "[4, 6]", "[2, 0]", "a[] %= b[1];",
+            "integer division by zero"),
+        ("int", "[4, int.min]", "[2, -1]", "c[] = a[] / b[];",
+            "integer overflow in division"),
+        ("int", "[4, 6]", "[2, 0]", "c[] = 12 / b[];",
+            "integer division by zero"),
+        ("byte", "[4, 6]", "[2, 0]", "c[] = a[] / b[];",
+            "integer division by zero"),
+        ("ulong", "[4, 6]", "[2, 0]", "c[] = a[] / b[];",
+            "integer division by zero"),
+        ("long", "[4, long.min]", "[2, -1]", "c[] = a[] / b[];",
+            "integer overflow in division"),
+    ],
+)
+def test_array_operation_division_traps_as_the_scalar_division_does(
+    tmp_path: Path, backend: str, type_: str, dividends: str, divisors: str,
+    statement: str, message: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "void main() {\n"
+        f"    {type_}[] a = {dividends};\n"
+        f"    {type_}[] b = {divisors};\n"
+        f"    {type_}[2] c;\n"
+        f"    {statement}\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert f"app.d(5): fatal: {message}" in result.stderr.splitlines()
+
+
+# Elements whose division does not trap are no fault: the narrow types
+# divide as `int`, and a floating point division never traps.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+@pytest.mark.parametrize(
+    "type_, dividends, divisors",
+    [
+        ("short", "[short.min, 6]", "[-1, 1]"),
+        ("ubyte", "[200, 6]", "[255, 1]"),
+        ("uint", "[uint.max, 6]", "[uint.max, 1]"),
+        ("double", "[4, 6]", "[2, 0]"),
+    ],
+)
+def test_array_operation_division_that_does_not_trap_is_no_fault(
+    tmp_path: Path, backend: str, type_: str, dividends: str, divisors: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "void main() {\n"
+        f"    {type_}[] a = {dividends};\n"
+        f"    {type_}[] b = {divisors};\n"
+        f"    {type_}[2] c;\n"
+        "    c[] = a[] / b[];\n"
+        "}\n",
+    )
+
+    assert result.returncode == 0, output(result)
+
+
+# `synchronized (c)` locks the monitor of `c`, a field of the object.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+def test_synchronized_on_a_null_class_reference_is_a_fault(
+    tmp_path: Path, backend: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "class C { }\n"
+        "void main() {\n"
+        "    C c;\n"
+        "    synchronized (c) {}\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert (
+        "app.d(4): fatal: use of a null class reference"
+        in result.stderr.splitlines()
+    )
+
+
+# A fault in a unittest run names the unittest that was running: the guest
+# call stack follows the message.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+def test_fault_in_unittest_names_the_unittest(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(tmp_path / "app" / "helper.d",
+        "module helper;\n"
+        "int target(int* p) { return *p; }\n")
+    result = run_program(
+        tmp_path, backend,
+        "module app;\n"
+        "import helper;\n"
+        "unittest {\n"
+        "    target(null);\n"
+        "}\n"
+        "int main() { return 0; }\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert (
+        "helper.d(2): fatal: null pointer dereference"
+        in result.stderr.splitlines()
+    )
+    assert "in helper.target (helper.d(2))" in result.stderr
+    assert "__unittest_L3_C1 (app.d(3))" in result.stderr
+
+
+# A destructor that the collector runs is guest code too: its fault is
+# reported as any other, with the message of the fault.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+def test_guest_fault_in_a_finalizer_ends_the_process_with_a_message(
+    tmp_path: Path, backend: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "import core.memory: GC;\n"
+        "class C {\n"
+        "    int* p;\n"
+        "    ~this() { *p = 1; }\n"
+        "}\n"
+        "void make() { foreach (i; 0 .. 100) new C; }\n"
+        "void main() {\n"
+        "    int x;\n"
+        "    int* q = &x;\n"
+        "    *q = 1;\n"
+        "    make();\n"
+        "    GC.collect();\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert (
+        "app.d(4): fatal: null pointer dereference"
+        in result.stderr.splitlines()
+    )
+
+
+# The unittest is named also when native code is between it and the fault.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+def test_fault_in_a_native_callback_names_the_unittest(
+    tmp_path: Path, backend: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "import core.stdc.stdlib: qsort;\n"
+        "extern(C) int compare(const(void)* a, const(void)* b) {\n"
+        "    int* p;\n"
+        "    return *p;\n"
+        "}\n"
+        "unittest {\n"
+        "    int[2] values = [2, 1];\n"
+        "    qsort(values.ptr, values.length, int.sizeof, &compare);\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert "in app.compare (app.d(2))" in result.stderr
+    assert "__unittest_L6_C1 (app.d(6))" in result.stderr
+
+
+# `p.length = n` writes the array that `p` points to.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+def test_length_assignment_through_a_null_pointer_is_a_fault(
+    tmp_path: Path, backend: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "void main() {\n"
+        "    int[]* p;\n"
+        "    p.length = 3;\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert (
+        "app.d(3): fatal: null pointer dereference"
+        in result.stderr.splitlines()
+    )
+
+
+# `*p ~= c` appends to the array that `p` points to.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+def test_append_through_a_null_pointer_is_a_fault(
+    tmp_path: Path, backend: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "void main() {\n"
+        "    string* p;\n"
+        "    *p ~= 'c';\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert (
+        "app.d(3): fatal: null pointer dereference"
+        in result.stderr.splitlines()
+    )
+
+
+# An operand of an array operation division can be the result of another
+# operation of the same statement: its elements are divided in the same
+# native loop, and the hardware trap is the same.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+@pytest.mark.parametrize(
+    "statement, message",
+    [
+        ("c[] = a[] / (b[] - 1);", "integer division by zero"),
+        ("c[] = a[] % (b[] - 1);", "integer division by zero"),
+        ("c[] = (a[] - 4) / (b[] - 3);", "integer overflow in division"),
+    ],
+)
+def test_array_operation_division_of_an_intermediate_result_is_a_fault(
+    tmp_path: Path, backend: str, statement: str, message: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        "void main() {\n"
+        "    int[] a = [int.min + 4, 6];\n"
+        "    int[] b = [2, 1];\n"
+        "    int[2] c;\n"
+        f"    {statement}\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert f"app.d(5): fatal: {message}" in result.stderr.splitlines()
+
+
+# `0 ^^ -1` is `1 / 0` for integers: compiled D dies of SIGFPE.
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+@pytest.mark.parametrize("type_", ["int", "long"])
+def test_zero_to_a_negative_power_is_a_fault(
+    tmp_path: Path, backend: str, type_: str,
+) -> None:
+    result = run_program(
+        tmp_path, backend,
+        f"{type_} zero() {{ return 0; }}\n"
+        "void main() {\n"
+        "    auto x = zero() ^^ (zero() - 1);\n"
+        "}\n",
+    )
+
+    assert result.returncode == 1, output(result)
+    assert (
+        "app.d(3): fatal: integer division by zero"
+        in result.stderr.splitlines()
+    )
+
+
 def dub_project_recipe(name: str) -> str:
     return (
         f'name "{name}"\ntargetType "library"\n'

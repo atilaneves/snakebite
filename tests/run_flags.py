@@ -435,6 +435,64 @@ def test_release_slice_out_of_bounds_in_system_code_is_not_checked(
     assert_passes_after_start(backend, outcome)
 
 
+# A guest fault is the signal that compiled D gets, not a failed check of
+# the guest: no flag turns it off or changes what it does. Native is not
+# here: it dies of the signal.
+FAULT_BACKENDS = ["bytecode", "interpreter"]
+
+
+def assert_faults_after_start(outcome: Outcome, message: str) -> None:
+    assert outcome.status == 1, outcome.output
+    assert f"fatal: {message}" in outcome.output
+    assert "start" in outcome.output
+    assert "after" not in outcome.output
+
+
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+def test_release_null_dereference_is_still_a_fault(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-release"], """
+        unittest {
+            int* p;
+            log("start\\n");
+            int x = *p;
+            log("after\\n");
+        }
+    """)
+    assert_faults_after_start(outcome, "null pointer dereference")
+
+
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+def test_release_division_by_zero_is_still_a_fault(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-release"], """
+        unittest {
+            int zero = 0;
+            log("start\\n");
+            int x = 1 / zero;
+            log("after\\n");
+        }
+    """)
+    assert_faults_after_start(outcome, "integer division by zero")
+
+
+@pytest.mark.parametrize("backend", FAULT_BACKENDS)
+def test_checkaction_halt_null_dereference_is_still_a_fault(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=halt"], """
+        unittest {
+            int* p;
+            log("start\\n");
+            int x = *p;
+            log("after\\n");
+        }
+    """)
+    assert_faults_after_start(outcome, "null pointer dereference")
+
+
 @pytest.mark.parametrize("backend", NO_CTFE_ABORT)
 def test_checkaction_c_failed_assert_aborts_with_the_c_message(
     tmp_path: Path, backend: str,

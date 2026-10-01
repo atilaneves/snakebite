@@ -12,12 +12,19 @@ import core.stdc.string: memcpy;
 public struct CallResult {
     private void* _address;
     private size_t _size;
+    private bool _isReference;
 
+    // The address can be null: a `ref` result that holds no object. Only a
+    // load or a store through it is a fault, and the caller reports that.
     public void* address() const {
-        if (_address is null)
+        if (!_isReference)
             throw new Exception("ffi call result is not a reference");
 
         return cast(void*) _address;
+    }
+
+    public bool isNullReference() const {
+        return _isReference && _address is null;
     }
 
     public void copyValue(void* destination) const {
@@ -379,6 +386,7 @@ public struct CallAdapter {
         auto result = CallResult(
             referenceAt(addressPlace.ptr),
             _resultSize,
+            true,
         );
         result.copyValue(returnPlace);
         return result;

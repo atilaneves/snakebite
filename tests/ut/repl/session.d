@@ -245,6 +245,70 @@ static foreach (backend; EnumMembers!ReplBackendName) {
 }
 
 
+// A guest fault is a halt that no guest code sees, and the cell fails with
+// the message of the fault.
+static foreach (backend; [BackendName.interpreter, BackendName.bytecode]) {
+    @("submit.faultedCellFailsWithTheMessage." ~ backend.stringof)
+    unittest {
+        auto repl = Repl(backend);
+        repl.submit("int load(int* p) { return *p; }")
+            .kind.should == SubmitResult.Kind.none;
+
+        const result = repl.submit("load(null)");
+
+        result.kind.should == SubmitResult.Kind.error;
+        "fatal: null pointer dereference".should.be in result.text;
+        repl.submit("1 + 2").text.should == "3";
+    }
+}
+
+
+// As a halt: no `finally` block runs for a fault.
+static foreach (backend; EnumMembers!ReplBackendName) {
+    @("submit.faultedCellDoesNotRunFinally." ~ backend.stringof)
+    unittest {
+        import std.process: environment;
+
+        enum ran = "SNAKEBITE_FAULT_FINALLY_" ~ backend.stringof;
+        auto repl = Repl(backend);
+        repl.submit(
+            "int load(int* p) {"
+            ~ " import core.sys.posix.stdlib: setenv;"
+            ~ " try return *p;"
+            ~ " finally setenv(\"" ~ ran ~ "\", \"1\", 1); }",
+        ).kind.should == SubmitResult.Kind.none;
+
+        repl.submit("load(null)").kind.should == SubmitResult.Kind.error;
+        environment.get(ran, "did not run").should == "did not run";
+    }
+}
+
+
+// As a halt: the destructor of a temporary is guest code, and does not run
+// for a fault.
+static foreach (backend; EnumMembers!ReplBackendName) {
+    @("submit.faultedCellDoesNotRunTemporaryDestructors." ~ backend.stringof)
+    unittest {
+        import std.process: environment;
+
+        enum ran = "SNAKEBITE_FAULT_TEMPORARY_" ~ backend.stringof;
+        auto repl = Repl(backend);
+        repl.submit(
+            "struct Guard { int v; ~this() {"
+            ~ " import core.sys.posix.stdlib: setenv;"
+            ~ " setenv(\"" ~ ran ~ "\", \"1\", 1); } }",
+        ).kind.should == SubmitResult.Kind.none;
+        repl.submit("Guard make() { return Guard(1); }")
+            .kind.should == SubmitResult.Kind.none;
+        repl.submit("int load(int* p) { return make().v + *p; }")
+            .kind.should == SubmitResult.Kind.none;
+
+        repl.submit("load(null)").kind.should == SubmitResult.Kind.error;
+        environment.get(ran, "did not run").should == "did not run";
+    }
+}
+
+
 // A `foreach` over a string with a `dchar` variable calls druntime's
 // compiled `_aApplycd1` with the loop body as a delegate, so the halt
 // goes through a native frame before it reaches the `catch`. A halt is
