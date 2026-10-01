@@ -1265,3 +1265,159 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+static foreach (backend; Matrix!()) {
+    @("compoundAssignFieldsOfDifferentTypesInMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Owner {
+                byte pad = 9;
+                double d = 1.5;
+                long l = 20;
+                double run() {
+                    d += 0.5;
+                    l <<= 1;
+                    return d + l;
+                }
+            }
+            int main() {
+                Owner owner;
+                return owner.run == 42.0 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("shiftLongLocalByInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                long value = 20;
+                value <<= 1;
+                return value == 40 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("shiftLongFieldThroughThisByInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Owner {
+                long value = 20;
+                void run() { value <<= 1; }
+            }
+            int main() {
+                Owner owner;
+                owner.run;
+                return owner.value == 40 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("shiftLongFieldThroughPointerByInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Owner { long value = 20; }
+            int main() {
+                Owner owner;
+                auto pointer = &owner;
+                pointer.value <<= 1;
+                return owner.value == 40 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("shiftLongFieldOfClassByInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Owner { long value = 20; }
+            int main() {
+                auto owner = new Owner;
+                owner.value <<= 1;
+                return owner.value == 40 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("shiftLongArrayElementByInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                long[2] values = [1, 20];
+                values[1] <<= 1;
+                return values[1] == 40 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("shiftLongRefParameterByInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void twice(ref long value) { value <<= 1; }
+            int main() {
+                long value = 20;
+                twice(value);
+                return value == 40 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a mutable static variable"),
+)) {
+    @("shiftLongStaticByInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            long value = 20;
+            int main() {
+                value <<= 1;
+                return value == 40 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("powAssignLongByInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                long value = 3;
+                int exponent = 3;
+                value ^^= exponent;
+                return value == 27 ? 0 : 1;
+            }
+        });
+    }
+}
