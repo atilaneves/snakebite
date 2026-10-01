@@ -115,6 +115,29 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// A closure keeps the caught exception alive past the handler, so the
+// `catch` variable lives in the closure and not in the frame.
+static foreach (backend; Matrix!()) {
+    @("catchVariableCapturedByClosure." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int run() {
+                try {
+                    throw new Exception("boom");
+                } catch (Exception caught) {
+                    auto length = () => caught.msg.length;
+                    return cast(int) length();
+                }
+            }
+
+            void main() {
+                assert(run() == 4);
+            }
+        });
+    }
+}
+
 static foreach (backend; Matrix!()) {
     @("catchMatchesGuestClassByBaseType." ~ backend.stringof)
     @Tags(backend.stringof)

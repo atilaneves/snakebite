@@ -1440,6 +1440,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 );
 
             _finished = false;
+            // The VM stores the exception into the frame slot; a captured
+            // variable reads from its closure slot instead.
+            if (catch_.var !is null && isClosureVariable(catch_.var)) {
+                const slot = _closureLayout.slotOf(catch_.var);
+                emit(&opStoreIndirect, closureSlotAddress(slot.offset),
+                    catchOffset, size_t.sizeof);
+            }
             compileStatement(catch_.handler);
             allHandlersFinished &= _finished;
 
