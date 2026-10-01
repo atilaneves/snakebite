@@ -687,3 +687,116 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// The alias argument is a field of another struct, so the second context
+// is the `this` of the member function that makes the call, not a frame.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on a dual-context "
+            ~ "function whose second context is a struct `this`"),
+)) {
+    @("readFieldOfOtherStructFromDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base = 2;
+                int add(alias field)() { return base + field; }
+            }
+            struct Owner {
+                int value = 40;
+                int run(ref Holder holder) { return holder.add!value(); }
+            }
+            int main() {
+                Holder holder;
+                Owner owner;
+                return owner.run(holder) == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// The second context is a class reference.
+static foreach (backend; Matrix!()) {
+    @("readFieldOfOtherClassFromDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Holder {
+                int base = 2;
+                int add(alias field)() { return base + field; }
+            }
+            class Owner {
+                int value = 40;
+                int run(Holder holder) { return holder.add!value(); }
+            }
+            int main() {
+                auto holder = new Holder;
+                auto owner = new Owner;
+                return owner.run(holder) == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// The call is in a function nested in the member, so the second context
+// (the member's `this`) is one step up the static chain.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on a dual-context "
+            ~ "function whose second context is a struct `this`"),
+)) {
+    @("readFieldOfOtherStructFromDualContextMemberInNestedFunction."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base = 2;
+                int add(alias field)() { return base + field; }
+            }
+            struct Owner {
+                int value = 40;
+                int run(ref Holder holder) {
+                    int nested() { return holder.add!value(); }
+                    return nested();
+                }
+            }
+            int main() {
+                Holder holder;
+                Owner owner;
+                return owner.run(holder) == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A delegate to a dual-context member whose second context is a `this`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE does not support closures"),
+)) {
+    @("delegateToDualContextMemberWithFieldOfOtherStruct."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base = 2;
+                int add(alias field)() { return base + field; }
+            }
+            struct Owner {
+                int value = 40;
+                int delegate() bind(ref Holder holder) {
+                    return &holder.add!value;
+                }
+            }
+            int main() {
+                Holder holder;
+                Owner owner;
+                auto callback = owner.bind(holder);
+                return callback() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
