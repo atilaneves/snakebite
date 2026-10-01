@@ -23,12 +23,17 @@ public struct ReplOptions {
 
 // `bin/sb-repl`: evaluate D snippets, interactively or from a pipe.
 public int run(string[] args) {
-    import snakebite.frontend.compiler: initialize, Snippets;
+    import snakebite.frontend.compiler:
+        compilerPath, FrontendFlags, initialize, Snippets, withScratchFrontend;
     import snakebite.dependencyimage: DependencyImage;
     import snakebite.dub: fetchProject;
     import snakebite.project: loadProject, prepareDependencies, sourceSet;
     import snakebite.gc: selectFrontendMemory;
     import snakebite.repl: Repl;
+    import std.algorithm.iteration: map;
+    import std.array: array;
+    import std.file: chdir;
+    import std.path: absolutePath;
     import std.stdio: stderr, writeln;
 
     const parsed = parseReplArgs(args);
@@ -48,7 +53,9 @@ public int run(string[] args) {
 
     try {
         string[] importPaths = parsed.options.importPaths.dup;
+        string[] files = parsed.options.files.dup;
         string[] stringImportPaths;
+        FrontendFlags flags;
         const(DependencyImage)* dependencyImage;
         string projectDirectory = parsed.options.projectDirectory;
         if (parsed.options.dubProject.length != 0) {
@@ -57,26 +64,44 @@ public int run(string[] args) {
             projectDirectory = fetchProject(parsed.options.dubProject);
         }
         if (projectDirectory.length != 0) {
+            // Like sb, the session works in the project directory, where
+            // dub builds the project: a project module's `__FILE__` is
+            // relative to it and dmd resolves that name against it.
+            projectDirectory = projectDirectory.absolutePath;
+            importPaths = importPaths.map!(path => path.absolutePath).array;
+            files = files.map!(file => file.absolutePath).array;
+            chdir(projectDirectory);
+
+            // Mutable: `loadProject` keeps these in the `Project` it returns.
             auto projectSources = sourceSet(
                 projectDirectory, [], [], parsed.options.versions,
             );
-            auto project = loadProject(
-                projectDirectory, projectSources,
+            // The frontend analyses what the cells reach, as they reach
+            // it; the whole project only when its image must be built, and
+            // that analysis leaves nothing behind for the cells to reuse.
+            dependencyImage = withScratchFrontend(
+                () => prepareDependencies(
+                    projectDirectory, projectSources,
+                    () => loadProject(projectDirectory, projectSources).program,
+                ),
             );
-            prepareDependencies(project);
-            importPaths = project.sources.importPaths ~ importPaths;
-            stringImportPaths = project.sources.stringImportPaths;
-            dependencyImage = project.program.dependencyImage;
+            const inProject = (string path) => compilerPath(path, projectDirectory);
+            importPaths = projectSources.importPaths.map!inProject.array
+                ~ importPaths;
+            stringImportPaths = projectSources.stringImportPaths
+                .map!inProject.array;
+            flags = projectSources.flags;
         }
 
         auto repl = Repl(
             parsed.options.backend,
             importPaths,
             stringImportPaths,
+            flags,
             dependencyImage,
         );
 
-        foreach (file; parsed.options.files)
+        foreach (file; files)
             repl.loadModuleFile(file);
 
         if (parsed.options.hasCommand)

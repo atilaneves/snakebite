@@ -237,9 +237,10 @@ public DependencyImage prepareImage(
     auto stamps = ProjectImageCache(
         directory.buildPath(sourceDigest(settings) ~ ".json"), settings, null,
         executable);
-    DependencyImage image;
-    if (stamps.restore(image, () => source))
-        return image;
+    // Every record written here names the image it was saved with.
+    const recorded = stamps.restore(() => source);
+    if (!recorded.isNull)
+        return loadImage(recorded.get);
 
     const identityOutput = compilerIdentity([executable]);
     import std.algorithm: startsWith;
@@ -319,7 +320,7 @@ public DependencyImage prepareImage(
         // builders publish equivalent complete files with atomic rename.
         rename(imagePath, destination);
     }
-    image = loadImage(destination);
+    auto image = loadImage(destination); // Returned as mutable: its handle is.
     stamps.save(destination, source,
         inputs ~ linkerFiles ~ (hasCppSource ? [cxxExecutable] : null));
     return image;
@@ -524,7 +525,9 @@ private void require(in bool condition, in string message) {
 // executable) and its inputs. An unchanged image needs only metadata
 // checks and a loader reference: file stamps for the compiler, the
 // generator, and every input stand in for their contents. A root edit
-// can reuse the same image if it requests the same templates.
+// can reuse the same image if it requests the same templates. A project
+// that needs no image is recorded the same way, so the answer "no image"
+// is as cheap to give again as an image is.
 public struct ProjectImageCache {
     private string _path;
     private string _settings;
@@ -548,6 +551,7 @@ public struct ProjectImageCache {
         _generator = generator;
     }
 
+    // Whether the project has an image, which is then in `image`.
     public bool prepare(
         ref DependencyImage image,
         scope string delegate() source,
@@ -565,42 +569,53 @@ public struct ProjectImageCache {
             }
             return generated;
         }
-        if (restore(image, &generateSource))
-            return true;
+        const recorded = restore(&generateSource);
+        if (!recorded.isNull) {
+            if (recorded.get.length)
+                image = loadImage(recorded.get);
+            return recorded.get.length != 0;
+        }
 
         buildDependencies();
         const generatedSource = generateSource();
-        if (!generatedSource.length && !hasLinkerFiles)
-            return false;
-        image = buildImage(generatedSource.length
-            ? generatedSource : "module snakebite_dependency_image;\n");
-        save(image.path, generatedSource, inputs());
-        return true;
+        string path;
+        if (generatedSource.length || hasLinkerFiles) {
+            image = buildImage(generatedSource.length
+                ? generatedSource : "module snakebite_dependency_image;\n");
+            path = image.path;
+        }
+        save(path, generatedSource, inputs());
+        return path.length != 0;
     }
 
-    private bool restore(ref DependencyImage image, scope string delegate() source) {
+    // The recorded image's path while the record holds for the current
+    // inputs: empty when the project needs no image, null when the record
+    // does not hold.
+    private imported!"std.typecons".Nullable!string restore(
+        scope string delegate() source,
+    ) {
         import std.file: exists, readText;
         import std.json: parseJSON;
+        import std.typecons: Nullable;
 
         if (!_path.exists)
-            return false;
+            return Nullable!string.init;
         auto record = parseJSON(_path.readText);
         if (record["settings"].str != _settings
                 || record["compiler"].str != _compiler)
-            return false;
+            return Nullable!string.init;
         foreach (path, stamp; record["inputs"].object)
             if (fileStamp(path) != stamp.str)
-                return false;
+                return Nullable!string.init;
         const roots = fileStamps(_roots);
         const rootChanged = roots != record["roots"];
         if (rootChanged && sourceDigest(source()) != record["source"].str)
-            return false;
-        image = loadImage(record["image"].str);
+            return Nullable!string.init;
         if (rootChanged) {
             record["roots"] = roots;
             publish(record.toString);
         }
-        return true;
+        return Nullable!string(record["image"].str);
     }
 
     private void publish(in string contents) const {
@@ -615,14 +630,16 @@ public struct ProjectImageCache {
         rename(temporary, _path);
     }
 
+    // `path` is empty for a project that needs no image.
     private void save(in string path, in string source, in string[] inputs) const {
         import std.json: JSONValue;
 
+        const image = path.length ? [path] : null;
         JSONValue record;
         record["settings"] = _settings;
         record["compiler"] = _compiler;
         record["roots"] = fileStamps(_roots);
-        record["inputs"] = fileStamps(inputs ~ [_compiler, _generator, path]);
+        record["inputs"] = fileStamps(inputs ~ [_compiler, _generator] ~ image);
         record["source"] = sourceDigest(source);
         record["image"] = path;
         publish(record.toString);

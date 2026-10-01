@@ -75,7 +75,10 @@ public PreparationReport prepareProject(
     const frontendDuration = stopWatch.peek;
     stopWatch.reset;
     if (nativeDependencies)
-        prepareDependencies(project, optimise);
+        project.program.dependencyImage = prepareDependencies(
+            project.directory, project.sources, () => project.program,
+            optimise,
+        );
     if (project.program.dependencyImage !is null)
         project.program.testHooks = project.program.dependencyImage.testHooks;
     auto startupImage = new DependencyImage;

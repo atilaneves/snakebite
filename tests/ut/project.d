@@ -18,6 +18,7 @@ import std.conv: octal;
 import std.path: absolutePath, buildNormalizedPath, buildPath, dirName;
 import std.meta: AliasSeq, Filter;
 import std.process: Config, execute, environment;
+import std.string: splitLines;
 import std.traits: isInstanceOf;
 import ut;
 import ut.backends;
@@ -249,34 +250,98 @@ private alias CliBackendMatrix = Filter!(isCliBackend, AliasSeq!(
 
 
 @("cli.fetchKeepsPackageName")
-@Serial
 unittest {
     const sandbox = Sandbox();
-    sandbox.writeFile("outside/.keep");
     sandbox.writeFile("bin/dub",
         "#!/bin/sh\n"
         ~ "echo \"fake dub received: $*\"\n"
         ~ "exit 1\n");
-    const dubPath = sandbox.inSandboxPath("bin/dub");
-    dubPath.setAttributes(dubPath.getAttributes | octal!700);
 
-    const oldPath = environment.get("PATH", "");
-    scope (exit) environment["PATH"] = oldPath;
-    environment["PATH"] = sandbox.inSandboxPath("bin") ~ ":" ~ oldPath;
-
-    const executable = buildPath(getcwd, "bin", "sb");
     foreach (backend; ["interpreter", "bytecode", "ctfe"]) {
-        const result = execute(
-            [executable, "--backend=" ~ backend, "unit-threaded"],
-            null,
-            Config.none,
-            size_t.max,
-            sandbox.inSandboxPath("outside"),
-        );
+        const result = runWithFakeDub(
+            sandbox, ["--backend=" ~ backend, "unit-threaded"]);
 
         result.status.should == 1;
         "fake dub received: fetch unit-threaded".should.be in result.output;
     }
+}
+
+
+// A package already in the local dub cache must resolve without `dub fetch`:
+// without a version, fetch always asks the registry over the network.
+@("cli.packageOnDiskDoesNotFetch")
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("bin/dub",
+        "#!/bin/sh\n"
+        ~ "echo \"$*\" >> \"" ~ sandbox.inSandboxPath("dub.log") ~ "\"\n"
+        ~ "[ \"$1\" = describe ] || exit 1\n"
+        ~ "echo \"" ~ sandbox.inSandboxPath("packages/cached") ~ "\"\n");
+
+    runWithFakeDub(sandbox, ["cached"]);
+
+    sandbox.inSandboxPath("dub.log").readText.splitLines.should == [
+        "describe cached --data=working-directory --data-list",
+    ];
+}
+
+
+// A package missing from the local dub cache is fetched once, then described.
+@("cli.packageMissingFetchesThenDescribes")
+unittest {
+    const sandbox = Sandbox();
+    const fetched = sandbox.inSandboxPath("fetched");
+    sandbox.writeFile("bin/dub",
+        "#!/bin/sh\n"
+        ~ "echo \"$*\" >> \"" ~ sandbox.inSandboxPath("dub.log") ~ "\"\n"
+        ~ "if [ \"$1\" = fetch ]; then touch \"" ~ fetched ~ "\"; exit 0; fi\n"
+        ~ "[ -e \"" ~ fetched ~ "\" ] || "
+        ~ "{ echo \"Failed to find package locally.\"; exit 2; }\n"
+        ~ "echo \"" ~ sandbox.inSandboxPath("packages/missing") ~ "\"\n");
+
+    runWithFakeDub(sandbox, ["missing"]);
+
+    sandbox.inSandboxPath("dub.log").readText.splitLines.should == [
+        "describe missing --data=working-directory --data-list",
+        "fetch missing",
+        "describe missing --data=working-directory --data-list",
+    ];
+}
+
+
+// A package that cannot be fetched reports what dub said about it.
+@("cli.fetchFailureReportsDubOutput")
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("bin/dub",
+        "#!/bin/sh\n"
+        ~ "echo \"fake dub said: $1\"\n"
+        ~ "exit 2\n");
+
+    const result = runWithFakeDub(sandbox, ["absent"]);
+
+    result.status.should == 1;
+    ("snakebite: dub fetch failed for `absent`:\n"
+        ~ "fake dub said: fetch\n"
+        ~ "after dub describe failed:\n"
+        ~ "fake dub said: describe\n").should.be in result.output;
+}
+
+
+// The fake dub goes on the child's PATH only: the tests run in parallel, and
+// changing this process's PATH would hand it to every other test's dub.
+private auto runWithFakeDub(in Sandbox sandbox, in string[] arguments) {
+    sandbox.writeFile("outside/.keep");
+    const dubPath = sandbox.inSandboxPath("bin/dub");
+    dubPath.setAttributes(dubPath.getAttributes | octal!700);
+    const path = sandbox.inSandboxPath("bin") ~ ":" ~ environment.get("PATH", "");
+    return execute(
+        [buildPath(getcwd, "bin", "sb")] ~ arguments,
+        ["PATH": path],
+        Config.none,
+        size_t.max,
+        sandbox.inSandboxPath("outside"),
+    );
 }
 
 

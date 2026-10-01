@@ -67,11 +67,16 @@ public imported!"dmd.dmodule".Module[] parseRootModules(
 // `Program.isRootOwned` treats a cell's own imports as root-owned under
 // (see `driveSharedSemantic`). A plain snippet (bin/ut, a REPL session
 // with no project) leaves it empty and behaves exactly as before.
+// `flags` apply to this parse only, as `parseRootModules`' flags do: a
+// cell and every project module it loads, however it loads it, are
+// analysed in full here, with the project's flags, so no analysis after
+// the parse needs them.
 public imported!"dmd.dmodule".Module parseSnippet(
     in string source,
     in string[] rootImportPaths = null,
+    in FrontendFlags flags = FrontendFlags.init,
 ) {
-    return compiler.parseSnippet(source, rootImportPaths);
+    return compiler.parseSnippet(source, rootImportPaths, flags);
 }
 
 // Parse several whole guest programs, driving the shared semantic phases
@@ -88,9 +93,53 @@ public imported!"dmd.dmodule".Module[] parseSnippets(in string[] sources) {
 // Runs host code under the frontend lock, so it sees dmd's state
 // settled and excludes every other thread's dmd work. It is still host
 // code: it allocates from the GC, and it reaches dmd only through
-// `newInFrontend`.
-public void withCompilerLock(scope void delegate() action) {
-    compiler.withLock(action);
+// `newInFrontend`. `flags` are in effect for `action` only, as for a
+// parse: a REPL session hands its project's flags to every frontend
+// call it makes.
+public void withCompilerLock(
+    scope void delegate() action,
+    in FrontendFlags flags = FrontendFlags.init,
+) {
+    compiler.withLock(action, flags);
+}
+
+// Run `action`, then put the frontend back in the state `initialize` left
+// it in: every module `action` parsed is gone, and so is what the frontend
+// printed while it ran, unless `action` throws. For an analysis whose only
+// product is `action`'s own result, such as the program a dependency image
+// is built from, so that what the process compiles afterwards does not
+// depend on whether that analysis ran.
+public T withScratchFrontend(T)(scope T delegate() action) {
+    auto captured = capturedStderr;
+    scope(failure) captured.replay;
+    scope(exit) compiler.reset;
+
+    auto result = action();
+    captured.discard;
+    return result;
+}
+
+// The path dmd is handed for `path` when it compiles from `directory`, and
+// so the `__FILE__` of a module read from it: relative to `directory` when
+// it is under it, as dub names a package's files when it builds from the
+// package's own directory; otherwise `path` itself.
+public string compilerPath(in string path, in string directory) {
+    const relative = pathUnder(path, directory);
+    return relative is null ? path : relative;
+}
+
+// `path` relative to `directory`, or null when it is not under it.
+private string pathUnder(in string path, in string directory) {
+    import std.algorithm.searching: startsWith;
+    import std.path: absolutePath, buildNormalizedPath, relativePath;
+
+    if (directory.length == 0)
+        return null;
+
+    const relative = path.absolutePath.buildNormalizedPath.relativePath(
+        directory.absolutePath.buildNormalizedPath,
+    );
+    return relative.startsWith("..") ? null : relative;
 }
 
 // Calls `dmdSymbol` - a function dmd declares, or a dmd class, which is
@@ -342,6 +391,10 @@ final class Compiler {
     // Keyed by source content; prevents re-registering the same root module
     // in DMD's process-global table.
     private Module[string] sourceCache;
+    // What `initialize` was asked for and how many modules it left parsed,
+    // so `reset` can tell whether anything was parsed since and redo it.
+    private Snippets snippets;
+    private size_t initialModuleCount;
 
     private this() {
         // Construct only. DMD's process-global state (allInst, the lightning
@@ -359,12 +412,19 @@ final class Compiler {
         if (initialized)
             return;
 
-        // Host code, in the GC: the search reads the configuration with
-        // Phobos, whose caches (`std.functional.memoize`, behind
-        // `std.regex`) are shared with every later host use. Made
-        // inside the frontend, their storage would be arena memory that
-        // host code then fills with GC data no collection looks at.
-        // Only dmd's own setup runs inside; the paths are copied in.
+        this.snippets = snippets;
+        inside(&rebuildIdentifierTable); // Not in `setUpDmd`: `reset` runs it.
+        setUpDmd;
+        initialized = true;
+    }
+
+    // Host code, in the GC: the search reads the configuration with
+    // Phobos, whose caches (`std.functional.memoize`, behind
+    // `std.regex`) are shared with every later host use. Made
+    // inside the frontend, their storage would be arena memory that
+    // host code then fills with GC data no collection looks at.
+    // Only dmd's own setup runs inside; the paths are copied in.
+    private void setUpDmd() {
         import dmd.frontend: findImportPaths;
 
         import std.array: array;
@@ -373,7 +433,7 @@ final class Compiler {
 
         inside({
             initializeDmdState(snippets, importPaths);
-            initialized = true;
+            initialModuleCount = Module.amodules.length;
         });
     }
 
@@ -402,6 +462,29 @@ final class Compiler {
         throw new Exception(thrown.msg, thrown.file, thrown.line);
     }
 
+    // Return dmd to the state `initialize` left it in. A no-op when nothing
+    // was parsed since, so it costs nothing on the path that parsed nothing.
+    void reset() {
+        import dmd.frontend: deinitializeDMD;
+
+        mutex.lock;
+        scope(exit) mutex.unlock;
+        requireInitialized;
+
+        if (Module.amodules.length == initialModuleCount)
+            return;
+
+        inside({
+            deinitializeDMD;
+            // `deinitializeDMD` leaves `Module.amodules`, dmd's list of every
+            // module parsed, as it was, so the modules `reset` drops would
+            // still be found there.
+            Module.amodules.setDim(0);
+            sourceCache = null;
+        });
+        setUpDmd;
+    }
+
     private void requireInitialized() const {
         assert(
             initialized,
@@ -423,7 +506,6 @@ final class Compiler {
         import dmd.target: CPU, addDefaultVersionIdentifiers, target;
         import std.algorithm.iteration: each;
 
-        rebuildIdentifierTable;
         initDMD;
         target.cpu = CPU.baseline;
         target.setCPU;
@@ -518,6 +600,14 @@ final class Compiler {
     // table. Fill it again here, inside the frontend, with the same
     // keywords: then the table and every identifier are frontend memory,
     // and the GC-owned table the constructor made is garbage.
+    //
+    // Once per process, from `initialize` only, never from `reset`. dmd
+    // interns identifiers and compares them by address, and identifiers
+    // outlive a reset: in a static cache, or in what an analysis in
+    // `withScratchFrontend` returns. A second table would intern a
+    // different identifier for the same name, and lookups that mix the
+    // two fail (`undefined identifier pow in module std.math`).
+    // `deinitializeDMD` does not clear the table either.
     private void rebuildIdentifierTable() {
         import dmd.identifier: Identifier;
         import dmd.tokens: TOK, Token;
@@ -588,18 +678,28 @@ final class Compiler {
     }
 
     // Host code under the lock is outside the frontend even when dmd is
-    // on this thread's stack.
-    void withLock(scope void delegate() action) {
-        import snakebite.gc: resumeFrontend, suspendFrontend;
+    // on this thread's stack. Applying the flags is dmd work, so it runs
+    // inside, and `action` runs after leaving it.
+    void withLock(scope void delegate() action, in FrontendFlags flags) {
+        import snakebite.gc:
+            enterFrontend, leaveFrontend, resumeFrontend, suspendFrontend;
 
         mutex.lock;
-        const depth = suspendFrontend;
-        scope(exit) {
-            resumeFrontend(depth);
-            mutex.unlock;
-        }
+        scope(exit) mutex.unlock;
+
+        enterFrontend;
+        scope(exit) leaveFrontend;
+
         resetErrors;
-        scope(exit) resetErrors;
+        const savedFlags = saveFrontendFlags;
+        scope(exit) {
+            restoreFrontendFlags(savedFlags);
+            resetErrors;
+        }
+        applyFrontendFlags(flags);
+
+        const depth = suspendFrontend;
+        scope(exit) resumeFrontend(depth);
         action();
     }
 
@@ -695,9 +795,16 @@ final class Compiler {
     Module parseSnippet(
         in string source,
         in string[] rootImportPaths,
+        in FrontendFlags flags,
     ) {
-        return inside(() => parseSourceLocked(
-            owned(source), owned(rootImportPaths)));
+        return inside(() {
+            const savedFlags = saveFrontendFlags;
+            scope(exit) restoreFrontendFlags(savedFlags);
+            applyFrontendFlags(flags);
+
+            return parseSourceLocked(
+                owned(source), owned(rootImportPaths), flags);
+        });
     }
 
     Module[] parseSnippets(in string[] sources) {
@@ -707,6 +814,7 @@ final class Compiler {
     private Module parseSourceLocked(
         in string source,
         in string[] rootImportPaths,
+        in FrontendFlags flags,
     ) {
         import core.atomic: atomicFetchAdd;
         import dmd.errors: diagnostics;
@@ -720,10 +828,13 @@ final class Compiler {
         // parse used; a REPL cell's `rootImportPaths` can differ across
         // `Repl` sessions in the same process even when the cell's source
         // text is byte-identical (e.g. two sessions' first cell), so a hit
-        // here would silently reuse the wrong session's gating. Only the
-        // plain-snippet callers (empty `rootImportPaths`) benefit from the
-        // cache; they are unaffected by this.
-        if (rootImportPaths.length == 0) {
+        // here would silently reuse the wrong session's gating. The same
+        // holds for a session's flags. Only the plain-snippet callers (empty
+        // `rootImportPaths`, no flags) benefit from the cache; they are
+        // unaffected by this.
+        const cacheable = rootImportPaths.length == 0
+            && flags.compilerArguments.length == 0;
+        if (cacheable) {
             if (auto cached = source in sourceCache)
                 return *cached;
         }
@@ -757,7 +868,7 @@ final class Compiler {
 
         captured.replay;
 
-        if (rootImportPaths.length == 0)
+        if (cacheable)
             sourceCache[source] = moduleResult.module_;
 
         return moduleResult.module_;
@@ -883,23 +994,11 @@ final class Compiler {
         in string[] importPaths,
         in string rootDirectory,
     ) const {
-        import std.algorithm.searching: startsWith;
-        import std.path: absolutePath, buildNormalizedPath, relativePath;
-
-        const absPath = filePath.absolutePath.buildNormalizedPath;
-        if (rootDirectory.length) {
-            const relPath = absPath.relativePath(
-                rootDirectory.absolutePath.buildNormalizedPath,
-            );
-            if (!relPath.startsWith(".."))
-                return relPath;
-        }
+        if (const underRoot = pathUnder(filePath, rootDirectory))
+            return underRoot;
         foreach (importPath; importPaths) {
-            const relPath = absPath.relativePath(
-                importPath.absolutePath.buildNormalizedPath,
-            );
-            if (!relPath.startsWith(".."))
-                return relPath;
+            if (const underImportPath = pathUnder(filePath, importPath))
+                return underImportPath;
         }
 
         return filePath;
@@ -961,9 +1060,76 @@ private void driveSharedSemantic(
     runDeferredSemantic2;
     foreach (m; rootModules) m.semantic3(null);
     runDeferredSemantic3;
+    if (rootImportPaths.length)
+        rootModules ~= analyseLoadedRootOwnedImports(rootImportPaths);
 
     if (global.errors == 0)
         reportInlineAsmDiagnostics(rootModules);
+}
+
+// Every module under `rootImportPaths` that the phases above loaded and
+// `discoverRootOwnedImports` did not find: one imported inside a function
+// body, a `version`/`static if` block or a `mixin`. dmd loads it as a
+// non-root import, so no phase analysed its function bodies, and the
+// backends would force that analysis later, outside this parse and
+// without its frontend flags. `dmd -i` compiles such an import as a root
+// (`Compiler.onImport`) and runs semantic3 on it after the roots'
+// (`dmd.main`'s `compiledImports` loop); do the same here, so every
+// root-owned module is analysed in the same parse, with the same flags.
+// A module's semantic3 can load further modules, hence the loop.
+private imported!"dmd.dmodule".Module[] analyseLoadedRootOwnedImports(
+    in string[] rootImportPaths,
+) {
+    import dmd.dmodule: Module;
+    import dmd.dsymbolsem: runDeferredSemantic3;
+    import dmd.semantic3: semantic3;
+    import snakebite.frontend.inlineasm: disableInlineAsmVersion;
+
+    Module[] promoted;
+    for (;;) {
+        Module[] loaded;
+        foreach (module_; Module.amodules)
+            if (!module_.isRoot && isUnderAnyPath(module_, rootImportPaths))
+                loaded ~= module_;
+        if (loaded.length == 0)
+            return promoted;
+
+        foreach (module_; loaded) {
+            disableInlineAsmVersion(module_);
+            module_.importedFrom = module_;
+            module_.semantic3(null);
+        }
+        runDeferredSemantic3;
+        promoted ~= loaded;
+    }
+}
+
+// Whether `module_` was read from a file under one of `paths`: a module of
+// the project a REPL session loads, as opposed to druntime, Phobos or any
+// other import the session calls natively.
+public bool isUnderAnyPath(
+    imported!"dmd.dmodule".Module module_,
+    in string[] paths,
+) {
+    import std.algorithm.searching: startsWith;
+    import std.path: absolutePath, buildNormalizedPath, dirSeparator;
+    import std.string: fromStringz;
+
+    const sourcePath = module_.srcfile.toString.fromStringz.idup
+        .absolutePath.buildNormalizedPath;
+
+    foreach (path; paths) {
+        const normalizedPath = path.absolutePath.buildNormalizedPath;
+        // A bare prefix match would also claim a sibling directory whose
+        // name merely starts with `path` (`-I /a/b` matching `/a/bc`), so
+        // the source must equal the path itself or sit under it as a
+        // whole directory component.
+        if (sourcePath == normalizedPath
+            || sourcePath.startsWith(normalizedPath ~ dirSeparator))
+            return true;
+    }
+
+    return false;
 }
 
 // A project module reached only through `import`, not one of `modules`
@@ -981,10 +1147,14 @@ private void driveSharedSemantic(
 // against `Module.amodules` the same way, so a later `import` resolves to
 // this same, already-parsed module instead of a fresh, ungated one),
 // gating each one immediately.
-// Known gap, the same shape as the string-mixin gap in docs/adr/0012: an
-// import nested inside a `version`/`static if`/`mixin` at module scope is
-// not discovered here, only a plain module-scope `import` declaration;
-// neither is one resolved through a package's `package.d`.
+// Only a plain module-scope `import` declaration, of a module file or of
+// a package's `package.d`, is discovered here: one inside a function
+// body, a `version`/`static if` block or a `mixin` needs semantic
+// analysis to resolve. dmd loads such a module during the phases, and
+// `analyseLoadedRootOwnedImports` analyses it as root-owned afterwards;
+// its module-scope `D_InlineAsm_X86_64` conditions are then already
+// resolved as dmd resolves them, the same shape as the string-mixin gap
+// in docs/adr/0012.
 private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
     imported!"dmd.dmodule".Module[] modules,
     in string[] rootImportPaths,
@@ -995,7 +1165,7 @@ private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
     import std.algorithm.iteration: map;
     import std.array: array;
     import std.file: exists, readText;
-    import std.path: absolutePath, buildNormalizedPath, buildPath;
+    import std.path: buildPath;
     import std.string: fromStringz;
 
     bool[Module] known;
@@ -1017,16 +1187,24 @@ private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
                 .map!(id => id.toString.fromStringz.idup)
                 .array
                 ~ import_.id.toString.fromStringz.idup;
-            const relativePath = buildPath(segments) ~ ".d";
-
+            // Named as dmd's own import lookup names it: the import path
+            // as dmd was handed it, joined with the module's file, or with
+            // the package's `package.d` when there is no such file.
+            const relativePaths = [
+                buildPath(segments) ~ ".d",
+                buildPath(segments ~ "package.d"),
+            ];
             string matchedPath;
             foreach (rootPath; rootImportPaths) {
-                const candidate =
-                    buildPath(rootPath, relativePath).absolutePath.buildNormalizedPath;
-                if (candidate.exists) {
-                    matchedPath = candidate;
-                    break;
+                foreach (relativePath; relativePaths) {
+                    const candidate = buildPath(rootPath, relativePath);
+                    if (candidate.exists) {
+                        matchedPath = candidate;
+                        break;
+                    }
                 }
+                if (matchedPath !is null)
+                    break;
             }
             if (matchedPath is null)
                 continue;
