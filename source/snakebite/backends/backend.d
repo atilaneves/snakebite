@@ -27,6 +27,8 @@ public struct Program {
     // `snakebite.frontend.dmd.functions.isRootOwned`.
     private bool[Module] _rootModuleSet;
     FuncDeclaration[] moduleConstructors;
+    // Built once from `rootModules`; see `definitionOf`.
+    private FuncDeclaration[FuncDeclaration] _linkedDefinitions;
     Main main;
     string name;
     private Checks _checks;
@@ -60,9 +62,11 @@ public struct Program {
     ) {
         import snakebite.frontend.dmd.functions:
             findFunction,
-            findModuleConstructors;
+            findModuleConstructors,
+            linkedDefinitions;
 
         this.rootModules = rootModules;
+        _linkedDefinitions = linkedDefinitions(rootModules);
         this.name = name;
         _checks = checks;
         _haltAction = haltAction;
@@ -91,6 +95,22 @@ public struct Program {
 
     public noreturn halt() const {
         _haltAction();
+    }
+
+    // The function a call to `function_` runs. A declaration without a body
+    // that a root module defines elsewhere under the same symbol is a call
+    // to that definition, as the linker makes it (a C prototype of a D
+    // `extern(C)` function); every other function is its own.
+    public FuncDeclaration definitionOf(
+        FuncDeclaration function_,
+    ) const {
+        if (function_.fbody !is null)
+            return function_;
+
+        if (auto definition = function_ in _linkedDefinitions)
+            return cast(FuncDeclaration) *definition;
+
+        return function_;
     }
 
     public bool isInterpreted(

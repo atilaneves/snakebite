@@ -781,6 +781,11 @@ final class Compiler {
             modules ~= result.module_;
         }
 
+        // A C module the project's D code imports compiles with the project,
+        // as `dmd -i` does, though no source list names it.
+        modules ~= discoverRootOwnedImports(
+            modules, importPathsUnder(importPaths, rootDirectory), true);
+
         // Drive the shared semantic phases over the whole root set the way dmd
         // drives `-unittest <files>`: each phase runs across all roots before
         // the next begins.
@@ -987,18 +992,6 @@ final class Compiler {
         return false;
     }
 
-    // dmd preprocesses a C file when it reads it (`Module.read`), so the
-    // source is not given here, and the file must exist under the name that
-    // dmd reads: the absolute path, because the name `dmdFileName` makes is
-    // relative to a directory that is not the working directory.
-    private auto parseCRoot(in string filePath) const {
-        import dmd.frontend: dmdParseModule = parseModule;
-        import std.path: absolutePath, buildNormalizedPath;
-
-        return dmdParseModule(
-            owned(filePath.absolutePath.buildNormalizedPath), null);
-    }
-
     // The name dmd sees for a root file, and so its `__FILE__`. dub compiles
     // a package from its own directory with paths relative to it, so a file
     // under `rootDirectory` gets that same relative name.
@@ -1171,6 +1164,7 @@ public bool isUnderAnyPath(
 private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
     imported!"dmd.dmodule".Module[] modules,
     in string[] rootImportPaths,
+    in bool cModulesOnly = false,
 ) {
     import dmd.dmodule: Module;
     import dmd.frontend: dmdParseModule = parseModule;
@@ -1203,10 +1197,13 @@ private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
             // Named as dmd's own import lookup names it: the import path
             // as dmd was handed it, joined with the module's file, or with
             // the package's `package.d` when there is no such file.
-            const relativePaths = [
-                buildPath(segments) ~ ".d",
-                buildPath(segments ~ "package.d"),
-            ];
+            const relativePaths = cModulesOnly
+                ? [buildPath(segments) ~ ".c"]
+                : [
+                    buildPath(segments) ~ ".d",
+                    buildPath(segments ~ "package.d"),
+                    buildPath(segments) ~ ".c",
+                ];
             string matchedPath;
             foreach (rootPath; rootImportPaths) {
                 foreach (relativePath; relativePaths) {
@@ -1224,7 +1221,9 @@ private imported!"dmd.dmodule".Module[] discoverRootOwnedImports(
 
             auto loaded = alreadyParsedModule(segments);
             if (loaded is null) {
-                auto result = dmdParseModule(matchedPath, matchedPath.readText);
+                auto result = isCSourceFile(matchedPath)
+                    ? parseCRoot(matchedPath)
+                    : dmdParseModule(matchedPath, matchedPath.readText);
                 if (result.diagnostics.hasErrors)
                     continue; // the real `importAll` below reports this properly
                 loaded = result.module_;
@@ -1793,4 +1792,33 @@ private bool isCSourceFile(in string path) {
 
     const suffix = path.extension;
     return suffix == ".c" || suffix == ".h";
+}
+
+// dmd preprocesses a C file when it reads it (`Module.read`), so the source
+// is not given here, and the file must exist under the name that dmd reads:
+// the absolute path, because the name `Compiler.dmdFileName` makes is
+// relative to a directory that is not the working directory.
+private auto parseCRoot(in string filePath) {
+    import dmd.frontend: dmdParseModule = parseModule;
+    import std.path: absolutePath, buildNormalizedPath;
+
+    return dmdParseModule(
+        owned(filePath.absolutePath.buildNormalizedPath), null);
+}
+
+private const(string)[] importPathsUnder(in string[] importPaths, in string directory) {
+    import std.algorithm.iteration: filter;
+    import std.algorithm.searching: startsWith;
+    import std.array: array;
+    import std.path: absolutePath, buildNormalizedPath, dirSeparator;
+
+    if (directory.length == 0)
+        return null;
+
+    const root = directory.absolutePath.buildNormalizedPath;
+    return importPaths.filter!((path) {
+        const normalized = path.absolutePath.buildNormalizedPath;
+        return normalized == root
+            || normalized.startsWith(root ~ dirSeparator);
+    }).array;
 }

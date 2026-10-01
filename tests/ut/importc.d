@@ -28,6 +28,34 @@ static foreach (backend; Matrix!()) {
 }
 
 static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE does not implement C-style variadic functions"),
+)) {
+    @("importc.vaCopy." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        42.cProjectStatus!(backend, "va_copy", `
+            #include <stdarg.h>
+            int twice(int count, ...) {
+                va_list first, second;
+                va_start(first, count);
+                va_copy(second, first);
+                int total = 0;
+                for (int i = 0; i < count; i++) total += va_arg(first, int);
+                for (int i = 0; i < count; i++) total += va_arg(second, int);
+                va_end(first);
+                va_end(second);
+                return total;
+            }
+        `, q{
+            import CMOD;
+            int main() { return twice(3, 3, 7, 11); }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
 )) {
     @("importc.scalarAndArrayInitialisers." ~ backend.stringof)
@@ -402,16 +430,100 @@ static foreach (backend; Matrix!(
 }
 
 
+static foreach (backend; Matrix!()) {
+    @("importc.bareDirectoryImportsCModule." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        // A directory with no recipe: the D files in it are the roots, and
+        // the C file that they import compiles with them, as `dmd -i` does.
+        42.cProjectStatus!(backend, "imported_unlisted", `
+            int add(int a, int b) { return a + b; }
+        `, q{
+            import CMOD;
+            int main() { return add(40, 2); }
+        }, Layout.bare);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot resolve a D declaration to the C definition of the same symbol"),
+)) {
+    @("importc.cFunctionDeclaredInD." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        42.cProjectStatus!(backend, "declared_in_d", `
+            int add(int a, int b) { return a + b; }
+        `, q{
+            extern(C) int add(int, int);
+            int main() { return add(40, 2); }
+        });
+    }
+}
+
+
+// In C the type of `!`, `&&`, `||` and a comparison is `int`, not `bool`, so
+// the whole result must be 0 or 1, whatever the stack held before.
+static foreach (backend; Matrix!()) {
+    @("importc.comparisonsGiveInt." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        42.cProjectStatus!(backend, "comparison_int", `
+            int dirty(void) {
+                int a[16] = {-1, -1, -1, -1, -1, -1, -1, -1,
+                    -1, -1, -1, -1, -1, -1, -1, -1};
+                return a[0] + a[15];
+            }
+            int less(int x) { return x < 3; }
+            int equal(int x) { return x == 3; }
+            int not(int x) { return !x; }
+            int both(int x, int y) { return x && y; }
+            int either(int x, int y) { return x || y; }
+            int pointer(int *p) { return p && *p > 3; }
+        `, q{
+            import CMOD;
+            int main() {
+                int three = 3;
+                int ok = 1;
+                dirty;
+                ok &= less(4) == 0;
+                dirty;
+                ok &= equal(4) == 0;
+                dirty;
+                ok &= not(5) == 0;
+                dirty;
+                ok &= both(1, 0) == 0;
+                dirty;
+                ok &= either(0, 0) == 0;
+                dirty;
+                ok &= pointer(&three) == 0;
+                return ok ? 42 : 1;
+            }
+        });
+    }
+}
+
+
 // Every test shares one frontend, which merges C structs of the same name
 // from different C files, so a struct tag is unique to its test unless the
 // definitions agree.
 
 
-// Builds a dub project whose `source/<name>.c` is `cSource` and whose
-// `source/<name>_app.d` is `dSource` (`CMOD` there names the C module),
-// and checks the exit status of the D `main`. Natively that is the program `dub build` makes.
-// A module name is unique per test: every test shares one frontend.
-private void cProjectStatus(backend, string name, string cSource, string dSource)(
+// Builds a project whose `<name>.c` is `cSource` and whose
+// `<name>_app.d` is `dSource` (`CMOD` there names the C module), and
+// checks the exit status of the D `main`. A `Layout.dub` project names the
+// C file in `sourceFiles`, and natively is the program `dub build` makes. A
+// `Layout.bare` directory has no recipe, and natively is `dmd -i`'s. A
+// module name is unique per test: every test shares one frontend.
+private enum Layout { dub, bare }
+
+private void cProjectStatus(
+    backend, string name, string cSource, string dSource,
+    Layout layout = Layout.dub,
+)(
     in int expected,
     in string file = __FILE__,
     in size_t line = __LINE__,
@@ -423,26 +535,32 @@ private void cProjectStatus(backend, string name, string cSource, string dSource
 
     enum moduleName = "importc_" ~ name ~ "_" ~ backend.stringof;
     const sandbox = Sandbox();
-    sandbox.writeFile("app/dub.sdl", `
-        name "importc_project"
-        targetType "library"
-        mainSourceFile "source/` ~ moduleName ~ `_app.d"
-        sourceFiles "source/` ~ moduleName ~ `.c"
-        configuration "unittest" {
-            targetType "executable"
-            targetName "importc_program"
-        }
-    `);
-    sandbox.writeFile("app/source/" ~ moduleName ~ ".c", cSource);
-    sandbox.writeFile("app/source/" ~ moduleName ~ "_app.d",
+    static if (layout == Layout.dub)
+        sandbox.writeFile("app/dub.sdl", `
+            name "importc_project"
+            targetType "library"
+            mainSourceFile "source/` ~ moduleName ~ `_app.d"
+            sourceFiles "source/` ~ moduleName ~ `.c"
+            configuration "unittest" {
+                targetType "executable"
+                targetName "importc_program"
+            }
+        `);
+    enum sources = layout == Layout.dub ? "app/source/" : "app/";
+    sandbox.writeFile(sources ~ moduleName ~ ".c", cSource);
+    sandbox.writeFile(sources ~ moduleName ~ "_app.d",
         "module " ~ moduleName ~ "_app;\n" ~ dSource.replace("CMOD", moduleName));
     const directory = sandbox.inSandboxPath("app");
 
     static if (is(backend == Native)) {
+        static if (layout == Layout.dub)
+            const command = ["dub", "build", "-q", "--config=unittest",
+                "--compiler=" ~ defaultCompiler];
+        else
+            const command = [defaultCompiler, "-i", "-ofimportc_program",
+                moduleName ~ "_app.d"];
         const build = execute(
-            ["dub", "build", "-q", "--config=unittest",
-                "--compiler=" ~ defaultCompiler],
-            null, Config.none, size_t.max, directory);
+            command, null, Config.none, size_t.max, directory);
         build.status.shouldEqual(0, build.output);
         execute([directory.buildPath("importc_program")])
             .status.shouldEqual(expected, file, line);

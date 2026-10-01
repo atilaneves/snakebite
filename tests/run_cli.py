@@ -304,6 +304,73 @@ def test_fetch_failure_reports_dub_output(tmp_path: Path) -> None:
     ) in output(result)
 
 
+C_ROOT_SOURCE = """
+#include <string.h>
+struct Point { int x; int y; };
+struct Point origin = {1, 2};
+int numbers[3] = {4, 5, 6};
+int total(int x) {
+    int pair[2] = {x, 3};
+    return pair[0] + pair[1] + (int) strlen("ab");
+}
+"""
+
+
+# A C file is a root module of a dub project (`sourceFiles`): the C
+# preprocessor runs on it, and its initialisers reach the backend. The
+# native row is the same files built by dmd, whose own unittest run is the
+# expected result.
+@pytest.mark.parametrize("backend", ["native", "interpreter", "bytecode"])
+@pytest.mark.parametrize(
+    "total, expected_status", [(9, 0), (8, 1)], ids=["agrees", "disagrees"],
+)
+def test_c_root_module(
+    tmp_path: Path, backend: str, total: int, expected_status: int,
+) -> None:
+    write(
+        tmp_path / "app" / "dub.sdl",
+        dub_project_recipe("c-root") + 'sourceFiles "source/lib.c"\n',
+    )
+    write(tmp_path / "app" / "source" / "lib.c", C_ROOT_SOURCE)
+    write(
+        tmp_path / "app" / "source" / "main.d",
+        f"""
+        module main;
+        import lib;
+        unittest {{
+            assert(total(4) == {total});
+            assert(origin.y == 2);
+            assert(numbers[2] == 6);
+        }}
+        int main() {{ return 0; }}
+        """,
+    )
+
+    if backend == "native":
+        result = run_native(tmp_path / "app")
+    else:
+        result = run_sb(
+            f"--backend={backend}", "--no-optimise-image",
+            str(tmp_path / "app"), cwd=tmp_path,
+        )
+
+    assert (result.returncode != 0) == (expected_status != 0), output(result)
+
+
+def run_native(directory: Path) -> subprocess.CompletedProcess[str]:
+    program = directory / "native-program"
+    build = subprocess.run(
+        ["dmd", "-unittest", f"-of={program}", "source/main.d",
+         "source/lib.c"],
+        capture_output=True, check=False, text=True, cwd=directory,
+    )
+    assert build.returncode == 0, output(build)
+    return subprocess.run(
+        [str(program)], capture_output=True, check=False, text=True,
+        cwd=directory,
+    )
+
+
 # A dub recipe whose unittest configuration is an executable: dub's own
 # synthetic unittest configuration would put a generated stub with its
 # own `main` first, and a program takes the first root `main` it finds.

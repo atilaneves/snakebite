@@ -217,8 +217,13 @@ public struct CallSelection {
         // carry the host compiler's frame layout, not this backend's -
         // reusing it for a guest call reads that closure with the wrong
         // layout. A missing independent symbol leaves the guest body.
+        // A function that is neither a template instance nor root-owned,
+        // yet has a body and no machine code in this process, has only its
+        // body to run: `core.stdc.stdarg.va_copy` is such a function when
+        // the host compiler's druntime implements it as an intrinsic.
         const prefers = function_.isInstantiated() !is null
-            ? !hasIndependentNativeSymbol : isGuest(function_);
+            ? !hasIndependentNativeSymbol
+            : isGuest(function_) || !hasNativeSymbol;
         return Decision(prefers ? Route.guest : Route.native);
     }
 

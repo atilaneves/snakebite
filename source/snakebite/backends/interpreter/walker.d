@@ -325,7 +325,7 @@ private struct Shared {
         import dmd.dsymbolsem: isAbstract;
 
         // getOverloads can leave an alias in a function-pointer constant.
-        method = method.toAliasFunc;
+        method = program.definitionOf(method.toAliasFunc);
         if (method.isAbstract)
             return null;
 
@@ -5585,8 +5585,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             callee.function_ = cast(FuncDeclaration) cast(void*) target.word;
             callee.context = cast(ubyte*) callee.context + target.adjustment;
         }
-        auto function_ = callee.function_;
-
+        auto function_ = _program.definitionOf(callee.function_);
 
         auto funcType = typeFunctionOf(function_);
 
