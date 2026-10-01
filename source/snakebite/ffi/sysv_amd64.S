@@ -152,7 +152,8 @@ snakebite_ffi_call_sysv_amd64:
      * stack-word one above) was tried for issue #334: `sseCount`
      * (`buildMoves`' `_sseCount` in `plan.d`) is exactly the number of
      * SSE registers the plan filled, so skipping is safe whenever it is
-     * zero. Measured on `at.ffi.cost` (LDC -release -O), it made the
+     * zero. Measured on the `barrier.overhead` acceptance test, since
+     * removed (see ADR-0011), with LDC -release -O, it made the
      * call slower, not faster: this branch lands right before the
      * `call *%rbx` below, and the two adjacent branches cost more in
      * front-end/predictor overhead around the indirect call than the

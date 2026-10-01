@@ -37,10 +37,9 @@ count). The stub carries CFI directives, so exceptions unwind through
 it (see ADR-0004).
 
 The acceptance test `barrier.overhead`, in `acceptance/at/ffi/cost.d`,
-checks the barrier cost against a direct call. The ratio must stay
-under 2.40. The stub must meet this bound before it replaces the
-dispatcher. The acceptance build `bin/at` is optimised, so the gate
-runs on every build.
+checked the barrier cost against a direct call. The ratio had to stay
+under 2.40. The stub had to meet this bound before it replaced the
+dispatcher. That test was removed later: see ADR-0011.
 
 The seam stays ABI-agnostic. Any other platform fails loudly.
 
