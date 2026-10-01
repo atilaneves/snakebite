@@ -113,6 +113,279 @@ static foreach (backend; Matrix!(
 }
 
 
+// The GC finalizer runs the destructor of an object that it collects. The
+// destructor writes a thread-local variable that no code on its thread has
+// touched before, which compiled D does without allocating. The object
+// becomes unreachable in `make`, which has a loop and is not inlined, and
+// 2000 of them are the deterministic form that a conservative GC allows: a
+// stale stack word keeps at most a few alive. The count is `__gshared`
+// because a collection on any thread, another test's included, can run
+// the finalizer.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsGuestDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class B {
+                static int threadLocalDead;
+                __gshared int dead;
+                int f() { return 1; }
+                ~this() {
+                    ++threadLocalDead;
+                    ++dead;
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000) {
+                    auto i = new B;
+                    assert(i.f == 1);
+                }
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                GC.collect;
+                assert(B.dead > 1000);
+            }
+        });
+    }
+}
+
+
+// A destructor that writes a `__gshared` variable runs under the finalizer
+// the same way. The 2000 dead objects are the deterministic form that a
+// conservative GC allows: a stale stack word can keep a few alive, never
+// most of them.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsGuestDestructorWritingGshared." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class B {
+                __gshared int dead;
+                ~this() { ++dead; }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                GC.collect;
+                assert(B.dead > 1000);
+            }
+        });
+    }
+}
+
+
+// A derived object runs its own destructor and then its base's, both from
+// the finalizer.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsBaseClassDestructor." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                __gshared int baseDead;
+                ~this() { ++baseDead; }
+            }
+            class Derived : Base {
+                __gshared int derivedDead;
+                ~this() { ++derivedDead; }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new Derived;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                GC.collect;
+                assert(Derived.derivedDead > 1000);
+                assert(Base.baseDead == Derived.derivedDead);
+            }
+        });
+    }
+}
+
+
+// The destructor of a class runs the destructors of its struct fields.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorOfStructField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int partDead;
+            __gshared int holderDead;
+            struct Part {
+                ~this() { ++partDead; }
+            }
+            class Holder {
+                Part part;
+                ~this() { ++holderDead; }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new Holder;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                GC.collect;
+                assert(holderDead > 1000);
+                assert(partDead == holderDead);
+            }
+        });
+    }
+}
+
+
+// A destructor that loops and calls a chain of functions runs under the
+// finalizer. Each destructor adds 120 to `total` in one store, so the sum is
+// a multiple of 120 however many objects the collection finalizes and
+// whenever another thread's collection runs some of them.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorWithCallChainAndLoop." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            __gshared int total;
+            int inner(int n) { return n + 1; }
+            int outer(int n) { return inner(n) + inner(n + 1); }
+            class B {
+                ~this() {
+                    int sum;
+                    foreach (i; 0 .. 10)
+                        sum += outer(i);
+                    total += sum;
+                    ++dead;
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                GC.collect;
+                assert(dead > 1000);
+                assert(total == dead * 120);
+            }
+        });
+    }
+}
+
+
+// The finalizer runs on the thread that collects, which is not the thread
+// that made the objects.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorOnCollectingThread." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            class B {
+                ~this() { ++dead; }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                import core.thread: Thread;
+                make;
+                auto collector = new Thread({
+                    GC.collect;
+                    GC.collect;
+                });
+                collector.start;
+                collector.join;
+                assert(dead > 1000);
+            }
+        });
+    }
+}
+
+
+// A destructor runs when the collection at the end of the program finalizes
+// its object, after `main` returned. The collection here stands for the one
+// that the process makes when it ends. Compiled D leaves no trace of a
+// destructor that the guest can read after `main`, so the destructor
+// creates a file, with C functions that do not allocate, and the test
+// checks for it. 2000 dead objects are the deterministic form that a
+// conservative GC allows: a stale stack word keeps at most a few alive.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsGuestDestructorAfterMain." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import core.memory: GC;
+        import std.file: exists, remove;
+
+        enum marker = "/tmp/snakebite-gc-finalizer-after-main-"
+            ~ backend.stringof;
+        enum code = "enum marker = \"" ~ marker ~ "\\0\";" ~ q{
+            class B {
+                ~this() {
+                    import core.stdc.stdio: fclose, fopen, fputs;
+
+                    auto file = fopen(marker.ptr, "w");
+                    fputs("finalized", file);
+                    fclose(file);
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                make;
+            }
+        };
+        if (exists(marker))
+            remove(marker);
+        scope(exit) if (exists(marker))
+            remove(marker);
+
+        0.shouldBeStatusOf!(backend, code);
+        GC.collect;
+        GC.collect;
+
+        exists(marker).should == true;
+    }
+}
+
+
 // Compiled D compiles a call that it never makes, so a branch that does
 // not execute must not reject the program because of the callee's
 // signature either. The extern(C) function returns an aggregate that holds
