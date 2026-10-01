@@ -15,8 +15,8 @@ import pytest
 
 BACKENDS = ["interpreter", "bytecode", "ctfe"]
 
-# CTFE cannot interpret `open64` from `std.file.readText`, which these
-# guest programs use.
+# CTFE cannot interpret `open64` from `std.file.readText`, which the
+# guest programs of the tests that use this list call.
 FILE_BACKENDS = ["bytecode", "interpreter"]
 
 
@@ -54,7 +54,7 @@ def test_module_constructor_uses_project_directory(
 
 # Guest code runs in the project directory, but snakebite's own state
 # stays in the directory it was started from.
-@pytest.mark.parametrize("backend", FILE_BACKENDS)
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_state_directory_stays_in_caller_directory(
     tmp_path: Path, backend: str,
 ) -> None:
