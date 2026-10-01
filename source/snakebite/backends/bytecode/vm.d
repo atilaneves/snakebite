@@ -119,8 +119,10 @@ public struct CallSite {
 
     // `calleeSlotOffset` names the caller frame slot `opCall` reads the
     // callee's own address back out of at run time.
+    // `args` feed a guest callee's frame; `nativeArgs` feed `nativePlan`.
     public static CallSite indirect(
-        size_t calleeSlotOffset, Arg[] args, size_t returnWidth,
+        size_t calleeSlotOffset, Arg[] args, Arg[] nativeArgs,
+        size_t returnWidth,
         const(void)* nativePlan = null,
         bool hasContext = false,
     ) {
@@ -130,6 +132,7 @@ public struct CallSite {
         site.calleeSlotOffset = calleeSlotOffset;
         site.hasContext = hasContext;
         site.args = args;
+        site.nativeArgs = nativeArgs;
         site.returnWidth = returnWidth;
         return site;
     }
@@ -149,6 +152,7 @@ public struct CallSite {
 
     package Kind kind;
     package Arg[] args;
+    package Arg[] nativeArgs;
     package size_t returnWidth;
     package const(Function)* callee;
     package const(Function)* delegate() prepareGuest;
@@ -955,7 +959,7 @@ private const(Instruction)* runCall(Decoded)(
             *cast(const(void)**) (execution.storage(site.calleeSlotOffset));
         ptrdiff_t contextAdjustment;
         if (site.nativePlan !is null) {
-            auto arguments = gatherArguments(execution, site.args);
+            auto arguments = gatherArguments(execution, site.nativeArgs);
             auto values = arguments.values;
             if (executeIndirectCallPlan(site.nativePlan, callee,
                     execution.destination, values.ptr, values.length,

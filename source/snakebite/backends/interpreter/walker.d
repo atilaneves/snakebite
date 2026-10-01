@@ -1064,7 +1064,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 size_t.sizeof, false);
             _temporaries.suspendConstructor(receiver);
         }, {
-            if (callSite !is null && typeFunctionOf(function_).isDstyleVariadic) {
+            if (callSite !is null && typeFunctionOf(function_).parameterList
+                    .varargs == VarArg.variadic) {
                 bindArguments(function_, callSite.arguments, callSite.loc,
                     frameBase, layout, true);
                 bindVariadicArguments(callSite, frameBase, layout);
@@ -5467,9 +5468,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         funcType = typeFunctionOf(function_);
-        if (funcType.parameterList.varargs == VarArg.variadic
-                && (!funcType.isDstyleVariadic
-                    || function_.fbody is null
+        const isVariadic = funcType.parameterList.varargs == VarArg.variadic;
+        if (isVariadic
+                && (function_.fbody is null
                     || !_program.isInterpreted(function_)
                     || _plans.hasNativeSymbol(function_))) {
             callVariadicNative(expression, function_, funcType,
@@ -5482,7 +5483,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             expression,
             function_,
             layout,
-            funcType.isDstyleVariadic,
+            isVariadic,
             classReceiver,
             hasClassReceiver,
             callee.context,
@@ -5501,7 +5502,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativelayout: storeIntegral;
 
         auto arguments = expression.arguments;
-        const firstExtra = 1 + layout.parameters.length;
+        const hasTypes = layout.variadicTypes != size_t.max;
+        const firstExtra = hasTypes + layout.parameters.length;
         TypeFacts[] facts;
         foreach (argument; (*arguments)[firstExtra .. $])
             facts ~= factsOf(argument.type);
@@ -5514,6 +5516,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
         storeIntegral(frame + layout.variadicCursor, cast(size_t) storage,
             size_t.sizeof);
+        if (!hasTypes)
+            return;
         auto types = (*arguments)[0];
         evaluate(types, types.type, factsOf(types.type),
             frame + layout.variadicTypes);

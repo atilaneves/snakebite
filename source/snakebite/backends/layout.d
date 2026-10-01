@@ -225,6 +225,7 @@ package struct FrameLayout {
             layout.parameters[i] = layout.packParameter(type.parameterList[i]);
 
         layout.reserveVariadic(type);
+        layout.reserveNativeCursor(type);
         return layout;
     }
 

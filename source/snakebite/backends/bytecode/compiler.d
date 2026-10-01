@@ -949,10 +949,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         size_t[] parameterOffsets;
         foreach (parameter; _layout.parameters)
             parameterOffsets ~= parameter.offset;
-        if (_layout.variadicTypes != size_t.max) {
+        if (_layout.variadicTypes != size_t.max)
             parameterOffsets ~= _layout.variadicTypes;
+        if (_layout.variadicCursor != size_t.max)
             parameterOffsets ~= _layout.variadicCursor;
-        }
         return Function(
             _instructions, _constants, _callSites, _assertSites,
             exceptionHandlers,
@@ -6241,6 +6241,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         size_t receiverOffset,
         size_t destOffset,
     ) {
+        import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import snakebite.backends.calls: arityMismatches;
         const isConstructor = callee.isCtorDeclaration !is null;
@@ -6273,7 +6274,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto calleeType = typeFunctionOf(callee);
 
         if (arityMismatches(calleeType.parameterList, arguments,
-                calleeType.isDstyleVariadic))
+                calleeType.parameterList.varargs == VarArg.variadic))
             throw rejection(_function, loc, exprText);
 
         Arg[] args;
@@ -6296,8 +6297,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto preparation = CallAdapter.Arguments.of(calleeType, arguments);
         args ~= compileGuestArguments(preparation, calleeLayout);
 
-        if (calleeType.isDstyleVariadic)
-            args ~= compileVariadicArguments(arguments, calleeLayout);
+        if (calleeType.parameterList.varargs == VarArg.variadic)
+            args ~= compileVariadicArguments(arguments, calleeLayout).guest;
 
         // A `ref` return hands the caller the callee's own returned
         // storage's address - `compileAddress`'s `CallExp` case is the one
@@ -6501,13 +6502,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? reserveTemp(returnFacts) : destOffset;
     }
 
-    private Arg[] compileVariadicArguments(
+    // What a variadic call hands over: `guest` fills the callee's frame
+    // slots (the `TypeInfo` tuple of a D variadic, then the cursor), and
+    // `values` are the extra arguments in place inside the cursor's
+    // storage, as a native C variadic callee takes them.
+    private struct VariadicArguments {
+        Arg[] guest;
+        Arg[] values;
+    }
+
+    private VariadicArguments compileVariadicArguments(
         Expressions* arguments,
         in FrameLayout layout,
     ) {
         import snakebite.backends.variadic: VariadicLayout;
 
-        const firstExtra = 1 + layout.parameters.length;
+        const hasTypes = layout.variadicTypes != size_t.max;
+        const firstExtra = hasTypes + layout.parameters.length;
         TypeFacts[] facts;
         foreach (argument; (*arguments)[firstExtra .. $])
             facts ~= TypeFacts.of(argument.type);
@@ -6522,15 +6533,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             addConstant(initial.offset_fpregs), uint.sizeof);
         emit(&opFrameAddress, storage + Cursor.stack_args.offsetof,
             storage + plan.argumentsOffset, size_t.sizeof);
-        foreach (i, offset; plan.offsets)
+        VariadicArguments result;
+        foreach (i, offset; plan.offsets) {
             evalInto((*arguments)[firstExtra + i], storage + offset,
                 facts[i].size);
+            result.values ~= Arg(storage + offset, 0, facts[i].size);
+        }
         const cursor = reserveTemp(pointerFacts);
         emit(&opFrameAddress, cursor, storage, size_t.sizeof);
-        const types = reserveTemp(pointerFacts);
-        evalInto((*arguments)[0], types, size_t.sizeof);
-        return [Arg(types, layout.variadicTypes, size_t.sizeof),
-            Arg(cursor, layout.variadicCursor, size_t.sizeof)];
+        if (hasTypes) {
+            const types = reserveTemp(pointerFacts);
+            evalInto((*arguments)[0], types, size_t.sizeof);
+            result.guest ~=
+                Arg(types, layout.variadicTypes, size_t.sizeof);
+        }
+        result.guest ~= Arg(cursor, layout.variadicCursor, size_t.sizeof);
+        return result;
     }
 
     private Arg compileBarrierArgument(CallAdapter.Arguments.Value value) {
@@ -6670,21 +6688,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto preparation = CallAdapter.Arguments.of(functionType, arguments);
         args ~= compileGuestArguments(preparation, calleeLayout);
 
+        auto guestArgs = args;
+        auto nativeArgs = args;
         const isVariadic = functionType.parameterList.varargs
             == VarArg.variadic;
-        if (functionType.isDstyleVariadic)
-            args ~= compileVariadicArguments(arguments, calleeLayout);
-        else if (isVariadic)
-            preparation.eachExtra((value) {
-                args ~= compileBarrierArgument(value);
-            });
+        if (isVariadic) {
+            auto variadic = compileVariadicArguments(arguments, calleeLayout);
+            guestArgs = args ~ variadic.guest;
+            nativeArgs = functionType.isDstyleVariadic
+                ? guestArgs : args ~ variadic.values;
+        }
 
         const nativePlan = isVariadic
             ? cast(const(void)*) preparation.prepareAtAddress(
                 _bytecode._plans, null, hasContext)
             : _bytecode._plans.signatureOf(functionType, hasContext);
         return CallSite.indirect(
-            calleeOffset, args, returnWidth, nativePlan, hasContext);
+            calleeOffset, guestArgs, nativeArgs, returnWidth, nativePlan,
+            hasContext);
     }
 
     private TypeFacts pointerFacts() {

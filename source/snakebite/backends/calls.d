@@ -156,8 +156,7 @@ public struct CallSelection {
             return builtinDecision(function_);
 
         const type = typeFunctionOf(function_);
-        if (type.parameterList.varargs == VarArg.variadic
-                && (!type.isDstyleVariadic || hasNativeSymbol))
+        if (type.parameterList.varargs == VarArg.variadic && hasNativeSymbol)
             return Decision(Route.native);
 
         // This includes siblings and deeper nested callees: every static
