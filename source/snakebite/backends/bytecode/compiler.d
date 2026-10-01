@@ -4950,9 +4950,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     extern(D):
 
+    // An expression evaluated for no result still runs, once and in order,
+    // so its operands' side effects happen: it computes into a scratch
+    // slot nobody reads. The restoring of `_destination` and `_width` is
+    // up to whoever set them (`evalInto`, `compileEffect`).
     private void requireDestination(Expression expression) {
-        if (_destination == discardResult)
-            visit(expression);
+        if (_destination != discardResult)
+            return;
+
+        const facts = TypeFacts.of(expression.type);
+        _destination = reserveTemp(facts);
+        _width = facts.size;
+        _valueType = expression.type;
     }
 
     private void compileBinaryExpression(
