@@ -4427,10 +4427,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // index - this just stores whichever one it finds as a `size_t`, the
     // way any other pointer value is stored.
     override void visit(AddrExp expression) {
-        import snakebite.nativelayout: storeIntegral;
+        import snakebite.nativelayout: isStaticStructAddress, storeIntegral;
 
-        // `&literal` is a pointer the frontend folded from `new S(...)`.
-        if (expression.e1.isStructLiteralExp !is null)
+        if (isStaticStructAddress(expression))
             return _nativeData.write(_type, _facts, expression, _place);
 
         storeIntegral(

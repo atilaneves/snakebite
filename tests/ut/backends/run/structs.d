@@ -4177,20 +4177,31 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A compile-time struct can hold a pointer to a struct that holds a pointer to
-// another struct, and each one keeps its identity.
+// A chain of two compile-time struct pointers reaches the innermost value.
 static foreach (backend; Matrix!()) {
-    @("compileTimeStructPointerChain." ~ backend.stringof)
+    @("compileTimeStructPointerChainValue." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
             struct B { int v; }
             struct A { B* b; }
             struct W { A* a = new A(new B(3)); }
-            void main() {
-                assert(W().a.b.v == 3);
-                assert(W().a.b is W().a.b);
-            }
+            void main() { assert(W().a.b.v == 3); }
+        });
+    }
+}
+
+// Every use of a compile-time struct pointer chain reaches the same innermost
+// struct value.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointerChainIdentity." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct B { int v; }
+            struct A { B* b; }
+            struct W { A* a = new A(new B(3)); }
+            void main() { assert(W().a.b is W().a.b); }
         });
     }
 }
@@ -4198,17 +4209,28 @@ static foreach (backend; Matrix!()) {
 // A class field default `new S(7)` gives every use of the compile-time object
 // the same struct value.
 static foreach (backend; Matrix!()) {
-    @("compileTimeStructPointerInClassFieldDefault." ~ backend.stringof)
+    @("compileTimeStructPointerInClassFieldDefaultIsShared." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
             struct S { int a; }
             class D { S* p = new S(7); }
             struct W { D d = new D; }
-            void main() {
-                assert(W().d.p is W().d.p);
-                assert(W().d.p.a == 7);
-            }
+            void main() { assert(W().d.p is W().d.p); }
+        });
+    }
+}
+
+// A class field default `new S(7)` holds the value that the expression made.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointerInClassFieldDefaultValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            class D { S* p = new S(7); }
+            struct W { D d = new D; }
+            void main() { assert(W().d.p.a == 7); }
         });
     }
 }
@@ -4232,22 +4254,56 @@ static foreach (backend; Matrix!(
 }
 
 // A `__gshared` module variable initialised with `new S(7)` points to a struct
+// value that holds 7.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a `__gshared` variable"),
+)) {
+    @("compileTimeStructPointerInGsharedModuleVariableValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            __gshared S* g = new S(7);
+            void main() { assert(g.a == 7); }
+        });
+    }
+}
+
+// A `__gshared` module variable initialised with `new S(7)` points to a struct
 // value that the program can write to.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read a `__gshared` variable"),
 )) {
-    @("compileTimeStructPointerInGsharedModuleVariable." ~ backend.stringof)
+    @("compileTimeStructPointerInGsharedModuleVariableWrite." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
             struct S { int a; }
             __gshared S* g = new S(7);
             void main() {
-                assert(g.a == 7);
                 g.a = 8;
                 assert(g.a == 8);
             }
+        });
+    }
+}
+
+// A `__gshared` struct variable gets the struct value that the field default
+// made.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a `__gshared` variable"),
+)) {
+    @("compileTimeStructPointerInGsharedStructVariableValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            struct W { S* p = new S(7); }
+            __gshared W w;
+            void main() { assert(w.p.a == 7); }
         });
     }
 }
@@ -4258,17 +4314,14 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read a `__gshared` variable"),
 )) {
-    @("compileTimeStructPointerInGsharedStructVariable." ~ backend.stringof)
+    @("compileTimeStructPointerInGsharedStructVariableIdentity." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
             struct S { int a; }
             struct W { S* p = new S(7); }
             __gshared W w;
-            void main() {
-                assert(w.p.a == 7);
-                assert(w.p is W().p);
-            }
+            void main() { assert(w.p is W().p); }
         });
     }
 }
@@ -4282,29 +4335,38 @@ static foreach (backend; Matrix!()) {
         0.shouldBeStatusOf!(backend, q{
             struct S { int a; }
             static immutable S* ip = new immutable(S)(7);
+            void main() { assert(ip.a == 7); }
+        });
+    }
+}
+
+// A pointer to a `const` struct value made at compile time keeps its identity.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointerConstPointee." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            struct W { const(S)* p = new const(S)(7); }
             void main() {
-                assert(ip.a == 7);
-                assert(ip is ip);
+                assert(W().p.a == 7);
+                assert(W().p is W().p);
             }
         });
     }
 }
 
-// Pointers to `const` and `immutable` struct values made at compile time keep
-// their identity.
+// A pointer to an `immutable` struct value made at compile time keeps its
+// identity.
 static foreach (backend; Matrix!()) {
-    @("compileTimeStructPointerConstAndImmutablePointee." ~ backend.stringof)
+    @("compileTimeStructPointerImmutablePointee." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
             struct S { int a; }
-            struct W {
-                const(S)* p = new const(S)(7);
-                immutable(S)* q = new immutable(S)(8);
-            }
+            struct W { immutable(S)* q = new immutable(S)(8); }
             void main() {
-                assert(W().p.a == 7 && W().q.a == 8);
-                assert(W().p is W().p);
+                assert(W().q.a == 8);
                 assert(W().q is W().q);
             }
         });
@@ -4312,7 +4374,7 @@ static foreach (backend; Matrix!()) {
 }
 
 // The elements of a `__gshared` static array of struct pointers each point to
-// their own writable struct value.
+// their own struct value.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read a `__gshared` variable"),
@@ -4323,10 +4385,25 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOf!(backend, q{
             struct S { int a; }
             __gshared S*[2] arr = [new S(1), new S(2)];
+            void main() { assert(arr[0].a == 1 && arr[1].a == 2); }
+        });
+    }
+}
+
+// A write through one element of a `__gshared` static array of struct pointers
+// does not change the struct value of another element.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a `__gshared` variable"),
+)) {
+    @("compileTimeStructPointersInGsharedStaticArrayAreIndependent." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            __gshared S*[2] arr = [new S(1), new S(2)];
             void main() {
-                assert(arr[0].a == 1 && arr[1].a == 2);
                 arr[1].a = 5;
-                assert(arr[1].a == 5);
                 assert(arr[0].a == 1);
             }
         });
@@ -4342,46 +4419,72 @@ static foreach (backend; Matrix!()) {
         0.shouldBeStatusOf!(backend, q{
             struct S { int a; }
             static immutable S*[] arr = [new S(1), new S(2)];
-            void main() {
-                assert(arr[0].a == 1 && arr[1].a == 2);
-                assert(arr[1] is arr[1]);
-                assert(arr[0] !is arr[1]);
-            }
+            void main() { assert(arr[0].a == 1 && arr[1].a == 2); }
         });
     }
 }
 
-// A static array field default holds one struct value for each element, shared
-// by every `W()`.
+// Two elements that each say `new S(...)` point to two struct values.
 static foreach (backend; Matrix!()) {
-    @("compileTimeStructPointersInStructStaticArrayField." ~ backend.stringof)
+    @("compileTimeStructPointersInStaticImmutableDynamicArrayAreDistinct." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            static immutable S*[] arr = [new S(1), new S(2)];
+            void main() { assert(arr[0] !is arr[1]); }
+        });
+    }
+}
+
+// A static array field default holds one struct value for each element.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointersInStructStaticArrayFieldAreDistinct." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
             struct S { int a; }
             struct W { S*[2] ps = [new S(1), new S(1)]; }
-            void main() {
-                assert(W().ps[0] !is W().ps[1]);
-                assert(W().ps[0] is W().ps[0]);
-                assert(W().ps[1].a == 1);
-            }
+            void main() { assert(W().ps[0] !is W().ps[1]); }
         });
     }
 }
 
-// A dynamic array field default holds one struct value for each element, shared
-// by every `W()`.
+// A static array field default holds the same struct values in every `W()`.
 static foreach (backend; Matrix!()) {
-    @("compileTimeStructPointersInStructDynamicArrayField." ~ backend.stringof)
+    @("compileTimeStructPointersInStructStaticArrayFieldAreShared." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            struct W { S*[2] ps = [new S(1), new S(1)]; }
+            void main() { assert(W().ps[0] is W().ps[0]); }
+        });
+    }
+}
+
+// A dynamic array field default holds the struct values that the frontend made.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointersInStructDynamicArrayFieldValue." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
             struct S { int a; }
             struct W { S*[] ps = [new S(1), new S(2)]; }
-            void main() {
-                assert(W().ps[0].a == 1);
-                assert(W().ps[1] is W().ps[1]);
-            }
+            void main() { assert(W().ps[1].a == 2); }
+        });
+    }
+}
+
+// A dynamic array field default holds the same struct values in every `W()`.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointersInStructDynamicArrayFieldAreShared." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            struct W { S*[] ps = [new S(1), new S(2)]; }
+            void main() { assert(W().ps[1] is W().ps[1]); }
         });
     }
 }
@@ -4412,6 +4515,148 @@ static foreach (backend; Matrix!()) {
             struct W { S* p = new S(7); }
             struct V { S* q = new S(7); }
             void main() { assert(W().p !is V().q); }
+        });
+    }
+}
+
+// A compile-time struct pointer to a struct with a union field keeps the
+// value of the union member that the program wrote.
+static foreach (backend; Matrix!()) {
+    @("compileTimeStructPointerToStructWithUnionField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            union U { int i; float f; }
+            struct H { U u; ubyte tag; }
+            struct W { H* p = new H(U(42), 1); }
+            void main() {
+                W w;
+                assert(w.p.tag == 1);
+                assert(w.p.u.i == 42);
+            }
+        });
+    }
+}
+
+// A `__gshared` struct variable with a union field keeps the value of the
+// union member that the initialiser wrote.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a `__gshared` variable"),
+)) {
+    @("gsharedStructVariableWithUnionField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            union U { int i; float f; }
+            struct H { U u; ubyte tag; }
+            __gshared H g = H(U(42), 1);
+            void main() { assert(g.u.i == 42); }
+        });
+    }
+}
+
+// A class field default with a union field keeps the value of the union
+// member that the initialiser wrote.
+static foreach (backend; Matrix!()) {
+    @("classFieldDefaultWithUnionField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            union U { int i; float f; }
+            struct H { U u; ubyte tag; }
+            class C { H h = H(U(42), 1); }
+            void main() { assert((new C).h.u.i == 42); }
+        });
+    }
+}
+
+// A `static immutable` struct made by a function keeps the value of the
+// union member that the function wrote.
+static foreach (backend; Matrix!()) {
+    @("staticImmutableStructWithUnionFieldFromFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            union U { int i; float f; }
+            struct H { U u; ubyte tag; }
+            H make() {
+                H h;
+                h.u.i = 42;
+                h.tag = 1;
+                return h;
+            }
+            static immutable H g = make();
+            void main() { assert(g.u.i == 42); }
+        });
+    }
+}
+
+// `new S(7)` in a function body is not a compile-time value: each call makes
+// a new struct value.
+static foreach (backend; Matrix!()) {
+    @("runTimeNewStructIsFreshForEachCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            int bump() { auto p = new S(7); p.a++; return p.a; }
+            void main() {
+                assert(bump() == 8);
+                assert(bump() == 8);
+            }
+        });
+    }
+}
+
+// A default argument `new S(7)` is evaluated at each call that omits the
+// argument, so each call gets a new struct value.
+static foreach (backend; Matrix!()) {
+    @("newStructDefaultArgumentIsFreshForEachCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            int bump(S* p = new S(7)) { p.a++; return p.a; }
+            void main() {
+                assert(bump() == 8);
+                assert(bump() == 8);
+            }
+        });
+    }
+}
+
+// A member function call on a struct literal binds `this` by reference to a
+// temporary, and each call gets a new temporary.
+static foreach (backend; Matrix!()) {
+    @("structLiteralTemporaryThroughRefIsFreshForEachCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; int bump() { return ++a; } }
+            int viaThis() { return S(7).bump; }
+            void main() {
+                assert(viaThis() == 8);
+                assert(viaThis() == 8);
+            }
+        });
+    }
+}
+
+// A `scope` pointer to a `new S(7)` in a function body points to a new struct
+// value at each call.
+static foreach (backend; Matrix!()) {
+    @("scopeNewStructIsFreshForEachCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; }
+            int bump(scope S* p) { return ++p.a; }
+            int viaScope() { scope p = new S(7); return bump(p); }
+            void main() {
+                assert(viaScope() == 8);
+                assert(viaScope() == 8);
+            }
         });
     }
 }

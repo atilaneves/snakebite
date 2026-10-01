@@ -440,6 +440,14 @@ public bool isStoredLiteral(imported!"dmd.expression".Expression value) {
         || value.isStringExp !is null || value.isNullExp !is null;
 }
 
+// A `&literal` is the address of one static struct value, as in dmd's
+// `e2ir.d` `visitAddr`, whether the frontend folded `new S(...)` or the
+// program wrote it. The keys are the literals themselves: for every
+// `StructLiteralExp` met here the literal is its own `origin`.
+public bool isStaticStructAddress(imported!"dmd.expression".AddrExp value) {
+    return value.e1.isStructLiteralExp !is null;
+}
+
 // Owns constant storage and its referenced data for the backend's lifetime.
 public struct NativeData {
     // Holds `SharedTable`s and a `PerThread` (finding 2.4): a copy of
@@ -464,9 +472,10 @@ public struct NativeData {
     private ThreadLocalAddress _threadLocalAddress;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
     private LoweringCall _callLowering;
-    // Read and written only under the compiler lock. Key by the object,
-    // not a reference expression, to preserve aliases and cycles.
-    private void*[StructLiteralExp] _classValues;
+    // Read and written only under the compiler lock. Class objects and
+    // struct values are keyed by their own literal, not by a reference
+    // or address expression, to preserve aliases and cycles.
+    private void*[StructLiteralExp] _compileTimeValues;
     // Written under the compiler lock only, like every miss below.
     private void[][] _blocks;
     private void[] _available;
@@ -525,7 +534,7 @@ public struct NativeData {
 
         void* address;
         withCompilerLock({
-            if (auto found = value.value in _classValues) {
+            if (auto found = value.value in _compileTimeValues) {
                 address = *found;
                 return;
             }
@@ -534,8 +543,8 @@ public struct NativeData {
             memcpy(bytes.ptr, info.m_init.ptr, bytes.length);
             address = bytes.ptr;
             // Register before fields: compile-time objects can form cycles.
-            _classValues[value.value] = address;
-            scope (failure) _classValues.remove(value.value);
+            _compileTimeValues[value.value] = address;
+            scope (failure) _compileTimeValues.remove(value.value);
             for (auto declaration = value.originalClass;
                     declaration !is null; declaration = declaration.baseClass) {
                 foreach (field; declaration.fields) {
@@ -558,7 +567,7 @@ public struct NativeData {
 
         void* address;
         withCompilerLock({
-            if (auto found = literal in _classValues) {
+            if (auto found = literal in _compileTimeValues) {
                 address = *found;
                 return;
             }
@@ -566,8 +575,8 @@ public struct NativeData {
             auto bytes = reserve(facts);
             address = bytes.ptr;
             // Register before fields: compile-time values can form cycles.
-            _classValues[literal] = address;
-            scope (failure) _classValues.remove(literal);
+            _compileTimeValues[literal] = address;
+            scope (failure) _compileTimeValues.remove(literal);
             write(literal.type, facts, literal, address);
         });
         return address;
@@ -963,9 +972,10 @@ private void storeValue(
     }
 
     if (auto address = value.isAddrExp) {
-        if (auto literal = address.e1.isStructLiteralExp) {
+        if (isStaticStructAddress(address)) {
             assert(nativeData !is null);
-            *cast(void**) place = nativeData.structValue(literal);
+            *cast(void**) place =
+                nativeData.structValue(address.e1.isStructLiteralExp);
             return;
         }
     }
@@ -1011,10 +1021,17 @@ private void storeValue(
 
     if (auto literal = value.isStructLiteralExp) {
         memset(place, 0, facts.size);
+        // Like dmd's `membersToDt`: of fields that overlap, the first one
+        // with an element wins and the later ones are skipped.
+        size_t writtenEnd;
         foreach (i, element; *literal.elements) {
             if (element is null)
                 continue;
             auto field = literal.sd.fields[i];
+            if (field.offset < writtenEnd && !field.isBitFieldDeclaration)
+                continue;
+            if (field.offset + field.type.size > writtenEnd)
+                writtenEnd = field.offset + field.type.size;
             if (auto bitfield = field.isBitFieldDeclaration) {
                 const fieldBytes = field.type.size;
                 auto bits = loadIntegral(bytes + field.offset, fieldBytes, false);
