@@ -793,6 +793,10 @@ def test_unknown_checkaction_value_is_an_error(
 PASSES = ("pass", "")
 HALTS = ("halt", "")
 
+# CTFE evaluates every `assert` that dmd's interpreter reaches, whatever the
+# assert check says: a row marked with it does not run there.
+EVALUATES_ASSERTS = "evaluates asserts"
+
 
 def raises(message: str) -> tuple[str, str]:
     return ("raise", message)
@@ -824,11 +828,14 @@ def backends_for(expected: tuple[str, str], unchecked: bool = False) -> list[str
     return BACKENDS
 
 
-def cases(table: list[tuple]) -> list:
+def cases(table: list[tuple], ctfe: bool = True) -> list:
     return [
-        pytest.param(backend, *row, id=f"{backend}-{' '.join(row[0]) or 'none'}")
+        pytest.param(
+            backend, row[0], row[1],
+            id=f"{backend}-{' '.join(row[0]) or 'none'}",
+        )
         for row in table
-        for backend in backends_for(row[1])
+        for backend in backends_for(row[1], len(row) > 2 or not ctfe)
     ]
 
 
@@ -854,21 +861,21 @@ ASSERT_CASES = [
     ([], raises("unittest failure")),
     (["-check=assert"], raises("unittest failure")),
     (["-check=assert=on"], raises("unittest failure")),
-    (["-check=assert=off"], PASSES),
-    (["-check=off"], PASSES),
+    (["-check=assert=off"], PASSES, EVALUATES_ASSERTS),
+    (["-check=off"], PASSES, EVALUATES_ASSERTS),
     (["-check=on"], raises("unittest failure")),
     (["-check=assert=off", "-check=assert=on"], raises("unittest failure")),
-    (["-check=assert=on", "-check=assert=off"], PASSES),
-    (["-check=on", "-check=assert=off"], PASSES),
+    (["-check=assert=on", "-check=assert=off"], PASSES, EVALUATES_ASSERTS),
+    (["-check=on", "-check=assert=off"], PASSES, EVALUATES_ASSERTS),
     (["-check=assert=off", "-check=on"], raises("unittest failure")),
     (["-check=off", "-check=assert=on"], raises("unittest failure")),
-    (["-release", "-check=assert=off"], PASSES),
+    (["-release", "-check=assert=off"], PASSES, EVALUATES_ASSERTS),
     (["-release", "-check=assert=on"], raises("unittest failure")),
     (["-check=bounds=off"], raises("unittest failure")),
     (["-check=assert=on", "-checkaction=halt"], HALTS),
-    (["-check=assert=off", "-checkaction=halt"], PASSES),
+    (["-check=assert=off", "-checkaction=halt"], PASSES, EVALUATES_ASSERTS),
     (["-check=assert=on", "-checkaction=C"], aborts("x == 2")),
-    (["-check=assert=off", "-checkaction=C"], PASSES),
+    (["-check=assert=off", "-checkaction=C"], PASSES, EVALUATES_ASSERTS),
 ]
 
 
@@ -880,7 +887,7 @@ def test_check_assert(
 
 
 # The operands of an assert that is off are not evaluated.
-@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("backend", NO_CTFE_UNCHECKED)
 def test_check_assert_off_does_not_evaluate_the_condition(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -911,7 +918,7 @@ IN_CASES = [
     (["-check=off"], PASSES),
     (["-check=on"], raises("AssertError")),
     (["-check=out=off"], raises("AssertError")),
-    (["-check=assert=off"], PASSES),
+    (["-check=assert=off"], PASSES, EVALUATES_ASSERTS),
     (["-release"], PASSES),
     (["-release", "-check=in=on"], raises("AssertError")),
     (["-release", "-check=in"], raises("AssertError")),
@@ -919,7 +926,7 @@ IN_CASES = [
     (["-check=in=on", "-check=in=off"], PASSES),
     # A contract is an assert: with the assert check off, nothing is left
     # of it.
-    (["-check=off", "-check=in=on"], PASSES),
+    (["-check=off", "-check=in=on"], PASSES, EVALUATES_ASSERTS),
     (["-check=in=off", "-check=on"], raises("AssertError")),
     (["-check=in=on", "-checkaction=halt"], HALTS),
     (["-check=in=off", "-checkaction=halt"], PASSES),
@@ -951,12 +958,12 @@ OUT_CASES = [
     (["-check=off"], PASSES),
     (["-check=on"], raises("AssertError")),
     (["-check=in=off"], raises("AssertError")),
-    (["-check=assert=off"], PASSES),
+    (["-check=assert=off"], PASSES, EVALUATES_ASSERTS),
     (["-release"], PASSES),
     (["-release", "-check=out=on"], raises("AssertError")),
     (["-check=out=off", "-check=out=on"], raises("AssertError")),
     (["-check=out=on", "-check=out=off"], PASSES),
-    (["-check=off", "-check=out=on"], PASSES),
+    (["-check=off", "-check=out=on"], PASSES, EVALUATES_ASSERTS),
     (["-check=out=off", "-check=on"], raises("AssertError")),
     (["-check=out=on", "-checkaction=halt"], HALTS),
     (["-check=out=off", "-checkaction=halt"], PASSES),
@@ -996,7 +1003,7 @@ INVARIANT_CASES = [
     (["-release", "-check=invariant=on"], raises("AssertError")),
     (["-check=invariant=off", "-check=invariant=on"], raises("AssertError")),
     (["-check=invariant=on", "-check=invariant=off"], PASSES),
-    (["-check=off", "-check=invariant=on"], PASSES),
+    (["-check=off", "-check=invariant=on"], PASSES, EVALUATES_ASSERTS),
     (["-check=invariant=off", "-check=on"], raises("AssertError")),
     (["-check=invariant=on", "-checkaction=halt"], HALTS),
     (["-check=invariant=off", "-checkaction=halt"], PASSES),
@@ -1063,7 +1070,10 @@ SWITCH_CASES = [
 ]
 
 
-@pytest.mark.parametrize("backend,flags,expected", cases(SWITCH_CASES))
+# CTFE does not raise the error of a `final switch` that no case matches.
+@pytest.mark.parametrize(
+    "backend,flags,expected", cases(SWITCH_CASES, ctfe=False),
+)
 def test_check_switch(
     tmp_path: Path, backend: str, flags: list[str], expected: tuple[str, str],
 ) -> None:
@@ -1075,6 +1085,9 @@ ON = "on"
 OFF = "off"
 SAFEONLY = "safeonly"
 
+# dub turns `-boundscheck=off` into its `noBoundsCheck` option and puts the
+# option after the other flags, so no row here has two `-boundscheck=` flags
+# where the order of an `off` among them matters.
 BOUNDS_FLAGS = [
     (["-check=bounds"], ON),
     (["-check=bounds=on"], ON),
@@ -1102,8 +1115,6 @@ BOUNDS_FLAGS = [
     (["-boundscheck=on", "-check=off"], OFF),
     (["-check=off", "-check=on"], ON),
     (["-check=off", "-release"], OFF),
-    (["-boundscheck=off", "-boundscheck=safeonly"], SAFEONLY),
-    (["-noboundscheck", "-boundscheck=on"], ON),
     (["-boundscheck=safeonly", "-check=on"], ON),
 ]
 
