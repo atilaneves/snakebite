@@ -1945,3 +1945,77 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+// An interface has no vtable of its own in its `TypeInfo_Class`: the
+// method tables live in the `Interface` entries of the classes that
+// implement it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not implement `typeid(Derived).info`"),
+)) {
+    @("interfaceTypeInfoHasNoVtbl." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface Base {
+                int first();
+            }
+            interface Derived: Base {
+                int second();
+            }
+            void main() {
+                auto info = typeid(Derived).info;
+                assert(info.vtbl.length == 0);
+                assert(info.base is null);
+                assert(info.depth == 0);
+                assert(info.interfaces.length == 1);
+                assert(info.interfaces[0].classinfo is typeid(Base).info);
+                assert(info.interfaces[0].vtbl.length == 0);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not implement `typeid(Pointerless).info`"),
+)) {
+    @("interfaceTypeInfoFlags." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface Pointerless {
+                int first();
+            }
+            void main() {
+                with (TypeInfo_Class.ClassFlags)
+                    assert(typeid(Pointerless).info.m_flags
+                        == (hasOffTi | hasTypeInfo | hasNameSig));
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not implement `typeid(Derived).vtbl`"),
+)) {
+    @("classTypeInfoVtblStartsWithClassInfo." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int first() { return 1; }
+            }
+            class Derived: Base {
+                int second() { return 2; }
+            }
+            void main() {
+                assert(typeid(Derived).vtbl[0] is cast(void*) typeid(Derived));
+                assert(typeid(Derived).vtbl.length
+                    == typeid(Base).vtbl.length + 1);
+                assert(typeid(Derived).base is typeid(Base));
+            }
+        });
+    }
+}
