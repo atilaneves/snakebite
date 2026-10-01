@@ -599,8 +599,6 @@ static foreach (backend; Matrix!(
 }
 
 
-// Va_start then va_arg!int in a guest C variadic function that starts
-// its own `va_list` with `va_start`.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run C-style variadic functions"),
@@ -623,8 +621,6 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 }
-// Va_arg!long in a guest C variadic function that starts
-// its own `va_list` with `va_start`.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run C-style variadic functions"),
@@ -647,8 +643,6 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 }
-// Va_arg!double in a guest C variadic function that starts
-// its own `va_list` with `va_start`.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run C-style variadic functions"),
@@ -671,8 +665,6 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 }
-// Va_arg of a pointer in a guest C variadic function that starts
-// its own `va_list` with `va_start`.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run C-style variadic functions"),
@@ -696,8 +688,6 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 }
-// Va_arg of a small struct in a guest C variadic function that starts
-// its own `va_list` with `va_start`.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run C-style variadic functions"),
@@ -719,8 +709,7 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 }
-// The va_arg(ap, ref T) form in a guest C variadic function that starts
-// its own `va_list` with `va_start`.
+// `va_arg(ap, ref T)` stores the next extra argument in the variable.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run C-style variadic functions"),
@@ -748,8 +737,7 @@ static foreach (backend; Matrix!(
 }
 
 
-// A second va_start starts again from the first extra argument in a guest C variadic function that starts
-// its own `va_list` with `va_start`.
+// A second `va_start` starts again from the first extra argument.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run C-style variadic functions"),
@@ -774,8 +762,7 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 }
-// Va_copy keeps its own position in a guest C variadic function that starts
-// its own `va_list` with `va_start`.
+// A `va_copy` has its own position: reading it leaves the original alone.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run C-style variadic functions"),
@@ -805,8 +792,8 @@ static foreach (backend; Matrix!(
 }
 
 
-// A va_list passed to a second guest function in a guest C variadic function that starts
-// its own `va_list` with `va_start`.
+// A `va_list` parameter refers to the caller's cursor, so the callee reads
+// the caller's extra arguments.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run C-style variadic functions"),
@@ -835,8 +822,7 @@ static foreach (backend; Matrix!(
 }
 
 
-// A va_list passed to vsnprintf in a guest C variadic function that starts
-// its own `va_list` with `va_start`.
+// A `va_list` can be passed to a C function such as `vsnprintf`.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run C-style variadic functions"),
