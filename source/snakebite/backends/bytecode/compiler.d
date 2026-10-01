@@ -975,7 +975,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const zero = reserveTemp(pointerFacts);
         emit(&opConstant, zero, addConstant(0), size_t.sizeof);
         _assertSites ~= AssertSite(
-            "Assertion failure",
+            "internal error: control reached the end of a non-void function",
             _function.loc.filename.fromStringz.idup,
             _function.loc.linnum,
         );
