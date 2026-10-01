@@ -4367,6 +4367,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileArrayLiteral(expression, _destination);
     }
 
+    protected override void requireLiteralDestination(
+            ArrayLiteralExp expression) {
+        requireDestination(expression);
+    }
+
     private struct TemporaryDestination {
         size_t offset;
         size_t width;

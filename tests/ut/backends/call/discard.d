@@ -144,3 +144,25 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// dmd lowers a dynamic array literal to a druntime allocation call. The
+// literal still allocates and evaluates its elements when nothing reads
+// the array.
+static foreach (backend; Matrix!()) {
+    @("discard.arrayLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int counter;
+                int bump() {
+                    return ++counter;
+                }
+
+                cast(void) [bump, bump + 1];
+                assert(counter == 2);
+            }
+        });
+    }
+}
