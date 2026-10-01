@@ -4685,6 +4685,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     override void visit(SliceExp expression) {
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
+        import snakebite.backends.sliceplan: planSlice;
         import std.conv: text;
 
         auto array = expression.e1;
@@ -4742,23 +4743,21 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const hi = expression.upr is null
             ? cast(long) sourceLength : asIntegral(expression.upr);
 
-        if (knownLength) {
-            if (lo < 0 || hi < lo || cast(size_t) hi > sourceLength) {
-                import snakebite.backends.druntimehooks: DruntimeHook;
+        const plan = planSlice(expression);
+        const lower = cast(size_t) lo;
+        const upper = cast(size_t) hi;
+        const outOfBounds = plan.checkOrder && upper < lower
+            || plan.checkUpper && upper > sourceLength;
+        if (outOfBounds) {
+            import snakebite.backends.druntimehooks: DruntimeHook;
 
-                const lower = cast(size_t) lo;
-                const upper = cast(size_t) hi;
-                throwArrayBounds(
-                    DruntimeHook.sliceBounds, expression.loc,
-                    [cast(const(void)*) &lower, cast(const(void)*) &upper,
-                        cast(const(void)*) &sourceLength],
-                );
-            }
-        } else if (lo < 0 || hi < lo)
-            throw new SnakebiteException(
-                text("interpreter cannot slice `", array.toString, "` [",
-                    lo, " .. ", hi, "]"),
+            const reportedLength = plan.reportsSourceLength ? sourceLength : 0;
+            throwArrayBounds(
+                DruntimeHook.sliceBounds, expression.loc,
+                [cast(const(void)*) &lower, cast(const(void)*) &upper,
+                    cast(const(void)*) &reportedLength],
             );
+        }
 
         const stride = factsOf(sourceType.nextOf).size;
         auto bytes = cast(ubyte*) _place;

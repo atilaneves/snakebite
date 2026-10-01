@@ -689,6 +689,133 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A pointer slice has no length to check against, but its lower bound
+// must not pass its upper bound: a `RangeError`, as in compiled D.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects the reversed slice as a compile error, which no guest code can catch"),
+)) {
+    @("pointerSlice.reversedBoundsIsRangeError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+            void main() {
+                int[3] a = [1, 2, 3];
+                int* p = a.ptr;
+                string message;
+                try {
+                    auto s = p[2 .. 1];
+                } catch (RangeError error) {
+                    message = error.msg;
+                }
+                assert(message ==
+                    "slice [2 .. 1] has a larger lower index than upper index");
+            }
+        });
+    }
+}
+
+// The error names the file and the line of the slice expression.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects the reversed slice as a compile error, which no guest code can catch"),
+)) {
+    @("pointerSlice.reversedBoundsNamesFileAndLine." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+            void main() {
+                int[3] a = [1, 2, 3];
+                int* p = a.ptr;
+                string file;
+                size_t line;
+                size_t expected;
+                try {
+                    expected = __LINE__ + 1;
+                    auto s = p[2 .. 1];
+                } catch (RangeError error) {
+                    file = error.file;
+                    line = error.line;
+                }
+                assert(file == __FILE__);
+                assert(line == expected);
+            }
+        });
+    }
+}
+
+// Equal bounds give an empty slice and the full range is intact.
+static foreach (backend; Matrix!(
+)) {
+    @("pointerSlice.equalAndFullBoundsWork." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int[3] a = [1, 2, 3];
+                int* p = a.ptr;
+                auto empty = p[1 .. 1];
+                auto all = p[0 .. 3];
+                assert(empty.length == 0);
+                assert(all.length == 3 && all[2] == 3);
+            }
+        });
+    }
+}
+
+// The bounds run once each, lower first, even when the check fails.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects the reversed slice as a compile error, which no guest code can catch"),
+)) {
+    @("pointerSlice.boundsEvaluateOnceInOrder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+            void main() {
+                int[3] a = [1, 2, 3];
+                int* p = a.ptr;
+                int trace;
+                size_t low() { trace = trace * 10 + 1; return 2; }
+                size_t high() { trace = trace * 10 + 2; return 1; }
+                try {
+                    auto s = p[low() .. high()];
+                } catch (RangeError) {
+                }
+                assert(trace == 12);
+            }
+        });
+    }
+}
+
+// A discarded pointer slice still checks its bounds.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects the reversed slice as a compile error, which no guest code can catch"),
+)) {
+    @("pointerSlice.discardedReversedBoundsIsRangeError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: RangeError;
+            void main() {
+                int[3] a = [1, 2, 3];
+                int* p = a.ptr;
+                bool caught;
+                try {
+                    cast(void) p[2 .. 1];
+                } catch (RangeError) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
 // A zero-length slice writes nothing.
 static foreach (backend; Matrix!(
 )) {
