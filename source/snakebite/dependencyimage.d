@@ -145,7 +145,7 @@ public DependencyImage prepareImage(
     import std.path: absolutePath, buildPath;
     import std.uuid: randomUUID;
 
-    import std.algorithm.iteration: filter, map;
+    import std.algorithm.iteration: map;
     import std.array: array;
 
     string imageArgument(string argument) {
@@ -154,21 +154,17 @@ public DependencyImage prepareImage(
             if (argument == "-debug" || argument.startsWith("-version=")
                     || argument.startsWith("-debug="))
                 return "-d" ~ argument;
-            if (argument == "-noboundscheck")
-                return "-boundscheck=off";
         }
         return argument;
     }
-    // `-check=` selects what the guest backends check, and ldc2 has no such
-    // flag: the compiled image has nothing to give it to.
-    bool isForImage(string argument) {
+    string[] imageArguments() {
         version (LDC) {
-            import std.algorithm: startsWith;
-            return !argument.startsWith("-check=");
+            import snakebite.frontend.checks: ldcArguments;
+            return ldcArguments(compilerArguments);
         } else
-            return true;
+            return compilerArguments.dup;
     }
-    const importFlags = compilerArguments.filter!isForImage.map!imageArgument.array
+    const importFlags = imageArguments.map!imageArgument.array
         ~ importPaths.map!(path => "-I" ~ path).array
         ~ stringImportPaths.map!(path => "-J" ~ path).array;
     const executable = compilerPath(compiler);

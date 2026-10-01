@@ -233,12 +233,33 @@ public void buildDubDependencies(
     const result = execute(["dub", "build", "--deep", "--compiler=" ~ defaultCompiler]
         ~ description.buildArguments, null, Config.none,
         size_t.max, directory);
-    if (result.status != 0)
+    if (result.status != 0 && !failedBuildingRoot(result.output, description))
         throw new SnakebiteException("Dub dependency build failed:\n" ~ result.output);
     if (!linkerFiles.all!exists)
         throw new SnakebiteException("Dub build did not produce all dependency libraries");
     stateDirectory.mkdirRecurse;
     statePath.write(fingerprint ~ fileFingerprint(linkerFiles));
+}
+
+// Whether the package that dub was building when the build failed is the
+// root. dub builds the root last, and the guest backends never use its
+// library, so only a root that `ldc2` cannot build is allowed to fail: dub
+// gives the root's `dflags` to `ldc2` as they are, and `ldc2` does not read
+// `-check=`. The dependencies are built with their own flags, and their
+// libraries are where `dub describe` says, which a rewritten recipe or
+// another compiler path would change.
+private bool failedBuildingRoot(in string output, in DubDescription description) {
+    import std.array: split;
+    import std.string: lineSplitter, strip;
+
+    string building;
+    foreach (line; output.lineSplitter) {
+        const words = line.strip.split(" ");
+        if (words.length > 1 && words[0] == "Building")
+            building = words[1];
+    }
+
+    return building == description.value["rootPackage"].str;
 }
 
 

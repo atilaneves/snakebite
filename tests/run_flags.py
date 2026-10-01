@@ -1070,7 +1070,8 @@ SWITCH_CASES = [
 ]
 
 
-# CTFE does not raise the error of a `final switch` that no case matches.
+# A `final switch` that no case matches ends the process in dmd's own CTFE
+# interpreter, so CTFE runs none of the rows that raise.
 @pytest.mark.parametrize(
     "backend,flags,expected", cases(SWITCH_CASES, ctfe=False),
 )
@@ -1162,7 +1163,7 @@ def bounds_cases(
     result = []
     for flags, effective in flag_table:
         for name in program_names:
-            body, message = BOUNDS_PROGRAMS[name]
+            _, message = BOUNDS_PROGRAMS[name]
             for attribute in ATTRIBUTES:
                 expected, unchecked = bounds_expectation(
                     effective, attribute, message,
@@ -1353,6 +1354,83 @@ def test_unknown_check_flag_value_is_an_error(
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
     assert flag in output
+
+
+# dmd defines `D_NoBoundsChecks` when the bounds check is off for all code.
+@pytest.mark.parametrize("flags", [
+    ["-check=bounds=off"], ["-boundscheck=off"], ["-noboundscheck"],
+])
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_check_bounds_off_defines_d_noboundschecks(
+    tmp_path: Path, backend: str, flags: list[str],
+) -> None:
+    run_program(tmp_path, backend, flags, """
+        unittest {
+            log("start\\n");
+            version (D_NoBoundsChecks) {} else
+                assert(0, "D_NoBoundsChecks is not defined");
+            log("after\\n");
+        }
+    """, PASSES)
+
+
+@pytest.mark.parametrize("flags", [
+    [], ["-release"], ["-boundscheck=safeonly"], ["-check=bounds=on"],
+])
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_check_bounds_not_off_does_not_define_d_noboundschecks(
+    tmp_path: Path, backend: str, flags: list[str],
+) -> None:
+    run_program(tmp_path, backend, flags, """
+        unittest {
+            log("start\\n");
+            version (D_NoBoundsChecks)
+                assert(0, "D_NoBoundsChecks is defined");
+            log("after\\n");
+        }
+    """, PASSES)
+
+
+# A template of a dub dependency that the project instantiates has the
+# checks of the project's flags, as it has in a native build.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_check_flag_applies_to_a_dependency_template(
+    tmp_path: Path, backend: str,
+) -> None:
+    app = tmp_path / "app"
+    dependency = tmp_path / "dependency"
+    (app / "source").mkdir(parents=True)
+    (dependency / "source").mkdir(parents=True)
+    (app / "dub.sdl").write_text(
+        'name "app"\ntargetType "library"\ndflags "-check=in=off"\n'
+        'dependency "dep" path="../dependency"\n',
+        encoding="utf-8",
+    )
+    (app / "source" / "app.d").write_text(
+        "module app;\nimport dep;\nunittest { positive(-1); }\n",
+        encoding="utf-8",
+    )
+    (dependency / "dub.sdl").write_text(
+        'name "dep"\ntargetType "library"\n', encoding="utf-8",
+    )
+    (dependency / "source" / "dep.d").write_text(
+        "module dep;\n"
+        "T positive(T)(T value) in (value > 0) { return value; }\n",
+        encoding="utf-8",
+    )
+    command = (
+        ["dub", "test", f"--compiler={native_compiler()}"]
+        if backend == "native"
+        else [sb_path(), f"--backend={backend}", "--no-optimise-image",
+              str(app)]
+    )
+
+    result = subprocess.run(
+        command, cwd=app, capture_output=True, check=False, text=True,
+        timeout=TIMEOUT,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 if __name__ == "__main__":
