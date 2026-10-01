@@ -881,3 +881,42 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 }
+
+
+// Alloca memory is stack memory, which the GC scans: it can hold the
+// only pointer to a GC object.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call alloca"),
+)) {
+    @("call.alloca.holdsGcPointers." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        8028.shouldBeRetOf!(backend, q{
+            import core.memory: GC;
+            import core.stdc.stdlib: alloca;
+            static void fill(int** slots) {
+                foreach (i; 0 .. 8) {
+                    slots[i] = new int;
+                    *slots[i] = 1000 + i;
+                }
+            }
+            static void churn(int** slots) {
+                foreach (i; 0 .. 100_000) {
+                    auto other = new int;
+                    *other = -1;
+                }
+            }
+            int answer() {
+                auto slots = cast(int**) alloca(8 * (int*).sizeof);
+                fill(slots);
+                GC.collect;
+                churn(slots);
+                int total;
+                foreach (i; 0 .. 8)
+                    total += *slots[i];
+                return total;
+            }
+        }, "answer");
+    }
+}
