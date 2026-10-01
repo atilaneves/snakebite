@@ -13,1571 +13,355 @@ import ut.backends;
 // rejects the count, gives another value (pinned per case), or asserts.
 private alias RejectedByCtfe = Omit!(Ctfe, Because.inexpressible,
     "CTFE rejects an out-of-range shift count at compile time");
-private alias WrongInCtfe = Omit!(Ctfe, Because.diverges,
+private alias AssertsInCtfe = Omit!(Ctfe, Because.inexpressible,
+    "dmd's CTFE asserts on a negative `>>=` or `>>>=` count");
+private alias DiffersInCtfe = Omit!(Ctfe, Because.diverges,
     "CTFE gives another value for an out-of-range count, where the CPU " ~
     "masks it: pinned by the `.Ctfe.diverges` test of the same case");
 
-private alias AssertsInCtfe = Omit!(Ctfe, Because.inexpressible,
-    "dmd's CTFE asserts on a negative `>>=` or `>>>=` count");
-
-// The signed operand is -100 and the unsigned one is its type's maximum,
-// so every bit of the result tells which count the shift used.
-private string shiftCode(
-    string type, string op, string form, string count,
-) {
-    const value = type[0] == 'u' ? type ~ ".max" : "-100";
-    const shifted = form == "expr"
-        ? "return cast(" ~ type ~ ")(value() " ~ op ~ " count());"
-        : type ~ " v = value();\n    v " ~ op ~ "= count();\n    return v;";
-
-    return type ~ " value() { return " ~ value ~ "; }\n"
-        ~ "int count() { return " ~ count ~ "; }\n"
-        ~ type ~ " shifted() {\n    " ~ shifted ~ "\n}\n";
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.int.shl.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(-100).shouldBeRetOf!(
-            backend, shiftCode("int", "<<", "expr", "32"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.int.shr.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(-100).shouldBeRetOf!(
-            backend, shiftCode("int", ">>", "expr", "32"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.int.ushr.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(-100).shouldBeRetOf!(
-            backend, shiftCode("int", ">>>", "expr", "32"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.int.shlAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(-100).shouldBeRetOf!(
-            backend, shiftCode("int", "<<", "assign", "32"), "shifted");
-    }
-}
-
-@("shift.int.shlAssign.countEqualsWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    int(0).shouldBeRetOf!(
-            Ctfe, shiftCode("int", "<<", "assign", "32"), "shifted");
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.int.shrAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(-100).shouldBeRetOf!(
-            backend, shiftCode("int", ">>", "assign", "32"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.int.ushrAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(-100).shouldBeRetOf!(
-            backend, shiftCode("int", ">>>", "assign", "32"), "shifted");
-    }
-}
-
-@("shift.int.ushrAssign.countEqualsWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    int(0).shouldBeRetOf!(
-            Ctfe, shiftCode("int", ">>>", "assign", "32"), "shifted");
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.int.shl.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(-200).shouldBeRetOf!(
-            backend, shiftCode("int", "<<", "expr", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.int.shr.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(-50).shouldBeRetOf!(
-            backend, shiftCode("int", ">>", "expr", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.int.ushr.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(2147483598).shouldBeRetOf!(
-            backend, shiftCode("int", ">>>", "expr", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.int.shlAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(-200).shouldBeRetOf!(
-            backend, shiftCode("int", "<<", "assign", "33"), "shifted");
-    }
-}
-
-@("shift.int.shlAssign.countAboveWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    int(0).shouldBeRetOf!(
-            Ctfe, shiftCode("int", "<<", "assign", "33"), "shifted");
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.int.shrAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(-50).shouldBeRetOf!(
-            backend, shiftCode("int", ">>", "assign", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.int.ushrAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(2147483598).shouldBeRetOf!(
-            backend, shiftCode("int", ">>>", "assign", "33"), "shifted");
-    }
-}
-
-@("shift.int.ushrAssign.countAboveWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    int(0).shouldBeRetOf!(
-            Ctfe, shiftCode("int", ">>>", "assign", "33"), "shifted");
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.int.shl.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(0).shouldBeRetOf!(
-            backend, shiftCode("int", "<<", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.int.shr.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(-1).shouldBeRetOf!(
-            backend, shiftCode("int", ">>", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.int.ushr.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(1).shouldBeRetOf!(
-            backend, shiftCode("int", ">>>", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.int.shlAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(0).shouldBeRetOf!(
-            backend, shiftCode("int", "<<", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(AssertsInCtfe)) {
-    @("shift.int.shrAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(-1).shouldBeRetOf!(
-            backend, shiftCode("int", ">>", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(AssertsInCtfe)) {
-    @("shift.int.ushrAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(1).shouldBeRetOf!(
-            backend, shiftCode("int", ">>>", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.uint.shl.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(4294967295).shouldBeRetOf!(
-            backend, shiftCode("uint", "<<", "expr", "32"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.uint.shr.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(4294967295).shouldBeRetOf!(
-            backend, shiftCode("uint", ">>", "expr", "32"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.uint.ushr.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(4294967295).shouldBeRetOf!(
-            backend, shiftCode("uint", ">>>", "expr", "32"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.uint.shlAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(4294967295).shouldBeRetOf!(
-            backend, shiftCode("uint", "<<", "assign", "32"), "shifted");
-    }
-}
-
-@("shift.uint.shlAssign.countEqualsWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    uint(0).shouldBeRetOf!(
-            Ctfe, shiftCode("uint", "<<", "assign", "32"), "shifted");
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.uint.shrAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(4294967295).shouldBeRetOf!(
-            backend, shiftCode("uint", ">>", "assign", "32"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.uint.ushrAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(4294967295).shouldBeRetOf!(
-            backend, shiftCode("uint", ">>>", "assign", "32"), "shifted");
-    }
-}
-
-@("shift.uint.ushrAssign.countEqualsWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    uint(0).shouldBeRetOf!(
-            Ctfe, shiftCode("uint", ">>>", "assign", "32"), "shifted");
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.uint.shl.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(4294967294).shouldBeRetOf!(
-            backend, shiftCode("uint", "<<", "expr", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.uint.shr.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(2147483647).shouldBeRetOf!(
-            backend, shiftCode("uint", ">>", "expr", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.uint.ushr.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(2147483647).shouldBeRetOf!(
-            backend, shiftCode("uint", ">>>", "expr", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.uint.shlAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(4294967294).shouldBeRetOf!(
-            backend, shiftCode("uint", "<<", "assign", "33"), "shifted");
-    }
-}
-
-@("shift.uint.shlAssign.countAboveWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    uint(0).shouldBeRetOf!(
-            Ctfe, shiftCode("uint", "<<", "assign", "33"), "shifted");
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.uint.shrAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(2147483647).shouldBeRetOf!(
-            backend, shiftCode("uint", ">>", "assign", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.uint.ushrAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(2147483647).shouldBeRetOf!(
-            backend, shiftCode("uint", ">>>", "assign", "33"), "shifted");
-    }
-}
-
-@("shift.uint.ushrAssign.countAboveWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    uint(0).shouldBeRetOf!(
-            Ctfe, shiftCode("uint", ">>>", "assign", "33"), "shifted");
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.uint.shl.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(2147483648).shouldBeRetOf!(
-            backend, shiftCode("uint", "<<", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.uint.shr.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(1).shouldBeRetOf!(
-            backend, shiftCode("uint", ">>", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.uint.ushr.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(1).shouldBeRetOf!(
-            backend, shiftCode("uint", ">>>", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.uint.shlAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(2147483648).shouldBeRetOf!(
-            backend, shiftCode("uint", "<<", "assign", "-1"), "shifted");
-    }
-}
-
-@("shift.uint.shlAssign.countNegative.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    uint(0).shouldBeRetOf!(
-            Ctfe, shiftCode("uint", "<<", "assign", "-1"), "shifted");
-}
-
-static foreach (backend; Matrix!(AssertsInCtfe)) {
-    @("shift.uint.shrAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(1).shouldBeRetOf!(
-            backend, shiftCode("uint", ">>", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(AssertsInCtfe)) {
-    @("shift.uint.ushrAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(1).shouldBeRetOf!(
-            backend, shiftCode("uint", ">>>", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.long.shl.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(-100).shouldBeRetOf!(
-            backend, shiftCode("long", "<<", "expr", "64"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.long.shr.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(-100).shouldBeRetOf!(
-            backend, shiftCode("long", ">>", "expr", "64"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.long.ushr.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(-100).shouldBeRetOf!(
-            backend, shiftCode("long", ">>>", "expr", "64"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.long.shlAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(-100).shouldBeRetOf!(
-            backend, shiftCode("long", "<<", "assign", "64"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.long.shrAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(-100).shouldBeRetOf!(
-            backend, shiftCode("long", ">>", "assign", "64"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.long.ushrAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(-100).shouldBeRetOf!(
-            backend, shiftCode("long", ">>>", "assign", "64"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.long.shl.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(-200).shouldBeRetOf!(
-            backend, shiftCode("long", "<<", "expr", "65"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.long.shr.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(-50).shouldBeRetOf!(
-            backend, shiftCode("long", ">>", "expr", "65"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.long.ushr.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(9223372036854775758).shouldBeRetOf!(
-            backend, shiftCode("long", ">>>", "expr", "65"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.long.shlAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(-200).shouldBeRetOf!(
-            backend, shiftCode("long", "<<", "assign", "65"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.long.shrAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(-50).shouldBeRetOf!(
-            backend, shiftCode("long", ">>", "assign", "65"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.long.ushrAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(9223372036854775758).shouldBeRetOf!(
-            backend, shiftCode("long", ">>>", "assign", "65"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.long.shl.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(0).shouldBeRetOf!(
-            backend, shiftCode("long", "<<", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.long.shr.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(-1).shouldBeRetOf!(
-            backend, shiftCode("long", ">>", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.long.ushr.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(1).shouldBeRetOf!(
-            backend, shiftCode("long", ">>>", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.long.shlAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(0).shouldBeRetOf!(
-            backend, shiftCode("long", "<<", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(AssertsInCtfe)) {
-    @("shift.long.shrAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(-1).shouldBeRetOf!(
-            backend, shiftCode("long", ">>", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(AssertsInCtfe)) {
-    @("shift.long.ushrAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(1).shouldBeRetOf!(
-            backend, shiftCode("long", ">>>", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.ulong.shl.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(18446744073709551615).shouldBeRetOf!(
-            backend, shiftCode("ulong", "<<", "expr", "64"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.ulong.shr.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(18446744073709551615).shouldBeRetOf!(
-            backend, shiftCode("ulong", ">>", "expr", "64"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.ulong.ushr.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(18446744073709551615).shouldBeRetOf!(
-            backend, shiftCode("ulong", ">>>", "expr", "64"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.ulong.shlAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(18446744073709551615).shouldBeRetOf!(
-            backend, shiftCode("ulong", "<<", "assign", "64"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.ulong.shrAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(18446744073709551615).shouldBeRetOf!(
-            backend, shiftCode("ulong", ">>", "assign", "64"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.ulong.ushrAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(18446744073709551615).shouldBeRetOf!(
-            backend, shiftCode("ulong", ">>>", "assign", "64"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.ulong.shl.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(18446744073709551614).shouldBeRetOf!(
-            backend, shiftCode("ulong", "<<", "expr", "65"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.ulong.shr.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(9223372036854775807).shouldBeRetOf!(
-            backend, shiftCode("ulong", ">>", "expr", "65"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.ulong.ushr.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(9223372036854775807).shouldBeRetOf!(
-            backend, shiftCode("ulong", ">>>", "expr", "65"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.ulong.shlAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(18446744073709551614).shouldBeRetOf!(
-            backend, shiftCode("ulong", "<<", "assign", "65"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.ulong.shrAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(9223372036854775807).shouldBeRetOf!(
-            backend, shiftCode("ulong", ">>", "assign", "65"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.ulong.ushrAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(9223372036854775807).shouldBeRetOf!(
-            backend, shiftCode("ulong", ">>>", "assign", "65"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.ulong.shl.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(9223372036854775808).shouldBeRetOf!(
-            backend, shiftCode("ulong", "<<", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.ulong.shr.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(1).shouldBeRetOf!(
-            backend, shiftCode("ulong", ">>", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.ulong.ushr.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(1).shouldBeRetOf!(
-            backend, shiftCode("ulong", ">>>", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.ulong.shlAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(9223372036854775808).shouldBeRetOf!(
-            backend, shiftCode("ulong", "<<", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(AssertsInCtfe)) {
-    @("shift.ulong.shrAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(1).shouldBeRetOf!(
-            backend, shiftCode("ulong", ">>", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(AssertsInCtfe)) {
-    @("shift.ulong.ushrAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        ulong(1).shouldBeRetOf!(
-            backend, shiftCode("ulong", ">>>", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.byte.shl.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-100).shouldBeRetOf!(
-            backend, shiftCode("byte", "<<", "expr", "32"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.byte.shr.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-100).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>", "expr", "32"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.byte.ushr.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-100).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>>", "expr", "32"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.byte.shlAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-100).shouldBeRetOf!(
-            backend, shiftCode("byte", "<<", "assign", "32"), "shifted");
-    }
-}
-
-@("shift.byte.shlAssign.countEqualsWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    byte(0).shouldBeRetOf!(
-            Ctfe, shiftCode("byte", "<<", "assign", "32"), "shifted");
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.byte.shrAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-100).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>", "assign", "32"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.byte.ushrAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-100).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>>", "assign", "32"), "shifted");
-    }
-}
-
-@("shift.byte.ushrAssign.countEqualsWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    byte(0).shouldBeRetOf!(
-            Ctfe, shiftCode("byte", ">>>", "assign", "32"), "shifted");
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.byte.shl.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(56).shouldBeRetOf!(
-            backend, shiftCode("byte", "<<", "expr", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.byte.shr.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-50).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>", "expr", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.byte.ushr.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-50).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>>", "expr", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.byte.shlAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(56).shouldBeRetOf!(
-            backend, shiftCode("byte", "<<", "assign", "33"), "shifted");
-    }
-}
-
-@("shift.byte.shlAssign.countAboveWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    byte(0).shouldBeRetOf!(
-            Ctfe, shiftCode("byte", "<<", "assign", "33"), "shifted");
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.byte.shrAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-50).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>", "assign", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.byte.ushrAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(78).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>>", "assign", "33"), "shifted");
-    }
-}
-
-@("shift.byte.ushrAssign.countAboveWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    byte(0).shouldBeRetOf!(
-            Ctfe, shiftCode("byte", ">>>", "assign", "33"), "shifted");
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.byte.shl.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(0).shouldBeRetOf!(
-            backend, shiftCode("byte", "<<", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.byte.shr.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-1).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.byte.ushr.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(1).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>>", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.byte.shlAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(0).shouldBeRetOf!(
-            backend, shiftCode("byte", "<<", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(AssertsInCtfe)) {
-    @("shift.byte.shrAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-1).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(AssertsInCtfe)) {
-    @("shift.byte.ushrAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(0).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>>", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.byte.shl.countEqualsOperandWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(0).shouldBeRetOf!(
-            backend, shiftCode("byte", "<<", "expr", "8"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.byte.shr.countEqualsOperandWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-1).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>", "expr", "8"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.byte.ushr.countEqualsOperandWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-1).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>>", "expr", "8"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.byte.shlAssign.countEqualsOperandWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(0).shouldBeRetOf!(
-            backend, shiftCode("byte", "<<", "assign", "8"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.byte.shrAssign.countEqualsOperandWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-1).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>", "assign", "8"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.byte.ushrAssign.countEqualsOperandWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(0).shouldBeRetOf!(
-            backend, shiftCode("byte", ">>>", "assign", "8"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.short.shl.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-100).shouldBeRetOf!(
-            backend, shiftCode("short", "<<", "expr", "32"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.short.shr.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-100).shouldBeRetOf!(
-            backend, shiftCode("short", ">>", "expr", "32"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.short.ushr.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-100).shouldBeRetOf!(
-            backend, shiftCode("short", ">>>", "expr", "32"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.short.shlAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-100).shouldBeRetOf!(
-            backend, shiftCode("short", "<<", "assign", "32"), "shifted");
-    }
-}
-
-@("shift.short.shlAssign.countEqualsWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    short(0).shouldBeRetOf!(
-            Ctfe, shiftCode("short", "<<", "assign", "32"), "shifted");
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.short.shrAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-100).shouldBeRetOf!(
-            backend, shiftCode("short", ">>", "assign", "32"), "shifted");
+// One shift of the operand `type` by `count`, a value of `countType`. The
+// operand is -100 when signed and the type's maximum when unsigned, so every
+// bit of the result tells which count the shift used. `expected` is what
+// compiled D gives.
+private struct ShiftCase {
+    enum Form { expr, assign }
+
+    // What CTFE does with the case. `differs` carries the value it gives.
+    enum Outcome { agrees, rejects, asserts, differs }
+
+    string type;
+    string op;
+    Form form;
+    string name;
+    string countType;
+    string count;
+    string expected;
+    Outcome ctfe;
+    string ctfeValue;
+}
+
+private enum expr = ShiftCase.Form.expr;
+private enum assign = ShiftCase.Form.assign;
+private enum agrees = ShiftCase.Outcome.agrees;
+private enum rejects = ShiftCase.Outcome.rejects;
+private enum asserts = ShiftCase.Outcome.asserts;
+private enum differs = ShiftCase.Outcome.differs;
+
+private enum shiftCases = [
+    ShiftCase("int", "<<", expr, "countEqualsWidth",
+        "int", "32", "-100", rejects),
+    ShiftCase("int", ">>", expr, "countEqualsWidth",
+        "int", "32", "-100", rejects),
+    ShiftCase("int", ">>>", expr, "countEqualsWidth",
+        "int", "32", "-100", rejects),
+    ShiftCase("int", "<<", assign, "countEqualsWidth",
+        "int", "32", "-100", differs, "0"),
+    ShiftCase("int", ">>", assign, "countEqualsWidth",
+        "int", "32", "-100", agrees),
+    ShiftCase("int", ">>>", assign, "countEqualsWidth",
+        "int", "32", "-100", differs, "0"),
+    ShiftCase("int", "<<", expr, "countAboveWidth",
+        "int", "33", "-200", rejects),
+    ShiftCase("int", ">>", expr, "countAboveWidth",
+        "int", "33", "-50", rejects),
+    ShiftCase("int", ">>>", expr, "countAboveWidth",
+        "int", "33", "2147483598", rejects),
+    ShiftCase("int", "<<", assign, "countAboveWidth",
+        "int", "33", "-200", differs, "0"),
+    ShiftCase("int", ">>", assign, "countAboveWidth",
+        "int", "33", "-50", agrees),
+    ShiftCase("int", ">>>", assign, "countAboveWidth",
+        "int", "33", "2147483598", differs, "0"),
+    ShiftCase("int", "<<", expr, "countNegative",
+        "int", "-1", "0", rejects),
+    ShiftCase("int", ">>", expr, "countNegative",
+        "int", "-1", "-1", rejects),
+    ShiftCase("int", ">>>", expr, "countNegative",
+        "int", "-1", "1", rejects),
+    ShiftCase("int", "<<", assign, "countNegative",
+        "int", "-1", "0", agrees),
+    ShiftCase("int", ">>", assign, "countNegative",
+        "int", "-1", "-1", asserts),
+    ShiftCase("int", ">>>", assign, "countNegative",
+        "int", "-1", "1", asserts),
+    ShiftCase("uint", "<<", expr, "countEqualsWidth",
+        "int", "32", "4294967295", rejects),
+    ShiftCase("uint", ">>", expr, "countEqualsWidth",
+        "int", "32", "4294967295", rejects),
+    ShiftCase("uint", ">>>", expr, "countEqualsWidth",
+        "int", "32", "4294967295", rejects),
+    ShiftCase("uint", "<<", assign, "countEqualsWidth",
+        "int", "32", "4294967295", differs, "0"),
+    ShiftCase("uint", ">>", assign, "countEqualsWidth",
+        "int", "32", "4294967295", agrees),
+    ShiftCase("uint", ">>>", assign, "countEqualsWidth",
+        "int", "32", "4294967295", differs, "0"),
+    ShiftCase("uint", "<<", expr, "countAboveWidth",
+        "int", "33", "4294967294", rejects),
+    ShiftCase("uint", ">>", expr, "countAboveWidth",
+        "int", "33", "2147483647", rejects),
+    ShiftCase("uint", ">>>", expr, "countAboveWidth",
+        "int", "33", "2147483647", rejects),
+    ShiftCase("uint", "<<", assign, "countAboveWidth",
+        "int", "33", "4294967294", differs, "0"),
+    ShiftCase("uint", ">>", assign, "countAboveWidth",
+        "int", "33", "2147483647", agrees),
+    ShiftCase("uint", ">>>", assign, "countAboveWidth",
+        "int", "33", "2147483647", differs, "0"),
+    ShiftCase("uint", "<<", expr, "countNegative",
+        "int", "-1", "2147483648", rejects),
+    ShiftCase("uint", ">>", expr, "countNegative",
+        "int", "-1", "1", rejects),
+    ShiftCase("uint", ">>>", expr, "countNegative",
+        "int", "-1", "1", rejects),
+    ShiftCase("uint", "<<", assign, "countNegative",
+        "int", "-1", "2147483648", differs, "0"),
+    ShiftCase("uint", ">>", assign, "countNegative",
+        "int", "-1", "1", asserts),
+    ShiftCase("uint", ">>>", assign, "countNegative",
+        "int", "-1", "1", asserts),
+    ShiftCase("long", "<<", expr, "countEqualsWidth",
+        "int", "64", "-100", rejects),
+    ShiftCase("long", ">>", expr, "countEqualsWidth",
+        "int", "64", "-100", rejects),
+    ShiftCase("long", ">>>", expr, "countEqualsWidth",
+        "int", "64", "-100", rejects),
+    ShiftCase("long", "<<", assign, "countEqualsWidth",
+        "int", "64", "-100", agrees),
+    ShiftCase("long", ">>", assign, "countEqualsWidth",
+        "int", "64", "-100", agrees),
+    ShiftCase("long", ">>>", assign, "countEqualsWidth",
+        "int", "64", "-100", agrees),
+    ShiftCase("long", "<<", expr, "countAboveWidth",
+        "int", "65", "-200", rejects),
+    ShiftCase("long", ">>", expr, "countAboveWidth",
+        "int", "65", "-50", rejects),
+    ShiftCase("long", ">>>", expr, "countAboveWidth",
+        "int", "65", "9223372036854775758", rejects),
+    ShiftCase("long", "<<", assign, "countAboveWidth",
+        "int", "65", "-200", agrees),
+    ShiftCase("long", ">>", assign, "countAboveWidth",
+        "int", "65", "-50", agrees),
+    ShiftCase("long", ">>>", assign, "countAboveWidth",
+        "int", "65", "9223372036854775758", agrees),
+    ShiftCase("long", "<<", expr, "countNegative",
+        "int", "-1", "0", rejects),
+    ShiftCase("long", ">>", expr, "countNegative",
+        "int", "-1", "-1", rejects),
+    ShiftCase("long", ">>>", expr, "countNegative",
+        "int", "-1", "1", rejects),
+    ShiftCase("long", "<<", assign, "countNegative",
+        "int", "-1", "0", agrees),
+    ShiftCase("long", ">>", assign, "countNegative",
+        "int", "-1", "-1", asserts),
+    ShiftCase("long", ">>>", assign, "countNegative",
+        "int", "-1", "1", asserts),
+    ShiftCase("ulong", "<<", expr, "countEqualsWidth",
+        "int", "64", "18446744073709551615", rejects),
+    ShiftCase("ulong", ">>", expr, "countEqualsWidth",
+        "int", "64", "18446744073709551615", rejects),
+    ShiftCase("ulong", ">>>", expr, "countEqualsWidth",
+        "int", "64", "18446744073709551615", rejects),
+    ShiftCase("ulong", "<<", assign, "countEqualsWidth",
+        "int", "64", "18446744073709551615", agrees),
+    ShiftCase("ulong", ">>", assign, "countEqualsWidth",
+        "int", "64", "18446744073709551615", agrees),
+    ShiftCase("ulong", ">>>", assign, "countEqualsWidth",
+        "int", "64", "18446744073709551615", agrees),
+    ShiftCase("ulong", "<<", expr, "countAboveWidth",
+        "int", "65", "18446744073709551614", rejects),
+    ShiftCase("ulong", ">>", expr, "countAboveWidth",
+        "int", "65", "9223372036854775807", rejects),
+    ShiftCase("ulong", ">>>", expr, "countAboveWidth",
+        "int", "65", "9223372036854775807", rejects),
+    ShiftCase("ulong", "<<", assign, "countAboveWidth",
+        "int", "65", "18446744073709551614", agrees),
+    ShiftCase("ulong", ">>", assign, "countAboveWidth",
+        "int", "65", "9223372036854775807", agrees),
+    ShiftCase("ulong", ">>>", assign, "countAboveWidth",
+        "int", "65", "9223372036854775807", agrees),
+    ShiftCase("ulong", "<<", expr, "countNegative",
+        "int", "-1", "9223372036854775808", rejects),
+    ShiftCase("ulong", ">>", expr, "countNegative",
+        "int", "-1", "1", rejects),
+    ShiftCase("ulong", ">>>", expr, "countNegative",
+        "int", "-1", "1", rejects),
+    ShiftCase("ulong", "<<", assign, "countNegative",
+        "int", "-1", "9223372036854775808", agrees),
+    ShiftCase("ulong", ">>", assign, "countNegative",
+        "int", "-1", "1", asserts),
+    ShiftCase("ulong", ">>>", assign, "countNegative",
+        "int", "-1", "1", asserts),
+    ShiftCase("byte", "<<", expr, "countEqualsWidth",
+        "int", "32", "-100", rejects),
+    ShiftCase("byte", ">>", expr, "countEqualsWidth",
+        "int", "32", "-100", rejects),
+    ShiftCase("byte", ">>>", expr, "countEqualsWidth",
+        "int", "32", "-100", rejects),
+    ShiftCase("byte", "<<", assign, "countEqualsWidth",
+        "int", "32", "-100", differs, "0"),
+    ShiftCase("byte", ">>", assign, "countEqualsWidth",
+        "int", "32", "-100", agrees),
+    ShiftCase("byte", ">>>", assign, "countEqualsWidth",
+        "int", "32", "-100", differs, "0"),
+    ShiftCase("byte", "<<", expr, "countAboveWidth",
+        "int", "33", "56", rejects),
+    ShiftCase("byte", ">>", expr, "countAboveWidth",
+        "int", "33", "-50", rejects),
+    ShiftCase("byte", ">>>", expr, "countAboveWidth",
+        "int", "33", "-50", rejects),
+    ShiftCase("byte", "<<", assign, "countAboveWidth",
+        "int", "33", "56", differs, "0"),
+    ShiftCase("byte", ">>", assign, "countAboveWidth",
+        "int", "33", "-50", agrees),
+    ShiftCase("byte", ">>>", assign, "countAboveWidth",
+        "int", "33", "78", differs, "0"),
+    ShiftCase("byte", "<<", expr, "countNegative",
+        "int", "-1", "0", rejects),
+    ShiftCase("byte", ">>", expr, "countNegative",
+        "int", "-1", "-1", rejects),
+    ShiftCase("byte", ">>>", expr, "countNegative",
+        "int", "-1", "1", rejects),
+    ShiftCase("byte", "<<", assign, "countNegative",
+        "int", "-1", "0", agrees),
+    ShiftCase("byte", ">>", assign, "countNegative",
+        "int", "-1", "-1", asserts),
+    ShiftCase("byte", ">>>", assign, "countNegative",
+        "int", "-1", "0", asserts),
+    ShiftCase("byte", "<<", expr, "countEqualsOperandWidth",
+        "int", "8", "0", agrees),
+    ShiftCase("byte", ">>", expr, "countEqualsOperandWidth",
+        "int", "8", "-1", agrees),
+    ShiftCase("byte", ">>>", expr, "countEqualsOperandWidth",
+        "int", "8", "-1", agrees),
+    ShiftCase("byte", "<<", assign, "countEqualsOperandWidth",
+        "int", "8", "0", agrees),
+    ShiftCase("byte", ">>", assign, "countEqualsOperandWidth",
+        "int", "8", "-1", agrees),
+    ShiftCase("byte", ">>>", assign, "countEqualsOperandWidth",
+        "int", "8", "0", agrees),
+    ShiftCase("short", "<<", expr, "countEqualsWidth",
+        "int", "32", "-100", rejects),
+    ShiftCase("short", ">>", expr, "countEqualsWidth",
+        "int", "32", "-100", rejects),
+    ShiftCase("short", ">>>", expr, "countEqualsWidth",
+        "int", "32", "-100", rejects),
+    ShiftCase("short", "<<", assign, "countEqualsWidth",
+        "int", "32", "-100", differs, "0"),
+    ShiftCase("short", ">>", assign, "countEqualsWidth",
+        "int", "32", "-100", agrees),
+    ShiftCase("short", ">>>", assign, "countEqualsWidth",
+        "int", "32", "-100", differs, "0"),
+    ShiftCase("short", "<<", expr, "countAboveWidth",
+        "int", "33", "-200", rejects),
+    ShiftCase("short", ">>", expr, "countAboveWidth",
+        "int", "33", "-50", rejects),
+    ShiftCase("short", ">>>", expr, "countAboveWidth",
+        "int", "33", "-50", rejects),
+    ShiftCase("short", "<<", assign, "countAboveWidth",
+        "int", "33", "-200", differs, "0"),
+    ShiftCase("short", ">>", assign, "countAboveWidth",
+        "int", "33", "-50", agrees),
+    ShiftCase("short", ">>>", assign, "countAboveWidth",
+        "int", "33", "32718", differs, "0"),
+    ShiftCase("short", "<<", expr, "countNegative",
+        "int", "-1", "0", rejects),
+    ShiftCase("short", ">>", expr, "countNegative",
+        "int", "-1", "-1", rejects),
+    ShiftCase("short", ">>>", expr, "countNegative",
+        "int", "-1", "1", rejects),
+    ShiftCase("short", "<<", assign, "countNegative",
+        "int", "-1", "0", agrees),
+    ShiftCase("short", ">>", assign, "countNegative",
+        "int", "-1", "-1", asserts),
+    ShiftCase("short", ">>>", assign, "countNegative",
+        "int", "-1", "0", asserts),
+    ShiftCase("short", "<<", expr, "countEqualsOperandWidth",
+        "int", "16", "0", agrees),
+    ShiftCase("short", ">>", expr, "countEqualsOperandWidth",
+        "int", "16", "-1", agrees),
+    ShiftCase("short", ">>>", expr, "countEqualsOperandWidth",
+        "int", "16", "-1", agrees),
+    ShiftCase("short", "<<", assign, "countEqualsOperandWidth",
+        "int", "16", "0", agrees),
+    ShiftCase("short", ">>", assign, "countEqualsOperandWidth",
+        "int", "16", "-1", agrees),
+    ShiftCase("short", ">>>", assign, "countEqualsOperandWidth",
+        "int", "16", "0", agrees),
+    ShiftCase("int", "<<", assign, "longCountAboveWidth",
+        "long", "33", "0", agrees),
+    ShiftCase("int", ">>", assign, "longCountAboveWidth",
+        "long", "33", "-1", differs, "-50"),
+    ShiftCase("uint", "<<", assign, "ulongCountEqualsWidth",
+        "ulong", "32", "0", agrees),
+    ShiftCase("byte", ">>", assign, "longCountEqualsOperandWidth",
+        "long", "8", "-1", agrees),
+    ShiftCase("short", ">>", assign, "uintCountEqualsOperandWidth",
+        "uint", "16", "-1", agrees),
+    ShiftCase("byte", ">>>", assign, "longCountEqualsOperandWidth",
+        "long", "8", "-1", differs, "0"),
+    ShiftCase("int", ">>>", assign, "longCountAboveWidth",
+        "long", "33", "int.max", differs, "0"),
+    ShiftCase("byte", ">>>", assign, "longCountInRange",
+        "long", "1", "-50", differs, "78"),
+    ShiftCase("int", ">>>", assign, "longCountInRange",
+        "long", "1", "-50", differs, "2147483598"),
+    ShiftCase("int", ">>", assign, "uintCountInRange",
+        "uint", "1", "-50", agrees),
+    ShiftCase("long", ">>", assign, "ulongCountInRange",
+        "ulong", "1", "-50", agrees),
+    ShiftCase("uint", ">>", assign, "longCountEqualsWidth",
+        "long", "32", "0", differs, "4294967295"),
+];
+
+private string testName(in ShiftCase row) {
+    const opName = row.op == "<<" ? "shl" : row.op == ">>" ? "shr" : "ushr";
+
+    return "shift." ~ row.type ~ "." ~ opName
+        ~ (row.form == assign ? "Assign." : ".") ~ row.name;
+}
+
+private string shiftCode(in ShiftCase row) {
+    const value = row.type[0] == 'u' ? row.type ~ ".max" : "-100";
+    const shifted = row.form == expr
+        ? "return cast(" ~ row.type ~ ")(value() " ~ row.op ~ " count());"
+        : row.type ~ " v = value();\n    v " ~ row.op ~ "= count();\n    return v;";
+
+    return row.type ~ " value() { return " ~ value ~ "; }\n"
+        ~ row.countType ~ " count() { return " ~ row.count ~ "; }\n"
+        ~ row.type ~ " shifted() {\n    " ~ shifted ~ "\n}\n";
+}
+
+private template CtfeOmissions(ShiftCase.Outcome ctfe) {
+    static if (ctfe == agrees)
+        alias CtfeOmissions = AliasSeq!();
+    else static if (ctfe == rejects)
+        alias CtfeOmissions = AliasSeq!(RejectedByCtfe);
+    else static if (ctfe == asserts)
+        alias CtfeOmissions = AliasSeq!(AssertsInCtfe);
+    else
+        alias CtfeOmissions = AliasSeq!(DiffersInCtfe);
+}
+
+static foreach (row; shiftCases) {
+    static foreach (backend; Matrix!(CtfeOmissions!(row.ctfe))) {
+        @(row.testName ~ "." ~ backend.stringof)
+        @Tags(backend.stringof)
+        unittest {
+            mixin(row.type, "(", row.expected, ")").shouldBeRetOf!(
+                backend, row.shiftCode, "shifted");
+        }
+    }
+}
+
+// CTFE runs the cases it omits above and gives these values instead.
+static foreach (row; shiftCases) {
+    static if (row.ctfe == differs) {
+        @(row.testName ~ ".Ctfe.diverges")
+        @Tags("Ctfe")
+        unittest {
+            mixin(row.type, "(", row.ctfeValue, ")").shouldBeRetOf!(
+                Ctfe, row.shiftCode, "shifted");
+        }
     }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.short.ushrAssign.countEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-100).shouldBeRetOf!(
-            backend, shiftCode("short", ">>>", "assign", "32"), "shifted");
-    }
-}
-
-@("shift.short.ushrAssign.countEqualsWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    short(0).shouldBeRetOf!(
-            Ctfe, shiftCode("short", ">>>", "assign", "32"), "shifted");
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.short.shl.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-200).shouldBeRetOf!(
-            backend, shiftCode("short", "<<", "expr", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.short.shr.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-50).shouldBeRetOf!(
-            backend, shiftCode("short", ">>", "expr", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.short.ushr.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-50).shouldBeRetOf!(
-            backend, shiftCode("short", ">>>", "expr", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.short.shlAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-200).shouldBeRetOf!(
-            backend, shiftCode("short", "<<", "assign", "33"), "shifted");
-    }
-}
-
-@("shift.short.shlAssign.countAboveWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    short(0).shouldBeRetOf!(
-            Ctfe, shiftCode("short", "<<", "assign", "33"), "shifted");
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.short.shrAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-50).shouldBeRetOf!(
-            backend, shiftCode("short", ">>", "assign", "33"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.short.ushrAssign.countAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(32718).shouldBeRetOf!(
-            backend, shiftCode("short", ">>>", "assign", "33"), "shifted");
-    }
-}
-
-@("shift.short.ushrAssign.countAboveWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    short(0).shouldBeRetOf!(
-            Ctfe, shiftCode("short", ">>>", "assign", "33"), "shifted");
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.short.shl.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(0).shouldBeRetOf!(
-            backend, shiftCode("short", "<<", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.short.shr.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-1).shouldBeRetOf!(
-            backend, shiftCode("short", ">>", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(RejectedByCtfe)) {
-    @("shift.short.ushr.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(1).shouldBeRetOf!(
-            backend, shiftCode("short", ">>>", "expr", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.short.shlAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(0).shouldBeRetOf!(
-            backend, shiftCode("short", "<<", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(AssertsInCtfe)) {
-    @("shift.short.shrAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-1).shouldBeRetOf!(
-            backend, shiftCode("short", ">>", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!(AssertsInCtfe)) {
-    @("shift.short.ushrAssign.countNegative." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(0).shouldBeRetOf!(
-            backend, shiftCode("short", ">>>", "assign", "-1"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.short.shl.countEqualsOperandWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(0).shouldBeRetOf!(
-            backend, shiftCode("short", "<<", "expr", "16"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.short.shr.countEqualsOperandWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-1).shouldBeRetOf!(
-            backend, shiftCode("short", ">>", "expr", "16"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.short.ushr.countEqualsOperandWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-1).shouldBeRetOf!(
-            backend, shiftCode("short", ">>>", "expr", "16"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.short.shlAssign.countEqualsOperandWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(0).shouldBeRetOf!(
-            backend, shiftCode("short", "<<", "assign", "16"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.short.shrAssign.countEqualsOperandWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-1).shouldBeRetOf!(
-            backend, shiftCode("short", ">>", "assign", "16"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.short.ushrAssign.countEqualsOperandWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(0).shouldBeRetOf!(
-            backend, shiftCode("short", ">>>", "assign", "16"), "shifted");
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.int.shlAssign.longCountAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(0).shouldBeRetOf!(
-            backend,
-            q{
-                int value() { return -100; }
-                long count() { return 33; }
-                int shifted() {
-                    int v = value();
-                    v <<= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.int.shrAssign.longCountAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(-1).shouldBeRetOf!(
-            backend,
-            q{
-                int value() { return -100; }
-                long count() { return 33; }
-                int shifted() {
-                    int v = value();
-                    v >>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-    }
-}
-
-@("shift.int.shrAssign.longCountAboveWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    int(-50).shouldBeRetOf!(
-            Ctfe,
-            q{
-                int value() { return -100; }
-                long count() { return 33; }
-                int shifted() {
-                    int v = value();
-                    v >>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.uint.shlAssign.ulongCountEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(0).shouldBeRetOf!(
-            backend,
-            q{
-                uint value() { return uint.max; }
-                ulong count() { return 32; }
-                uint shifted() {
-                    uint v = value();
-                    v <<= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.byte.shrAssign.longCountEqualsOperandWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-1).shouldBeRetOf!(
-            backend,
-            q{
-                byte value() { return -100; }
-                long count() { return 8; }
-                byte shifted() {
-                    byte v = value();
-                    v >>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.short.shrAssign.uintCountEqualsOperandWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        short(-1).shouldBeRetOf!(
-            backend,
-            q{
-                short value() { return -100; }
-                uint count() { return 16; }
-                short shifted() {
-                    short v = value();
-                    v >>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.byte.ushrAssign.longCountEqualsOperandWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-1).shouldBeRetOf!(
-            backend,
-            q{
-                byte value() { return -100; }
-                long count() { return 8; }
-                byte shifted() {
-                    byte v = value();
-                    v >>>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-    }
-}
-
-@("shift.byte.ushrAssign.longCountEqualsOperandWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    byte(0).shouldBeRetOf!(
-            Ctfe,
-            q{
-                byte value() { return -100; }
-                long count() { return 8; }
-                byte shifted() {
-                    byte v = value();
-                    v >>>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.int.ushrAssign.longCountAboveWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(int.max).shouldBeRetOf!(
-            backend,
-            q{
-                int value() { return -100; }
-                long count() { return 33; }
-                int shifted() {
-                    int v = value();
-                    v >>>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-    }
-}
-
-@("shift.int.ushrAssign.longCountAboveWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    int(0).shouldBeRetOf!(
-            Ctfe,
-            q{
-                int value() { return -100; }
-                long count() { return 33; }
-                int shifted() {
-                    int v = value();
-                    v >>>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.byte.ushrAssign.longCountInRange." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        byte(-50).shouldBeRetOf!(
-            backend,
-            q{
-                byte value() { return -100; }
-                long count() { return 1; }
-                byte shifted() {
-                    byte v = value();
-                    v >>>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-    }
-}
-
-@("shift.byte.ushrAssign.longCountInRange.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    byte(78).shouldBeRetOf!(
-            Ctfe,
-            q{
-                byte value() { return -100; }
-                long count() { return 1; }
-                byte shifted() {
-                    byte v = value();
-                    v >>>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.int.ushrAssign.longCountInRange." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(-50).shouldBeRetOf!(
-            backend,
-            q{
-                int value() { return -100; }
-                long count() { return 1; }
-                int shifted() {
-                    int v = value();
-                    v >>>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-    }
-}
-
-@("shift.int.ushrAssign.longCountInRange.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    int(2147483598).shouldBeRetOf!(
-            Ctfe,
-            q{
-                int value() { return -100; }
-                long count() { return 1; }
-                int shifted() {
-                    int v = value();
-                    v >>>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.int.shrAssign.uintCountInRange." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        int(-50).shouldBeRetOf!(
-            backend,
-            q{
-                int value() { return -100; }
-                uint count() { return 1; }
-                int shifted() {
-                    int v = value();
-                    v >>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-    }
-}
-
-static foreach (backend; Matrix!()) {
-    @("shift.long.shrAssign.ulongCountInRange." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        long(-50).shouldBeRetOf!(
-            backend,
-            q{
-                long value() { return -100; }
-                ulong count() { return 1; }
-                long shifted() {
-                    long v = value();
-                    v >>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-    }
-}
-
-static foreach (backend; Matrix!(WrongInCtfe)) {
-    @("shift.uint.shrAssign.longCountEqualsWidth." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        uint(0).shouldBeRetOf!(
-            backend,
-            q{
-                uint value() { return uint.max; }
-                long count() { return 32; }
-                uint shifted() {
-                    uint v = value();
-                    v >>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
-    }
-}
-
-@("shift.uint.shrAssign.longCountEqualsWidth.Ctfe.diverges")
-@Tags("Ctfe")
-unittest {
-    uint(4294967295).shouldBeRetOf!(
-            Ctfe,
-            q{
-                uint value() { return uint.max; }
-                long count() { return 32; }
-                uint shifted() {
-                    uint v = value();
-                    v >>= count();
-                    return v;
-                }
-            },
-            "shifted",
-        );
 }
