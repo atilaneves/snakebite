@@ -2783,3 +2783,99 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+static foreach (backend; Matrix!()) {
+    @("inheritedInterfaceContractCallsThroughThis." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface Named { int id(); }
+            interface Checked: Named {
+                int f(int x) in (x > id()) out (r) { assert(r == id() + x); };
+            }
+            class Impl: Checked {
+                int base = 10;
+                int id() { return base; }
+                int f(int x) in (x > 0) { return x + base; }
+            }
+            void main() {
+                Checked c = new Impl;
+                assert(c.f(11) == 21);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("inheritedContractOfSecondInterfaceReadsThis." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface First { int a(); }
+            interface Second {
+                int f(int x) in (x == g()) out (r) { assert(r == g() * 2); };
+                int g();
+            }
+            class Impl: First, Second {
+                int value = 7;
+                int a() { return 1; }
+                int g() { return value; }
+                int f(int x) in (x > 0) { return x * 2; }
+            }
+            void main() {
+                Second s = new Impl;
+                assert(s.f(7) == 14);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("inheritedContractsWithClosureInOverride." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int scale = 3;
+                int f(int x) in (x > 0) out (r) { assert(r == x * scale); }
+                do { return x * scale; }
+            }
+            class Derived: Base {
+                override int f(int x) {
+                    int delegate() get = () => x * scale;
+                    return get();
+                }
+            }
+            void main() {
+                Base b = new Derived;
+                assert(b.f(4) == 12);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("inheritedContractsWithClosureInBase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int scale = 3;
+                int f(int x) in (x > 0) out (r) { assert(r == x * scale); }
+                do {
+                    int delegate() get = () => x * scale;
+                    return get();
+                }
+            }
+            class Derived: Base {
+                override int f(int x) out (r) { assert(r > 0); } do {
+                    return super.f(x);
+                }
+            }
+            void main() {
+                Base b = new Derived;
+                assert(b.f(4) == 12);
+            }
+        });
+    }
+}
