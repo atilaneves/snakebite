@@ -408,7 +408,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         ForStatement, GotoCaseStatement, GotoDefaultStatement, GotoStatement,
         IfStatement,
         ImportStatement, LabelStatement, ReturnStatement, ScopeStatement,
-        Statement, SwitchStatement, ThrowStatement, TryCatchStatement,
+        Statement, SwitchErrorStatement, SwitchStatement, ThrowStatement,
+        TryCatchStatement,
         TryFinallyStatement, UnrolledLoopStatement, WithStatement;
     import dmd.tokens: EXP;
     import dmd.typesem: isIntegral, nextOf, toBasetype;
@@ -1843,6 +1844,16 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             cast(void*) target,
             cast(void*) _switchStatement.tryBody,
         );
+    }
+
+    // The frontend's own "no case matched" default: a call to the
+    // druntime switch-error hook, run like any other call.
+    override void visit(SwitchErrorStatement statement) {
+        if (_controlFlow.seeking)
+            return;
+
+        if (statement.exp !is null)
+            runFullExpression(statement.exp);
     }
 
     override void visit(GotoDefaultStatement statement) {
