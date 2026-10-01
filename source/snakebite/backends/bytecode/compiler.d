@@ -3387,8 +3387,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         size_t operationWidth = operationFacts.size;
         size_t operands;
         bool shiftSignExtend = !targetFacts.isUnsigned;
-        // A shift count keeps its own promoted type, which can differ in
-        // width from the operation type.
+        // A literal shift count keeps its own promoted type, which can
+        // differ in width from the operation type.
         bool stepAtOperationWidth;
         CompoundConversion conversion;
         with (ArithmeticPlan.Kind) final switch (plan.kind) {
@@ -3447,7 +3447,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             valueOffset = readScalar(storage, valueFacts);
 
         auto rightOffset = reserveTemp(rightFacts);
-        if (stepAtOperationWidth)
+        if (stepAtOperationWidth && expression.e2.isIntegerExp)
             evalOperandInto(expression.e2, rightOffset, operationWidth);
         else
             evalInto(expression.e2, rightOffset, rightFacts.size);
@@ -5480,6 +5480,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (operandFacts.size == width) {
             evalInto(operand, destOffset, width);
             return;
+        }
+
+        if (operandFacts.size < width && operand.isIntegerExp) {
+            // A literal needs no run-time conversion: store it at `width`.
+            Type literalType = operandFacts.isUnsigned
+                ? (width == 8 ? Type.tuns64 : Type.tuns32)
+                : (width == 8 ? Type.tint64 : Type.tint32);
+            if (TypeFacts.of(literalType).size == width) {
+                evalInto(operand, destOffset, width, literalType);
+                return;
+            }
         }
 
         if (operandFacts.size < width) {
