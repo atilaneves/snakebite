@@ -800,3 +800,67 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// Assigning to the field of the other struct writes through the second
+// context, the `this` of the member function that makes the call.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on a dual-context "
+            ~ "function whose second context is a struct `this`"),
+)) {
+    @("writeFieldOfOtherStructFromDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base = 2;
+                void set(alias field)() { field = base + 40; }
+            }
+            struct Owner {
+                int value;
+                void run(ref Holder holder) { holder.set!value(); }
+            }
+            int main() {
+                Holder holder;
+                Owner owner;
+                owner.run(holder);
+                return owner.value == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// The call is in a member of a class nested in the class that owns the
+// alias, so the second context is the outer object, found through the
+// nested object's context field.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine reads a null outer object in a class nested in a "
+            ~ "class that calls a dual-context function"),
+)) {
+    @("readFieldOfOuterClassFromDualContextMemberInInnerClass."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Holder {
+                int base = 2;
+                int add(alias field)() { return base + field; }
+            }
+            class Owner {
+                int value = 40;
+                class Inner {
+                    int run(Holder holder) { return holder.add!value(); }
+                }
+            }
+            int main() {
+                auto holder = new Holder;
+                auto owner = new Owner;
+                auto inner = owner.new Inner;
+                return inner.run(holder) == 42 ? 0 : 1;
+            }
+        });
+    }
+}

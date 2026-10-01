@@ -3071,14 +3071,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t compileFieldAddress(DotVarExp expression) {
-        import dmd.astenums: Tclass;
+        import dmd.astenums: Tclass, Tpointer;
 
         auto field = expression.var.isVarDeclaration;
         assert(field !is null, "a field address names a variable");
 
         size_t addressOffset;
         auto aggregateType = expression.e1.type.toBasetype;
-        if (aggregateType.ty == Tclass) {
+        if (aggregateType.ty == Tclass || aggregateType.ty == Tpointer) {
             addressOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, addressOffset, size_t.sizeof);
         } else {
@@ -4049,7 +4049,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 addConstant(0), size_t.sizeof);
         }
 
-        const plan = pairPlanOf(target.function_, target.contextPair);
+        const plan = pairPlanOf(
+            _function, target.function_, target.contextPair);
         if (plan.variable !is null)
             emit(&opCopy, context, storeContextPair(plan, context),
                 size_t.sizeof);
@@ -4188,9 +4189,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        import dmd.astenums: Tclass;
+        import dmd.astenums: Tclass, Tpointer;
         auto aggregateType = expression.e1.type.toBasetype;
-        if (aggregateType.ty == Tclass) {
+        if (aggregateType.ty == Tclass || aggregateType.ty == Tpointer) {
             const facts = TypeFacts.of(field.type);
             const objectOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, objectOffset, size_t.sizeof);
@@ -6400,7 +6401,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         CallExp expression, FuncDeclaration callee, in size_t destOffset,
     ) {
         const first = firstContextOffsetOf(expression, callee, destOffset);
-        const plan = pairPlanOf(callee, expression.vthis2);
+        const plan = pairPlanOf(_function, callee, expression.vthis2);
         return plan.variable is null ? first : storeContextPair(plan, first);
     }
 
@@ -6428,6 +6429,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return context;
         case frame:
             return contextAddressOf(cast() source.function_);
+        case receiver:
+            size_t value = hiddenThisOffset(cast() source.function_.vthis);
+            foreach (const offset; source.fields) {
+                const address = pointerAt(value, offset);
+                value = reserveTemp(pointerFacts);
+                emit(&opLoadIndirect, value, address, size_t.sizeof);
+            }
+            return value;
         }
     }
 
@@ -6444,7 +6453,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // reach `contextAddressOf` gives any other captured variable.
         if (callee.isThis is null)
             return contextOffsetOf(
-                contextSourceOf(nestedContextOwnerOf(callee)));
+                contextSourceOf(_function, nestedContextOwnerOf(callee)));
 
         // An ordinary bound method call wraps its receiver in a
         // `DotVarExp` (`expression.e1.isDotVarExp.e1`); `super(args)`/

@@ -9,8 +9,9 @@ private:
 // argument: the address of a `void*[2]`, as dmd's own code generator passes
 // it. Word 0 is the receiver for a member function, or the context of
 // `toParentLocal` for a nested one. Word 1 is the context of `toParent2`,
-// the function that owns the alias. The callee reads its `this` from word 0
-// and finds an outer frame through whichever word `wordTowards` selects.
+// the function or the aggregate that owns the alias. The callee reads its
+// `this` from word 0 and finds an outer context through whichever word
+// `wordTowards` selects.
 public enum DualContext {
     receiverWord = 0,
     outerWord = 1,
@@ -18,29 +19,41 @@ public enum DualContext {
 }
 
 // The byte offset in the pair of the word a lookup of `target`'s context
-// follows when it passes through `function_`.
+// follows when it passes through `symbol`.
 public size_t wordTowards(
-    imported!"dmd.func".FuncDeclaration function_,
+    imported!"dmd.dsymbol".Dsymbol symbol,
     imported!"dmd.dsymbol".Dsymbol target,
 ) {
     import dmd.dsymbolsem: followInstantiationContext;
 
-    const word = function_.followInstantiationContext(target)
+    const word = symbol.followInstantiationContext(target)
         ? DualContext.outerWord : DualContext.receiverWord;
     return word * size_t.sizeof;
 }
 
+// The byte offset in an instance of `aggregate` of the context field a
+// lookup of `target`'s context follows when it passes through `aggregate`.
+public size_t fieldTowards(
+    imported!"dmd.aggregate".AggregateDeclaration aggregate,
+    imported!"dmd.dsymbol".Dsymbol target,
+) {
+    import dmd.dsymbolsem: followInstantiationContext;
+
+    return (aggregate.followInstantiationContext(target)
+        ? aggregate.vthis2 : aggregate.vthis).offset;
+}
+
 // The symbol whose context a lookup of `target`'s context reaches next
-// after `function_`.
+// after `symbol`.
 public imported!"dmd.dsymbol".Dsymbol parentTowards(
-    imported!"dmd.func".FuncDeclaration function_,
+    imported!"dmd.dsymbol".Dsymbol symbol,
     imported!"dmd.dsymbol".Dsymbol target,
 ) {
     import dmd.dsymbolsem: toParentP;
     import snakebite.frontend.dmd.delegates: isDualContext;
 
-    return isDualContext(function_)
-        ? function_.toParentP(target) : function_.toParent2();
+    return isDualContext(symbol)
+        ? symbol.toParentP(target) : symbol.toParent2();
 }
 
 // Where a context pointer that a call or a delegate hands to its callee
@@ -53,10 +66,16 @@ public struct ContextSource {
         none,
         // The frame, or the closure, of `function_`.
         frame,
+        // The `this` of the member function `function_`, followed through
+        // the context fields at the byte offsets in `fields`: the context
+        // is an object, not a frame, when the symbol that encloses the
+        // callee is an aggregate.
+        receiver,
     }
 
     public Kind kind;
     public FuncDeclaration function_;
+    public const(size_t)[] fields;
 }
 
 // What a call or a delegate to a dual-context function stores before it
@@ -78,6 +97,7 @@ public struct PairPlan {
 }
 
 public PairPlan pairPlanOf(
+    imported!"dmd.func".FuncDeclaration caller,
     imported!"dmd.func".FuncDeclaration callee,
     imported!"dmd.declaration".VarDeclaration pair,
 ) {
@@ -92,16 +112,60 @@ public PairPlan pairPlanOf(
         pair,
         DualContext.receiverWord * size_t.sizeof,
         DualContext.outerWord * size_t.sizeof,
-        contextSourceOf(callee.toParent2()),
+        contextSourceOf(caller, callee.toParent2()),
     );
 }
 
-// The source of the context of `owner`, the symbol that encloses a callee.
+// The source, as seen from `caller`, of the context of `owner`: the symbol
+// that encloses a callee, or that a nested aggregate was made in.
 public ContextSource contextSourceOf(
+    imported!"dmd.func".FuncDeclaration caller,
     imported!"dmd.dsymbol".Dsymbol owner,
 ) {
-    auto function_ = owner is null ? null : owner.isFuncDeclaration;
-    return function_ is null
-        ? ContextSource.init
-        : ContextSource(ContextSource.Kind.frame, function_);
+    if (owner is null)
+        return ContextSource.init;
+
+    if (auto function_ = owner.isFuncDeclaration)
+        return ContextSource(ContextSource.Kind.frame, function_);
+
+    return receiverSourceOf(caller, owner);
+}
+
+// The context of an aggregate is the `this` of one of its member
+// functions, which `caller` reaches along its static chain. `getEthis` in
+// dmd's code generator walks the same chain: the member function is the
+// last function before the chain leaves for `owner`, and each nested
+// aggregate between them adds the load of one of its context fields.
+private ContextSource receiverSourceOf(
+    imported!"dmd.func".FuncDeclaration caller,
+    imported!"dmd.dsymbol".Dsymbol owner,
+) {
+    import dmd.dsymbol: Dsymbol;
+    import dmd.func: FuncDeclaration;
+
+    FuncDeclaration member;
+    const(size_t)[] fields;
+    Dsymbol symbol = caller;
+    while (symbol !is null) {
+        if (auto function_ = symbol.isFuncDeclaration) {
+            member = function_;
+            fields = null;
+        } else if (auto aggregate = symbol.isAggregateDeclaration) {
+            // Otherwise dmd's code generator reports "cannot get frame
+            // pointer", as it does for a caller in a class derived from
+            // `owner`.
+            assert(aggregate.isNested && aggregate.vthis !is null,
+                "an aggregate on the path to an enclosing this is nested");
+            fields ~= aggregate.fieldTowards(owner);
+        } else
+            break;
+
+        auto next = symbol.parentTowards(owner);
+        if (next is owner)
+            return ContextSource(ContextSource.Kind.receiver, member, fields);
+        symbol = next;
+    }
+
+    assert(0, "dmd's code generator gives a path from the caller to the "
+        ~ "this of the aggregate that owns the alias, or reports an error");
 }
