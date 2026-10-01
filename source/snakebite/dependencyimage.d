@@ -157,19 +157,12 @@ public DependencyImage prepareImage(
         }
         return argument;
     }
-    // `-betterC` is the flag of the project's own modules: the image holds the
-    // dependencies and the library template instances the project asks for,
-    // which a native build links from a library that was built without it.
     string[] imageArguments() {
-        import std.algorithm.iteration: filter;
-        import std.array: array;
-
-        const arguments = compilerArguments.filter!(a => a != "-betterC").array;
         version (LDC) {
             import snakebite.frontend.checks: ldcArguments;
-            return ldcArguments(arguments);
+            return ldcArguments(compilerArguments);
         } else
-            return arguments;
+            return compilerArguments.dup;
     }
     const importFlags = imageArguments.map!imageArgument.array
         ~ importPaths.map!(path => "-I" ~ path).array

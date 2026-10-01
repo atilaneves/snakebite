@@ -318,6 +318,17 @@ private string dmdFlagsForOption(in string option) {
 }
 
 
+// `-betterC` is the flag of the project's own modules. The image holds the
+// dependencies and the library template instances that the project asks
+// for, and a native build links those from a library built without it.
+private immutable(string)[] imageCompilerArguments(in string[] compilerArguments) {
+    import std.algorithm.iteration: filter;
+    import std.array: array;
+
+    return compilerArguments.filter!(argument => argument != "-betterC").array.idup;
+}
+
+
 // The analysed program is an input of the dependency image only when the
 // image has to be built: on a cache hit `program` never runs, and on a miss
 // it runs once. A caller that has not run the frontend yet (the REPL) passes
@@ -384,7 +395,7 @@ public const(imported!"snakebite.dependencyimage".DependencyImage)* prepareDepen
         source => prepareImage(source, imageDirectory, defaultCompiler,
             cachedDependencyInputs(), sources.importPaths,
             sources.stringImportPaths,
-            sources.flags.compilerArguments,
+            imageCompilerArguments(sources.flags.compilerArguments),
             sources.linkerFiles, sources.linkerFlags,
             optimise: optimise),
         sources.linkerFiles.length != 0,
