@@ -966,10 +966,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         );
     }
 
-    // dmd only accepts a non-void function whose end it proved
-    // unreachable. The compiler's own `_finished` tracking is less precise
-    // (a `goto` leaves it unset), so the end gets the `assert(0)` dmd would
-    // have put there rather than a rejection.
+    // dmd normally rejects a non-void function whose end is reachable, but
+    // the compiler's own `_finished` tracking is less precise than dmd's.
+    // Trap at the end instead of rejecting.
     private void emitUnreachableTrap() {
         import std.string: fromStringz;
 
