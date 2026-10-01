@@ -5,6 +5,7 @@ private:
 
 
 import dmd.typesem: toBasetype;
+import snakebite.backends.druntimehooks: DruntimeHook;
 
 
 // The single decision both backends use for a `DeleteExp`. The frontend
@@ -19,12 +20,7 @@ import dmd.typesem: toBasetype;
 public struct DeletePlan {
     import dmd.expression: Expression;
 
-    public enum Kind {
-        classFinalizer,
-        interfaceFinalizer,
-    }
-
-    public Kind kind;
+    public DruntimeHook hook;
     public Expression object;
 }
 
@@ -35,8 +31,8 @@ public DeletePlan planDelete(imported!"dmd.expression".DeleteExp expression) {
 
     return DeletePlan(
         classType.sym.isInterfaceDeclaration is null
-            ? DeletePlan.Kind.classFinalizer
-            : DeletePlan.Kind.interfaceFinalizer,
+            ? DruntimeHook.callFinalizer
+            : DruntimeHook.callInterfaceFinalizer,
         expression.e1,
     );
 }
