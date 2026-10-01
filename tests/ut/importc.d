@@ -6,7 +6,6 @@ module ut.importc;
 // status of the project's D `main`, which a compiled program gives natively.
 
 
-import snakebite.backends: backendIdentity;
 import std.array: replace;
 import std.path: buildPath;
 import ut;
@@ -23,7 +22,7 @@ static foreach (backend; Matrix!()) {
         `, q{
             import CMOD;
             int main() { return add(40, 2); }
-        });
+        }, Layout.dub);
     }
 }
 
@@ -501,7 +500,7 @@ static foreach (backend; Matrix!(
         `, q{
             extern(C) int add(int, int);
             int main() { return add(40, 2); }
-        });
+        }, Layout.dub);
     }
 }
 
@@ -585,7 +584,7 @@ static foreach (backend; Matrix!(
         `, q{
             pragma(mangle, "mangledAdd") extern(C) int sum(int, int);
             int main() { return sum(40, 2); }
-        });
+        }, Layout.dub);
     }
 }
 
@@ -604,6 +603,27 @@ static foreach (backend; Matrix!(
             int main() { return inNamespace(41); }
         }, Layout.dub, null, q{
             extern(C++, importcns) int inNamespace(int x) { return x + 1; }
+        });
+    }
+}
+
+// The linker resolves a declaration to the definition whichever module
+// declares it, so a declaration in a module that the project does not own
+// (druntime's `abs`) is the definition that the project gives of the symbol.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot resolve a D declaration to the definition of the same symbol"),
+)) {
+    @("importc.declarationInNonRootModule." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        42.cProjectStatus!(backend, "non_root_declaration", `
+            int unusedInNonRootTest(void) { return 0; }
+        `, q{
+            import core.stdc.stdlib: libcAbs = abs;
+            int main() { return libcAbs(-3) - 35; }
+        }, Layout.dub, null, q{
+            extern(C) int abs(int x) { return 77; }
         });
     }
 }
@@ -690,23 +710,22 @@ static foreach (backend; Matrix!(
 
 // Builds a project whose `<name>.c` is `cSource` and whose
 // `<name>_app.d` is `dSource` (`CMOD` there names the C module), and
-// checks the exit status of the D `main`. A `Layout.dub` project names the
-// C file in `sourceFiles`, and natively is the program `dub build` makes. A
-// `Layout.bare` directory has no recipe, and natively is `dmd -i`'s. A
+// checks the exit status of the D `main`. A `Layout.bare` directory has no recipe,
+// and natively is `dmd -i`'s: the common case, because it is the faster. A
+// `Layout.dub` project names the C file in `sourceFiles`, and natively is the
+// program `dub build` makes. A
 // module name is unique per test: every test shares one frontend.
 private enum Layout { dub, bare }
 
 private void cProjectStatus(
     backend, string name, string cSource, string dSource,
-    Layout layout = Layout.dub, string extraC = null, string extraD = null,
+    Layout layout = Layout.bare, string extraC = null, string extraD = null,
 )(
     in int expected,
-    in string file = __FILE__,
-    in size_t line = __LINE__,
 ) {
     import snakebite.backends.backend: run;
     import snakebite.dependencyimage: defaultCompiler;
-    import snakebite.execution: prepareProject;
+    import snakebite.project: loadProject, sourceSet;
     import std.process: Config, execute;
 
     enum moduleName = "importc_" ~ name ~ "_" ~ backend.stringof;
@@ -743,12 +762,13 @@ private void cProjectStatus(
                 moduleName ~ "_app.d"];
         const build = execute(
             command, null, Config.none, size_t.max, directory);
-        build.status.shouldEqual(0, build.output);
+        if (build.status != 0)
+            assert(0, build.output);
         execute([directory.buildPath("importc_program")])
-            .status.shouldEqual(expected, file, line);
+            .status.should == expected;
     } else {
-        auto project = prepareProject(directory).project;
+        auto project = loadProject(directory, sourceSet(directory, null, null));
         scope instance = new backend(project.program);
-        run(instance, project.program).shouldEqual(expected, file, line);
+        run(instance, project.program).should == expected;
     }
 }
