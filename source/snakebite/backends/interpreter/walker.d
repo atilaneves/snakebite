@@ -525,7 +525,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // so every enclosing visitor can continue its normal statement sequence.
     private ControlFlowState _controlFlow;
     private SwitchStatement _switchStatement;
-    private ubyte[][] _activationAllocations;
+    private void[][] _activationAllocations;
     // `extern(D)`: only `Visitor`'s `visit` overloads need the C++
     // linkage.
     extern(D) public this(Shared* shared_) {
@@ -1175,7 +1175,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // the guard of that function's activation lets go of it on return.
     private void* allocateForActivation(in size_t size) {
         enum alignment = 16;
-        auto block = new ubyte[](size + alignment);
+        // A block with pointers: the GC scans it, as it scans a stack.
+        auto block = new void[](size + alignment);
         _activationAllocations ~= block;
         return cast(void*) ((cast(size_t) block.ptr + alignment - 1)
             & ~size_t(alignment - 1));
@@ -1321,7 +1322,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         private Identifier _pendingLoopLabel;
         private ControlFlowState _controlFlow;
         private SwitchStatement _switchStatement;
-        private ubyte[][] _activationAllocations;
+        private void[][] _activationAllocations;
 
         @disable this();
         @disable this(this);
