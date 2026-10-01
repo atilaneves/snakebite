@@ -859,3 +859,25 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 }
+
+
+// The compiler turns a call to `alloca` into stack allocation, so the
+// memory lasts until the calling function returns and has no host symbol.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call alloca"),
+)) {
+    @("call.alloca." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        42.shouldBeRetOf!(backend, q{
+            import core.stdc.stdlib: alloca;
+            int answer() {
+                auto numbers = cast(int*) alloca(2 * int.sizeof);
+                numbers[0] = 40;
+                numbers[1] = 2;
+                return numbers[0] + numbers[1];
+            }
+        }, "answer");
+    }
+}
