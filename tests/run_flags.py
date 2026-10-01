@@ -50,10 +50,11 @@ class Outcome:
 
 def run_unittests(
     directory: Path, backend: str, flags: list[str], source: str,
+    native_flags: tuple[str, ...] = ("-unittest", "-main"),
 ) -> Outcome:
     code = PRELUDE + source
     if backend == "native":
-        return run_native(directory, flags, code)
+        return run_native(directory, flags, code, native_flags)
 
     recipe = 'name "app"\ntargetType "library"\n'
     for flag in flags:
@@ -74,16 +75,11 @@ def run_unittests(
     )
 
 
-def run_native(directory: Path, flags: list[str], code: str) -> Outcome:
-    (directory / "app.d").write_text(code, encoding="utf-8")
-    compiled = subprocess.run(
-        [native_compiler(), "-unittest", "-main",
-         f"-of={directory / 'app'}", *flags, str(directory / "app.d")],
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=TIMEOUT,
-    )
+def run_native(
+    directory: Path, flags: list[str], code: str,
+    native_flags: tuple[str, ...] = ("-unittest", "-main"),
+) -> Outcome:
+    compiled = compile_native(directory, flags, code, native_flags)
     assert compiled.returncode == 0, compiled.stdout + compiled.stderr
 
     return outcome_of(
@@ -94,6 +90,22 @@ def run_native(directory: Path, flags: list[str], code: str) -> Outcome:
             text=True,
             timeout=TIMEOUT,
         ),
+    )
+
+
+def compile_native(
+    directory: Path, flags: list[str], code: str,
+    native_flags: tuple[str, ...],
+) -> subprocess.CompletedProcess[str]:
+    (directory / "app.d").write_text(code, encoding="utf-8")
+
+    return subprocess.run(
+        [native_compiler(), *native_flags,
+         f"-of={directory / 'app'}", *flags, str(directory / "app.d")],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=TIMEOUT,
     )
 
 
@@ -1431,6 +1443,499 @@ def test_check_flag_applies_to_a_dependency_template(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+# A `-betterC` program has no druntime: no unittest block or module
+# constructor runs by itself, and a failed check calls the C `assert`. What
+# runs the tests is the `main` that dub generates for `dub test` when
+# `-betterC` is on, which calls every unittest block itself; `bin/sb` runs
+# that `main`, and the native build gets the same one. The native build adds
+# `-unittest` because every snakebite run keeps its checks as `dmd -unittest`
+# does.
+BETTERC = ("-unittest",)
+
+DUB_TEST_MAIN = """
+extern(C) int main() {
+    foreach (test; __traits(getUnitTests, app))
+        test();
+    return 0;
+}
+"""
+
+# CTFE cannot run that `main`: it calls the C library.
+BETTERC_BACKENDS = ["native", "bytecode", "interpreter"]
+
+
+def run_betterc(
+    directory: Path, backend: str, flags: list[str], source: str,
+) -> Outcome:
+    program = source + (DUB_TEST_MAIN if backend == "native" else "")
+
+    return run_unittests(
+        directory, backend, ["-betterC", *flags], program, BETTERC,
+    )
+
+
+# What a compiler says of a program it rejects: the status of the compiler,
+# and for `bin/sb` the status of the load, which never starts the program.
+def reject_betterc(
+    directory: Path, backend: str, flags: list[str], source: str,
+) -> Outcome:
+    if backend == "native":
+        compiled = compile_native(
+            directory, ["-betterC", *flags], PRELUDE + source, BETTERC,
+        )
+
+        return outcome_of(compiled)
+
+    return run_betterc(directory, backend, flags, source)
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_version_betterc_is_defined(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        unittest {
+            version (D_BetterC) log("defined\\n");
+            else assert(false);
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "defined" in outcome.output
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_runtime_versions_are_undefined(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        unittest {
+            version (D_ModuleInfo) assert(false);
+            version (D_Exceptions) assert(false);
+            version (D_TypeInfo) assert(false);
+            log("undefined\\n");
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "undefined" in outcome.output
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_does_not_run_module_constructors(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        __gshared int value = 1;
+        shared static this() { value = 2; }
+        unittest {
+            assert(value == 1);
+            log("not run\\n");
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "not run" in outcome.output
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_runs_each_unittest_block_once(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        unittest { log("one\\n"); }
+        unittest { log("two\\n"); }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert outcome.output.count("one") == 1
+    assert outcome.output.count("two") == 1
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_failed_assert_aborts_with_the_c_message(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        unittest {
+            int x = 1;
+            log("start\\n");
+            assert(x == 2, "message");
+            log("after\\n");
+        }
+    """)
+    assert_aborts_after_start(outcome, "message")
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_failed_assert_without_a_message_aborts_with_the_condition(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        unittest {
+            int x = 1;
+            log("start\\n");
+            assert(x == 2);
+            log("after\\n");
+        }
+    """)
+    assert_aborts_after_start(outcome, "x == 2")
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_index_out_of_bounds_aborts_with_the_c_message(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        unittest {
+            int[4] storage = [1, 2, 3, 4];
+            int[] slice = storage[0 .. 2];
+            log("start\\n");
+            const value = slice[3];
+            log("after\\n");
+        }
+    """)
+    assert_aborts_after_start(outcome, "array index out of bounds")
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_final_switch_on_non_member_aborts(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        enum E { a, b }
+        int select(E e) {
+            final switch (e) {
+                case E.a: return 1;
+                case E.b: return 2;
+            }
+        }
+        unittest {
+            log("start\\n");
+            select(cast(E) 3);
+            log("after\\n");
+        }
+    """)
+    assert_aborts_after_start(outcome, "0")
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_final_switch_on_a_member_selects_the_case(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        enum E { a, b }
+        int select(E e) {
+            final switch (e) {
+                case E.a: return 1;
+                case E.b: return 2;
+            }
+        }
+        unittest {
+            assert(select(E.b) == 2);
+            log("selected\\n");
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "selected" in outcome.output
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_checkaction_halt_halts(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, ["-checkaction=halt"], """
+        unittest {
+            int x = 1;
+            log("start\\n");
+            assert(x == 2);
+            log("after\\n");
+        }
+    """)
+    assert_halts_after_start(backend, outcome)
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_checkaction_d_still_aborts_with_the_c_message(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, ["-checkaction=D"], """
+        unittest {
+            int x = 1;
+            log("start\\n");
+            assert(x == 2);
+            log("after\\n");
+        }
+    """)
+    assert_aborts_after_start(outcome, "x == 2")
+
+
+# With the switch check off dmd makes the default of a `final switch` a halt
+# instead of a call to the C `assert`.
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_release_final_switch_on_non_member_halts(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, ["-release"], """
+        enum E { a, b }
+        int select(E e) {
+            final switch (e) {
+                case E.a: return 1;
+                case E.b: return 2;
+            }
+        }
+        unittest {
+            log("start\\n");
+            select(cast(E) 3);
+            log("after\\n");
+        }
+    """)
+    assert_halts_after_start(backend, outcome)
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_check_assert_off_skips_the_assert(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, ["-check=assert=off"], """
+        unittest {
+            int x = 1;
+            assert(x == 2);
+            log("start\\n");
+            log("after\\n");
+        }
+    """)
+    assert_passes_after_start(backend, outcome)
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_release_index_out_of_bounds_in_safe_code_aborts(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, ["-release"], """
+        @safe unittest {
+            int[4] storage = [1, 2, 3, 4];
+            int[] slice = storage[0 .. 2];
+            log("start\\n");
+            const value = slice[3];
+            log("after\\n");
+        }
+    """)
+    assert_aborts_after_start(outcome, "array index out of bounds")
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_boundscheck_off_does_not_check_the_index(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, ["-boundscheck=off"], """
+        unittest {
+            int[4] storage = [1, 2, 3, 4];
+            int[] slice = storage[0 .. 2];
+            log("start\\n");
+            const value = slice[3];
+            assert(value == 4);
+            log("after\\n");
+        }
+    """)
+    assert_passes_after_start(backend, outcome)
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_struct_destructor_and_scope_exit_run_in_reverse_order(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        __gshared int order;
+        struct S {
+            int id;
+            ~this() { order = order * 10 + id; }
+        }
+        unittest {
+            {
+                S first = S(1);
+                scope(exit) order = order * 10 + 2;
+                S third = S(3);
+            }
+            assert(order == 321);
+            log("ordered\\n");
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "ordered" in outcome.output
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_scope_exit_runs_on_return(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        __gshared int value;
+        int f() {
+            scope(exit) value = 7;
+            return 1;
+        }
+        unittest {
+            assert(f() == 1);
+            assert(value == 7);
+            log("returned\\n");
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "returned" in outcome.output
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_calls_the_c_library(tmp_path: Path, backend: str) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        import core.stdc.stdio: printf;
+        import core.stdc.stdlib: free, malloc;
+        unittest {
+            auto p = cast(int*) malloc(int.sizeof);
+            *p = 7;
+            printf("value %d\\n", *p);
+            const value = *p;
+            free(p);
+            assert(value == 7);
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "value 7" in outcome.output
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_static_array_literal(tmp_path: Path, backend: str) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        unittest {
+            int[3] a = [1, 2, 3];
+            int sum;
+            foreach (element; a[])
+                sum += element;
+            assert(sum == 6);
+            log("summed\\n");
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "summed" in outcome.output
+
+
+# A literal that does not escape is the one dynamic array literal that
+# `-betterC` accepts: dmd keeps it on the stack and does not lower it.
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_array_literal_that_stays_on_the_stack(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        int total(scope const int[] values) @nogc {
+            int sum;
+            foreach (value; values)
+                sum += value;
+            return sum;
+        }
+        unittest {
+            assert(total([1, 2, 3]) == 6);
+            log("totalled\\n");
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "totalled" in outcome.output
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_template_function(tmp_path: Path, backend: str) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        T add(T)(T a, T b) { return a + b; }
+        unittest {
+            assert(add(1, 2) == 3);
+            log("added\\n");
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "added" in outcome.output
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_druntime_template_emplace(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        import core.lifetime: emplace;
+        struct S {
+            int value;
+            this(int value) { this.value = value; }
+        }
+        unittest {
+            S s = void;
+            emplace(&s, 5);
+            assert(s.value == 5);
+            log("emplaced\\n");
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "emplaced" in outcome.output
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_phobos_templates_on_a_static_array(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        import std.algorithm.iteration: map, sum;
+        import std.algorithm.sorting: sort;
+        unittest {
+            int[3] a = [3, 1, 2];
+            a[].sort;
+            assert(a[0] == 1);
+            assert(a[].map!(x => x * 2).sum == 12);
+            log("sorted\\n");
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "sorted" in outcome.output
+
+
+REJECTED = [
+    ("throw", "throw new Exception(\"x\");", "cannot use `throw` statements with `-betterC`"),
+    ("try_catch", "try { return; } catch (Exception) { }", "cannot use try-catch statements with `-betterC`"),
+    ("scope_failure", "scope(failure) log(\"f\");", "`scope(failure)` cannot be used with `-betterC`"),
+    ("array_literal", "int[] a = [1, 2];", "this array literal requires the GC and cannot be used with `-betterC`"),
+    ("append", "int[] a; a ~= 1;", "appending to array in `a ~= 1` requires the GC which is not available with -betterC"),
+    ("typeid", "auto t = typeid(int);", "`TypeInfo` cannot be used with `-betterC`"),
+    ("phobos_template_that_needs_the_gc", "import std.conv: text; enum name = text(\"a\", 1);", "`TypeInfo` cannot be used with `-betterC`"),
+    ("associative_array", "int[int] aa; aa[1] = 2;", "`TypeInfo` cannot be used with `-betterC`"),
+    ("closure", "int y; auto e = () => y; e();", "is `-betterC` yet allocates closure"),
+]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize(
+    "body,message", [row[1:] for row in REJECTED], ids=[row[0] for row in REJECTED],
+)
+def test_betterc_rejects_what_needs_the_runtime(
+    tmp_path: Path, backend: str, body: str, message: str,
+) -> None:
+    outcome = reject_betterc(tmp_path, backend, [], f"""
+        unittest {{
+            {body}
+        }}
+    """)
+    assert outcome.status == 1, outcome.output
+    assert message in outcome.output
+
+
+# dmd reports it while it generates code, so the function is a plain one:
+# a template instance that uses the GC is left out of the object instead.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_betterc_rejects_array_concatenation(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = reject_betterc(tmp_path, backend, [], """
+        int[] join(int[] a, int[] b) { return a ~ b; }
+        unittest {
+        }
+    """)
+    assert outcome.status == 1, outcome.output
+    assert (
+        "array concatenation of expression `a ~ b` requires the GC "
+        "which is not available with -betterC"
+    ) in outcome.output
 
 
 if __name__ == "__main__":
