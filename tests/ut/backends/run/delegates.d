@@ -428,3 +428,190 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// A member function template with an alias parameter, instantiated with a
+// nested function, has two contexts: the receiver and the frame of the
+// function that owns the alias. dmd deprecates this but compiles it.
+static foreach (backend; Matrix!()) {
+    @("callNestedFunctionFromDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base;
+                int call(alias callee)() { return base + callee(); }
+            }
+            int main() {
+                int local = 40;
+                int nested() { return local; }
+                auto holder = Holder(2);
+                return holder.call!nested() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A class receiver is a pointer to the object, and the first context
+// word holds that pointer.
+static foreach (backend; Matrix!()) {
+    @("callNestedFunctionFromDualContextClassMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Holder {
+                int base;
+                this(int base) { this.base = base; }
+                int call(alias callee)() { return base + callee(); }
+            }
+            int main() {
+                int local = 40;
+                int nested() { return local; }
+                auto holder = new Holder(2);
+                return holder.call!nested() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// The member writes its own field; the nested function writes the local
+// of the function that owns it.
+static foreach (backend; Matrix!()) {
+    @("writeFieldAndNestedLocalFromDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base;
+                void bump(alias callee)() {
+                    base += 1;
+                    callee();
+                }
+            }
+            int main() {
+                int local = 40;
+                void nested() { local += 5; }
+                auto holder = Holder(2);
+                holder.bump!nested();
+                return holder.base == 3 && local == 45 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// The nested function is declared in a member function, so it reads
+// both its own enclosing `this` and a local.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine asserts on a dual-context function whose "
+            ~ "alias is nested in a member function"),
+)) {
+    @("callNestedFunctionOfMemberFromDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base;
+                int call(alias callee)() { return base + callee(); }
+            }
+            struct Owner {
+                int field = 7;
+                int run() {
+                    int local = 30;
+                    int nested() { return local + field; }
+                    auto holder = Holder(5);
+                    return holder.call!nested();
+                }
+            }
+            int main() {
+                Owner owner;
+                return owner.run() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// The alias argument is a local delegate variable.
+static foreach (backend; Matrix!()) {
+    @("callDelegateVariableFromDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base;
+                int call(alias callee)() { return base + callee(); }
+            }
+            int main() {
+                int local = 40;
+                auto lambda = () => local;
+                auto holder = Holder(2);
+                return holder.call!lambda() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// The delegate's context word points at the pair of contexts.
+static foreach (backend; Matrix!()) {
+    @("callDualContextMemberThroughDelegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base;
+                int call(alias callee)() { return base + callee(); }
+            }
+            int main() {
+                int local = 40;
+                int nested() { return local; }
+                auto holder = Holder(2);
+                int delegate() callback = &holder.call!nested;
+                return callback() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// Control: the alias is a module-level function, so the member
+// template has one context only.
+static foreach (backend; Matrix!()) {
+    @("callGlobalFunctionFromMemberTemplate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int global() { return 40; }
+            struct Holder {
+                int base;
+                int call(alias callee)() { return base + callee(); }
+            }
+            int main() {
+                auto holder = Holder(2);
+                return holder.call!global() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// The alias is nested two levels deep, and reads a local of each level.
+static foreach (backend; Matrix!()) {
+    @("callTwiceNestedFunctionFromDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base;
+                int call(alias callee)() { return base + callee(); }
+            }
+            int main() {
+                int outerLocal = 30;
+                int outer() {
+                    int innerLocal = 10;
+                    int inner() { return outerLocal + innerLocal; }
+                    auto holder = Holder(2);
+                    return holder.call!inner();
+                }
+                return outer() == 42 ? 0 : 1;
+            }
+        });
+    }
+}

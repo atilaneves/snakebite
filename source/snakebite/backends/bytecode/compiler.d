@@ -2911,14 +2911,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // through the static chain, the same way any other captured variable
     // is reached.
     private size_t hiddenThisOffset(VarDeclaration variable = null) {
+        import snakebite.backends.dualcontext: isDualContext;
+
         auto hiddenThis = variable is null
             ? cast() _layout.hiddenThis.variable
             : variable;
         if (hiddenThis is null)
             throw rejection(_function, _function.loc, "a `this`");
 
-        if (hiddenThis is _layout.hiddenThis.variable)
-            return _layout.offsetOf(hiddenThis);
+        if (hiddenThis is _layout.hiddenThis.variable) {
+            const offset = _layout.offsetOf(hiddenThis);
+            if (!isDualContext(_function))
+                return offset;
+
+            const receiver = reserveTemp(pointerFacts);
+            emit(&opLoadIndirect, receiver, offset, size_t.sizeof);
+            return receiver;
+        }
 
         return contextThisOffset(hiddenThis);
     }
@@ -2933,6 +2942,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // performs to cross into another frame or closure is the equivalent
     // cost, not an extra dereference layered on top of it.
     private size_t contextThisOffset(VarDeclaration hiddenThis) {
+        import snakebite.backends.dualcontext: isDualContext;
+
         auto owner = outerFunctionOf(hiddenThis);
         if (owner is null)
             throw rejection(_function, _function.loc, "a `this`");
@@ -2954,6 +2965,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         emit(&opLoadIndirect, context, context, size_t.sizeof);
+        if (isDualContext(owner))
+            emit(&opLoadIndirect, context, context, size_t.sizeof);
         return context;
     }
 
@@ -3989,7 +4002,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         requireDestination(expression);
 
         compileDelegateValue(
-            delegateTargetOf(expression.func, expression.type, expression.e1),
+            delegateTargetOf(expression.func, expression.type, expression.e1,
+                expression.vthis2),
             expression);
     }
 
@@ -4028,6 +4042,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         } else {
             emit(&opConstant, _destination + delegateContextOffset,
                 addConstant(0), size_t.sizeof);
+        }
+
+        if (target.contextPair !is null) {
+            const pairAddress = addressOfVariable(target.contextPair);
+            storeContextPair(
+                pairAddress, context, target.function_, expression.loc);
+            emit(&opCopy, context, pairAddress, size_t.sizeof);
         }
 
         if (target.virtualDispatch) {
@@ -6375,12 +6396,53 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t receiverOffsetOf(
         CallExp expression, FuncDeclaration callee, in size_t destOffset,
     ) {
+        import snakebite.backends.dualcontext: isDualContext;
+
+        const first = firstContextOffsetOf(expression, callee, destOffset);
+        if (!isDualContext(callee))
+            return first;
+
+        const pair = reserveTemp(TypeFacts.delegateValue);
+        const pairAddress = reserveTemp(pointerFacts);
+        emit(&opFrameAddress, pairAddress, pair, size_t.sizeof);
+        storeContextPair(pairAddress, first, callee, expression.loc);
+        return pairAddress;
+    }
+
+    // Writes the two contexts of a dual-context `callee` to the pair at
+    // `pairAddress`: `first` is word 0, and word 1 is the context of the
+    // function that owns the alias.
+    private void storeContextPair(
+        in size_t pairAddress, in size_t first, FuncDeclaration callee,
+        Loc loc,
+    ) {
+        import snakebite.backends.dualcontext: DualContext,
+            outerContextOwnerOf;
+
+        auto owner = outerContextOwnerOf(callee);
+        if (owner is null)
+            throw rejection(_function, loc, "a static chain");
+
+        emit(&opStoreIndirect, pairAddress, first, size_t.sizeof);
+        const outerAddress = addPointerOffset(
+            pairAddress, DualContext.outerWord * size_t.sizeof);
+        emit(&opStoreIndirect, outerAddress, contextAddressOf(owner),
+            size_t.sizeof);
+    }
+
+    // `receiverOffsetOf` without the pair a dual-context callee adds
+    // around it.
+    private size_t firstContextOffsetOf(
+        CallExp expression, FuncDeclaration callee, in size_t destOffset,
+    ) {
+        import snakebite.backends.dualcontext: nestedContextOwnerOf;
+
         // A lambda or nested function reading `this` implicitly names an
         // outer member function's own hidden `this`, reached through the
         // static chain rather than through `expression.e1` - the same
         // reach `contextAddressOf` gives any other captured variable.
         if (callee.isThis is null) {
-            auto parentFunction = outerFunctionOf(callee);
+            auto parentFunction = nestedContextOwnerOf(callee);
             if (parentFunction is null) {
                 const context = reserveTemp(pointerFacts);
                 emit(&opConstant, context, addConstant(0), size_t.sizeof);

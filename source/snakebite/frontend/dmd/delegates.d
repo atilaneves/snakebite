@@ -164,11 +164,16 @@ public struct DelegateTarget {
     public Expression receiver;
     public bool receiverIsAddress;
     public bool virtualDispatch;
+
+    // The temporary dmd declares to hold the pair of contexts of a
+    // dual-context function; the delegate's context word is its address.
+    public VarDeclaration contextPair;
 }
 
 public DelegateTarget delegateTargetOf(
     FuncDeclaration function_, Type type,
     imported!"dmd.expression".Expression receiver = null,
+    VarDeclaration contextPair = null,
 ) {
     import dmd.astenums: Tdelegate, Tstruct;
     import dmd.funcsem: isVirtualMethod;
@@ -181,7 +186,7 @@ public DelegateTarget delegateTargetOf(
         return DelegateTarget(function_, false, null, receiver,
             receiver !is null && receiver.type.toBasetype.ty == Tstruct,
             receiver !is null && receiver.isSuperExp is null
-                && function_.isVirtualMethod);
+                && function_.isVirtualMethod, contextPair);
 
     if (!hasHiddenThis(function_))
         return DelegateTarget(function_, false, null);

@@ -15,6 +15,7 @@ struct Hop {
         closureWord,
         frameSlot,
         structField,
+        contextPairWord,
     }
 
     public Kind kind;
@@ -44,6 +45,8 @@ public struct ClosurePlan {
         FuncDeclaration to,
     ) {
         import dmd.aggregate: AggregateDeclaration;
+        import snakebite.backends.dualcontext:
+            isDualContext, parentTowards, wordTowards;
 
         if (from is to)
             return null;
@@ -55,7 +58,10 @@ public struct ClosurePlan {
         Hop[] hops = [Hop(Hop.Kind.frameSlot,
             layout.hiddenThis.parameter.offset)];
 
-        auto parent = from.toParent2();
+        if (isDualContext(from))
+            hops ~= Hop(Hop.Kind.contextPairWord, from.wordTowards(to));
+
+        auto parent = from.parentTowards(to);
         auto currentFunction = parent is null ? null : parent.isFuncDeclaration;
         auto currentAggregate =
             parent is null ? null : parent.isAggregateDeclaration;
@@ -93,7 +99,11 @@ public struct ClosurePlan {
                 );
             }
 
-            auto next = currentFunction.toParent2();
+            if (isDualContext(currentFunction))
+                hops ~= Hop(Hop.Kind.contextPairWord,
+                    currentFunction.wordTowards(to));
+
+            auto next = currentFunction.parentTowards(to);
             currentFunction = next is null ? null : next.isFuncDeclaration;
             currentAggregate =
                 next is null ? null : next.isAggregateDeclaration;

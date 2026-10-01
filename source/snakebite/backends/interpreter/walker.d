@@ -2393,7 +2393,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.frontend.dmd.delegates: delegateTargetOf;
 
         storeDelegateValue(
-            delegateTargetOf(expression.func, _type, expression.e1),
+            delegateTargetOf(expression.func, _type, expression.e1,
+                expression.vthis2),
             expression, _place);
     }
 
@@ -2404,6 +2405,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         Expression expression,
         void* place,
     ) {
+        import snakebite.backends.dualcontext: DualContext;
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, storeIntegral;
         import std.conv: text;
@@ -2430,6 +2432,15 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                         "`: its enclosing function could not be determined"),
                 );
             context = cast(size_t) tryContextOf(target.contextOwner);
+        }
+
+        if (target.contextPair !is null) {
+            auto pair = storageOf(target.contextPair);
+            storeIntegral(pair, context, size_t.sizeof);
+            storeIntegral(
+                pair + DualContext.outerWord * size_t.sizeof,
+                outerContextOf(target.function_), size_t.sizeof);
+            context = cast(size_t) pair;
         }
 
         auto bytes = cast(ubyte*) place;
@@ -2532,12 +2543,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import core.stdc.string: memcpy;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
 
-        VarDeclaration variable;
-        if (expression.var is null)
-            variable = cast() _layout.hiddenThis.variable;
-        else
-            variable = expression.var;
-        auto slot = slotOf(expression, variable);
+        auto slot = thisSlotOf(expression);
         if (_type.ty == Tclass) {
             storeIntegral(
                 _place,
@@ -2548,6 +2554,27 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
 
         memcpy(_place, slot, _facts.size);
+    }
+
+    // The slot a `this` read goes through: a class reference is loaded
+    // from it, and a struct receiver is read at the address it holds. In a
+    // dual-context function the hidden slot holds the address of the pair
+    // of contexts, and word 0 of it is the receiver.
+    private ubyte* thisSlotOf(ThisExp expression) {
+        import snakebite.backends.dualcontext: isDualContext;
+        import snakebite.nativelayout: loadIntegral;
+
+        auto variable = expression.var is null
+            ? cast() _layout.hiddenThis.variable : expression.var;
+        auto slot = slotOf(expression, variable);
+        auto owner = outerFunctionOf(variable);
+        if (owner is null || !isDualContext(owner))
+            return slot;
+
+        auto pair = cast(ubyte*) loadIntegral(slot, size_t.sizeof, false);
+        if (expression.type.toBasetype.ty == Tclass)
+            return pair;
+        return cast(ubyte*) loadIntegral(pair, size_t.sizeof, false);
     }
 
     // Where `owner`'s own context is: `owner` itself if it is the function
@@ -2935,12 +2962,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         Evaluator evaluator;
 
         public void* storageThis(ThisExp expression) {
-            auto slot = evaluator.slotOf(
-                expression,
-                expression.var is null
-                    ? cast() evaluator._layout.hiddenThis.variable
-                    : expression.var,
-            );
+            auto slot = evaluator.thisSlotOf(expression);
             if (expression.type.ty == Tclass) {
                 import snakebite.nativelayout: loadIntegral;
 
@@ -5972,70 +5994,102 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // The shared layout excludes unused lambda contexts even when
         // dmd retains their `vthis` declarations.
         if (layout.hiddenThis.variable !is null) {
-            if (fromDelegate)
-                storeIntegral(
-                    frame.base + layout.hiddenThis.parameter.offset,
-                    cast(size_t) delegateContext,
-                    size_t.sizeof,
-                );
-            else if (function_.isThis !is null) {
-                auto dot = expression.e1.isDotVarExp;
-                const classDeclaration =
-                    cast(ClassDeclaration) function_.isThis.isClassDeclaration;
-                if (classDeclaration !is null) {
-                    if (hasClassReceiver)
-                        storeIntegral(
-                            frame.base + layout.hiddenThis.parameter.offset,
-                            cast(size_t) classReceiver,
-                            size_t.sizeof,
-                        );
-                    else {
-                        classReceiver = classReferenceOf(
-                            dot is null ? expression.e1 : dot.e1,
-                        );
-                        storeIntegral(
-                            frame.base + layout.hiddenThis.parameter.offset,
-                            cast(size_t) classReceiver,
-                            size_t.sizeof,
-                        );
-                    }
-                } else if (dot is null)
-                    throw new SnakebiteException(
-                        text("interpreter cannot call `", function_.toString,
-                            "`: its `this` receiver is not a struct lvalue"),
-                    );
-                else {
-                    auto receiver = addressOf(dot.e1);
-                    storeIntegral(
-                        frame.base + layout.hiddenThis.parameter.offset,
-                        cast(size_t) receiver,
-                        size_t.sizeof,
-                    );
-                }
-            } else {
-                // A nested callee's `vthis` is its enclosing context. A
-                // delegate supplies this context directly because it may
-                // outlive the call that created it; a direct call finds it
-                // by walking the current static chain. A callee with no
-                // enclosing function has no frame to point at.
-                auto enclosing = outerFunctionOf(function_);
-                size_t context;
-                if (enclosing !is null) {
-                    auto base = tryContextOf(enclosing);
-                    assert(
-                        base !is null,
-                        "a direct call's enclosing function is on the "
-                            ~ "static chain",
-                    );
-                    context = cast(size_t) base;
-                }
-                storeIntegral(
-                    frame.base + layout.hiddenThis.parameter.offset,
-                    context, size_t.sizeof);
-            }
+            const hidden = fromDelegate
+                ? cast(size_t) delegateContext
+                : hiddenArgumentOf(expression, function_, classReceiver,
+                    hasClassReceiver);
+            storeIntegral(
+                frame.base + layout.hiddenThis.parameter.offset,
+                hidden, size_t.sizeof,
+            );
         }
 
         return frame;
+    }
+
+    // The value of `function_`'s hidden argument for a direct call:
+    // the receiver, or a nested callee's enclosing context, or the address
+    // of the pair of contexts when the callee has two.
+    private size_t hiddenArgumentOf(
+        CallExp expression,
+        FuncDeclaration function_,
+        void* classReceiver,
+        bool hasClassReceiver,
+    ) {
+        import snakebite.backends.dualcontext: DualContext, isDualContext;
+        import snakebite.nativelayout: storeIntegral;
+
+        const first = firstContextOf(
+            expression, function_, classReceiver, hasClassReceiver);
+        if (!isDualContext(function_))
+            return first;
+
+        auto pair = _frames.reserve(DualContext.size, size_t.alignof);
+        storeIntegral(pair, first, size_t.sizeof);
+        storeIntegral(
+            pair + DualContext.outerWord * size_t.sizeof,
+            outerContextOf(function_), size_t.sizeof);
+        return cast(size_t) pair;
+    }
+
+    // Word 0 of a dual-context callee's pair, and the whole hidden
+    // argument of any other callee.
+    private size_t firstContextOf(
+        CallExp expression,
+        FuncDeclaration function_,
+        void* classReceiver,
+        bool hasClassReceiver,
+    ) {
+        import snakebite.backends.dualcontext: nestedContextOwnerOf;
+        import std.conv: text;
+
+        if (function_.isThis !is null) {
+            auto dot = expression.e1.isDotVarExp;
+            const classDeclaration =
+                cast(ClassDeclaration) function_.isThis.isClassDeclaration;
+            if (classDeclaration !is null) {
+                if (hasClassReceiver)
+                    return cast(size_t) classReceiver;
+                return cast(size_t) classReferenceOf(
+                    dot is null ? expression.e1 : dot.e1,
+                );
+            }
+            if (dot is null)
+                throw new SnakebiteException(
+                    text("interpreter cannot call `", function_.toString,
+                        "`: its `this` receiver is not a struct lvalue"),
+                );
+            return cast(size_t) addressOf(dot.e1);
+        }
+
+        // A nested callee's `vthis` is its enclosing context. A
+        // delegate supplies this context directly because it may
+        // outlive the call that created it; a direct call finds it
+        // by walking the current static chain.
+        return contextForCallTo(function_, nestedContextOwnerOf(function_));
+    }
+
+    // Word 1 of a dual-context callee's pair: the context of the function
+    // that owns the alias.
+    private size_t outerContextOf(FuncDeclaration function_) {
+        import snakebite.backends.dualcontext: outerContextOwnerOf;
+
+        return contextForCallTo(function_, outerContextOwnerOf(function_));
+    }
+
+    private size_t contextForCallTo(
+        FuncDeclaration function_, FuncDeclaration owner,
+    ) {
+        import std.conv: text;
+
+        if (owner is null)
+            throw new SnakebiteException(
+                text("interpreter cannot call `",
+                    function_.toString, "`: its enclosing ",
+                    "function could not be determined"),
+            );
+
+        return cast(size_t) tryContextOf(owner);
     }
 
     // The address a call hands back for `addressOf` when the call itself is
