@@ -251,6 +251,7 @@ private struct Shared {
     this(const Program program, typeof(callGuest) callGuest) {
         this.program = program;
         this.callGuest = callGuest;
+        callSelection.betterC = program.checks.betterC;
         plans = PlanCache(program.dependencyImage);
         nativeData = NativeData(&this.program.isRootOwned,
             &constantSymbolAddress,

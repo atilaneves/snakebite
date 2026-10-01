@@ -95,6 +95,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
     public this(const Program program) {
         super(program);
+        _callSelection.betterC = program.checks.betterC;
         _plans = PlanCache(program.dependencyImage);
         _nativeData = NativeData(&_program.isRootOwned,
             &constantSymbolAddress,
@@ -5998,6 +5999,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileTernary(
         CondExp expression, in size_t destOffset, in size_t width,
     ) {
+        import snakebite.frontend.dmd.functions: ctfeBranchOf;
+
+        // dmd generates nothing for the compile-time operand.
+        if (auto taken = expression.ctfeBranchOf)
+            return evalInto(taken, destOffset, width);
+
         const conditionOffset = compileCondition(expression.econd);
         const conditionWidth_ = conditionWidth(expression.econd);
 

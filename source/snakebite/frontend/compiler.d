@@ -1536,8 +1536,6 @@ private void applyChecks(in imported!"snakebite.frontend.checks".Checks checks) 
     import dmd.cond: VersionCondition;
     import dmd.globals: global;
 
-    import dmd.cond: VersionCondition;
-
     checks.applyTo(global.params);
     if (checks.betterC)
         VersionCondition.addPredefinedGlobalIdent("D_BetterC");

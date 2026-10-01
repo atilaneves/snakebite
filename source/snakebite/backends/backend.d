@@ -68,7 +68,9 @@ public struct Program {
         _haltAction = haltAction;
         foreach (module_; rootModules) {
             _rootModuleSet[module_] = true;
-            moduleConstructors ~= findModuleConstructors(module_);
+            // Without a runtime nothing calls a module constructor.
+            if (!checks.betterC)
+                moduleConstructors ~= findModuleConstructors(module_);
         }
 
         foreach (module_; rootModules) {
@@ -225,9 +227,7 @@ public int run(
     Program program,
     in string[] hostArguments = null,
 ) {
-    // Without a runtime nothing calls a module constructor.
-    if (!program.checks.betterC
-            && runModuleConstructors(backend, program.moduleConstructors))
+    if (runModuleConstructors(backend, program.moduleConstructors))
         return 1;
 
     return runMain(backend, program, hostArguments);
@@ -269,6 +269,8 @@ package(snakebite) int runModuleConstructors(
     return 0;
 }
 
+private extern(C) extern __gshared char** environ;
+
 // The program's own `main`. `void main` maps to exit status 0, and no `main`
 // at all is not an error: the status is 0.
 package(snakebite) int runMain(
@@ -276,7 +278,7 @@ package(snakebite) int runMain(
     Program program,
     in string[] hostArguments,
 ) {
-    import dmd.astenums: Tvoid;
+    import dmd.astenums: LINK, Tvoid;
     import dmd.typesem: nextOf;
 
     auto main_ = program.main.func;
@@ -285,13 +287,31 @@ package(snakebite) int runMain(
 
     const isVoid = main_.type.nextOf.ty == Tvoid;
     int status;
-    string[] arguments;
+    const arguments = hostArguments.length ? hostArguments : [program.name];
+    // The storage of the arguments lives until `main` returns.
+    string[] dArguments;
+    int argc;
+    char** argv;
+    char** envp;
     void*[] mainArguments;
     if (main_.parameters !is null && main_.parameters.length != 0) {
-        arguments = hostArguments.length
-            ? hostArguments.dup
-            : [program.name];
-        mainArguments = [cast(void*) &arguments];
+        if (main_.resolvedLinkage == LINK.c) {
+            // C permits `main()`, `main(argc, argv)` and `main(argc, argv,
+            // envp)`: the first parameters of the C start-up call.
+            import std.string: toStringz;
+
+            auto vector = new char*[arguments.length + 1];
+            foreach (index, argument; arguments)
+                vector[index] = cast(char*) argument.toStringz;
+            argc = cast(int) arguments.length;
+            argv = vector.ptr;
+            envp = environ;
+            void*[3] all = [cast(void*) &argc, cast(void*) &argv, cast(void*) &envp];
+            mainArguments = all[0 .. main_.parameters.length].dup;
+        } else {
+            dArguments = arguments.dup;
+            mainArguments = [cast(void*) &dArguments];
+        }
     }
     return failing(() {
         backend.call(main_, isVoid ? null : &status, mainArguments);

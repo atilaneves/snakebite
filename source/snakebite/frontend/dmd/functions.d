@@ -56,6 +56,24 @@ public bool isRootOwned(
     return (declaration.getModule in rootModules) !is null;
 }
 
+// The one operand of `expression` that dmd's glue (`glue/e2ir.d`, `visitCond`)
+// generates code for when the condition is `__ctfe` or `!__ctfe`, which is
+// constant at run time, and `null` for any other condition.
+public imported!"dmd.expression".Expression ctfeBranchOf(
+    imported!"dmd.expression".CondExp expression,
+) {
+    import dmd.id: Id;
+
+    auto negated = expression.econd.isNotExp;
+    auto condition = negated !is null ? negated.e1 : expression.econd;
+    auto variable = condition.isVarExp;
+    if (variable is null || variable.var is null
+            || variable.var.ident != Id.ctfe)
+        return null;
+
+    return negated is null ? expression.e2 : expression.e1;
+}
+
 // `function_`'s type as the function type it must be. A `FuncDeclaration`
 // whose type is not a `TypeFunction` would be a malformed AST, not a guest
 // construct a backend has chosen not to support, so this halts on it as
