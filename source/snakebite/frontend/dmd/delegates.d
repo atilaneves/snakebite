@@ -211,6 +211,7 @@ public DelegateTarget delegateTargetOf(
         return DelegateTarget(function_, false, null, receiver,
             receiver !is null && receiver.type.toBasetype.ty == Tstruct,
             receiver !is null && receiver.isSuperExp is null
+                && receiver.isDotTypeExp is null
                 && function_.isVirtualMethod, contextPair);
 
     if (!hasHiddenThis(function_))

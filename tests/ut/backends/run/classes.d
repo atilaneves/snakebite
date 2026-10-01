@@ -2048,3 +2048,400 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects a field access through a class qualifier"),
+)) {
+    @("dotTypeReadsBaseField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int v = 4; }
+            class B : A { int g() { return this.A.v; } }
+            void main() { assert((new B).g() == 4); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects a field access through a class qualifier"),
+)) {
+    @("dotTypeWritesBaseField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int v = 4; }
+            class B : A { void g() { this.A.v = 1; } }
+            void main() {
+                auto b = new B;
+                b.g();
+                assert(b.v == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects a field access through a class qualifier"),
+)) {
+    @("dotTypeCompoundAssignsBaseField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int v = 4; }
+            class B : A { void g() { this.A.v += 3; } }
+            void main() {
+                auto b = new B;
+                b.g();
+                assert(b.v == 7);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects a field access through a class qualifier"),
+)) {
+    @("dotTypeIncrementsBaseField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int v = 4; }
+            class B : A { int g() { return ++this.A.v; } }
+            void main() {
+                auto b = new B;
+                assert(b.g() == 5);
+                assert(b.v == 5);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("dotTypeCallsBaseMethodNonVirtually." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int f() { return 1; } }
+            class B : A {
+                override int f() { return 2; }
+                int g() { return this.A.f(); }
+            }
+            void main() {
+                auto b = new B;
+                assert(b.g() == 1);
+                assert(b.f() == 2);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects a field access through a class qualifier"),
+)) {
+    @("dotTypeOnVariableReadsBaseField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int v = 4; }
+            class B : A { }
+            void main() {
+                auto b = new B;
+                assert(b.A.v == 4);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects a field access through a class qualifier"),
+)) {
+    @("dotTypeOnVariableWritesBaseField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int v = 4; }
+            class B : A { }
+            void main() {
+                auto b = new B;
+                b.A.v = 9;
+                assert(b.v == 9);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("dotTypeOnVariableCallsBaseMethodNonVirtually." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int f() { return 1; } }
+            class B : A { override int f() { return 2; } }
+            void main() {
+                auto b = new B;
+                assert(b.A.f() == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects a field access through a class qualifier"),
+)) {
+    @("dotTypeReachesBaseTwoLevelsUp." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int v = 4; }
+            class B : A { }
+            class C : B { int g() { return this.A.v; } }
+            void main() {
+                auto c = new C;
+                assert(c.g() == 4);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects a field access through a class qualifier"),
+)) {
+    @("dotTypeWritesBaseTwoLevelsUpThroughVariable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int v = 4; }
+            class B : A { }
+            class C : B { }
+            void main() {
+                auto c = new C;
+                c.A.v = 6;
+                assert(c.v == 6);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects a field access through a class qualifier"),
+)) {
+    @("dotTypeNamesOwnClass." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int v = 4; int g() { return this.A.v; } }
+            void main() { assert((new A).g() == 4); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects a field access through a class qualifier"),
+)) {
+    @("dotTypeTakesAddressOfBaseField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int v = 4; }
+            class B : A {
+                int* g() { return &this.A.v; }
+            }
+            void main() {
+                auto b = new B;
+                *b.g() = 8;
+                assert(b.v == 8);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects a field access through a class qualifier"),
+)) {
+    @("dotTypePassesBaseFieldByRef." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int v = 4; }
+            class B : A {
+                void g() { set(this.A.v); }
+            }
+            void set(ref int x) { x = 11; }
+            void main() {
+                auto b = new B;
+                b.g();
+                assert(b.v == 11);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects a field access through a class qualifier"),
+)) {
+    @("dotTypeQualifiesImplicitThisField." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int v = 4; }
+            class B : A { int g() { return A.v; } }
+            void main() { assert((new B).g() == 4); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("dotTypeQualifiesImplicitThisMethod." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int f() { return 1; } }
+            class B : A {
+                override int f() { return 2; }
+                int g() { return A.f(); }
+            }
+            void main() { assert((new B).g() == 1); }
+        });
+    }
+}
+
+// An interface base makes a CastExp, not a DotTypeExp: the qualifier names
+// the interface and the call dispatches through its vtable.
+static foreach (backend; Matrix!()) {
+    @("dotTypeNamesInterfaceBase." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface I { int f(); }
+            class C : I {
+                int f() { return 3; }
+                int g() { return this.I.f(); }
+            }
+            void main() { assert((new C).g() == 3); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE fails an internal assertion on a call of a delegate made through a class qualifier"),
+)) {
+    @("dotTypeMakesDelegateToBaseMethodNonVirtually." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int f() { return 1; } }
+            class B : A {
+                override int f() { return 2; }
+                int delegate() g() { return &this.A.f; }
+            }
+            void main() { assert((new B).g()() == 1); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE fails an internal assertion on a delegate made through a class qualifier"),
+)) {
+    @("dotTypeOnVariableMakesDelegateToBaseMethodNonVirtually." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int f() { return 1; } }
+            class B : A { override int f() { return 2; } }
+            void main() {
+                auto b = new B;
+                auto dg = &b.A.f;
+                assert(dg() == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE fails an internal assertion on a call of a delegate made through a class qualifier"),
+)) {
+    @("dotTypeQualifiesImplicitThisDelegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int f() { return 1; } }
+            class B : A {
+                override int f() { return 2; }
+                int delegate() g() { return &A.f; }
+            }
+            void main() { assert((new B).g()() == 1); }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE rejects a field access through a class qualifier"),
+)) {
+    @("dotTypeEvaluatesOperandOnce." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int v = 4; }
+            class B : A { }
+            void main() {
+                int calls;
+                B make() { ++calls; return new B; }
+                assert(make().A.v == 4);
+                assert(calls == 1);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE cannot compare a class qualifier at compile time"),
+)) {
+    @("dotTypeIsAValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { int v = 4; }
+            class B : A { }
+            void main() {
+                auto b = new B;
+                A a = b.A;
+                assert(a is b);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("dotTypeDiscardedAsVoidCastEvaluatesOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class A { }
+            class B : A { }
+            void main() {
+                int calls;
+                B make() { ++calls; return new B; }
+                cast(void) make().A;
+                assert(calls == 1);
+            }
+        });
+    }
+}
