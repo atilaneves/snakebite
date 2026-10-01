@@ -14,5 +14,6 @@ bin/at '~@timing'
 bin/at -s '@timing'
 build/test-repl.sh
 build/test-cli.sh
+build/test-flags.sh
 bin/sb -b bytecode examples/rt-simple
 build/benches.sh
