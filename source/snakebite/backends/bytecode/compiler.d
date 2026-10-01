@@ -2289,21 +2289,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // Runs `expression` for effect, at statement level: whatever value it
     // produces (a call's return, an assignment's own value) is never read.
     private void compileEffect(Expression expression) {
-        const destination = _destination;
-        const width = _width;
-        auto valueType = _valueType;
-        scope (exit) {
-            _destination = destination;
-            _width = width;
-            _valueType = valueType;
-        }
-
-        _destination = discardResult;
-        _width = 0;
-
-        withFullExpression(FullExpressionKind.effect, expression,
-            { expression.accept(this); },
-        );
+        discardingResult({
+            withFullExpression(FullExpressionKind.effect, expression,
+                { expression.accept(this); },
+            );
+        });
     }
 
     // `NewExp.argprefix` stages constructor arguments before the call. Its
@@ -2312,6 +2302,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // expression instead of opening a nested one that would clean them up
     // before the constructor reads its arguments.
     private void compileEffectInCurrentLifetime(Expression expression) {
+        discardingResult({ expression.accept(this); });
+    }
+
+    private void discardingResult(scope void delegate() compile) {
         const destination = _destination;
         const width = _width;
         auto valueType = _valueType;
@@ -2323,7 +2317,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         _destination = discardResult;
         _width = 0;
-        expression.accept(this);
+        compile();
     }
 
     private void compileValue(
