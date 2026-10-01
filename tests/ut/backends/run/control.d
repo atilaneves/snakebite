@@ -1698,3 +1698,369 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// The parser gives a `catch` a statement without a scope, and dmd's
+// semantic analysis of a `catch` does not rewrite a scope guard that is the
+// whole handler. dmd's glue layer generates no code for that guard.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on a scope guard"
+            ~ " that semantic analysis did not rewrite"),
+)) {
+    @("scopeGuardAsCatchHandler." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int count;
+            void bump() { count++; }
+            int main() {
+                try
+                    throw new Exception("");
+                catch (Exception)
+                    scope(exit) bump();
+                return count;
+            }
+        });
+    }
+}
+
+
+// dmd does not lower an append in an `if (__ctfe)` block. A `case` label
+// in the block makes the statements after the label a run-time target, but
+// the append before the label stays dead code at run time.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0 and ldc 1.43.0 fail with an internal error on an "
+            ~ "append in an `if (__ctfe)` block that has a `case` label"),
+    Omit!(Ctfe, Because.inexpressible, "`__ctfe` is true in CTFE"),
+)) {
+    @("deadAppendBeforeCaseLabelInCtfeBlock." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int pick(int value) {
+                int[] array;
+                int result;
+                switch (value) {
+                    case 0:
+                        if (__ctfe) {
+                            array ~= 7;
+                            case 1:
+                                result = 5;
+                        }
+                        break;
+                    default:
+                }
+                return result + cast(int) array.length;
+            }
+
+            int main() {
+                return pick(1) == 5 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A scope guard that is the whole `if` body, not in a compound or scope statement.
+static foreach (backend; Matrix!()) {
+    @("scopeGuardAsIfBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+            int main() {
+                int count;
+                void bump() { count++; }
+                if (count == 0) scope(exit) bump();
+                return count == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A scope guard that is the whole `else` body, not in a compound or scope statement.
+static foreach (backend; Matrix!()) {
+    @("scopeGuardAsElseBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+            int main() {
+                int count;
+                void bump() { count++; }
+                if (count == 1) {} else scope(exit) bump();
+                return count == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A scope guard that is the whole `for` body, not in a compound or scope statement.
+static foreach (backend; Matrix!()) {
+    @("scopeGuardAsForBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+            int main() {
+                int count;
+                void bump() { count++; }
+                for (int i = 0; i < 1; i++) scope(exit) bump();
+                return count == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A scope guard that is the whole `while` body, not in a compound or scope statement.
+static foreach (backend; Matrix!()) {
+    @("scopeGuardAsWhileBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+            int main() {
+                int count;
+                void bump() { count++; }
+                int i;
+                while (i++ < 1) scope(exit) bump();
+                return count == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A scope guard that is the whole `do` body, not in a compound or scope statement.
+static foreach (backend; Matrix!()) {
+    @("scopeGuardAsDoBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+            int main() {
+                int count;
+                void bump() { count++; }
+                int i;
+                do scope(exit) bump(); while (i++ < 0);
+                return count == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A scope guard that is the whole `foreach` body, not in a compound or scope statement.
+static foreach (backend; Matrix!()) {
+    @("scopeGuardAsForeachBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+            int main() {
+                int count;
+                void bump() { count++; }
+                foreach (i; 0 .. 1) scope(exit) bump();
+                return count == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A scope guard that is the whole `with` body, not in a compound or scope statement.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on a scope guard"
+            ~ " that semantic analysis did not rewrite"),
+)) {
+    @("scopeGuardAsWithBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+            int main() {
+                int count;
+                void bump() { count++; }
+                S s;
+                with (s) scope(exit) bump();
+                return count == 0 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A scope guard that is the whole `synchronized` body, not in a compound or scope statement.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine cannot call `_d_monitorenter`"),
+)) {
+    @("scopeGuardAsSynchronizedBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+            int main() {
+                int count;
+                void bump() { count++; }
+                auto object = new Object;
+                synchronized (object) scope(exit) bump();
+                return count == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A scope guard that is the last statement of a `case`, not in a compound or scope statement.
+static foreach (backend; Matrix!()) {
+    @("scopeGuardAsCaseBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+            int main() {
+                int count;
+                void bump() { count++; }
+                switch (1) {
+                    case 1: scope(exit) bump(); break;
+                    default:
+                }
+                return count == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A scope guard that is the last statement of a `default`, not in a compound or scope statement.
+static foreach (backend; Matrix!()) {
+    @("scopeGuardAsDefaultBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+            int main() {
+                int count;
+                void bump() { count++; }
+                switch (2) {
+                    case 1: break;
+                    default: scope(exit) bump();
+                }
+                return count == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A scope guard that is the statement of a label, not in a compound or scope statement.
+static foreach (backend; Matrix!()) {
+    @("scopeGuardAsLabelledStatement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+            int main() {
+                int count;
+                void bump() { count++; }
+                L: scope(exit) bump();
+                return count == 0 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A scope guard that is the whole `try` body, not in a compound or scope statement.
+static foreach (backend; Matrix!()) {
+    @("scopeGuardAsTryBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+            int main() {
+                int count;
+                void bump() { count++; }
+                try scope(exit) bump(); catch (Exception) {}
+                return count == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A scope guard that is the whole `finally` body, not in a compound or scope statement.
+static foreach (backend; Matrix!()) {
+    @("scopeGuardAsFinallyBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+            int main() {
+                int count;
+                void bump() { count++; }
+                try {} finally scope(exit) bump();
+                return count == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A scope guard that is the whole `catch` handler, not in a compound or scope statement.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on a scope guard"
+            ~ " that semantic analysis did not rewrite"),
+)) {
+    @("scopeGuardAsSuccessCatchHandler." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+            int main() {
+                int count;
+                void bump() { count++; }
+                try
+                    throw new Exception("");
+                catch (Exception)
+                    scope(success) bump();
+                return count == 0 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+// A scope guard that is the whole `catch` handler, not in a compound or scope statement.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on a scope guard"
+            ~ " that semantic analysis did not rewrite"),
+)) {
+    @("scopeGuardAsFailureCatchHandler." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int x; }
+            int main() {
+                int count;
+                void bump() { count++; }
+                try {
+                    try
+                        throw new Exception("");
+                    catch (Exception)
+                        scope(failure) bump();
+                } catch (Exception) {}
+                return count == 0 ? 0 : 1;
+            }
+        });
+    }
+}

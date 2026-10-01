@@ -134,6 +134,9 @@ private string stringValue(imported!"dmd.expression".Expression expression) {
     if (auto literal = expression.isStringExp)
         return literal.peekString.idup;
 
+    if (expression.isNullExp !is null)
+        return "";
+
     if (auto array = expression.isArrayLiteralExp) {
         string result;
         foreach (element; *array.elements)

@@ -9,8 +9,11 @@ import std.meta: AliasSeq;
 
 
 // A frontend node class that no backend ever receives, and why. A class on
-// this list needs no `visit` override.
-package struct Unreachable(Node, string reason) {
+// this list needs no `visit` override. A visitor that handles the class
+// anyway is an error, unless `handledAnyway` states why that is correct.
+package struct Unreachable(Node, string reason, string handledAnywayReason = "") {
+    alias Class = Node;
+    enum handledAnyway = handledAnywayReason;
 }
 
 package alias UnreachableNodes = AliasSeq!(
@@ -73,9 +76,14 @@ package alias UnreachableNodes = AliasSeq!(
     Unreachable!(PreExp,
         "expression semantic rewrites `++e` to `e += 1` or an overload call"),
     Unreachable!(BinAssignExp,
-        "a base class that dmd never constructs directly"),
+        "a base class that dmd never constructs directly",
+        "the bytecode compiler overrides it once for every compound "
+            ~ "assignment operator, and the interpreter has one override "
+            ~ "for each operator"),
     Unreachable!(PowAssignExp,
-        "expression semantic rewrites `a ^^= b` to `a = a ^^ b`"),
+        "expression semantic rewrites `a ^^= b` to `a = a ^^ b`",
+        "the bytecode compiler reaches it through its `BinAssignExp` "
+            ~ "override"),
     Unreachable!(PowExp,
         "expression semantic rewrites `^^` to a multiplication, a "
             ~ "division or a `std.math.pow` call"),
@@ -135,9 +143,6 @@ package alias UnreachableNodes = AliasSeq!(
     Unreachable!(SynchronizedStatement,
         "statement semantic rewrites it to a `TryFinallyStatement` "
             ~ "around the monitor calls"),
-    Unreachable!(ScopeGuardStatement,
-        "statement semantic rewrites it to try-finally or try-catch "
-            ~ "in the enclosing block"),
     Unreachable!(DebugStatement,
         "statement semantic replaces it with the statement inside"),
     Unreachable!(AsmStatement,
@@ -148,15 +153,36 @@ package alias UnreachableNodes = AliasSeq!(
         "inline assembler fails the load (ADR-0012)"),
 );
 
-// Fails the build, naming each class, when a concrete frontend `Expression`
-// or `Statement` class has neither a `visit` override in `Visitor` nor an
-// entry in `UnreachableNodes`. An override of the `Expression` or `Statement`
-// catch-all itself does not count as handling a class.
+// Fails the build, naming the visitor and each class, when a concrete
+// frontend `Expression` or `Statement` class has neither a `visit` override
+// in `Visitor` nor an entry in `UnreachableNodes`. It also fails when an
+// entry names a class that `Visitor` handles, because that entry says
+// something false about the code. An override of the `Expression` or
+// `Statement` catch-all itself does not count as handling a class.
 package template AssertEveryNodeHandled(Visitor) {
     private enum missing = missingNodes!Visitor;
     static assert(missing.length == 0,
-        "visitor has no `visit` override for: " ~ missing);
+        Visitor.stringof ~ " has no `visit` override for:" ~ missing);
+
+    private enum unnecessary = unnecessaryEntries!Visitor;
+    static assert(unnecessary.length == 0,
+        Visitor.stringof ~ " handles classes that `UnreachableNodes` lists:"
+            ~ unnecessary);
+
     enum AssertEveryNodeHandled = true;
+}
+
+private string unnecessaryEntries(Visitor)() {
+    import dmd.expression: Expression;
+    import dmd.statement: Statement;
+
+    string result;
+    static foreach (Entry; UnreachableNodes) {
+        static if (Entry.handledAnyway.length == 0
+                && isHandled!(Visitor, Entry.Class, Expression, Statement))
+            result ~= " " ~ Entry.Class.stringof;
+    }
+    return result;
 }
 
 private string missingNodes(Visitor)() {
@@ -196,7 +222,7 @@ private enum isUnreachable(Node) = isUnreachableIn!(Node, UnreachableNodes);
 private template isUnreachableIn(Node, Entries...) {
     static if (Entries.length == 0)
         enum isUnreachableIn = false;
-    else static if (is(Entries[0] == Unreachable!(Node, reason), string reason))
+    else static if (is(Entries[0].Class == Node))
         enum isUnreachableIn = true;
     else
         enum isUnreachableIn = isUnreachableIn!(Node, Entries[1 .. $]);

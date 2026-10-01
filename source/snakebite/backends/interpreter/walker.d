@@ -424,8 +424,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         IfStatement,
         ImportStatement, LabelStatement, ReturnStatement, ScopeStatement,
         Statement, SwitchErrorStatement, SwitchStatement, ThrowStatement,
-        TryCatchStatement,
-        TryFinallyStatement, UnrolledLoopStatement, WithStatement;
+        TryCatchStatement, ScopeGuardStatement, TryFinallyStatement,
+        UnrolledLoopStatement, WithStatement;
     import dmd.tokens: EXP;
     import dmd.typesem: isIntegral, nextOf, toBasetype;
     import snakebite.nativelayout: NativeData, nativeSymbolName;
@@ -1464,6 +1464,12 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // arrives with its callee resolved. Nothing is left to execute, so
     // this runs no code rather than refusing the statement.
     override void visit(ImportStatement statement) {
+    }
+
+    // Statement semantic rewrites a scope guard in a compound or scope
+    // statement. A scope guard that is a whole `catch` handler stays, and
+    // dmd's glue generates no code for it.
+    override void visit(ScopeGuardStatement statement) {
     }
 
     override void visit(TryCatchStatement statement) {
@@ -4724,7 +4730,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     // dmd makes one for a `switch` default under `-release` or
     // `-checkaction=halt`, and for `assert(0)` with assertions off.
-    override void visit(HaltExp) {
+    protected override void visitHalt() {
         haltRun;
     }
 
@@ -6330,5 +6336,10 @@ private struct Cache(Key, Value) {
 
 
 
-static assert(
-    imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!Evaluator);
+// A function body is analysed only in the compile unit that compiles this
+// module, whereas a module-scope `static assert` runs again in every unit
+// that imports it.
+private void assertEveryNodeHandled() {
+    static assert(
+        imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!Evaluator);
+}

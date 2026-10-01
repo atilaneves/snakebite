@@ -603,8 +603,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         GotoCaseStatement, GotoDefaultStatement, GotoStatement, IfStatement,
         ImportStatement, LabelStatement, ReturnStatement, ScopeStatement, Statement,
         SwitchErrorStatement, SwitchStatement, ThrowStatement,
-        TryCatchStatement, TryFinallyStatement, UnrolledLoopStatement,
-        WithStatement;
+        TryCatchStatement, ScopeGuardStatement, TryFinallyStatement,
+        UnrolledLoopStatement, WithStatement;
     import dmd.tokens: EXP;
     import snakebite.backends.bytecode.vm:
         Arg, AssertSite, CallSite, ClosureSlot, castSizeWithSignedness,
@@ -1399,6 +1399,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (statement._body !is null)
             compileStatement(statement._body);
+    }
+
+    // Statement semantic rewrites a scope guard in a compound or scope
+    // statement. A scope guard that is a whole `catch` handler stays, and
+    // dmd's glue generates no code for it.
+    override void visit(ScopeGuardStatement statement) {
     }
 
     override void visit(TryCatchStatement statement) {
@@ -4992,7 +4998,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileAssert(expression);
     }
 
-    override void visit(HaltExp) {
+    protected override void visitHalt() {
         const never = reserveTemp(pointerFacts);
         emit(&opConstant, never, addConstant(0), size_t.sizeof);
         emit(&opAssert, never, haltSite, size_t.sizeof);
@@ -7689,5 +7695,10 @@ private string expressionText(imported!"dmd.expression".Expression expression) {
 
 
 
-static assert(
-    imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!FunctionCompiler);
+// A function body is analysed only in the compile unit that compiles this
+// module, whereas a module-scope `static assert` runs again in every unit
+// that imports it.
+private void assertEveryNodeHandled() {
+    static assert(
+        imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!FunctionCompiler);
+}
