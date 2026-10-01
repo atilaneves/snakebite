@@ -752,6 +752,74 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 }
 
 
+
+private extern(C++) class NativeMine {
+    int tag_ = 3;
+    int first() { return tag_ * 10 + 5; }
+    int second() { return tag_ * 100 + 5; }
+    Big bigVirtual() { return Big(tag_, tag_ + 1, tag_ + 2); }
+}
+
+// The C++ library calls the virtual methods of a class that D defines:
+// the vtable slots of an `extern(C++)` class hold functions that C++
+// code can call, and the hidden return pointer comes before `this`.
+static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
+    "CTFE cannot call a function in a loaded native image"))) {
+    @("cpp.guestClass.hostCallsVirtuals." ~ backend.stringof)
+    @Serial
+    unittest {
+        static if (is(backend == Native)) {
+            auto image = cppImage;
+            auto callFirst = resolveNative!CallIntMethodFn(
+                image, call_first.mangleof);
+            auto callSecond = resolveNative!CallIntMethodFn(
+                image, call_second.mangleof);
+            auto callBigVirtual = resolveNative!CallBigFn(
+                image, call_big_virtual.mangleof);
+            auto mine = cast(Base) cast(void*) new NativeMine;
+            callFirst(mine).should == 35;
+            callSecond(mine).should == 305;
+            const big = callBigVirtual(mine);
+            (big.a * 100 + big.b * 10 + big.c).should == 345;
+        } else {
+            auto image = cppImage;
+            auto module_ = parseSnippet(cppBindings ~ q{
+                extern(C++) class Mine {
+                    int tag_ = 3;
+                    int first() { return tag_ * 10 + 5; }
+                    int second() { return tag_ * 100 + 5; }
+                    Big bigVirtual() {
+                        return Big(tag_, tag_ + 1, tag_ + 2);
+                    }
+                }
+                Base mine() { return cast(Base) cast(void*) new Mine; }
+                int callFirst() { return call_first(mine); }
+                int callSecond() { return call_second(mine); }
+                struct Reading { size_t a; size_t b; size_t c; }
+                Reading callBigVirtual() {
+                    auto big = call_big_virtual(mine);
+                    return Reading(big.a, big.b, big.c);
+                }
+            });
+            auto program = Program([module_]);
+            program.dependencyImage = &image;
+            scope instance = new backend(program);
+
+            int result;
+            instance.call(findFunction(module_, "callFirst"), &result, []);
+            result.should == 35;
+            instance.call(findFunction(module_, "callSecond"), &result, []);
+            result.should == 305;
+
+            static struct Reading { size_t a; size_t b; size_t c; }
+            Reading big;
+            instance.call(
+                findFunction(module_, "callBigVirtual"), &big, []);
+            (big.a * 100 + big.b * 10 + big.c).should == 345;
+        }
+    }
+}
+
 // A C++ exception unwinding past every frame this project owns must
 // end the process the same way it would in compiled D: nothing here
 // catches or translates it (ADR-0004), and a D `catch (Throwable)`

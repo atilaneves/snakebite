@@ -124,29 +124,39 @@ public TypeInfo_Class classRuntimeInfo(
     import dmd.astenums: STC;
     import dmd.dsymbolsem: hasPointers, isAbstract;
 
-    info.m_flags = cast(TypeInfo_Class.ClassFlags)(
-        TypeInfo_Class.ClassFlags.hasOffTi
-        | TypeInfo_Class.ClassFlags.hasGetMembers
-        | TypeInfo_Class.ClassFlags.hasTypeInfo
-        | TypeInfo_Class.ClassFlags.hasNameSig);
-    if (declaration.ctor !is null)
-        info.m_flags |= TypeInfo_Class.ClassFlags.hasCtor;
-    if (declaration.isAbstract)
-        info.m_flags |= TypeInfo_Class.ClassFlags.isAbstract;
+    const isInterface = declaration.isInterfaceDeclaration !is null;
+    // Same flags as `glue/toobj.d`: a class and an interface differ.
+    with (TypeInfo_Class.ClassFlags) {
+        info.m_flags = cast(TypeInfo_Class.ClassFlags)(
+            hasOffTi | hasTypeInfo | hasNameSig);
+        if (declaration.isCOMclass)
+            info.m_flags |= isCOMclass;
+        if (!isInterface) {
+            info.m_flags |= hasGetMembers;
+            if (declaration.isCPPclass)
+                info.m_flags |= isCPPclass;
+            if (declaration.ctor !is null)
+                info.m_flags |= hasCtor;
+            if (declaration.isAbstract)
+                info.m_flags |= isAbstract;
+        }
+    }
     info.name = cast(string) declaration.toPrettyChars.toDString;
     info.nameSig = *cast(uint[4]*) blake3(
         cast(const(ubyte)[]) info.name,
     )[0 .. 16].ptr;
-    for (auto parent = declaration; parent !is null;
-            parent = parent.baseClass)
-        ++info.depth;
-    bool hasPointerData;
-    for (auto parent = declaration; parent !is null;
-            parent = parent.baseClass)
-        foreach (field; parent.fields)
-            hasPointerData |= hasPointers(field);
-    if (!hasPointerData)
-        info.m_flags |= TypeInfo_Class.ClassFlags.noPointers;
+    if (!isInterface) {
+        for (auto parent = declaration; parent !is null;
+                parent = parent.baseClass)
+            ++info.depth;
+        bool hasPointerData;
+        for (auto parent = declaration; parent !is null;
+                parent = parent.baseClass)
+            foreach (field; parent.fields)
+                hasPointerData |= hasPointers(field);
+        if (!hasPointerData)
+            info.m_flags |= TypeInfo_Class.ClassFlags.noPointers;
+    }
     info.m_RTInfo = hooks.rtInfo(declaration);
     for (auto parent = declaration; parent !is null;
             parent = parent.baseClass)
@@ -166,17 +176,22 @@ public TypeInfo_Class classRuntimeInfo(
     if (hooks.registerGenerated !is null)
         hooks.registerGenerated(declaration, info);
 
-    const isInterface = declaration.isInterfaceDeclaration !is null;
     if (!isInterface && declaration.baseClass !is null)
         info.base = classRuntimeInfo(declaration.baseClass, cache, hooks);
 
+    // An interface's methods live in the `Interface` tables of the classes
+    // that implement it, not in its own `TypeInfo_Class`.
     const baseLength = info.base is null ? 0 : info.base.vtbl.length;
-    const length = declaration.vtbl.length > baseLength
-        ? declaration.vtbl.length : baseLength;
+    const length = isInterface ? 0
+        : declaration.vtbl.length > baseLength
+            ? declaration.vtbl.length : baseLength;
     info.vtbl = new void*[length];
     if (info.base !is null)
         info.vtbl[0 .. baseLength] = info.base.vtbl[];
-    if (length)
+    // An `extern(C++)` class has no classinfo slot: its first virtual
+    // method is at index 0.
+    const firstMethod = declaration.vtblOffset;
+    if (firstMethod && !isInterface)
         info.vtbl[0] = cast(void*) info;
 
     if (!isInterface) {
@@ -197,7 +212,7 @@ public TypeInfo_Class classRuntimeInfo(
         if (declaration.inv !is null)
             info.classInvariant = cast(void function(Object))
                 hooks.methodAddress(declaration.inv, 0);
-        foreach (i; 1 .. declaration.vtbl.length) {
+        foreach (i; firstMethod .. declaration.vtbl.length) {
             auto method = declaration.vtbl[i].isFuncDeclaration;
             import dmd.dsymbolsem: isAbstract;
 
