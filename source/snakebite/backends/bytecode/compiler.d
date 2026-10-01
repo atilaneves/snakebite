@@ -2919,8 +2919,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (hiddenThis is null)
             throw rejection(_function, _function.loc, "a `this`");
 
+        const hidden = hiddenSlotOffset(hiddenThis);
+        return receiverOffsetFrom(
+            hiddenThis is _layout.hiddenThis.variable
+                ? _function : outerFunctionOf(hiddenThis),
+            hidden,
+        );
+    }
+
+    // The slot that holds the value of `hiddenThis`, before the hops of
+    // `ClosurePlan.receiverHops` that reach the receiver.
+    private size_t hiddenSlotOffset(VarDeclaration hiddenThis) {
         if (hiddenThis is _layout.hiddenThis.variable)
-            return receiverOffsetFrom(_function, _layout.offsetOf(hiddenThis));
+            return _layout.offsetOf(hiddenThis);
 
         return contextThisOffset(hiddenThis);
     }
@@ -2956,7 +2967,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         emit(&opLoadIndirect, context, context, size_t.sizeof);
-        return receiverOffsetFrom(owner, context);
+        return context;
     }
 
     // The receiver of `function_`, from the frame slot `hidden` that holds
@@ -4039,8 +4050,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             } else
                 evalInto(target.receiver, context, size_t.sizeof);
         } else if (target.needsContext) {
-            assert(target.contextOwner !is null,
-                "a delegate that needs a context has an enclosing function");
             const contextOffset = contextAddressOf(target.contextOwner);
             emit(&opCopy, _destination + delegateContextOffset,
                 contextOffset, size_t.sizeof);
@@ -6421,14 +6430,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         case frame:
             return contextAddressOf(cast() source.function_);
         case receiver:
-            size_t value = hiddenThisOffset(cast() source.function_.vthis);
-            foreach (const offset; source.fields) {
-                const address = pointerAt(value, offset);
-                value = reserveTemp(pointerFacts);
-                emit(&opLoadIndirect, value, address, size_t.sizeof);
-            }
+            auto hidden = cast() source.function_.vthis;
+            auto value = source.throughPair
+                ? loadWordAt(hiddenSlotOffset(hidden), source.pairOffset)
+                : hiddenThisOffset(hidden);
+            foreach (const offset; source.fields)
+                value = loadWordAt(value, offset);
             return value;
         }
+    }
+
+    private size_t loadWordAt(in size_t address, in size_t offset) {
+        const word = reserveTemp(pointerFacts);
+        emit(&opLoadIndirect, word, pointerAt(address, offset), size_t.sizeof);
+        return word;
     }
 
     // `receiverOffsetOf` without the pair a dual-context callee adds

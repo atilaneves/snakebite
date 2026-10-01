@@ -68,13 +68,17 @@ public struct ContextSource {
         // The `this` of the member function `function_`, followed through
         // the context fields at the byte offsets in `fields`: the context
         // is an object, not a frame, when the symbol that encloses the
-        // callee is an aggregate.
+        // callee is an aggregate. When `function_` has two contexts, its
+        // hidden argument is the address of a pair, and the `this` to start
+        // from is the word at `pairOffset` in it, not the receiver.
         receiver,
     }
 
     public Kind kind;
     public FuncDeclaration function_;
     public const(size_t)[] fields;
+    public bool throughPair;
+    public size_t pairOffset;
 }
 
 // What a call or a delegate to a dual-context function stores before it
@@ -105,8 +109,9 @@ public PairPlan pairPlanOf(
     if (!isDualContext(callee))
         return PairPlan.init;
 
-    assert(pair !is null,
-        "dmd declares the pair for each call of a dual-context function");
+    if (pair is null)
+        assert(0,
+            "dmd declares the pair for each call of a dual-context function");
     return PairPlan(
         pair,
         DualContext.receiverWord * size_t.sizeof,
@@ -134,13 +139,27 @@ public ContextSource contextSourceOf(
 // functions, which `caller` reaches along its static chain. `getEthis` in
 // dmd's code generator walks the same chain: the member function is the
 // last function before the chain leaves for `owner`, and each nested
-// aggregate between them adds the load of one of its context fields.
+// aggregate between them adds the load of one of its context fields. The
+// chain also ends at a class derived from `owner`, whose members have the
+// `this` of `owner` as theirs.
 private ContextSource receiverSourceOf(
     imported!"dmd.func".FuncDeclaration caller,
     imported!"dmd.dsymbol".Dsymbol owner,
 ) {
     import dmd.dsymbol: Dsymbol;
     import dmd.func: FuncDeclaration;
+    import snakebite.frontend.dmd.delegates: isDualContext;
+
+    ContextSource receiverFrom(FuncDeclaration member, const(size_t)[] fields) {
+        const throughPair = isDualContext(member);
+        return ContextSource(
+            ContextSource.Kind.receiver,
+            member,
+            fields,
+            throughPair,
+            throughPair ? member.wordTowards(owner) : 0,
+        );
+    }
 
     FuncDeclaration member;
     const(size_t)[] fields;
@@ -150,18 +169,22 @@ private ContextSource receiverSourceOf(
             member = function_;
             fields = null;
         } else if (auto aggregate = symbol.isAggregateDeclaration) {
-            // Otherwise dmd's code generator reports "cannot get frame
-            // pointer", as it does for a caller in a class derived from
-            // `owner`.
-            assert(aggregate.isNested && aggregate.vthis !is null,
-                "an aggregate on the path to an enclosing this is nested");
+            // `auto`: `isBaseOf` is not callable on a `const` class.
+            auto base = owner.isClassDeclaration;
+            if (base !is null && aggregate.isClassDeclaration !is null
+                    && base.isBaseOf(aggregate.isClassDeclaration, null))
+                return receiverFrom(member, fields);
+
+            if (!aggregate.isNested || aggregate.vthis is null)
+                assert(0, "an aggregate on the path to an enclosing this "
+                    ~ "is nested or derives from the owner");
             fields ~= aggregate.fieldTowards(owner);
         } else
             break;
 
         auto next = symbol.parentTowards(owner);
         if (next is owner)
-            return ContextSource(ContextSource.Kind.receiver, member, fields);
+            return receiverFrom(member, fields);
         symbol = next;
     }
 

@@ -247,7 +247,7 @@ public AggregateInitPlan planPositionalFields(
 )
 in (arguments is null || arguments.length <= sd.fields.length)
 {
-    InitStep[] steps = vthisStepsOf(sd);
+    auto steps = vthisStepsOf(sd);
 
     if (arguments !is null)
         foreach (i, argument; *arguments) {

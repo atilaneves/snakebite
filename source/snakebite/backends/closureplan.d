@@ -7,10 +7,7 @@ private:
 import snakebite.backends.layout: ClosureLayout, FrameLayout;
 
 
-public:
-
-
-struct Hop {
+public struct Hop {
     public enum Kind {
         closureWord,
         frameSlot,

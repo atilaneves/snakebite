@@ -2426,8 +2426,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     factsOf(target.receiver.type), &context);
 
         } else if (target.needsContext) {
-            assert(target.contextOwner !is null,
-                "a delegate that needs a context has an enclosing function");
             context = cast(size_t) tryContextOf(target.contextOwner);
         }
 
@@ -2574,6 +2572,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             value = cast(size_t) loadIntegral(
                 cast(ubyte*) value + hop.offset, size_t.sizeof, false);
         return value;
+    }
+
+    // The word at `offset` in the pair that the hidden `this` of the
+    // dual-context function `variable` belongs to holds.
+    private size_t hiddenValueOf(VarDeclaration variable, in size_t offset) {
+        import snakebite.nativelayout: loadIntegral;
+
+        const pair = cast(size_t) loadIntegral(
+            slotOf(null, variable), size_t.sizeof, false);
+        return cast(size_t) loadIntegral(
+            cast(ubyte*) pair + offset, size_t.sizeof, false);
     }
 
     // Where `owner`'s own context is: `owner` itself if it is the function
@@ -6075,7 +6084,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         case frame:
             return cast(size_t) tryContextOf(cast() source.function_);
         case receiver:
-            auto value = thisValueOf(null, cast() source.function_.vthis);
+            auto value = source.throughPair
+                ? hiddenValueOf(cast() source.function_.vthis, source.pairOffset)
+                : thisValueOf(null, cast() source.function_.vthis);
             foreach (offset; source.fields)
                 value = cast(size_t) loadIntegral(
                     cast(ubyte*) value + offset, size_t.sizeof, false);

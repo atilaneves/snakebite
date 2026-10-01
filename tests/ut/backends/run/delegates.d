@@ -944,3 +944,313 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// The caller is a dual-context member too, so the `this` that owns the
+// alias is word 1 of the caller's own pair, not the caller's receiver:
+// dmd's code generator selects the word of each dual-context function on
+// the path with `followInstantiationContext`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine does not implement a read through the second "
+            ~ "context of a dual-context function that another one calls"),
+)) {
+    @("callDualContextMemberFromDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base = 2;
+                int add(alias field)() { return base + field; }
+                int relay(alias field)() { return add!field(); }
+            }
+            struct Owner {
+                int value = 40;
+                int run(ref Holder holder) { return holder.relay!value(); }
+            }
+            int main() {
+                Holder holder;
+                Owner owner;
+                return owner.run(holder) == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// As above, with the call in a lambda in the dual-context member, so the
+// pair of the member is one step up the static chain.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine asserts on a dual-context function called from "
+            ~ "a lambda in a dual-context function"),
+)) {
+    @("callDualContextMemberFromLambdaInDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base = 2;
+                int add(alias field)() { return base + field; }
+                int relay(alias field)() {
+                    auto lambda = () => add!field();
+                    return lambda();
+                }
+            }
+            struct Owner {
+                int value = 40;
+                int run(ref Holder holder) { return holder.relay!value(); }
+            }
+            int main() {
+                Holder holder;
+                Owner owner;
+                return owner.run(holder) == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A dual-context class made in a dual-context member: its second context
+// field holds word 1 of the pair of the member.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine reads a null outer object in a dual-context "
+            ~ "class"),
+)) {
+    @("makeDualContextClassInDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Outer {
+                int base = 2;
+                class Inner(alias field) {
+                    int call() { return base + field; }
+                }
+            }
+            struct Holder {
+                int padding = 5;
+                int relay(alias field)(Outer outer) {
+                    auto inner = outer.new Outer.Inner!field;
+                    return inner.call();
+                }
+            }
+            struct Owner {
+                int value = 40;
+                int run(ref Holder holder, Outer outer) {
+                    return holder.relay!value(outer);
+                }
+            }
+            int main() {
+                Holder holder;
+                Owner owner;
+                return owner.run(holder, new Outer) == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// The alias argument of a dual-context class is a field of a base class of
+// the class whose member makes the object. The second context field is
+// then the `this` of that member: `setEthis` in dmd's code generator
+// accepts a base class of the class of the calling member.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine reads a null outer object in a dual-context "
+            ~ "class"),
+)) {
+    @("readFieldOfBaseClassFromDualContextClass." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Outer {
+                int base = 2;
+                class Inner(alias field) {
+                    int call() { return base + field; }
+                }
+            }
+            class Base { int value = 40; }
+            class Derived : Base {
+                int run(Outer outer) {
+                    auto inner = outer.new Outer.Inner!value;
+                    return inner.call();
+                }
+            }
+            int main() {
+                auto derived = new Derived;
+                return derived.run(new Outer) == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// As above, with the object made in a function nested in the member, so
+// the `this` of the member is one step up the static chain.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine reads a null outer object in a dual-context "
+            ~ "class"),
+)) {
+    @("readFieldOfBaseClassFromDualContextClassMadeInNestedFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Outer {
+                int base = 2;
+                class Inner(alias field) {
+                    int call() { return base + field; }
+                }
+            }
+            class Base { int value = 40; }
+            class Derived : Base {
+                int run(Outer outer) {
+                    int nested() {
+                        auto inner = outer.new Outer.Inner!value;
+                        return inner.call();
+                    }
+                    return nested();
+                }
+            }
+            int main() {
+                auto derived = new Derived;
+                return derived.run(new Outer) == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A dual-context nested function called directly: its second context is
+// the frame of the function that owns the alias.
+static foreach (backend; Matrix!()) {
+    @("callDualContextNestedFunctionDirectly." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int outerLocal = 40;
+                int callee() { return outerLocal; }
+                int innerLocal = 2;
+                int add(alias other)() { return innerLocal + other(); }
+                return add!callee() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A compound assignment to the field of another struct goes through the
+// second context, which dmd types as a pointer to the struct.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on a dual-context "
+            ~ "function whose second context is a struct `this`"),
+)) {
+    @("compoundAssignFieldOfOtherStructFromDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                int base = 2;
+                void bump(alias field)() { field += base; field *= 2; ++field; }
+            }
+            struct Owner {
+                int value = 19;
+                void run(ref Holder holder) { holder.bump!value(); }
+            }
+            int main() {
+                Holder holder;
+                Owner owner;
+                owner.run(holder);
+                return owner.value == 43 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// The field of another struct passed by `ref` is the address of that
+// field in the object behind the second context.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on a dual-context "
+            ~ "function whose second context is a struct `this`"),
+)) {
+    @("passFieldOfOtherStructByRefFromDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void addTwo(ref int number) { number += 2; }
+            struct Holder {
+                void touch(alias field)() { addTwo(field); }
+            }
+            struct Owner {
+                int value = 40;
+                void run(ref Holder holder) { holder.touch!value(); }
+            }
+            int main() {
+                Holder holder;
+                Owner owner;
+                owner.run(holder);
+                return owner.value == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// Taking the address of the field of another struct gives a pointer into
+// the object behind the second context.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on a dual-context "
+            ~ "function whose second context is a struct `this`"),
+)) {
+    @("addressOfFieldOfOtherStructFromDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Holder {
+                void store(alias field)() {
+                    int* pointer = &field;
+                    *pointer = 42;
+                }
+            }
+            struct Owner {
+                int value = 40;
+                void run(ref Holder holder) { holder.store!value(); }
+            }
+            int main() {
+                Holder holder;
+                Owner owner;
+                owner.run(holder);
+                return owner.value == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A method call on a struct field of another struct passes the address of
+// that field as its receiver.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine fails with an internal error on a dual-context "
+            ~ "function whose second context is a struct `this`"),
+)) {
+    @("callMethodOfFieldOfOtherStructFromDualContextMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Counter {
+                int count;
+                void add(int amount) { count += amount; }
+            }
+            struct Holder {
+                void touch(alias field)() { field.add(42); }
+            }
+            struct Owner {
+                Counter counter;
+                void run(ref Holder holder) { holder.touch!counter(); }
+            }
+            int main() {
+                Holder holder;
+                Owner owner;
+                owner.run(holder);
+                return owner.counter.count == 42 ? 0 : 1;
+            }
+        });
+    }
+}
