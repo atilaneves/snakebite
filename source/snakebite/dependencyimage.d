@@ -542,10 +542,9 @@ public struct ProjectImageCache {
         in string settings,
         in string[] roots,
         in string compiler = defaultCompiler,
-        in string generator = imported!"std.file".thisExePath(),
+        in string generator = runningExecutable,
     ) {
         import std.conv: text;
-
         import std.path: extension, stripExtension;
 
         _path = text(recordPath.stripExtension, "-", generatorKey(generator),
@@ -651,13 +650,22 @@ public struct ProjectImageCache {
 }
 
 
+// The path of this running executable. On Linux the kernel resolves it to
+// the running file even after that file is replaced or removed; a path
+// from `thisExePath` then names the missing file.
+public string runningExecutable() {
+    version (linux)
+        return "/proc/self/exe";
+    else
+        return imported!"std.file".thisExePath;
+}
+
+
 // Names the build of snakebite that is running. A different or rebuilt
 // executable gives a different key; so does a copy, which costs one miss
 // and is never wrong. A stat stands in for hashing the executable, which
 // is megabytes.
-public string generatorKey(
-    in string generator = imported!"std.file".thisExePath(),
-) {
+public string generatorKey(in string generator = runningExecutable) {
     return sourceDigest(fileStamp(generator))[0 .. 16];
 }
 

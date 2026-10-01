@@ -60,7 +60,7 @@ private bool decode(in ubyte[] bytes, out imported!"std.json".JSONValue value) {
 public imported!"std.json".JSONValue cachedDubDescription(
     in string directory, in string compiler, in string[] versions,
     scope imported!"std.json".JSONValue delegate() describe,
-    in string generator = imported!"std.file".thisExePath,
+    in string generator = imported!"snakebite.dependencyimage".runningExecutable,
 ) {
     import std.json: JSONValue, JSONType;
     import std.file: exists, read, write, mkdirRecurse, rename, remove, FileException;
