@@ -1278,6 +1278,60 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A destructor-bearing first constructor argument is a temporary that dmd
+// stages in the `NewExp` argument prefix, with its own cleanup gate. The
+// prefix keeps argument order, and the temporary is destroyed exactly once.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE cannot evaluate placement `NewExp` expressions"),
+)) {
+    @("placementNew.destructibleArgumentRunsCleanupOnce." ~
+        backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int log;
+            int destructions;
+
+            struct Guard {
+                int value;
+                ~this() { ++destructions; }
+            }
+
+            struct Value {
+                int first;
+                int second;
+
+                this(Guard guard, int other) {
+                    first = guard.value;
+                    second = other;
+                    assert(destructions == 0);
+                }
+            }
+
+            Guard makeGuard() {
+                log = log * 10 + 1;
+                return Guard(5);
+            }
+
+            int other() {
+                log = log * 10 + 2;
+                return 9;
+            }
+
+            void main() {
+                Value storage = void;
+                Value* result = new (storage) Value(makeGuard, other);
+                assert(result == &storage);
+                assert(storage.first == 5);
+                assert(storage.second == 9);
+                assert(log == 12);
+                assert(destructions == 1);
+            }
+        });
+    }
+}
+
 // A discarded allocation still runs its constructor exactly once.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
