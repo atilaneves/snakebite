@@ -674,6 +674,169 @@ static foreach (backend; Matrix!(
     }
 }
 
+
+// Class placement construction writes the class init image into the
+// supplied bytes before it runs the constructor, then returns a reference
+// to those same bytes.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE cannot evaluate placement `NewExp` expressions"),
+)) {
+    @("placementNew.classInitializesCallerStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class DefaultValue {
+                int value = 41;
+            }
+
+            class ConstructedValue {
+                int value;
+                this(int value) { this.value = value; }
+            }
+
+            void main() {
+                void*[4] defaultStorage;
+                void*[4] constructedStorage;
+                auto defaultValue = new (defaultStorage) DefaultValue;
+                auto constructedValue =
+                    new (constructedStorage) ConstructedValue(73);
+
+                assert(cast(void*) defaultValue == defaultStorage.ptr);
+                assert(defaultValue.value == 41);
+                assert(cast(void*) constructedValue == constructedStorage.ptr);
+                assert(constructedValue.value == 73);
+            }
+        });
+    }
+}
+
+
+// D lowers an anonymous class expression to its declaration followed by
+// the same class construction as a named type. Placement keeps that
+// generated class object in the supplied bytes.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE cannot evaluate placement `NewExp` expressions"),
+)) {
+    @("placementNew.anonymousClassUsesCallerStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                void*[4] storage;
+                auto value = new (storage) class {
+                    int number = 41;
+                };
+
+                assert(cast(void*) value == storage.ptr);
+                assert(value.number == 41);
+            }
+        });
+    }
+}
+
+
+// Placement does not remove the explicit outer object from a nested class
+// allocation. The constructor and later method must both use that same
+// outer object, while the class itself stays in caller storage.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE cannot evaluate placement `NewExp` expressions"),
+)) {
+    @("placementNew.nestedClassUsesExplicitOuter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Outer {
+                int value = 7;
+
+                final class Inner {
+                    this(int increment) { value += increment; }
+                    int get() { return value; }
+                }
+            }
+
+            void main() {
+                auto outer = new Outer;
+                void*[4] storage;
+                auto inner = outer.new (storage) Inner(5);
+
+                assert(cast(void*) inner == storage.ptr);
+                assert(inner.get() == 12);
+                assert(outer.value == 12);
+            }
+        });
+    }
+}
+
+
+// The on-stack route must also initialize the explicit outer context before
+// it calls a nested class constructor.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE leaves a nested class's `this.this` null"),
+)) {
+    @("scopeNestedClassUsesExplicitOuter." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Outer {
+                int value = 7;
+
+                final class Inner {
+                    this(int increment) { value += increment; }
+                    int get() { return value; }
+                }
+            }
+
+            void main() {
+                auto outer = new Outer;
+                {
+                    scope inner = outer.new Inner(5);
+                    assert(inner.get() == 12);
+                }
+                assert(outer.value == 12);
+            }
+        });
+    }
+}
+
+
+// A nested class in a function has no explicit outer-object expression.
+// Its constructor must receive the captured function context for both
+// placement and stack allocation.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE cannot evaluate placement `NewExp` expressions"),
+)) {
+    @("nestedClassConstructorUsesCapturedContext." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                int value = 7;
+
+                final class Inner {
+                    this(int increment) { value += increment; }
+                    int get() { return value; }
+                }
+
+                void*[4] storage;
+                auto placed = new (storage) Inner(5);
+                assert(cast(void*) placed == storage.ptr);
+                assert(placed.get() == 12);
+
+                {
+                    scope stacked = new Inner(3);
+                    assert(stacked.get() == 15);
+                }
+                assert(value == 15);
+            }
+        });
+    }
+}
+
 // `scope` on the variable, not the class, still runs the destructor at
 // scope exit and allocates off the GC heap. `resource`'s type is inferred
 // (dmd's dsymbolsem.d runs a full expressionSemantic on the initialiser
