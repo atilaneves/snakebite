@@ -463,7 +463,7 @@ public struct NativeData {
     private SymbolAddress _symbolAddress;
     private ThreadLocalAddress _threadLocalAddress;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
-    private NativeCall _call;
+    private LoweringCall _callLowering;
     // Read and written only under the compiler lock. Key by the object,
     // not a reference expression, to preserve aliases and cycles.
     private void*[StructLiteralExp] _classValues;
@@ -492,22 +492,22 @@ public struct NativeData {
         SymbolAddress symbolAddress,
         ThreadLocalAddress threadLocalAddress,
         TypeInfo_Class delegate(ClassDeclaration) classInfo,
-        NativeCall call,
+        LoweringCall call,
     ) {
         _isRootOwned = isRootOwned;
         _symbolAddress = symbolAddress;
         _threadLocalAddress = threadLocalAddress;
         _classInfo = classInfo;
-        _call = call;
+        _callLowering = call;
         _tls = PerThread!(TlsSlots*)(() => new TlsSlots);
     }
 
-    private void callNative(
+    private void callLowering(
         imported!"dmd.func".FuncDeclaration function_,
         void* returnPlace,
-        scope const(void*)[] arguments,
+        scope void*[] arguments,
     ) {
-        _call(function_, returnPlace, arguments);
+        _callLowering(function_, returnPlace, arguments);
     }
 
     public void write(
@@ -785,12 +785,13 @@ private alias SymbolAddress =
     void* delegate(imported!"dmd.declaration".Declaration);
 // This thread's address of a thread-local symbol, by linker name.
 private alias ThreadLocalAddress = void* delegate(in char[] name);
-// Calls `function_` natively: `arguments[i]` is the address of parameter
-// `i`'s bytes, and the result goes to `returnPlace`.
-private alias NativeCall = void delegate(
+// Calls the function that a lowering names, as guest or native code:
+// `arguments[i]` is the address of parameter `i`'s bytes, and the result
+// goes to `returnPlace`.
+private alias LoweringCall = void delegate(
     imported!"dmd.func".FuncDeclaration function_,
     void* returnPlace,
-    scope const(void*)[] arguments,
+    scope void*[] arguments,
 );
 
 public string nativeSymbolName(imported!"dmd.declaration".Declaration symbol) {
@@ -1094,9 +1095,9 @@ private void storeValue(
             *cast(void**) (valuesArgument.ptr + arrayPointerOffset) =
                 valueBytes.ptr;
 
-            const(void*)[2] arguments =
+            void*[2] arguments =
                 [keysArgument.ptr, valuesArgument.ptr];
-            nativeData.callNative(constructor.f, place, arguments[]);
+            nativeData.callLowering(constructor.f, place, arguments[]);
             return;
         }
 

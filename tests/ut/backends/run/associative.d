@@ -409,14 +409,19 @@ static foreach (backend; Matrix!()) {
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            int[string] makeTable() {
-                return ["a": 1, "b": 2];
+            struct Point {
+                int x;
+                int y;
+            }
+
+            Point[string] makeTable() {
+                return ["a": Point(1, 2), "b": Point(3, 4)];
             }
 
             static immutable table = makeTable();
 
             int main() {
-                return table["b"] == 2 && table["a"] == 1
+                return table["b"].y == 4 && table["a"].x == 1
                     && table.length == 2 ? 0 : 1;
             }
         });
@@ -430,10 +435,16 @@ static foreach (backend; Matrix!()) {
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            immutable int[string] table = ["a": 1, "b": 2];
+            struct Point {
+                int x;
+                int y;
+            }
+
+            immutable Point[string] table =
+                ["a": Point(1, 2), "b": Point(3, 4)];
 
             int main() {
-                return table["b"] == 2 && table["a"] == 1
+                return table["b"].y == 4 && table["a"].x == 1
                     && table.length == 2 ? 0 : 1;
             }
         });
@@ -450,10 +461,15 @@ static foreach (backend; Matrix!(
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
             int main() {
-                static int[string] table = ["a": 1];
-                table["b"] = 2;
-                return table["a"] == 1 && table["b"] == 2
+                static Point[string] table = ["a": Point(1, 2)];
+                table["b"] = Point(3, 4);
+                return table["a"].x == 1 && table["b"].y == 4
                     && table.length == 2 ? 0 : 1;
             }
         });
@@ -483,7 +499,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-// A static associative array can hold class references.
+// A static associative array literal can hold class references.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read a static variable's value at compile time"),
@@ -501,8 +517,7 @@ static foreach (backend; Matrix!(
             }
 
             int main() {
-                static Animal[string] animals;
-                animals["dog"] = new Animal(4);
+                static Animal[string] animals = ["dog": new Animal(4)];
                 return animals["dog"].legs == 4 ? 0 : 1;
             }
         });
@@ -540,10 +555,15 @@ static foreach (backend; Matrix!(
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
             int main() {
-                static int[string][string] table =
-                    ["x": ["a": 1], "y": ["b": 2]];
-                return table["y"]["b"] == 2 && table["x"]["a"] == 1
+                static Point[string][string] table =
+                    ["x": ["a": Point(1, 2)], "y": ["b": Point(3, 4)]];
+                return table["y"]["b"].y == 4 && table["x"]["a"].x == 1
                     && table.length == 2 ? 0 : 1;
             }
         });
@@ -556,13 +576,18 @@ static foreach (backend; Matrix!()) {
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
             struct S {
-                int[string] m = ["a": 1];
+                Point[string] m = ["a": Point(1, 2)];
             }
 
             int main() {
                 S s;
-                return s.m["a"] == 1 ? 0 : 1;
+                return s.m["a"].y == 2 ? 0 : 1;
             }
         });
     }
@@ -574,13 +599,18 @@ static foreach (backend; Matrix!()) {
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
             class C {
-                int[string] m = ["a": 1];
+                Point[string] m = ["a": Point(1, 2)];
             }
 
             int main() {
                 auto c = new C;
-                return c.m["a"] == 1 ? 0 : 1;
+                return c.m["a"].y == 2 ? 0 : 1;
             }
         });
     }
@@ -595,17 +625,22 @@ static foreach (backend; Matrix!(
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            __gshared int[string] table = ["a": 1];
+            struct Point {
+                int x;
+                int y;
+            }
+
+            __gshared Point[string] table = ["a": Point(1, 2)];
 
             int main() {
-                table["b"] = 2;
-                return table["a"] == 1 && table["b"] == 2 ? 0 : 1;
+                table["b"] = Point(3, 4);
+                return table["a"].x == 1 && table["b"].y == 4 ? 0 : 1;
             }
         });
     }
 }
 
-// A thread-local associative array is a static initialiser.
+// A thread-local associative array with struct keys is a static initialiser.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read a static variable's value at compile time"),
@@ -614,11 +649,17 @@ static foreach (backend; Matrix!(
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            int[string] table = ["a": 1];
+            struct Key {
+                string name;
+                int number;
+            }
+
+            int[Key] table = [Key("a", 1): 10];
 
             int main() {
-                table["b"] = 2;
-                return table["a"] == 1 && table["b"] == 2 ? 0 : 1;
+                table[Key("b", 2)] = 20;
+                return table[Key("a", 1)] == 10 && table[Key("b", 2)] == 20
+                    ? 0 : 1;
             }
         });
     }
