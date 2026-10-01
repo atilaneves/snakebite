@@ -108,6 +108,30 @@ public struct CallSelection {
         ).route == Route.guest;
     }
 
+    // Runs the lowered call of a static initialiser (an associative array
+    // literal's `_d_assocarrayliteralTX!(K, V)`) the way an ordinary call to
+    // it runs: that template instance has machine code only when druntime
+    // instantiated it over the same types, so otherwise it is guest code.
+    // The routes `builtin`, `vaStart` and `alloca` never apply to such a
+    // lowering, so they take the plan with `native`.
+    public void callLowering(
+        FuncDeclaration function_,
+        void* returnPlace,
+        scope void*[] arguments,
+        scope bool delegate(FuncDeclaration) isGuest,
+        lazy bool hasNativeSymbol,
+        lazy bool hasIndependentNativeSymbol,
+        scope void delegate(FuncDeclaration, void*, void*[]) callGuest,
+        scope void delegate(FuncDeclaration, void*, scope const(void*)[])
+            callPlan,
+    ) {
+        if (usesGuestBody(function_, isGuest, hasNativeSymbol,
+                hasIndependentNativeSymbol))
+            callGuest(function_, returnPlace, arguments);
+        else
+            callPlan(function_, returnPlace, arguments);
+    }
+
     // A host variadic function pointer must keep its host address. Its
     // call plan depends on the extra argument types at each call site.
     public bool usesNativeVariadicAddress(

@@ -27,7 +27,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 
     public this(const Program program) {
         super(program);
-        _shared = new Shared(program);
+        _shared = new Shared(program, &call);
         _shared.plans.useCallbacks(
             new CallbackBridge(
                 &invokeCallback,
@@ -238,13 +238,17 @@ private struct Shared {
     // directly instead of crossing the FFI barrier to call itself.
     SharedTable!(const(void)*, FuncDeclaration) callableDeclarations;
 
-    this(const Program program) {
+    // Runs a guest function from host code with native-layout arguments.
+    private void delegate(FuncDeclaration, void*, void*[]) callGuest;
+
+    this(const Program program, typeof(callGuest) callGuest) {
         this.program = program;
+        this.callGuest = callGuest;
         plans = PlanCache(program.dependencyImage);
         nativeData = NativeData(&this.program.isRootOwned,
             &constantSymbolAddress,
             (name) => plans.resolveThreadLocal(name),
-            &classRuntimeInfo, &callNative);
+            &classRuntimeInfo, &callLowering);
         runtimeTypes = RuntimeTypes(&this.program.isRootOwned,
             (name) => plans.resolve(name),
             &callableAddress,
@@ -261,12 +265,16 @@ private struct Shared {
         return plans.resolve(nativeSymbolName(symbol));
     }
 
-    private void callNative(
+    private void callLowering(
         FuncDeclaration function_,
         void* returnPlace,
-        scope const(void*)[] arguments,
+        scope void*[] arguments,
     ) {
-        plans.of(function_).call(returnPlace, arguments);
+        callSelection.callLowering(function_, returnPlace, arguments,
+            (callee) => program.isInterpreted(callee),
+            plans.hasNativeSymbol(function_),
+            plans.hasIndependentNativeSymbol(function_), callGuest,
+            (callee, place, args) => plans.of(callee).call(place, args));
     }
 
     // A guest class's native metadata. This vtable is real native layout

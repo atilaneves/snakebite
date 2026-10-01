@@ -96,7 +96,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         _nativeData = NativeData(&_program.isRootOwned,
             &constantSymbolAddress,
             (name) => _plans.resolveThreadLocal(name),
-            &classRuntimeInfo, &callNative);
+            &classRuntimeInfo, &callLowering);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &callableAddress,
             &classRuntimeInfo,
@@ -116,12 +116,15 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _plans.resolve(nativeSymbolName(symbol));
     }
 
-    private void callNative(
+    private void callLowering(
         FuncDeclaration function_,
         void* returnPlace,
-        scope const(void*)[] arguments,
+        scope void*[] arguments,
     ) {
-        _plans.of(function_).call(returnPlace, arguments);
+        _callSelection.callLowering(function_, returnPlace, arguments,
+            &isGuestFunction, hasNativeSymbol(function_),
+            hasIndependentNativeSymbol(function_), &call,
+            (callee, place, args) => _plans.of(callee).call(place, args));
     }
 
     public override CompilationStatistics compilationStatistics() const {

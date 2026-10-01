@@ -400,3 +400,267 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A module-scope `static immutable` associative array initialised by a call
+// is built while the frontend evaluates the call, and the program reads the
+// finished table.
+static foreach (backend; Matrix!()) {
+    @("staticImmutableAssocArrayFromCtfeCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
+            Point[string] makeTable() {
+                return ["a": Point(1, 2), "b": Point(3, 4)];
+            }
+
+            static immutable table = makeTable();
+
+            int main() {
+                return table["b"].y == 4 && table["a"].x == 1
+                    && table.length == 2 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A module-scope `immutable` associative array literal is a static
+// initialiser.
+static foreach (backend; Matrix!()) {
+    @("moduleScopeImmutableAssocArrayLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
+            immutable Point[string] table =
+                ["a": Point(1, 2), "b": Point(3, 4)];
+
+            int main() {
+                return table["b"].y == 4 && table["a"].x == 1
+                    && table.length == 2 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A function-level `static` associative array starts as its literal and
+// accepts inserts.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable's value at compile time"),
+)) {
+    @("functionStaticAssocArrayLiteralIsMutable." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
+            int main() {
+                static Point[string] table = ["a": Point(1, 2)];
+                table["b"] = Point(3, 4);
+                return table["a"].x == 1 && table["b"].y == 4
+                    && table.length == 2 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A static associative array can hold struct values.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable's value at compile time"),
+)) {
+    @("staticAssocArrayOfStructValues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
+            int main() {
+                static Point[string] points =
+                    ["a": Point(1, 2), "b": Point(3, 4)];
+                return points["b"].y == 4 && points["a"].x == 1 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A static associative array literal can hold class references.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable's value at compile time"),
+)) {
+    @("staticAssocArrayWithClassValues." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Animal {
+                int legs;
+
+                this(int legs) {
+                    this.legs = legs;
+                }
+            }
+
+            int main() {
+                static Animal[string] animals = ["dog": new Animal(4)];
+                return animals["dog"].legs == 4 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A static associative array can have struct keys that hold strings.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable's value at compile time"),
+)) {
+    @("staticAssocArrayWithStructKeys." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Key {
+                string name;
+                int number;
+            }
+
+            int main() {
+                static int[Key] table = [Key("a", 1): 10, Key("b", 2): 20];
+                return table[Key("b", 2)] == 20 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A static associative array of associative arrays.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable's value at compile time"),
+)) {
+    @("staticNestedAssocArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
+            int main() {
+                static Point[string][string] table =
+                    ["x": ["a": Point(1, 2)], "y": ["b": Point(3, 4)]];
+                return table["y"]["b"].y == 4 && table["x"]["a"].x == 1
+                    && table.length == 2 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// An associative array literal initialises a struct field.
+static foreach (backend; Matrix!()) {
+    @("structFieldAssocArrayInitialiser." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
+            struct S {
+                Point[string] m = ["a": Point(1, 2)];
+            }
+
+            int main() {
+                S s;
+                return s.m["a"].y == 2 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// An associative array literal initialises a class field.
+static foreach (backend; Matrix!()) {
+    @("classFieldAssocArrayInitialiser." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
+            class C {
+                Point[string] m = ["a": Point(1, 2)];
+            }
+
+            int main() {
+                auto c = new C;
+                return c.m["a"].y == 2 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A `__gshared` associative array is a static initialiser.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable's value at compile time"),
+)) {
+    @("gsharedAssocArrayLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Point {
+                int x;
+                int y;
+            }
+
+            __gshared Point[string] table = ["a": Point(1, 2)];
+
+            int main() {
+                table["b"] = Point(3, 4);
+                return table["a"].x == 1 && table["b"].y == 4 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// A thread-local associative array with struct keys is a static initialiser.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable's value at compile time"),
+)) {
+    @("threadLocalStaticAssocArrayLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Key {
+                string name;
+                int number;
+            }
+
+            int[Key] table = [Key("a", 1): 10];
+
+            int main() {
+                table[Key("b", 2)] = 20;
+                return table[Key("a", 1)] == 10 && table[Key("b", 2)] == 20
+                    ? 0 : 1;
+            }
+        });
+    }
+}

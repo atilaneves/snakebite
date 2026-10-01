@@ -52,6 +52,55 @@ def test_module_constructor_uses_project_directory(
     assert (tmp_path / "app" / "test-ran.txt").exists()
 
 
+# `bin/sb` has no native instance of the druntime template that builds an
+# associative array literal, unlike `bin/ut`, so a static initialiser's
+# literal must run as guest code.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_struct_field_assoc_array_initialiser(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(tmp_path / "app" / "dub.sdl", dub_project_recipe("aa-field"))
+    write(
+        tmp_path / "app" / "source" / "main.d",
+        """
+        module main;
+        struct S { int[string] m = ["a": 1]; }
+        unittest { S s; assert(s.m["a"] == 1); }
+        int main() { return 0; }
+        """,
+    )
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_immutable_assoc_array_literal(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(tmp_path / "app" / "dub.sdl", dub_project_recipe("aa-immutable"))
+    write(
+        tmp_path / "app" / "source" / "main.d",
+        """
+        module main;
+        immutable int[string] g = ["g": 7];
+        unittest { assert(g["g"] == 7); }
+        int main() { return 0; }
+        """,
+    )
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 # Guest code runs in the project directory, but snakebite's own state
 # stays in the directory it was started from.
 @pytest.mark.parametrize("backend", BACKENDS)
