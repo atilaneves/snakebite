@@ -637,8 +637,12 @@ public struct CallPlan {
                 memcpy(bytes + returnOffset,
                     frameBytes + move.sourceOffset, 16);
                 returnOffset += 16;
+            } else if (move.store == Store.partial) {
+                memcpy(bytes + returnOffset,
+                    frameBytes + move.sourceOffset, move.bytes);
+                returnOffset += 8;
             } else {
-                storeResult(move,
+                storeResult(move.store,
                     *cast(size_t*) (frameBytes + move.sourceOffset),
                     bytes + returnOffset);
                 returnOffset += 8;
@@ -693,34 +697,29 @@ public struct CallPlan {
     // every call.
     pragma(inline, true)
     private static void storeResult(
-        in ResultMove move, in size_t value, void* place,
+        in Store store, in size_t value, void* place,
     ) {
-        if (move.store == Store.byte8) {
+        if (store == Store.byte8) {
             *cast(size_t*) place = value;
             return;
         }
-        if (move.store == Store.byte4) {
+        if (store == Store.byte4) {
             *cast(uint*) place = cast(uint) value;
             return;
         }
-        storeRare(move, value, place);
+        storeRare(store, value, place);
     }
 
     pragma(inline, false)
     private static void storeRare(
-        in ResultMove move, in size_t value, void* place,
+        in Store store, in size_t value, void* place,
     ) {
-        final switch (move.store) with (Store) {
+        final switch (store) with (Store) {
             case byte1: *cast(ubyte*) place = cast(ubyte) value; break;
             case byte2: *cast(ushort*) place = cast(ushort) value; break;
             case byte4: *cast(uint*) place = cast(uint) value; break;
             case byte8: *cast(size_t*) place = value; break;
-            case partial: {
-                import core.stdc.string: memcpy;
-
-                memcpy(place, &value, move.bytes);
-                break;
-            }
+            case partial: assert(false, "a partial result is copied");
             case copy16: assert(false, "16-byte result uses memcpy");
         }
     }

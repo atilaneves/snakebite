@@ -79,9 +79,9 @@ public struct CStack(T, bool scanned = false) {
         _length = length;
     }
 
+    // Unchecked: the interpreter reads items by index on each expression,
+    // and a check there costs a measurable share of a tight loop.
     public ref inout(T) opIndex(in size_t index) inout {
-        if (index >= _length)
-            assert(0, "index past the end of a stack");
         return _items[index];
     }
 
