@@ -147,6 +147,33 @@ public imported!"dmd.func".FuncDeclaration[] findModuleConstructors(
     return sharedCtors ~ ordinary;
 }
 
+// Every module destructor in `module_`, in declaration order, found the
+// way `findModuleConstructors` finds the constructors.
+public struct ModuleDestructors {
+    imported!"dmd.func".FuncDeclaration[] shared_;
+    imported!"dmd.func".FuncDeclaration[] threadLocal;
+}
+
+public ModuleDestructors findModuleDestructors(
+    imported!"dmd.dmodule".Module module_,
+) {
+    ModuleDestructors destructors;
+    appendFromScope(module_.members, (member) {
+        if (auto destructor = member.isSharedStaticDtorDeclaration()) {
+            destructors.shared_ ~= destructor;
+            return true;
+        }
+
+        if (auto destructor = member.isStaticDtorDeclaration()) {
+            destructors.threadLocal ~= destructor;
+            return true;
+        }
+
+        return false;
+    });
+    return destructors;
+}
+
 private void appendModuleConstructors(
     imported!"dmd.arraytypes".Dsymbols* symbols,
     ref imported!"dmd.func".FuncDeclaration[] sharedCtors,

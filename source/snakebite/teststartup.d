@@ -66,7 +66,8 @@ public TestStartupReport runTestsAndMain(
     imported!"snakebite.backends.backend".Program program,
     in string[] arguments,
 ) {
-    import snakebite.backends.backend: runMain, runModuleConstructors;
+    import snakebite.backends.backend:
+        runMain, runModuleConstructors, runModuleDestructors;
     import snakebite.dependencyimage: TestHooks;
     import std.algorithm.iteration: map;
     import std.array: array;
@@ -136,6 +137,10 @@ public TestStartupReport runTestsAndMain(
     watch.install(TestHooks.current);
     scope(exit) watch.restore;
     report.status = _d_run_main(_runtimeCArgs.argc, cArguments.ptr, &callMain);
+    // The guest's destructors follow the guest's threads, and precede the
+    // host's own `rt_term` below.
+    if (runModuleDestructors(backend, program, true) && report.status == 0)
+        report.status = 1;
     if (watch.escaped)
         rt_term();
     report.constructorDuration = constructorDuration;

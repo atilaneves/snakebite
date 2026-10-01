@@ -30,6 +30,13 @@ public struct Program {
     FuncDeclaration[] moduleConstructors;
     // Built once from `rootModules`; see `linkedFunctionOf`.
     private LinkMap _links;
+    // In the order compiled D runs them at program end: the reverse of
+    // declaration order, so a module's destructors follow those of the
+    // modules that come after it. `threadDestructors` run on each thread
+    // that ran the thread-local constructors, as that thread ends. The
+    // main thread's run before `sharedDestructors`.
+    FuncDeclaration[] sharedDestructors;
+    FuncDeclaration[] threadDestructors;
     Main main;
     string name;
     private Checks _checks;
@@ -63,7 +70,10 @@ public struct Program {
     ) {
         import snakebite.frontend.dmd.functions:
             findFunction,
-            findModuleConstructors;
+            findModuleConstructors,
+            findModuleDestructors;
+        import std.range: retro;
+        import std.array: array;
 
         this.rootModules = rootModules;
         _links = LinkMap(rootModules);
@@ -73,7 +83,13 @@ public struct Program {
         foreach (module_; rootModules) {
             _rootModuleSet[module_] = true;
             moduleConstructors ~= findModuleConstructors(module_);
+            auto destructors = findModuleDestructors(module_);
+            sharedDestructors ~= destructors.shared_;
+            threadDestructors ~= destructors.threadLocal;
         }
+
+        sharedDestructors = sharedDestructors.retro.array;
+        threadDestructors = threadDestructors.retro.array;
 
         foreach (module_; rootModules) {
             auto found = findFunction(module_, "main");
@@ -174,12 +190,16 @@ public abstract class Backend {
     // called natively is the program's one decision (`isInterpreted`),
     // so every backend is constructed knowing which program it runs.
     protected const Program _program;
-    private PerThread!(bool*) _threadInitialized;
+    private PerThread!(ThreadModules*) _threadModules;
     private FuncDeclaration[] _threadConstructors;
+    private FuncDeclaration[] _threadDestructors;
 
     protected this(const Program program) {
         _program = program;
-        _threadInitialized = PerThread!(bool*)(() => new bool);
+        // DMD declarations retain mutable semantic caches.
+        _threadDestructors = cast(FuncDeclaration[]) program.threadDestructors;
+        _threadModules = PerThread!(ThreadModules*)(
+            () => new ThreadModules(false, false, this, _threadDestructors));
         foreach (constructor; program.moduleConstructors)
             if (constructor.isStaticCtorDeclaration !is null
                 && constructor.isSharedStaticCtorDeclaration is null)
@@ -188,16 +208,16 @@ public abstract class Backend {
     }
 
     protected void initializeThread() {
-        if (_threadConstructors.length == 0)
+        if (_threadConstructors.length == 0 && _threadDestructors.length == 0)
             return;
-        auto initialized = _threadInitialized.current;
-        if (*initialized)
+        auto thread = _threadModules.current;
+        if (thread.constructed)
             return;
 
         // Publish before calling guest code: constructors can call back
         // into this backend on the same thread.
-        *initialized = true;
-        scope(failure) *initialized = false;
+        thread.constructed = true;
+        scope(failure) thread.constructed = false;
         foreach (constructor; _threadConstructors)
             call(constructor, null, []);
     }
@@ -264,7 +284,62 @@ public int run(
             program.hasCEntryPoint ? null : program.moduleConstructors))
         return 1;
 
-    return runMain(backend, program, hostArguments);
+    const status = runMain(backend, program, hostArguments);
+    const destructorStatus = runModuleDestructors(backend, program, false);
+    return status != 0 ? status : destructorStatus;
+}
+
+// What druntime does at program end, once `main` returned or threw: the
+// main thread's thread-local destructors, then the shared ones. An
+// exception from one ends the phase, skips the rest and fails the program.
+// A caller that owns the process joins the other threads first, as druntime
+// does; one that runs on a thread a test runner owns cannot, because that
+// thread would wait for itself.
+package(snakebite) int runModuleDestructors(
+    Backend backend,
+    Program program,
+    in bool joinThreads,
+) {
+    import core.thread: thread_joinAll;
+
+    return failing(() {
+        backend._threadModules.current.finish;
+        if (joinThreads)
+            thread_joinAll;
+
+        foreach (destructor; program.sharedDestructors)
+            backend.call(destructor, null, []);
+    }) ? 1 : 0;
+}
+
+// The thread-local module state of one thread of one backend. When the
+// thread ends, its destructors run, the same way druntime runs them for a
+// thread it started, but only if the thread ran the constructors. A
+// program whose startup failed runs none.
+private struct ThreadModules {
+    import dmd.func: FuncDeclaration;
+
+    bool constructed;
+    bool finished;
+    Backend backend;
+    FuncDeclaration[] destructors;
+
+    void finish() {
+        if (!constructed || finished)
+            return;
+
+        finished = true;
+        foreach (destructor; destructors)
+            backend.call(destructor, null, []);
+    }
+
+    // A GC finalizer must not call guest code.
+    ~this() {
+        import core.memory: GC;
+
+        if (!GC.inFinalizer)
+            failing(&finish);
+    }
 }
 
 // A constructor that cannot run is a failed program startup. Report it
@@ -276,7 +351,8 @@ package(snakebite) int runModuleConstructors(
     import snakebite.exception: SnakebiteException;
     import std.stdio: stderr;
 
-    *backend._threadInitialized.current = true;
+    auto thread = backend._threadModules.current;
+    thread.constructed = true;
     foreach (constructor; constructors) {
         try
             backend.call(constructor, null, []);
@@ -287,6 +363,7 @@ package(snakebite) int runModuleConstructors(
                 "`: ",
                 exception.msg,
             );
+            thread.finished = true;
             return 1;
         }
         catch (Throwable throwable) {
@@ -296,6 +373,7 @@ package(snakebite) int runModuleConstructors(
                 "` failed: ",
                 throwable.msg,
             );
+            thread.finished = true;
             return 1;
         }
     }

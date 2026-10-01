@@ -386,9 +386,10 @@ def test_thread_destructor_runs_when_thread_ends(
     ]
 
 
-# `bin/sb` runs the unittests, then `main`, then the module destructors.
+# Compiled D with `-unittest` runs the unittests, not `main`, and then the
+# module destructors.
 @pytest.mark.parametrize("backend", FILE_BACKENDS)
-def test_module_destructor_runs_after_unittests_and_main(
+def test_module_destructor_runs_after_unittests(
     tmp_path: Path, backend: str,
 ) -> None:
     write(
@@ -405,7 +406,7 @@ def test_module_destructor_runs_after_unittests_and_main(
     result = run_app(tmp_path, backend)
 
     assert result.returncode == 0, output(result)
-    assert guest_lines(result) == ["unittest", "main", "dtor"]
+    assert guest_lines(result) == ["unittest", "dtor"]
 
 
 # Compiled D with `-unittest` runs the destructors even when a unittest
