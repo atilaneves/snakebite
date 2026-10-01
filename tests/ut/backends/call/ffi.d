@@ -1107,6 +1107,65 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A guest C variadic function that host code calls gets its extra
+// arguments in registers. A second va_start starts again from them.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("callback.variadicC.startRestart." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        23.0.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+            alias Callback = extern(C) double function(int, ...);
+            pragma(mangle, "snakebite_ut_call_mixed_c_variadic_callback")
+            extern(C) double invoke(Callback);
+            extern(C) double guest(int fixed, ...) {
+                va_list args;
+                double total = fixed;
+                foreach (pass; 0 .. 2) {
+                    va_start(args, fixed);
+                    total += va_arg!double(args);
+                    total += va_arg!int(args);
+                    total += va_arg!double(args);
+                    va_end(args);
+                }
+                return total;
+            }
+            double answer() { return invoke(&guest); }
+        }, "answer");
+    }
+}
+
+// The va_list of a guest C variadic function that host code calls goes
+// to vsnprintf, which reads the int and the doubles from the register
+// save area.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("callback.variadicC.startToHost." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        10.0.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_end, va_list, va_start;
+            import core.stdc.stdio: vsnprintf;
+            alias Callback = extern(C) double function(int, ...);
+            pragma(mangle, "snakebite_ut_call_mixed_c_variadic_callback")
+            extern(C) double invoke(Callback);
+            extern(C) double guest(int fixed, ...) {
+                char[32] buffer;
+                va_list args;
+                va_start(args, fixed);
+                const length = vsnprintf(
+                    buffer.ptr, buffer.length, "%.1f %d %.1f", args);
+                va_end(args);
+                return fixed + (buffer[0 .. length] == "1.5 3 2.5");
+            }
+            double answer() { return invoke(&guest); }
+        }, "answer");
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
 )) {
