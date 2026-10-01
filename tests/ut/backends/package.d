@@ -165,9 +165,13 @@ public void shouldBeStatusOf(
 // - an unqualified lookup would instead walk out to this module's public
 // imports and could silently resolve to an unrelated `main`.
 //
-// The source arrives as one type per character, not as a `string` template
-// argument: dmd cannot mangle a `string` value in the parent chain of an
-// `extern(C++)` class, and `Guest` is nested in this instance.
+// A guest that declares an `extern(C++` class arrives as one type per
+// character, not as a `string` template argument: dmd cannot mangle a
+// `string` value in the parent chain of an `extern(C++)` class, and `Guest`
+// is nested in this instance. Other guests keep the `string`, which is much
+// cheaper to compile. The text test misses a spelling such as
+// `extern (C++)`; that fails at build time with dmd's "C++ `string`
+// template value parameter is not supported", never silently.
 private int nativeMainStatus(Characters...)() {
     struct Guest {
         static:
@@ -209,25 +213,39 @@ private struct Character(char value_) {
     enum value = value_;
 }
 
+private template SourceCharacters(string source) {
+    import std.algorithm.searching: canFind;
+
+    static if (source.canFind("extern(C++"))
+        alias SourceCharacters = EachCharacter!source;
+    else
+        alias SourceCharacters = AliasSeq!source;
+}
+
 // Halves the string at each step so the recursion depth stays logarithmic
 // in the length of a guest program.
-private template SourceCharacters(string source) {
+private template EachCharacter(string source) {
     static if (source.length == 0)
-        alias SourceCharacters = AliasSeq!();
+        alias EachCharacter = AliasSeq!();
     else static if (source.length == 1)
-        alias SourceCharacters = AliasSeq!(Character!(source[0]));
+        alias EachCharacter = AliasSeq!(Character!(source[0]));
     else
-        alias SourceCharacters = AliasSeq!(
-            SourceCharacters!(source[0 .. $ / 2]),
-            SourceCharacters!(source[$ / 2 .. $]),
+        alias EachCharacter = AliasSeq!(
+            EachCharacter!(source[0 .. $ / 2]),
+            EachCharacter!(source[$ / 2 .. $]),
         );
 }
 
 private string sourceText(Characters...)() {
-    string result;
-    static foreach (Character_; Characters)
-        result ~= Character_.value;
-    return result;
+    static if (Characters.length == 1
+            && is(typeof(Characters[0]) : string))
+        return Characters[0];
+    else {
+        string result;
+        static foreach (Character_; Characters)
+            result ~= Character_.value;
+        return result;
+    }
 }
 
 // UFCS assertion: `42.shouldBeRetOf!(backend, code, "answer")` invokes one
@@ -251,6 +269,8 @@ public template shouldBeRetOf(
 
         enum call = callExpression!(functionName, Args);
 
+        // A guest `extern(C++)` class does not build here, for the reason
+        // given on `nativeMainStatus`: use `shouldBeStatusOf` for one.
         static if (is(BackendType == Native)) {
             const native = () {
                 mixin(code);
@@ -355,6 +375,8 @@ private string evaluate(
     // straight back for the test to assert on, so a wrong expectation fails
     // as the entry that produced it. The native oracle is one such entry
     // rather than an extra comparison every backend re-runs.
+    // As in `shouldBeRetOf`, a guest `extern(C++)` class does not build in
+    // this arm; see `nativeMainStatus`.
     static if (is(BackendType == Native)) {
         mixin(declarations);
         return text(mixin(code));
