@@ -2561,7 +2561,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // dual-context function the hidden slot holds the address of the pair
     // of contexts, and word 0 of it is the receiver.
     private ubyte* thisSlotOf(ThisExp expression) {
-        import snakebite.backends.dualcontext: isDualContext;
+        import snakebite.frontend.dmd.delegates: isDualContext;
         import snakebite.nativelayout: loadIntegral;
 
         auto variable = expression.var is null
@@ -6016,7 +6016,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void* classReceiver,
         bool hasClassReceiver,
     ) {
-        import snakebite.backends.dualcontext: DualContext, isDualContext;
+        import snakebite.backends.dualcontext: DualContext;
+        import snakebite.frontend.dmd.delegates: isDualContext;
         import snakebite.nativelayout: storeIntegral;
 
         const first = firstContextOf(
@@ -6040,7 +6041,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void* classReceiver,
         bool hasClassReceiver,
     ) {
-        import snakebite.backends.dualcontext: nestedContextOwnerOf;
+        import snakebite.frontend.dmd.delegates: nestedContextOwnerOf;
         import std.conv: text;
 
         if (function_.isThis !is null) {

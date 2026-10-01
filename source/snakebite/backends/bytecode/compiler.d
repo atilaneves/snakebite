@@ -2911,7 +2911,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // through the static chain, the same way any other captured variable
     // is reached.
     private size_t hiddenThisOffset(VarDeclaration variable = null) {
-        import snakebite.backends.dualcontext: isDualContext;
+        import snakebite.frontend.dmd.delegates: isDualContext;
 
         auto hiddenThis = variable is null
             ? cast() _layout.hiddenThis.variable
@@ -2942,7 +2942,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // performs to cross into another frame or closure is the equivalent
     // cost, not an extra dereference layered on top of it.
     private size_t contextThisOffset(VarDeclaration hiddenThis) {
-        import snakebite.backends.dualcontext: isDualContext;
+        import snakebite.frontend.dmd.delegates: isDualContext;
 
         auto owner = outerFunctionOf(hiddenThis);
         if (owner is null)
@@ -6396,7 +6396,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t receiverOffsetOf(
         CallExp expression, FuncDeclaration callee, in size_t destOffset,
     ) {
-        import snakebite.backends.dualcontext: isDualContext;
+        import snakebite.frontend.dmd.delegates: isDualContext;
 
         const first = firstContextOffsetOf(expression, callee, destOffset);
         if (!isDualContext(callee))
@@ -6435,7 +6435,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t firstContextOffsetOf(
         CallExp expression, FuncDeclaration callee, in size_t destOffset,
     ) {
-        import snakebite.backends.dualcontext: nestedContextOwnerOf;
+        import snakebite.frontend.dmd.delegates: nestedContextOwnerOf;
 
         // A lambda or nested function reading `this` implicitly names an
         // outer member function's own hidden `this`, reached through the

@@ -45,8 +45,8 @@ public struct ClosurePlan {
         FuncDeclaration to,
     ) {
         import dmd.aggregate: AggregateDeclaration;
-        import snakebite.backends.dualcontext:
-            isDualContext, parentTowards, wordTowards;
+        import snakebite.backends.dualcontext: parentTowards, wordTowards;
+        import snakebite.frontend.dmd.delegates: isDualContext;
 
         if (from is to)
             return null;

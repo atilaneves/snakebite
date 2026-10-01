@@ -45,24 +45,33 @@ public bool isCtfeVariable(Declaration variable) {
 // module, reached through a delegate) would otherwise answer `false` to
 // one backend and, once analysed, `true` to the other.
 public bool functionNeedsClosure(FuncDeclaration function_) {
+    import dmd.funcsem: needsClosure;
+
+    runSemantic3(function_);
+    return function_.needsClosure();
+}
+
+// Runs `function_`'s body semantic, which sets `vthis`, `closureVars` and
+// `hasDualContext`.
+//
+// `forceIfNeeded`'s own doc explains why reading `semanticRun` first,
+// unlocked, and skipping the call below when it already says
+// `semantic3done`, is exactly as safe as `functionSemantic3`'s own gate -
+// never a guess at it. The read itself is `atomicLoad!(MemoryOrder.acq)`,
+// not a plain field read - see `forceIfNeeded`'s doc for why the unlocked
+// check needs that much, even though `semanticRun` is dmd's own plain
+// field.
+public void runSemantic3(FuncDeclaration function_) {
     import core.atomic: atomicLoad, MemoryOrder;
     import dmd.dsymbol: PASS;
-    import dmd.funcsem: functionSemantic3, needsClosure;
+    import dmd.funcsem: functionSemantic3;
     import snakebite.frontend.compiler: forceIfNeeded;
 
-    // `forceIfNeeded`'s own doc explains why reading `semanticRun`
-    // first, unlocked, and skipping the call below when it already says
-    // `semantic3done`, is exactly as safe as `functionSemantic3`'s own
-    // gate - never a guess at it. The read itself is
-    // `atomicLoad!(MemoryOrder.acq)`, not a plain field read - see
-    // `forceIfNeeded`'s doc for why the unlocked check needs that much,
-    // even though `semanticRun` is dmd's own plain field.
     forceIfNeeded!functionSemantic3(
         () => atomicLoad!(MemoryOrder.acq)(function_.semanticRun)
             >= PASS.semantic3done,
         function_,
     );
-    return function_.needsClosure();
 }
 
 // Whether `function_` receives a hidden `this`/context argument before its
@@ -94,21 +103,9 @@ public bool functionNeedsClosure(FuncDeclaration function_) {
 // case, below, only ever narrows a non-null `vthis` to unused, never
 // widens a null one.
 public bool hasHiddenThis(FuncDeclaration function_) {
-    import core.atomic: atomicLoad, MemoryOrder;
-    import dmd.dsymbol: PASS;
-    import dmd.funcsem: functionSemantic3;
     import dmd.tokens: TOK;
-    import snakebite.frontend.compiler: forceIfNeeded;
 
-    // As `functionNeedsClosure`'s own guarded force: skips the frontend
-    // lock once `function_` is already past `semantic3`, which is
-    // exactly the condition `functionSemantic3` itself checks before
-    // doing anything. Acquire load - see `forceIfNeeded`'s doc.
-    forceIfNeeded!functionSemantic3(
-        () => atomicLoad!(MemoryOrder.acq)(function_.semanticRun)
-            >= PASS.semantic3done,
-        function_,
-    );
+    runSemantic3(function_);
 
     // Inferred function pointers can retain the provisional context variable
     // that DMD created before it knew whether the lambda captured anything.
@@ -140,6 +137,36 @@ public FuncDeclaration outerFunctionOf(Dsymbol symbol) {
         parent = parent.toParent2();
     }
     return null;
+}
+
+// Whether `symbol` has two contexts: a function or aggregate template
+// instantiated with an alias to a local symbol of another function or
+// aggregate than the one that declares it. dmd settles this while it
+// analyses a function body, so the answer for a function is read after
+// that pass has run.
+public bool isDualContext(Dsymbol symbol) {
+    if (auto function_ = symbol.isFuncDeclaration) {
+        runSemantic3(function_);
+        return function_.hasDualContext;
+    }
+
+    auto aggregate = symbol.isAggregateDeclaration;
+    return aggregate !is null && aggregate.vthis2 !is null;
+}
+
+// The function whose context `function_` receives as its hidden argument,
+// or in word 0 of its pair when it has two contexts; `null` when no
+// function encloses it. The context of a nested function that has two is
+// the one of the function that declares its template, not of the function
+// that owns the alias.
+public FuncDeclaration nestedContextOwnerOf(FuncDeclaration function_) {
+    if (!isDualContext(function_))
+        return outerFunctionOf(function_);
+
+    auto parent = function_.toParentLocal;
+    while (parent !is null && parent.isFuncDeclaration is null)
+        parent = parent.toParent2;
+    return parent is null ? null : parent.isFuncDeclaration;
 }
 
 // What a `DelegateExp` (`&nested`) or a delegate-typed `FuncExp` (a
