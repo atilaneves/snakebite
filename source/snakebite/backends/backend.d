@@ -15,6 +15,7 @@ public struct Program {
     import dmd.dsymbol: Dsymbol;
     import snakebite.backends.haltprocess: HaltAction, haltProcess;
     import snakebite.frontend.checks: Checks;
+    import snakebite.frontend.dmd.linking: LinkMap;
 
     // `func` is null when the program has no `main`, which is not an error: a
     // bare directory of `.d` files can be a library.
@@ -27,8 +28,8 @@ public struct Program {
     // `snakebite.frontend.dmd.functions.isRootOwned`.
     private bool[Module] _rootModuleSet;
     FuncDeclaration[] moduleConstructors;
-    // Built once from `rootModules`; see `definitionOf`.
-    private FuncDeclaration[FuncDeclaration] _linkedDefinitions;
+    // Built once from `rootModules`; see `linkedFunctionOf`.
+    private LinkMap _links;
     Main main;
     string name;
     private Checks _checks;
@@ -62,11 +63,10 @@ public struct Program {
     ) {
         import snakebite.frontend.dmd.functions:
             findFunction,
-            findModuleConstructors,
-            linkedDefinitions;
+            findModuleConstructors;
 
         this.rootModules = rootModules;
-        _linkedDefinitions = linkedDefinitions(rootModules);
+        _links = LinkMap(rootModules);
         this.name = name;
         _checks = checks;
         _haltAction = haltAction;
@@ -97,20 +97,20 @@ public struct Program {
         _haltAction();
     }
 
-    // The function a call to `function_` runs. A declaration without a body
-    // that a root module defines elsewhere under the same symbol is a call
-    // to that definition, as the linker makes it (a C prototype of a D
-    // `extern(C)` function); every other function is its own.
-    public FuncDeclaration definitionOf(
+    // The root definition that the linker makes of the declaration
+    // `function_`, or `function_` itself. Backends ask this once for each
+    // function, through `CallSelection.definitionOf`, not for each call.
+    public FuncDeclaration linkedFunctionOf(
         FuncDeclaration function_,
     ) const {
-        if (function_.fbody !is null)
-            return function_;
+        return _links.definitionOf(function_);
+    }
 
-        if (auto definition = function_ in _linkedDefinitions)
-            return cast(FuncDeclaration) *definition;
-
-        return function_;
+    // As `linkedFunctionOf`, for an `extern` variable.
+    public imported!"dmd.declaration".VarDeclaration linkedVariableOf(
+        imported!"dmd.declaration".VarDeclaration variable,
+    ) const {
+        return _links.definitionOf(variable);
     }
 
     public bool isInterpreted(

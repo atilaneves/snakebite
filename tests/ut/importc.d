@@ -549,6 +549,138 @@ static foreach (backend; Matrix!()) {
 }
 
 
+// A C `static` function has internal linkage: it is not the definition
+// of the same name that another translation unit declares.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot resolve a D declaration to the C definition of the same symbol"),
+)) {
+    @("importc.staticFunctionIsNotALinkedDefinition." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        21.cProjectStatus!(backend, "static_not_linked", `
+            static int linkedHelper(void) { return 1; }
+            int fromStatic(void) { return linkedHelper(); }
+        `, q{
+            extern(C) int linkedHelper();
+            extern(C) int fromStatic();
+            int main() { return linkedHelper() * 10 + fromStatic(); }
+        }, Layout.dub, `
+            int linkedHelper(void) { return 2; }
+        `);
+    }
+}
+
+// `pragma(mangle)` gives the symbol; the D identifier of the declaration
+// is not the name of the C function.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot resolve a D declaration to the C definition of the same symbol"),
+)) {
+    @("importc.declarationWithPragmaMangle." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        42.cProjectStatus!(backend, "pragma_mangle", `
+            int mangledAdd(int a, int b) { return a + b; }
+        `, q{
+            pragma(mangle, "mangledAdd") extern(C) int sum(int, int);
+            int main() { return sum(40, 2); }
+        });
+    }
+}
+
+// A declaration in a C++ namespace is not a direct member of its module.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot resolve a D declaration to the definition of the same symbol"),
+)) {
+    @("importc.declarationInCppNamespace." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        42.cProjectStatus!(backend, "cpp_namespace", `
+            int unusedInNamespaceTest(void) { return 0; }
+        `, q{
+            extern(C++, importcns) int inNamespace(int);
+            int main() { return inNamespace(41); }
+        }, Layout.dub, null, q{
+            extern(C++, importcns) int inNamespace(int x) { return x + 1; }
+        });
+    }
+}
+
+// An `extern` variable is the one object that another translation unit
+// defines, for C and for D declarations of it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
+)) {
+    @("importc.externVariableIsTheDefinition." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        42.cProjectStatus!(backend, "extern_variable", `
+            int linkedCounter = 3;
+            int readCounter(void) { return linkedCounter; }
+        `, q{
+            extern(C) extern __gshared int linkedCounter;
+            extern(C) int readCounter();
+            extern(C) int bumpCounter();
+            int main() {
+                linkedCounter += 9;
+                bumpCounter();
+                return readCounter();
+            }
+        }, Layout.dub, `
+            extern int linkedCounter;
+            int bumpCounter(void) { linkedCounter += 30; return linkedCounter; }
+        `);
+    }
+}
+
+// C has no array bounds checks: a flexible array member, and the older
+// one-element form of it, are indexed past their declared length.
+static foreach (backend; Matrix!()) {
+    @("importc.flexibleArrayMember." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        42.cProjectStatus!(backend, "flexible_array", `
+            struct Flexible { int count; int data[]; };
+            struct OneElement { int count; int data[1]; };
+            int flexible(void) {
+                int storage[8] = {0};
+                struct Flexible *f = (struct Flexible *) storage;
+                struct OneElement *o = (struct OneElement *) storage;
+                f->data[3] = 40;
+                o->data[4] = 2;
+                return f->data[3] + o->data[4];
+            }
+        `, q{
+            import CMOD;
+            int main() { return flexible(); }
+        });
+    }
+}
+
+// A compound literal at file scope has static storage, and a string
+// initialises a `char` array member of it.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
+)) {
+    @("importc.compoundLiteralWithCharArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    @Serial
+    unittest {
+        42.cProjectStatus!(backend, "compound_literal_chars", `
+            struct Named { int x; char name[8]; };
+            struct Named *named = &(struct Named){41, "a"};
+        `, q{
+            import CMOD;
+            int main() { return named.x + (named.name[0] == 'a'); }
+        });
+    }
+}
+
+
 // Every test shares one frontend, which merges C structs of the same name
 // from different C files, so a struct tag is unique to its test unless the
 // definitions agree.
@@ -564,7 +696,7 @@ private enum Layout { dub, bare }
 
 private void cProjectStatus(
     backend, string name, string cSource, string dSource,
-    Layout layout = Layout.dub,
+    Layout layout = Layout.dub, string extraC = null, string extraD = null,
 )(
     in int expected,
     in string file = __FILE__,
@@ -583,6 +715,7 @@ private void cProjectStatus(
             targetType "library"
             mainSourceFile "source/` ~ moduleName ~ `_app.d"
             sourceFiles "source/` ~ moduleName ~ `.c"
+            ` ~ (extraC is null ? "" : `sourceFiles "source/` ~ moduleName ~ `_extra.c"`) ~ `
             configuration "unittest" {
                 targetType "executable"
                 targetName "importc_program"
@@ -590,6 +723,11 @@ private void cProjectStatus(
         `);
     enum sources = layout == Layout.dub ? "app/source/" : "app/";
     sandbox.writeFile(sources ~ moduleName ~ ".c", cSource);
+    static if (extraC !is null)
+        sandbox.writeFile(sources ~ moduleName ~ "_extra.c", extraC);
+    static if (extraD !is null)
+        sandbox.writeFile(sources ~ moduleName ~ "_defs.d",
+            "module " ~ moduleName ~ "_defs;\n" ~ extraD);
     sandbox.writeFile(sources ~ moduleName ~ "_app.d",
         "module " ~ moduleName ~ "_app;\n" ~ dSource.replace("CMOD", moduleName));
     const directory = sandbox.inSandboxPath("app");

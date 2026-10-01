@@ -460,6 +460,9 @@ public struct NativeData {
     import snakebite.tlsstorage: TlsDescriptor, TlsSlots;
 
     private bool delegate(Dsymbol) const _isRootOwned;
+    private VarDeclaration delegate(VarDeclaration) _linkedVariable;
+    // An `extern` variable's definition, found once for each variable.
+    private SharedTable!(VarDeclaration, VarDeclaration) _definitions;
     private SymbolAddress _symbolAddress;
     private ThreadLocalAddress _threadLocalAddress;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
@@ -489,12 +492,14 @@ public struct NativeData {
 
     public this(
         bool delegate(Dsymbol) const isRootOwned,
+        VarDeclaration delegate(VarDeclaration) linkedVariable,
         SymbolAddress symbolAddress,
         ThreadLocalAddress threadLocalAddress,
         TypeInfo_Class delegate(ClassDeclaration) classInfo,
         LoweringCall call,
     ) {
         _isRootOwned = isRootOwned;
+        _linkedVariable = linkedVariable;
         _symbolAddress = symbolAddress;
         _threadLocalAddress = threadLocalAddress;
         _classInfo = classInfo;
@@ -614,9 +619,10 @@ public struct NativeData {
     // otherwise the one copy every thread shares. Native storage when
     // the variable has it (`hasNativeStorage`); this program's own
     // otherwise.
-    public void[] storageOf(VarDeclaration variable) {
+    public void[] storageOf(VarDeclaration declaration) {
         import std.string: fromStringz;
 
+        auto variable = definitionOf(declaration);
         const facts = TypeFacts.of(variable.type);
         if (variable.isThreadlocal)
             return _tls.current.slotFor(tlsDescriptorOf(variable));
@@ -653,7 +659,8 @@ public struct NativeData {
     // into an `opTls*` instruction operand in place of a resolved
     // address (finding 1.3): a thread-local variable's address is never
     // a compile-time constant, the same way it never is in compiled D.
-    public const(TlsDescriptor)* tlsDescriptorOf(VarDeclaration variable) {
+    public const(TlsDescriptor)* tlsDescriptorOf(VarDeclaration declaration) {
+        auto variable = definitionOf(declaration);
         if (auto found = variable in _tlsDescriptors)
             return found;
 
@@ -683,6 +690,18 @@ public struct NativeData {
                 cast(const(void)*) variable, bytes.ptr, bytes.length));
         });
         return descriptor;
+    }
+
+    // The one variable that an `extern` declaration shares its storage
+    // with: its definition in a root module, when there is one.
+    private VarDeclaration definitionOf(VarDeclaration variable) {
+        if (!isExtern(variable))
+            return variable;
+
+        if (auto found = variable in _definitions)
+            return *found;
+
+        return *_definitions.insert(variable, _linkedVariable(variable));
     }
 
     // Whether `variable`'s storage is native rather than this program's

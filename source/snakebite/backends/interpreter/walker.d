@@ -253,6 +253,7 @@ private struct Shared {
         this.callGuest = callGuest;
         plans = PlanCache(program.dependencyImage);
         nativeData = NativeData(&this.program.isRootOwned,
+            (variable) => this.program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => plans.resolveThreadLocal(name),
             &classRuntimeInfo, &callLowering);
@@ -261,6 +262,11 @@ private struct Shared {
             &callableAddress,
             &classRuntimeInfo,
             (type, loc) => nativeData.initialValue(type, loc));
+    }
+
+    private FuncDeclaration definitionOf(FuncDeclaration function_) {
+        return callSelection.definitionOf(
+            function_, (declaration) => program.linkedFunctionOf(declaration));
     }
 
     private void* constantSymbolAddress(Declaration symbol) {
@@ -325,7 +331,7 @@ private struct Shared {
         import dmd.dsymbolsem: isAbstract;
 
         // getOverloads can leave an alias in a function-pointer constant.
-        method = program.definitionOf(method.toAliasFunc);
+        method = definitionOf(method.toAliasFunc);
         if (method.isAbstract)
             return null;
 
@@ -5585,7 +5591,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             callee.function_ = cast(FuncDeclaration) cast(void*) target.word;
             callee.context = cast(ubyte*) callee.context + target.adjustment;
         }
-        auto function_ = _program.definitionOf(callee.function_);
+        auto function_ = _callSelection.definitionOf(
+            callee.function_,
+            (declaration) => _program.linkedFunctionOf(declaration));
 
         auto funcType = typeFunctionOf(function_);
 

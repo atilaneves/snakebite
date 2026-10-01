@@ -97,6 +97,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         super(program);
         _plans = PlanCache(program.dependencyImage);
         _nativeData = NativeData(&_program.isRootOwned,
+            (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => _plans.resolveThreadLocal(name),
             &classRuntimeInfo, &callLowering);
@@ -266,8 +267,9 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _program.isInterpreted(function_);
     }
 
-    package FuncDeclaration definitionOf(FuncDeclaration function_) const {
-        return _program.definitionOf(function_);
+    package FuncDeclaration definitionOf(FuncDeclaration function_) {
+        return _callSelection.definitionOf(
+            function_, (declaration) => _program.linkedFunctionOf(declaration));
     }
 
     package Checks checks() const {
@@ -370,7 +372,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         import dmd.dsymbolsem: isAbstract;
 
         // getOverloads can leave an alias in a function-pointer constant.
-        method = _program.definitionOf(method.toAliasFunc);
+        method = definitionOf(method.toAliasFunc);
         if (method.isAbstract)
             return null;
         const(void)* word;

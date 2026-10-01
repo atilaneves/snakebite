@@ -120,66 +120,6 @@ public imported!"dmd.func".FuncDeclaration unresolvedCalleeOf(
     return null;
 }
 
-// A function that one module declares without a body and another module
-// defines, under the same symbol, is one function to the linker: an
-// `extern int fromD(int);` prototype in a C file and the `extern(C)` D
-// definition of `fromD`, for one. The result maps each such declaration,
-// among the module-scope functions of `modules`, to its definition. A
-// declaration with no definition among `modules` stays a call to a symbol
-// of the process.
-public imported!"dmd.func".FuncDeclaration[imported!"dmd.func".FuncDeclaration]
-linkedDefinitions(imported!"dmd.dmodule".Module[] modules) {
-    import dmd.func: FuncDeclaration;
-    import snakebite.frontend.dmd.mangle: mangledNameOf;
-
-    FuncDeclaration[] declarations;
-    FuncDeclaration[][string] definitions;
-    foreach (module_; modules)
-        appendModuleScopeFunctions(module_.members, (function_) {
-            if (function_.fbody is null)
-                declarations ~= function_;
-            else
-                definitions[function_.ident.toString.idup] ~= function_;
-        });
-
-    FuncDeclaration[FuncDeclaration] linked;
-    foreach (declaration; declarations) {
-        auto candidates = declaration.ident.toString in definitions;
-        if (candidates is null)
-            continue;
-
-        const name = mangledNameOf(declaration);
-        foreach (definition; *candidates)
-            if (mangledNameOf(definition) == name) {
-                linked[declaration] = definition;
-                break;
-            }
-    }
-
-    return linked;
-}
-
-private void appendModuleScopeFunctions(
-    imported!"dmd.arraytypes".Dsymbols* symbols,
-    scope void delegate(imported!"dmd.func".FuncDeclaration) action,
-) {
-    import dmd.dsymbolsem: include;
-
-    if (symbols is null)
-        return;
-
-    foreach (member; *symbols) {
-        if (auto function_ = member.isFuncDeclaration) {
-            if (function_.isFuncLiteralDeclaration is null
-                    && function_.isUnitTestDeclaration is null
-                    && function_.isStaticCtorDeclaration is null
-                    && function_.isStaticDtorDeclaration is null)
-                action(function_);
-        } else if (auto attributes = member.isAttribDeclaration)
-            appendModuleScopeFunctions(include(attributes, null), action);
-    }
-}
-
 // Every unittest in `module_`, in declaration order, as druntime's
 // `__modtest` runs them. See `appendFromScope` for the scopes the search
 // descends into.

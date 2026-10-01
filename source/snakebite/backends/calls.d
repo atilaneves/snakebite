@@ -53,6 +53,27 @@ public struct CallSelection {
     // (ADR-0006); a decision is built once per function.
     private SharedTable!(FuncDeclaration, Decision) _decisions;
 
+    // Read without a lock, like `_decisions`; see `definitionOf`.
+    private SharedTable!(FuncDeclaration, FuncDeclaration) _definitions;
+
+    // The function that a call to `function_` runs. A declaration with no
+    // body is the definition that the linker finds for it (see
+    // `snakebite.frontend.dmd.linking`), and that is worked out once for
+    // each declaration, at its first call or when its call is compiled. A
+    // function with a body is its own definition, with no lookup.
+    public FuncDeclaration definitionOf(
+        FuncDeclaration function_,
+        scope FuncDeclaration delegate(FuncDeclaration) link,
+    ) {
+        if (function_.fbody !is null)
+            return function_;
+
+        if (auto cached = function_ in _definitions)
+            return *cached;
+
+        return *_definitions.insert(function_, link(function_));
+    }
+
     // `function_`'s full routing decision. The one call every hot path
     // wants: a single cache lookup carries both the route and, for
     // `builtin`, the wrapper to call - `usesGuestBody` below is the one
