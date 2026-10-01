@@ -40,6 +40,19 @@ public struct ClosurePlan {
         );
     }
 
+    // The hops from the value of `function_`'s hidden `this` slot to its
+    // receiver: none for a function with one context, and word 0 of the
+    // pair for one with two.
+    public static Hop[] receiverHops(FuncDeclaration function_) {
+        import snakebite.backends.dualcontext: DualContext;
+        import snakebite.frontend.dmd.delegates: isDualContext;
+
+        return isDualContext(function_)
+            ? [Hop(Hop.Kind.contextPairWord,
+                DualContext.receiverWord * size_t.sizeof)]
+            : null;
+    }
+
     public static Hop[] staticChainPath(
         FuncDeclaration from,
         FuncDeclaration to,

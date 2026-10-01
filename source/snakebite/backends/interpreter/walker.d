@@ -384,6 +384,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     import snakebite.frontend.dmd.delegates: DelegateTarget, outerFunctionOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.closureplan: ClosurePlan, Hop;
+    import snakebite.backends.dualcontext:
+        ContextSource, PairPlan, contextSourceOf, pairPlanOf;
     import snakebite.backends.classinfo;
     import dmd.dclass: ClassDeclaration;
     import dmd.dstruct: StructDeclaration;
@@ -2405,7 +2407,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         Expression expression,
         void* place,
     ) {
-        import snakebite.backends.dualcontext: DualContext;
         import snakebite.nativelayout:
             delegateContextOffset, delegateFunctionOffset, storeIntegral;
         import std.conv: text;
@@ -2425,23 +2426,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                     factsOf(target.receiver.type), &context);
 
         } else if (target.needsContext) {
-            if (target.contextOwner is null)
-                throw new SnakebiteException(
-                    text("interpreter cannot evaluate `",
-                        expression.toString,
-                        "`: its enclosing function could not be determined"),
-                );
+            assert(target.contextOwner !is null,
+                "a delegate that needs a context has an enclosing function");
             context = cast(size_t) tryContextOf(target.contextOwner);
         }
 
-        if (target.contextPair !is null) {
-            auto pair = storageOf(target.contextPair);
-            storeIntegral(pair, context, size_t.sizeof);
-            storeIntegral(
-                pair + DualContext.outerWord * size_t.sizeof,
-                outerContextOf(target.function_), size_t.sizeof);
-            context = cast(size_t) pair;
-        }
+        const plan = pairPlanOf(target.function_, target.contextPair);
+        if (plan.variable !is null)
+            context = storeContextPair(plan, context);
 
         auto bytes = cast(ubyte*) place;
         if (bytes is null)
@@ -2541,40 +2533,38 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     // ordinary byte-copy behavior used by struct methods.
     override void visit(ThisExp expression) {
         import core.stdc.string: memcpy;
-        import snakebite.nativelayout: loadIntegral, storeIntegral;
+        import snakebite.nativelayout: storeIntegral;
 
-        auto slot = thisSlotOf(expression);
+        const receiver = thisValueOf(expression);
         if (_type.ty == Tclass) {
-            storeIntegral(
-                _place,
-                loadIntegral(slot, size_t.sizeof, false),
-                _facts.size,
-            );
+            storeIntegral(_place, receiver, _facts.size);
             return;
         }
 
-        memcpy(_place, slot, _facts.size);
+        memcpy(_place, cast(void*) receiver, _facts.size);
     }
 
-    // The slot a `this` read goes through: a class reference is loaded
-    // from it, and a struct receiver is read at the address it holds. In a
-    // dual-context function the hidden slot holds the address of the pair
-    // of contexts, and word 0 of it is the receiver.
-    private ubyte* thisSlotOf(ThisExp expression) {
-        import snakebite.frontend.dmd.delegates: isDualContext;
+    // The receiver a `this` read goes through, found from the hidden slot
+    // the way `ClosurePlan.receiverHops` says: a class reference, or the
+    // address of a struct.
+    private size_t thisValueOf(ThisExp expression) {
         import snakebite.nativelayout: loadIntegral;
 
         auto variable = expression.var is null
             ? cast() _layout.hiddenThis.variable : expression.var;
         auto slot = slotOf(expression, variable);
         auto owner = outerFunctionOf(variable);
-        if (owner is null || !isDualContext(owner))
-            return slot;
+        const hops = owner is null ? null : ClosurePlan.receiverHops(owner);
+        if (hops.length == 0)
+            return variable.type.toBasetype.ty == Tclass
+                ? cast(size_t) loadIntegral(slot, size_t.sizeof, false)
+                : cast(size_t) slot;
 
-        auto pair = cast(ubyte*) loadIntegral(slot, size_t.sizeof, false);
-        if (expression.type.toBasetype.ty == Tclass)
-            return pair;
-        return cast(ubyte*) loadIntegral(pair, size_t.sizeof, false);
+        auto value = cast(size_t) loadIntegral(slot, size_t.sizeof, false);
+        foreach (hop; hops)
+            value = cast(size_t) loadIntegral(
+                cast(ubyte*) value + hop.offset, size_t.sizeof, false);
+        return value;
     }
 
     // Where `owner`'s own context is: `owner` itself if it is the function
@@ -2962,13 +2952,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         Evaluator evaluator;
 
         public void* storageThis(ThisExp expression) {
-            auto slot = evaluator.thisSlotOf(expression);
-            if (expression.type.ty == Tclass) {
-                import snakebite.nativelayout: loadIntegral;
-
-                return cast(void*) loadIntegral(slot, size_t.sizeof, false);
-            }
-            return slot;
+            return cast(void*) evaluator.thisValueOf(expression);
         }
 
         public void* storageSuper(SuperExp expression) {
@@ -6016,21 +6000,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void* classReceiver,
         bool hasClassReceiver,
     ) {
-        import snakebite.backends.dualcontext: DualContext;
-        import snakebite.frontend.dmd.delegates: isDualContext;
-        import snakebite.nativelayout: storeIntegral;
 
         const first = firstContextOf(
             expression, function_, classReceiver, hasClassReceiver);
-        if (!isDualContext(function_))
-            return first;
-
-        auto pair = _frames.reserve(DualContext.size, size_t.alignof);
-        storeIntegral(pair, first, size_t.sizeof);
-        storeIntegral(
-            pair + DualContext.outerWord * size_t.sizeof,
-            outerContextOf(function_), size_t.sizeof);
-        return cast(size_t) pair;
+        const plan = pairPlanOf(function_, expression.vthis2);
+        return plan.variable is null ? first : storeContextPair(plan, first);
     }
 
     // Word 0 of a dual-context callee's pair, and the whole hidden
@@ -6067,30 +6041,37 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // delegate supplies this context directly because it may
         // outlive the call that created it; a direct call finds it
         // by walking the current static chain.
-        return contextForCallTo(function_, nestedContextOwnerOf(function_));
+        return callContextOf(contextSourceOf(nestedContextOwnerOf(function_)));
     }
 
-    // Word 1 of a dual-context callee's pair: the context of the function
-    // that owns the alias.
-    private size_t outerContextOf(FuncDeclaration function_) {
-        import snakebite.backends.dualcontext: outerContextOwnerOf;
-
-        return contextForCallTo(function_, outerContextOwnerOf(function_));
+    // The context a direct call hands over, which is always reachable from
+    // the caller.
+    private size_t callContextOf(in ContextSource source) {
+        const context = contextValueOf(source);
+        assert(context != 0 || source.kind == ContextSource.Kind.none,
+            "a direct call's enclosing function is on the static chain");
+        return context;
     }
 
-    private size_t contextForCallTo(
-        FuncDeclaration function_, FuncDeclaration owner,
-    ) {
-        import std.conv: text;
+    private size_t contextValueOf(in ContextSource source) {
+        final switch (source.kind) with (ContextSource.Kind) {
+        case none:
+            return 0;
+        case frame:
+            return cast(size_t) tryContextOf(cast() source.function_);
+        }
+    }
 
-        if (owner is null)
-            throw new SnakebiteException(
-                text("interpreter cannot call `",
-                    function_.toString, "`: its enclosing ",
-                    "function could not be determined"),
-            );
+    // Fills the pair in the storage of its variable and returns its
+    // address, the hidden argument of a callee with two contexts.
+    private size_t storeContextPair(in PairPlan plan, in size_t first) {
+        import snakebite.nativelayout: storeIntegral;
 
-        return cast(size_t) tryContextOf(owner);
+        auto pair = storageOf(cast() plan.variable);
+        storeIntegral(pair + plan.receiverOffset, first, size_t.sizeof);
+        storeIntegral(
+            pair + plan.outerOffset, callContextOf(plan.outer), size_t.sizeof);
+        return cast(size_t) pair;
     }
 
     // The address a call hands back for `addressOf` when the call itself is

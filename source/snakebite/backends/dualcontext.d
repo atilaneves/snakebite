@@ -43,11 +43,65 @@ public imported!"dmd.dsymbol".Dsymbol parentTowards(
         ? function_.toParentP(target) : function_.toParent2();
 }
 
-// The function whose context a dual-context callee receives in word 1,
-// or `null` when that context is not a function.
-public imported!"dmd.func".FuncDeclaration outerContextOwnerOf(
-    imported!"dmd.func".FuncDeclaration function_,
+// Where a context pointer that a call or a delegate hands to its callee
+// comes from.
+public struct ContextSource {
+    import dmd.func: FuncDeclaration;
+
+    public enum Kind {
+        // No function encloses the callee, so compiled D passes null.
+        none,
+        // The frame, or the closure, of `function_`.
+        frame,
+    }
+
+    public Kind kind;
+    public FuncDeclaration function_;
+}
+
+// What a call or a delegate to a dual-context function stores before it
+// passes the address of the pair. The pair is the variable that dmd
+// declares for it in the caller (`CallExp.vthis2`, `DelegateExp.vthis2`),
+// so the backends give it the storage of any other local and it lives as
+// long as that local does. A callee with one context has no pair, and
+// `variable` is `null`.
+public struct PairPlan {
+    import dmd.declaration: VarDeclaration;
+
+    public VarDeclaration variable;
+    // Byte offsets in the pair of the receiver (or of the context of the
+    // function that declares the callee) and of the outer context.
+    public size_t receiverOffset;
+    public size_t outerOffset;
+    // The source of the outer context.
+    public ContextSource outer;
+}
+
+public PairPlan pairPlanOf(
+    imported!"dmd.func".FuncDeclaration callee,
+    imported!"dmd.declaration".VarDeclaration pair,
 ) {
-    auto parent = function_.toParent2();
-    return parent is null ? null : parent.isFuncDeclaration;
+    import snakebite.frontend.dmd.delegates: isDualContext;
+
+    if (!isDualContext(callee))
+        return PairPlan.init;
+
+    assert(pair !is null,
+        "dmd declares the pair for each call of a dual-context function");
+    return PairPlan(
+        pair,
+        DualContext.receiverWord * size_t.sizeof,
+        DualContext.outerWord * size_t.sizeof,
+        contextSourceOf(callee.toParent2()),
+    );
+}
+
+// The source of the context of `owner`, the symbol that encloses a callee.
+public ContextSource contextSourceOf(
+    imported!"dmd.dsymbol".Dsymbol owner,
+) {
+    auto function_ = owner is null ? null : owner.isFuncDeclaration;
+    return function_ is null
+        ? ContextSource.init
+        : ContextSource(ContextSource.Kind.frame, function_);
 }
