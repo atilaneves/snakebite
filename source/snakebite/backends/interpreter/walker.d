@@ -3333,6 +3333,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private extern(D) void storeIntegralAssign(string op)(
         BinAssignExp expression, void* resolvedTarget,
     ) {
+        import snakebite.backends.shifts: ShiftPlan, shiftPlan;
         import snakebite.frontend.storage: compoundTarget;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
 
@@ -3341,13 +3342,20 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // dmd's own integral promotion always widens a narrow target to a
         // signed `int` for the operation itself; a bitwise-width-preserving
         // combination of the target's own storage width and that
-        // operation's signedness is what a shift or a division needs -
+        // operation's signedness is what a division needs -
         // `targetFacts.isUnsigned` alone would compare an unsigned narrow
         // target's own signedness against its always-signed promoted right
         // operand and refuse a division that dmd allows.
         const operationFacts = factsOf(expression.e1.type);
-        const arithmeticFacts = TypeFacts(targetFacts.size,
+        auto arithmeticFacts = TypeFacts(targetFacts.size,
             targetFacts.alignment, true, operationFacts.isUnsigned);
+        bool signExtend = !targetFacts.isUnsigned;
+        static if (op == "<<" || op == ">>" || op == ">>>") {
+            const shift = shiftPlan(expression);
+            arithmeticFacts = TypeFacts(shift.width, cast(uint) shift.width,
+                true, shift.direction == ShiftPlan.Direction.rightLogical);
+            signExtend = shift.signExtend;
+        }
         auto target = resolvedTarget;
         if (target is null)
             target = addressOf(expression.e1);
@@ -3360,7 +3368,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             if (field !is null && field.isBitFieldDeclaration !is null) {
                 const stepFacts = factsOf(expression.e2.type);
                 const step = asIntegral(expression.e2, stepFacts);
-                const current = bitfieldValueAtPlace(field, target);
+                const fieldValue = bitfieldValueAtPlace(field, target);
+                const current = signExtend
+                    ? fieldValue
+                    : fieldValue & (ulong.max >> (64 - 8 * targetFacts.size));
                 const result = combine!op(
                     current, step, arithmeticFacts, stepFacts, expression);
                 storeBitfieldAt(field, target, result);
@@ -3371,8 +3382,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         const stepFacts = factsOf(expression.e2.type);
         const step = asIntegral(expression.e2, stepFacts);
-        const current =
-            loadIntegral(target, targetFacts.size, !targetFacts.isUnsigned);
+        const current = loadIntegral(target, targetFacts.size, signExtend);
         const result =
             combine!op(current, step, arithmeticFacts, stepFacts, expression);
 
@@ -6015,7 +6025,7 @@ private ulong combine(string op)(
     imported!"dmd.expression".Expression expression,
 ) {
     static if (op == "<<" || op == ">>" || op == ">>>")
-        return shifted!op(a, b, aFacts, expression);
+        return shifted!op(a, b, aFacts);
     else static if (op == "/" || op == "%")
         return divided!op(
             a, b, sharedSignedness(aFacts, bFacts), expression);
@@ -6082,25 +6092,17 @@ private ulong divided(string op)(
 // the same domain - dmd leaves it its own type, which can differ in
 // signedness from the left one - so its facts say nothing here.
 //
-// A count outside `[0, width)` is undefined in D, and the host's shift
-// instruction answers it by taking the count modulo the register width,
-// which is a plausible wrong answer rather than the guest's own. Report
-// the invalid count instead.
+// A count outside `[0, width)` is undefined in D; the count is masked as
+// compiled D does on the host.
 private ulong shifted(string op)(
     in long a,
-    in long b,
+    in long count,
     in imported!"snakebite.nativelayout".TypeFacts aFacts,
-    imported!"dmd.expression".Expression expression,
 ) {
-    import std.conv: text;
+    import snakebite.nativevalue: shiftCount;
 
     const width = aFacts.size * 8;
-    if (b < 0 || b >= width)
-        throw new SnakebiteException(
-            text("interpreter: invalid shift count ", b, " in `",
-                expression.toString, "`: the left operand has ", width,
-                " bits"),
-        );
+    const b = shiftCount(count, aFacts.size);
 
     static if (op == "<<")
         return cast(ulong) a << b;

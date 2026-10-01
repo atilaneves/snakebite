@@ -15,13 +15,17 @@ import dmd.typesem: isIntegral, toBasetype;
 public imported!"dmd.expression".Expression compoundTarget(
     imported!"dmd.expression".BinAssignExp expression,
 ) {
-    auto target = expression.e1;
-    if (auto promotion = target.isCastExp)
-        if (!promotion.type.toBasetype.equals(expression.type.toBasetype)
-                && promotion.e1.type.toBasetype.equals(
-                    expression.type.toBasetype))
+    const type = expression.type.toBasetype;
+    if (expression.e1.type.toBasetype.equals(type))
+        return expression.e1;
+
+    // A shift by a wider count promotes the target twice, e.g.
+    // `cast(long)cast(int)b` for a `byte`.
+    for (auto promotion = expression.e1.isCastExp; promotion !is null;
+            promotion = promotion.e1.isCastExp)
+        if (promotion.e1.type.toBasetype.equals(type))
             return promotion.e1;
-    return target;
+    return expression.e1;
 }
 
 // Resolves the storage named by an expression. `Result` is deliberately a

@@ -3171,6 +3171,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import snakebite.backends.arithmetic:
             ArithmeticPlan, arithmeticKind, arithmeticPlan;
+        import snakebite.backends.shifts: shiftPlan;
         import snakebite.frontend.storage: compoundTarget;
         import std.conv: text;
 
@@ -3183,10 +3184,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         TypeFacts rightFacts = operationFacts;
         size_t operationWidth = operationFacts.size;
         size_t operands;
+        bool shiftSignExtend = !targetFacts.isUnsigned;
         with (ArithmeticPlan.Kind) final switch (plan.kind) {
             case integral, pointerOffset:
-                handler = compoundHandler(
-                    expression, operationFacts.isUnsigned, false);
+                if (expression.isShlAssignExp || expression.isShrAssignExp
+                        || expression.isUshrAssignExp) {
+                    const shift = shiftPlan(expression);
+                    handler = shiftHandler(shift);
+                    operationWidth = shift.width;
+                    shiftSignExtend = shift.signExtend;
+                } else
+                    handler = compoundHandler(
+                        expression, operationFacts.isUnsigned, false);
                 break;
             case floating:
                 handler = compoundHandler(
@@ -3216,12 +3225,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             targetFacts, targetOffset, fieldDeclaration,
             arithmeticKind(target.type),
         );
-        // `>>>=` shifts the target's own unsigned bit pattern. Reading it
-        // through the promoted target's own (possibly signed) facts would
-        // sign-extend a negative narrow target, and the vacated high bits
-        // would then leak into the truncated result.
-        if (expression.isUshrAssignExp)
-            storage.facts.isUnsigned = true;
+        storage.facts.isUnsigned = !shiftSignExtend;
         const promotedFirst = storage.promotesBeforeOperand
             && operationFacts.size != storage.facts.size;
         size_t valueOffset;
@@ -3475,6 +3479,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(staticLoadHandler(variable), destinationOffset, staticAddressOf(variable), width);
     }
 
+    private Instruction.Handler shiftHandler(
+        in imported!"snakebite.backends.shifts".ShiftPlan plan,
+    ) {
+        with (imported!"snakebite.backends.shifts".ShiftPlan.Direction)
+            final switch (plan.direction) {
+                case left:
+                    return &opShiftLeft;
+                case rightArithmetic:
+                    return &opShiftRightArithmetic;
+                case rightLogical:
+                    return &opShiftRightLogical;
+            }
+    }
+
     private Instruction.Handler compoundHandler(
         BinAssignExp expression, in bool unsigned, in bool floating,
     ) {
@@ -3489,10 +3507,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (expression.isAndAssignExp) return &opBitAnd;
         if (expression.isOrAssignExp) return &opBitOr;
         if (expression.isXorAssignExp) return &opBitXor;
-        if (expression.isShlAssignExp) return &opShiftLeft;
-        if (expression.isShrAssignExp)
-            return unsigned ? &opShiftRightLogical : &opShiftRightArithmetic;
-        if (expression.isUshrAssignExp) return &opShiftRightLogical;
         if (expression.isDivAssignExp)
             return floating
                 ? &opFloatDivide

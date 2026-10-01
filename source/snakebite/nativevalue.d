@@ -367,6 +367,15 @@ public bool isIntegralSize(in size_t size) @safe @nogc nothrow pure {
     return size == 1 || size == 2 || size == 4 || size == 8;
 }
 
+// The count a shift uses. D leaves a count outside `[0, width)` undefined;
+// compiled D on x86-64 answers it with the CPU's own rule, the low 5 bits
+// of the count for a shift narrower than 64 bits - 8- and 16-bit shifts
+// included - and the low 6 bits for a 64-bit one.
+public ulong shiftCount(in ulong count, in size_t operandSize)
+        @safe @nogc nothrow pure {
+    return count & (operandSize == 8 ? 63 : 31);
+}
+
 public enum arrayLengthOffset = 0;
 public enum arrayPointerOffset = size_t.sizeof;
 public enum arrayValueSize = size_t.sizeof + (void*).sizeof;

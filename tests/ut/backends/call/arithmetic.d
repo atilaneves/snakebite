@@ -641,50 +641,6 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-// A shift by the operand's own width or more is undefined in D, and the
-// host's shift instruction answers it by taking the count modulo the
-// register width - a plausible wrong answer. The interpreter reports the
-// invalid count and expression, so this is pinned for the interpreter alone.
-@("arithmetic.leftShift.countTooLarge.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
-
-    auto module_ = parseSnippet(q{
-        int one() { return 1; }
-        int width() { return 32; }
-        int shifted() { return one() << width(); }
-    });
-    auto function_ = findFunction(module_, "shifted");
-
-    int result;
-    interpreter(module_).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "interpreter: invalid shift count 32 in `one() << width()`: " ~
-            "the left operand has 32 bits");
-}
-
-@("arithmetic.rightShift.countNegative.Interpreter")
-@Tags("Interpreter")
-unittest {
-    import snakebite.frontend.compiler: parseSnippet;
-    import snakebite.frontend.dmd.functions: findFunction;
-
-    auto module_ = parseSnippet(q{
-        int one() { return 1; }
-        int back() { return -1; }
-        int shifted() { return one() >> back(); }
-    });
-    auto function_ = findFunction(module_, "shifted");
-
-    int result;
-    interpreter(module_).call(function_, &result, [])
-        .shouldThrowWithMessage(
-            "interpreter: invalid shift count -1 in `one() >> back()`: " ~
-            "the left operand has 32 bits");
-}
-
 // Every compound assignment, each reading the target once and writing the
 // combined value back. The starting value and the operand differ from each
 // other and from the answer, so an implementation that drops either side
