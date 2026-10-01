@@ -201,6 +201,13 @@ public struct CallAdapter {
                 emit(Value(expression, TypeFacts.of(expression.type)));
         }
 
+        // The order a native callee takes already-evaluated arguments in,
+        // the order `each` emits them: a D variadic's hidden `TypeInfo`
+        // tuple, the declared arguments, then the extra ones.
+        public T[] nativeOrder(T)(T hidden, T[] declared, T[] extras) const {
+            return (_declaredOffset ? [hidden] : []) ~ declared ~ extras;
+        }
+
         public void eachExtra(scope void delegate(Value) emit) {
             foreach (expression; _expressions[extraOffset .. $])
                 emit(Value(expression, TypeFacts.of(expression.type)));
@@ -223,7 +230,7 @@ public struct CallAdapter {
             );
         }
 
-        private Value hiddenArgument() {
+        public Value hiddenArgument() {
             import snakebite.ffi.abi: dVariadicArgumentsIsSlice;
 
             auto expression = _expressions[0];

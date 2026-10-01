@@ -6557,6 +6557,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const offset = reserveTemp(value.facts);
         evalInto(value.expression, offset, value.facts.size);
+        return compileEvaluatedArgument(offset, value);
+    }
+
+    // The argument a native callee takes for `value`, already evaluated
+    // into the frame slot at `offset`.
+    private Arg compileEvaluatedArgument(
+        in size_t offset,
+        CallAdapter.Arguments.Value value,
+    ) {
         if (!value.readsField)
             return Arg(offset, 0, value.facts.size);
 
@@ -6686,8 +6695,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: VarArg;
 
         auto preparation = CallAdapter.Arguments.of(functionType, arguments);
+        const initialCount = args.length;
         args ~= compileGuestArguments(preparation, calleeLayout);
 
+        auto declared = args[initialCount .. $];
         auto guestArgs = args;
         auto nativeArgs = args;
         const isVariadic = functionType.parameterList.varargs
@@ -6695,8 +6706,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (isVariadic) {
             auto variadic = compileVariadicArguments(arguments, calleeLayout);
             guestArgs = args ~ variadic.guest;
-            nativeArgs = functionType.isDstyleVariadic
-                ? guestArgs : args ~ variadic.values;
+            const hidden = functionType.isDstyleVariadic
+                ? compileEvaluatedArgument(
+                    variadic.guest[0].callerOffset, preparation.hiddenArgument)
+                : Arg.init;
+            nativeArgs = args[0 .. initialCount] ~ preparation.nativeOrder(
+                hidden, declared, variadic.values);
         }
 
         const nativePlan = isVariadic
