@@ -4009,3 +4009,71 @@ static foreach (backend; Matrix!(
         }, "answer");
     }
 }
+
+
+// A struct whose only field has no bytes: `typeid(int[0]).tsize` is 0,
+// so no SysV eightbyte holds data and the argument has no register
+// class, although the struct itself still has its `int` alignment and
+// so a size of 4. The callee reads that size back through
+// `_arguments[0]` alone.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("variadic.externD.zeroSizeFieldStructExtra." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(4).shouldBeRetOf!(
+            backend,
+            q{
+                struct OnlyEmptyArray {
+                    int[0] nothing;
+                }
+
+                struct Ffi {
+                    static:
+                    pragma(mangle, "snakebite_ut_dvariadic_struct_backend")
+                    extern(D) size_t copyStruct(ubyte* dest, ...);
+                }
+
+                size_t answer() {
+                    ubyte[8] buffer;
+                    OnlyEmptyArray value;
+                    return Ffi.copyStruct(buffer.ptr, value);
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+
+// An `extern(C)` struct with no fields has the C size of 0, not the 1
+// that an `extern(D)` struct with no fields has, so it has no SysV
+// eightbyte at all.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+)) {
+    @("variadic.externD.zeroSizeStructExtra." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        size_t(0).shouldBeRetOf!(
+            backend,
+            q{
+                extern(C) struct Empty {}
+
+                struct Ffi {
+                    static:
+                    pragma(mangle, "snakebite_ut_dvariadic_struct_backend")
+                    extern(D) size_t copyStruct(ubyte* dest, ...);
+                }
+
+                size_t answer() {
+                    ubyte[8] buffer;
+                    Empty value;
+                    return Ffi.copyStruct(buffer.ptr, value);
+                }
+            },
+            "answer",
+        );
+    }
+}
