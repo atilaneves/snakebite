@@ -1698,3 +1698,59 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// `__ctfe` is false at run time, so `__ctfe ? a : b` is `b` and
+// `!__ctfe ? a : b` is `a`, whatever the shape of the operands.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "`__ctfe` is true in CTFE"),
+)) {
+    @("ctfeConditionalSelectsTheRunTimeOperand." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Wide { long a, b, c; }
+            int calls;
+            int count(int value) { calls++; return value; }
+            Wide wide(long value) { calls++; return Wide(value, value, value); }
+            ref int pick(return ref int a, return ref int b) {
+                return __ctfe ? a : b;
+            }
+
+            void main() {
+                assert((__ctfe ? 1 : 2) == 2);
+                assert((!__ctfe ? 1 : 2) == 1);
+                assert((__ctfe ? count(1) : count(2)) == 2);
+                assert(calls == 1);
+                assert((!__ctfe ? count(3) : count(4)) == 3);
+                assert(calls == 2);
+                assert((__ctfe ? 1 : !__ctfe ? 2 : 3) == 2);
+                assert((!__ctfe ? (__ctfe ? 4 : 5) : 6) == 5);
+                assert((__ctfe ? wide(1) : wide(2)).c == 2);
+                assert((!__ctfe ? wide(3) : wide(4)).b == 3);
+                assert(calls == 4);
+                int x = 1, y = 2;
+                (__ctfe ? x : y) = 7;
+                assert(x == 1 && y == 7);
+                pick(x, y) = 9;
+                assert(y == 9);
+                (!__ctfe ? x : y) += 4;
+                assert(x == 5);
+                int taken;
+                if (__ctfe ? false : true) taken = 1;
+                assert(taken == 1);
+                bool flag = true;
+                assert((flag ? (__ctfe ? 1 : 2) : 3) == 2);
+                assert(((__ctfe ? 1 : 2) + (!__ctfe ? 10 : 20)) == 12);
+                string text = __ctfe ? "ctfe" : "run";
+                assert(text == "run");
+                double d = !__ctfe ? 1.5 : 2.5;
+                assert(d == 1.5);
+                __ctfe ? cast(void) count(1) : cast(void) count(2);
+                assert(calls == 5);
+                auto dg = () => __ctfe ? x : y;
+                assert(dg() == 9);
+            }
+        });
+    }
+}

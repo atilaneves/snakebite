@@ -2125,12 +2125,241 @@ def test_betterc_rejects_a_closure_that_a_template_instance_causes(
     assert "allocates closure for `bar()` with the GC" in outcome.output
 
 
-# A native build compiles the instance of a dependency's template into the
-# object file of the root module that instantiates it, with the flags of
-# the root.
+# dmd generates code for a declaration in a function body only as its glue
+# layer reaches it (`Dsymbol_toElem`): a template is not code, and a nested
+# function whose attributes dmd infers is left out of the object when it
+# uses the GC. Such a declaration is free to use the GC at compile time.
+LOCAL_COMPILE_TIME_DECLARATIONS = [
+    ("enum_template", """
+        template Digit(size_t n) {
+            static if (n == 0) enum Digit = "0"; else enum Digit = "1";
+        }
+        int run(int x) {
+            enum sum(size_t i) = "x + " ~ Digit!i;
+            return mixin(sum!1);
+        }
+    """),
+    ("function_template", """
+        int run(int x) {
+            int[] join(T)(T[] a, T[] b) { return a ~ b; }
+            return x + 1;
+        }
+    """),
+    ("struct_template", """
+        int run(int x) {
+            static struct Buffer(T) { T[] items; void add(T item) { items ~= item; } }
+            return x + 1;
+        }
+    """),
+    ("nested_function_for_ctfe", """
+        int run(int x) {
+            static auto twice(string a) { return a ~ a; }
+            enum text = twice("ab");
+            return x + cast(int) text.length - 3;
+        }
+    """),
+    ("nested_function_not_called", """
+        int run(int x) {
+            string twice(string a) { return a ~ a; }
+            return x + 1;
+        }
+    """),
+    ("alias_of_a_lambda", """
+        int run(int x) {
+            alias twice = (int[] a) => a ~ a;
+            enum length = twice([1]).length;
+            return x + cast(int) length - 1;
+        }
+    """),
+]
+
+
 @pytest.mark.parametrize("backend", BETTERC_BACKENDS)
-def test_betterc_applies_to_a_dependency_template_that_a_root_instantiates(
-    tmp_path: Path, backend: str,
+@pytest.mark.parametrize(
+    "declarations",
+    [row[1] for row in LOCAL_COMPILE_TIME_DECLARATIONS],
+    ids=[row[0] for row in LOCAL_COMPILE_TIME_DECLARATIONS],
+)
+def test_betterc_accepts_gc_use_in_a_local_declaration_with_no_code(
+    tmp_path: Path, backend: str, declarations: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], declarations + """
+        unittest {
+            assert(run(2) == 3);
+            log("ran\\n");
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "ran" in outcome.output
+
+
+# `match` of `std.sumtype` declares `enum` templates that concatenate
+# strings in its body. `SumType` is documented to work with `-betterC`.
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+def test_betterc_phobos_sumtype_match(tmp_path: Path, backend: str) -> None:
+    outcome = run_betterc(tmp_path, backend, [], """
+        import std.sumtype;
+        unittest {
+            alias Value = SumType!(int, double);
+            Value value = 3;
+            assert(value.match!((int i) => i, (double d) => 0) == 3);
+            log("matched\\n");
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "matched" in outcome.output
+
+
+# An `extern(C++)` class is the class that `-betterC` permits, and a call
+# of an abstract function goes through the vtable: it needs no symbol,
+# whatever its name is.
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+@pytest.mark.parametrize("name", ["priority", "rt_priority", "gc_count", "_d_tick"])
+def test_betterc_calls_an_abstract_cpp_function_of_any_name(
+    tmp_path: Path, backend: str, name: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], f"""
+        import core.lifetime: emplace;
+        import core.stdc.stdlib: free, malloc;
+        extern(C++) abstract class Task {{ abstract int {name}(); }}
+        extern(C++) class Idle : Task {{
+            override int {name}() {{ return 7; }}
+        }}
+        unittest {{
+            enum size = __traits(classInstanceSize, Idle);
+            void[] storage = malloc(size)[0 .. size];
+            Task task = emplace!Idle(storage);
+            assert(task.{name} == 7);
+            free(storage.ptr);
+            log("called\\n");
+        }}
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "called" in outcome.output
+
+
+# The object file has no reference to a function that only unreachable code
+# names: the compiler removes that code, so the program links.
+UNREACHABLE_REFERENCES = [
+    ("constant_if", """
+        import core.memory: GC;
+        import core.stdc.stdlib: malloc;
+        enum useGc = false;
+        void* allocate(size_t size) {
+            if (useGc)
+                return GC.malloc(size);
+            return malloc(size);
+        }
+    """),
+    ("constant_while", """
+        import core.memory: GC;
+        import core.stdc.stdlib: malloc;
+        void* allocate(size_t size) {
+            while (false)
+                GC.collect();
+            return malloc(size);
+        }
+    """),
+    ("ctfe_and", """
+        import core.memory: GC;
+        import core.stdc.stdlib: malloc;
+        void* allocate(size_t size) {
+            if (__ctfe && GC.malloc(size))
+                return null;
+            return malloc(size);
+        }
+    """),
+    ("constant_if_function_that_dmd_leaves_out", """
+        import core.stdc.stdlib: malloc;
+        enum verbose = false;
+        T[] twice(T)(T[] items) { return items ~ items; }
+        void* allocate(size_t size) {
+            int[] none;
+            if (verbose)
+                return twice(none).ptr;
+            return malloc(size);
+        }
+    """),
+]
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+@pytest.mark.parametrize(
+    "declarations",
+    [row[1] for row in UNREACHABLE_REFERENCES],
+    ids=[row[0] for row in UNREACHABLE_REFERENCES],
+)
+def test_betterc_accepts_a_runtime_reference_in_unreachable_code(
+    tmp_path: Path, backend: str, declarations: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], declarations + """
+        unittest {
+            import core.stdc.stdlib: free;
+            auto memory = allocate(8);
+            assert(memory !is null);
+            free(memory);
+            log("allocated\\n");
+        }
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "allocated" in outcome.output
+
+
+# `core.atomic` is a module of templates over inline assembler, and it
+# needs no runtime.
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+@pytest.mark.parametrize(
+    "statement",
+    ['atomicOp!"+="(value, 2);', "atomicFetchAdd(value, 2);"],
+    ids=["atomic_op", "atomic_fetch_add"],
+)
+def test_betterc_core_atomic(
+    tmp_path: Path, backend: str, statement: str,
+) -> None:
+    outcome = run_betterc(tmp_path, backend, [], f"""
+        import core.atomic;
+        unittest {{
+            shared int value = 1;
+            {statement}
+            assert(atomicLoad(value) == 3);
+            log("added\\n");
+        }}
+    """)
+    assert outcome.status == 0, outcome.output
+    assert "added" in outcome.output
+
+
+# A template instance is one function in the program, whichever module
+# asks for it: its `static` variable and its address are the same for the
+# root module and for the dependency that declares the template.
+SHARED_INSTANCES = [
+    ("static_variable", """
+        module dep;
+        int next()() { static int count; return ++count; }
+        int nextInDependency() { return next(); }
+    """, """
+        assert(next() == 1);
+        assert(nextInDependency() == 2);
+        assert(next() == 3);
+    """),
+    ("address", """
+        module dep;
+        int twice(T)(T x) { return x * 2; }
+        int function(int) twiceInDependency() { return &twice!int; }
+    """, """
+        assert(&twice!int is twiceInDependency());
+    """),
+]
+
+
+@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
+@pytest.mark.parametrize(
+    "dependency_source,body",
+    [row[1:] for row in SHARED_INSTANCES],
+    ids=[row[0] for row in SHARED_INSTANCES],
+)
+def test_betterc_root_and_dependency_share_one_template_instance(
+    tmp_path: Path, backend: str, dependency_source: str, body: str,
 ) -> None:
     dependency = tmp_path / "dep"
     (dependency / "source").mkdir(parents=True)
@@ -2138,27 +2367,22 @@ def test_betterc_applies_to_a_dependency_template_that_a_root_instantiates(
         'name "dep"\ntargetType "library"\n', encoding="utf-8",
     )
     (dependency / "source" / "dep.d").write_text(
-        """
-        module dep;
-        int mode()() {
-            version (D_BetterC) return 1;
-            else return 2;
-        }
-        """,
-        encoding="utf-8",
+        dependency_source, encoding="utf-8",
     )
-    code = PRELUDE + """
+    code = PRELUDE + f"""
         import dep;
-        unittest {
-            assert(mode() == 1);
-            log("instantiated\\n");
-        }
+        unittest {{
+            {body}
+            log("shared\\n");
+        }}
     """
     root = tmp_path / "root"
     (root / "source").mkdir(parents=True)
     if backend == "native":
         outcome = run_native(
-            root, ["-betterC", f"-I{dependency / 'source'}"],
+            root,
+            ["-betterC", f"-I{dependency / 'source'}",
+             str(dependency / "source" / "dep.d")],
             code + DUB_TEST_MAIN, BETTERC,
         )
     else:
@@ -2179,85 +2403,7 @@ def test_betterc_applies_to_a_dependency_template_that_a_root_instantiates(
             ),
         )
     assert outcome.status == 0, outcome.output
-    assert "instantiated" in outcome.output
-
-# A `-betterC` program links with no druntime, so code that calls a runtime
-# function, or a function that dmd leaves out because it uses the GC, does
-# not link. The load reports the same programs that the native link rejects.
-LINK_ERRORS = [
-    ("new_class", """
-        class C { int x; }
-        void make() { auto c = new C; }
-        unittest { make; }
-    """),
-    ("array_length", """
-        void grow(int[] a) { a.length = 3; }
-        unittest { int[2] storage; grow(storage[]); }
-    """),
-    ("synchronized", """
-        void lock() { synchronized {} }
-        unittest { lock; }
-    """),
-    ("foreach_dchar", """
-        void each(string text) { foreach (dchar c; text) {} }
-        unittest { each("a"); }
-    """),
-    ("append_dchar", """
-        void append() { char[] text; dchar c = 1; text ~= c; }
-        unittest { append; }
-    """),
-    ("new_array_in_a_plain_function", """
-        int make() { auto p = new int[3]; return 0; }
-        unittest { make; }
-    """),
-    ("call_of_a_function_dmd_leaves_out", """
-        int[] join()(int[] a, int[] b) @nogc { return a ~ b; }
-        unittest { int[2] storage; join(storage[], storage[]); }
-    """),
-    ("lambda_that_uses_the_gc", """
-        unittest { auto join = (int[] a) @nogc => a ~ a; }
-    """),
-]
-
-
-@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
-@pytest.mark.parametrize(
-    "source",
-    [row[1] for row in LINK_ERRORS],
-    ids=[row[0] for row in LINK_ERRORS],
-)
-def test_betterc_rejects_what_the_native_link_rejects(
-    tmp_path: Path, backend: str, source: str,
-) -> None:
-    outcome = reject_betterc(tmp_path, backend, [], source)
-
-    assert outcome.status == 1, outcome.output
-    if backend == "native":
-        assert "undefined" in outcome.output
-    else:
-        assert "-betterC" in outcome.output
-
-
-# `__ArrayCast` reports a bad length through `onArrayCastError`, a druntime
-# template that a native `-betterC` build compiles with the root module, so
-# its `assert` is the C one.
-@pytest.mark.parametrize("backend", BETTERC_BACKENDS)
-def test_betterc_array_cast_of_a_bad_length_aborts_with_the_c_message(
-    tmp_path: Path, backend: str,
-) -> None:
-    outcome = run_betterc(tmp_path, backend, [], """
-        unittest {
-            ubyte[7] storage;
-            ubyte[] bytes = storage[];
-            log("start\\n");
-            int[] ints = cast(int[]) bytes;
-            log("after\\n");
-        }
-    """)
-    assert outcome.status == -SIGABRT, outcome.output
-    assert "cannot be cast to `int[]`" in outcome.output
-    assert "start" in outcome.output
-    assert "after" not in outcome.output
+    assert "shared" in outcome.output
 
 
 if __name__ == "__main__":

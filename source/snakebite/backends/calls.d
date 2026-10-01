@@ -53,10 +53,6 @@ public struct CallSelection {
     // (ADR-0006); a decision is built once per function.
     private SharedTable!(FuncDeclaration, Decision) _decisions;
 
-    // Whether the program has `-betterC`. Set once, before the first
-    // decision.
-    public bool betterC;
-
     // `function_`'s full routing decision. The one call every hot path
     // wants: a single cache lookup carries both the route and, for
     // `builtin`, the wrapper to call - `usesGuestBody` below is the one
@@ -90,7 +86,7 @@ public struct CallSelection {
             function_,
             buildDecision(
                 function_, hasNativeSymbol, hasIndependentNativeSymbol,
-                isGuest, betterC,
+                isGuest,
             ),
         );
     }
@@ -179,7 +175,6 @@ public struct CallSelection {
         lazy bool hasNativeSymbol,
         lazy bool hasIndependentNativeSymbol,
         scope bool delegate(FuncDeclaration) isGuest,
-        in bool betterC,
     ) {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -222,20 +217,7 @@ public struct CallSelection {
         // carry the host compiler's frame layout, not this backend's -
         // reusing it for a guest call reads that closure with the wrong
         // layout. A missing independent symbol leaves the guest body.
-        //
-        // With `-betterC` the instance that a root module needs is also a
-        // guest body whatever the image holds: a native build compiles it
-        // into the root's object with the root's flags, so its result can
-        // differ from that of the image, which has the flags of the
-        // dependency. After the load check `minst` is the root module that
-        // dmd generates the instance for, or no root module at all. No
-        // backend runs inline assembler, so such a body stays native.
-        auto instance = function_.isInstantiated;
-        const prefers = betterC && instance !is null
-                && instance.minst !is null && instance.minst.isRoot
-                && !function_.hasInlineAsm
-            ? true
-            : instance !is null
+        const prefers = function_.isInstantiated() !is null
             ? !hasIndependentNativeSymbol : isGuest(function_);
         return Decision(prefers ? Route.guest : Route.native);
     }

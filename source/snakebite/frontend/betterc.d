@@ -10,8 +10,8 @@ private:
 // declarations it generates code for and only for them. This is the same
 // walk as `FuncDeclaration_toObjFile`, `ToObjFile` and `Statement_toIR` in
 // `dmd/glue`, with the same stops and the same order, and it reports the
-// same errors with the same text, one for each node. A backend then never
-// reaches a node that dmd leaves without a `lowering` under `-betterC`.
+// same errors with the same text, one for each node. It does not report what
+// only the linker rejects.
 public void reportBetterCDiagnostics(
     imported!"dmd.dmodule".Module[] rootModules,
 ) {
@@ -285,7 +285,7 @@ private extern(C++) class BetterCGlueBody
     import dmd.visitor: SemanticTimeTransitiveVisitor;
     alias visit = SemanticTimeTransitiveVisitor.visit;
 
-    import dmd.astenums: STC, Tchar, Tclass;
+    import dmd.astenums: STC;
     import dmd.dsymbol: Dsymbol;
     import dmd.dsymbolsem: include, toAlias;
     import dmd.dtemplate: TemplateInstance, TemplateMixin, isExpression, isType;
@@ -297,25 +297,21 @@ private extern(C++) class BetterCGlueBody
     import dmd.expression:
         CastExp,
         CatAssignExp,
-        CatDcharAssignExp,
         CatElemAssignExp,
         CatExp,
         CondExp,
         DeclarationExp,
         DelegateExp,
         DotTemplateInstanceExp,
-        DotVarExp,
         FuncExp,
-        NewExp,
         SymOffExp,
         TypeidExp,
         Expression,
         VarExp;
     import dmd.func: FuncDeclaration, FuncLiteralDeclaration;
     import dmd.globals: global;
-    import dmd.location: Loc;
-    import dmd.typesem: nextOf, toBasetype;
     import dmd.statement:
+        ExpStatement,
         IfStatement,
         ImportStatement,
         MixinStatement,
@@ -372,20 +368,6 @@ private extern(C++) class BetterCGlueBody
         expression.e1.accept(this);
     }
 
-    override void visit(NewExp expression) {
-        if (expression.placement !is null)
-            expression.placement.accept(this);
-        if (expression.thisexp !is null)
-            expression.thisexp.accept(this);
-        if (expression.arguments !is null)
-            foreach (argument; *expression.arguments)
-                argument.accept(this);
-        if (!global.params.useGC && !expression.onstack
-                && expression.placement is null
-                && expression.newtype.toBasetype.ty == Tclass)
-            reportRuntimeFunction(expression, "_d_newclass".ptr, expression.loc);
-    }
-
     override void visit(CastExp expression) {
         expression.e1.accept(this);
     }
@@ -436,20 +418,6 @@ private extern(C++) class BetterCGlueBody
         visit(cast(CatAssignExp) expression);
     }
 
-    // Appending a `dchar` to a `char[]` is a call of a runtime function
-    // that dmd's glue names, and its own error is the linker's.
-    override void visit(CatDcharAssignExp expression) {
-        expression.e1.accept(this);
-        expression.e2.accept(this);
-        if (!global.params.useGC)
-            reportRuntimeFunction(
-                expression,
-                expression.e1.type.toBasetype.nextOf.toBasetype.ty == Tchar
-                    ? "_d_arrayappendcd".ptr : "_d_arrayappendwd".ptr,
-                expression.loc,
-            );
-    }
-
     override void visit(TypeidExp expression) {
         if (isType(expression.obj) !is null) {
             _declarations.reportTypeInfo(expression);
@@ -467,101 +435,21 @@ private extern(C++) class BetterCGlueBody
     }
 
     override void visit(FuncExp expression) {
-        reference(expression.fd, expression);
         useLiteral(expression.fd);
     }
 
     override void visit(VarExp expression) {
-        if (auto function_ = expression.var.isFuncDeclaration)
-            reference(function_, expression);
         if (auto literal = expression.var.isFuncLiteralDeclaration)
             useLiteral(literal);
     }
 
     override void visit(SymOffExp expression) {
-        if (auto function_ = expression.var.isFuncDeclaration)
-            reference(function_, expression);
         if (auto literal = expression.var.isFuncLiteralDeclaration)
             useLiteral(literal);
     }
 
-    override void visit(DotVarExp expression) {
-        expression.e1.accept(this);
-        if (auto function_ = expression.var.isFuncDeclaration)
-            reference(function_, expression);
-    }
-
     override void visit(DelegateExp expression) {
         expression.e1.accept(this);
-        reference(expression.func, expression);
-    }
-
-    // The linker reports a reference to a function that has no code: dmd
-    // generates none for a function that uses the GC under `-betterC`
-    // (`skipCodegen`), and a `-betterC` program has no druntime to supply
-    // the runtime functions that compiled code calls.
-    private extern(D) void reference(
-        FuncDeclaration function_, Expression expression,
-    ) {
-        if (global.params.useGC || _declarations.fatal)
-            return;
-        if (function_.fbody !is null) {
-            if (function_.skipCodegen && !function_.inNonRoot)
-                error(
-                    expression.loc,
-                    "`%s` uses the GC, so dmd generates no code for `%s` "
-                    ~ "with -betterC and the reference to it cannot link",
-                    expression.toChars,
-                    function_.toPrettyChars,
-                );
-            return;
-        }
-        if (isRuntimeFunction(function_))
-            reportRuntimeFunction(
-                expression, function_.toPrettyChars, expression.loc,
-            );
-    }
-
-    // A function of the D runtime that has no code here. The compiler
-    // declares some with no module (`_d_criticalenter2`, `_aApplycd1`).
-    // druntime's own C entry points have the names `gc_*`, `_d_*` and
-    // `rt_*`, which the C library does not use, and its D functions have no
-    // body outside its own modules.
-    private extern(D) static bool isRuntimeFunction(
-        FuncDeclaration function_,
-    ) {
-        import dmd.astenums: LINK;
-        import std.algorithm.searching: any, startsWith;
-        import std.string: fromStringz;
-
-        auto module_ = function_.getModule;
-        if (module_ is null)
-            return true;
-
-        const name = module_.toPrettyChars.fromStringz;
-        const isRuntimeModule = name == "object" || name == "core.memory"
-            || name.startsWith("core.internal.") || name.startsWith("rt.")
-            || name.startsWith("gc.");
-        if (function_.resolvedLinkage == LINK.d)
-            return isRuntimeModule;
-
-        // The linker name of a C function: `pragma(mangle)` or the name.
-        const symbol = function_.mangleOverride.length != 0
-            ? function_.mangleOverride : function_.ident.toString;
-        return ["gc_", "_d_", "rt_", "_aApply", "_aaApply"]
-            .any!(prefix => symbol.startsWith(prefix));
-    }
-
-    private extern(D) void reportRuntimeFunction(
-        Expression expression, in char* name, in Loc loc,
-    ) {
-        error(
-            loc,
-            "`%s` needs the D runtime function `%s`, which is not "
-            ~ "available with -betterC",
-            expression.toChars,
-            name,
-        );
     }
 
     private extern(D) void useLiteral(FuncLiteralDeclaration literal) {
@@ -571,6 +459,13 @@ private extern(C++) class BetterCGlueBody
         }
         if (_declarations.firstUse(literal))
             deferred ~= literal;
+    }
+
+    // The default walk of a declaration statement goes to the declaration
+    // as code. `dmd` generates code for it through `declare`.
+    override void visit(ExpStatement statement) {
+        if (statement.exp !is null)
+            statement.exp.accept(this);
     }
 
     override void visit(DeclarationExp expression) {
