@@ -60,7 +60,7 @@ def run_unittests(
     for flag in flags:
         recipe += f'dflags "{flag}"\n'
     (directory / "dub.sdl").write_text(recipe, encoding="utf-8")
-    (directory / "source").mkdir()
+    (directory / "source").mkdir(exist_ok=True)
     (directory / "source" / "app.d").write_text(code, encoding="utf-8")
 
     return outcome_of(
@@ -1665,6 +1665,28 @@ def test_betterc_checkaction_d_still_aborts_with_the_c_message(
         }
     """)
     assert_aborts_after_start(outcome, "x == 2")
+
+
+# The state `bin/sb` keeps for a project (its dependency image and the
+# startup image) must follow the flags: a run with the flag in between two
+# runs without it must not leave either one with the other's build.
+@pytest.mark.parametrize("backend", ["bytecode", "interpreter"])
+def test_betterc_state_of_a_project_follows_the_flag(
+    tmp_path: Path, backend: str,
+) -> None:
+    source = """
+        unittest {
+            version (D_BetterC) log("betterc\\n");
+            else log("runtime\\n");
+        }
+    """
+    outcomes = [
+        run_unittests(tmp_path, backend, flags, source, BETTERC)
+        for flags in ([], ["-betterC"], [], ["-betterC"])
+    ]
+    for outcome, expected in zip(outcomes, ["runtime", "betterc"] * 2):
+        assert outcome.status == 0, outcome.output
+        assert expected in outcome.output
 
 
 # With the switch check off dmd makes the default of a `final switch` a halt
