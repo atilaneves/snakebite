@@ -558,6 +558,72 @@ def test_missing_c_preprocessor_is_reported_once(
     assert "No such file or directory" in output(result)
 
 
+# The GC forbids an allocation while it runs a finalizer, so a guest
+# destructor that allocates fails the way compiled D does. Each case runs in
+# a process of its own: the error leaves the process that collected unsafe
+# for the next test. CTFE cannot run `GC.collect`.
+FINALIZER_BACKENDS = ["native", "interpreter", "bytecode"]
+
+
+@pytest.mark.parametrize("backend", FINALIZER_BACKENDS)
+@pytest.mark.parametrize(
+    "destructor",
+    [
+        "auto p = new int; *p = 1;",
+        "int[] a; a ~= 1; total += a.length;",
+        "int x = dead; total += call(() => x);",
+        'throw new Exception("boom");',
+    ],
+    ids=["new", "append", "closure", "throw-new"],
+)
+def test_destructor_that_allocates_fails_in_finalizer(
+    tmp_path: Path, backend: str, destructor: str,
+) -> None:
+    source = f"""
+        module main;
+        __gshared int dead;
+        __gshared long total;
+        int call(int delegate() d) {{ return d(); }}
+        class B {{ ~this() {{ {destructor} ++dead; }} }}
+        pragma(inline, false) void make() {{
+            foreach (n; 0 .. 2000)
+                new B;
+        }}
+        unittest {{
+            import core.memory: GC;
+            make;
+            GC.collect;
+            GC.collect;
+        }}
+        int main() {{ return 0; }}
+    """
+    write(tmp_path / "app" / "dub.sdl", dub_project_recipe("finalizer"))
+    write(tmp_path / "app" / "source" / "main.d", source)
+
+    if backend == "native":
+        result = subprocess.run(
+            ["dmd", "-unittest", "-of=native", "source/main.d"],
+            capture_output=True, check=False, text=True,
+            cwd=tmp_path / "app",
+        )
+        assert result.returncode == 0, output(result)
+        result = subprocess.run(
+            [str(tmp_path / "app" / "native")],
+            capture_output=True, check=False, text=True,
+            cwd=tmp_path / "app",
+        )
+    else:
+        result = run_sb(
+            f"--backend={backend}", "--no-optimise-image",
+            str(tmp_path / "app"), cwd=tmp_path,
+        )
+
+    assert result.returncode != 0, output(result)
+    assert "InvalidMemoryOperationError" in output(result)
+
+
+
+
 # A dub recipe whose unittest configuration is an executable: dub's own
 # synthetic unittest configuration would put a generated stub with its
 # own `main` first, and a program takes the first root `main` it finds.

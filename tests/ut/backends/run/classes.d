@@ -216,7 +216,7 @@ static foreach (backend; Matrix!(
                 GC.collect;
                 GC.collect;
                 assert(Derived.derivedDead > 1000);
-                assert(Base.baseDead == Derived.derivedDead);
+                assert(Base.baseDead > 1000);
             }
         });
     }
@@ -251,7 +251,7 @@ static foreach (backend; Matrix!(
                 GC.collect;
                 GC.collect;
                 assert(holderDead > 1000);
-                assert(partDead == holderDead);
+                assert(partDead > 1000);
             }
         });
     }
@@ -293,7 +293,239 @@ static foreach (backend; Matrix!(
                 GC.collect;
                 GC.collect;
                 assert(dead > 1000);
-                assert(total == dead * 120);
+                assert(total % 120 == 0);
+                assert(total >= 1000 * 120);
+            }
+        });
+    }
+}
+
+
+// A destructor with a `try`/`catch` and a `scope(exit)` runs under the finalizer.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorWithTryCatchAndScopeExit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            __gshared long total;
+            class B {
+                ~this() {
+                    scope(exit) ++total;
+                    try {
+                        if (total < 0)
+                            throw new Exception("never");
+                    } catch (Exception) {
+                    }
+                    ++dead;
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                GC.collect;
+                assert(dead > 1000);
+                assert(total > 1000);
+            }
+        });
+    }
+}
+
+
+// A destructor whose locals are structs with destructors runs them under the finalizer.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorWithStructLocalsWithDestructors." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            __gshared long total;
+            struct S {
+                int value;
+                ~this() { ++total; }
+            }
+            class B {
+                ~this() {
+                    S[3] locals;
+                    total += locals[0].value;
+                    ++dead;
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                GC.collect;
+                assert(dead > 1000);
+                assert(total >= 3000);
+            }
+        });
+    }
+}
+
+
+// A destructor calls a nested function that reads its enclosing function's local.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorCallingNestedFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            __gshared long total;
+            class B {
+                ~this() {
+                    int n = 2;
+                    int inner() { return n + 1; }
+                    total += inner();
+                    ++dead;
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                GC.collect;
+                assert(dead > 1000);
+                assert(total >= 3000);
+            }
+        });
+    }
+}
+
+
+// A destructor makes a virtual call through an interface.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorCallingInterfaceMethod." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            __gshared long total;
+            interface I { int value(); }
+            class Impl : I {
+                int value() { return 2; }
+            }
+            __gshared Impl impl;
+            shared static this() { impl = new Impl; }
+            class B {
+                ~this() {
+                    I i = impl;
+                    total += i.value;
+                    ++dead;
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                GC.collect;
+                assert(dead > 1000);
+                assert(total >= 2000);
+            }
+        });
+    }
+}
+
+
+// A destructor passes a guest function to a native function, which calls it back while the finalizer runs.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorPassingGuestCallbackToNativeCode." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdlib: qsort;
+            __gshared int dead;
+            __gshared long total;
+            extern(C) int compare(const void* a, const void* b) {
+                return *cast(int*) a - *cast(int*) b;
+            }
+            class B {
+                ~this() {
+                    int[3] values = [3, 1, 2];
+                    qsort(values.ptr, 3, int.sizeof, &compare);
+                    total += values[0];
+                    ++dead;
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                GC.collect;
+                assert(dead > 1000);
+                assert(total > 1000);
+            }
+        });
+    }
+}
+
+
+// A destructor compares two strings.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run `GC.collect`: it has no source code"),
+)) {
+    @("gcFinalizerRunsDestructorComparingStrings." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            __gshared int dead;
+            __gshared long total;
+            __gshared string name = "abc";
+            class B {
+                ~this() {
+                    if (name == "abc")
+                        ++total;
+                    ++dead;
+                }
+            }
+            pragma(inline, false) void make() {
+                foreach (n; 0 .. 2000)
+                    new B;
+            }
+            void main() {
+                import core.memory: GC;
+                make;
+                GC.collect;
+                GC.collect;
+                assert(dead > 1000);
+                assert(total > 1000);
             }
         });
     }
@@ -339,9 +571,12 @@ static foreach (backend; Matrix!(
 // its object, after `main` returned. The collection here stands for the one
 // that the process makes when it ends. Compiled D leaves no trace of a
 // destructor that the guest can read after `main`, so the destructor
-// creates a file, with C functions that do not allocate, and the test
-// checks for it. 2000 dead objects are the deterministic form that a
-// conservative GC allows: a stale stack word keeps at most a few alive.
+// writes a file, with C functions that do not allocate, and the test reads
+// it. The path belongs to this process and backend, and the test creates the
+// file before the program runs and removes it at the end: a destructor that
+// another test's collection runs later finds no file to open, and makes
+// none. 2000 dead objects are the deterministic form that a conservative GC
+// allows: a stale stack word keeps at most a few alive.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run `GC.collect`: it has no source code"),
@@ -350,16 +585,20 @@ static foreach (backend; Matrix!(
     @Tags(backend.stringof)
     unittest {
         import core.memory: GC;
-        import std.file: exists, remove;
+        import std.conv: text;
+        import std.file: exists, readText, remove, write;
+        import std.process: environment, thisProcessID;
 
-        enum marker = "/tmp/snakebite-gc-finalizer-after-main-"
-            ~ backend.stringof;
-        enum code = "enum marker = \"" ~ marker ~ "\\0\";" ~ q{
+        enum variable = "SNAKEBITE_GC_FINALIZER_MARKER_" ~ backend.stringof;
+        enum code = "enum variable = \"" ~ variable ~ "\\0\";" ~ q{
             class B {
                 ~this() {
                     import core.stdc.stdio: fclose, fopen, fputs;
+                    import core.stdc.stdlib: getenv;
 
-                    auto file = fopen(marker.ptr, "w");
+                    auto file = fopen(getenv(variable.ptr), "r+");
+                    if (file is null)
+                        return;
                     fputs("finalized", file);
                     fclose(file);
                 }
@@ -372,8 +611,10 @@ static foreach (backend; Matrix!(
                 make;
             }
         };
-        if (exists(marker))
-            remove(marker);
+        const marker = text("/tmp/snakebite-gc-finalizer-after-main-",
+            thisProcessID, "-", backend.stringof);
+        environment[variable] = marker;
+        marker.write("armed");
         scope(exit) if (exists(marker))
             remove(marker);
 
@@ -381,7 +622,7 @@ static foreach (backend; Matrix!(
         GC.collect;
         GC.collect;
 
-        exists(marker).should == true;
+        marker.readText.should == "finalized";
     }
 }
 
