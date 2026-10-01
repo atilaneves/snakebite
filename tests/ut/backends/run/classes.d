@@ -2445,3 +2445,341 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+static foreach (backend; Matrix!()) {
+    @("inheritedInContractPasses." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int f(int x) in (x > 0) { return x; }
+            }
+            class Derived: Base {
+                override int f(int x) { return x + 1; }
+            }
+            void main() {
+                Base b = new Derived;
+                assert(b.f(3) == 4);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not accept an in contract that any one of the override chain satisfies"),
+)) {
+    @("inheritedInContractOrRule." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int f(int x) in (x > 0) { return x; }
+            }
+            class Derived: Base {
+                override int f(int x) in (x < 0) { return -x; }
+            }
+            void main() {
+                Base b = new Derived;
+                assert(b.f(3) == -3);
+                assert(b.f(-3) == 3);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not catch this assertion failure"),
+)) {
+    @("inheritedInContractsBothFail." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: AssertError;
+            class Base {
+                int f(int x) in (x > 0) { return x; }
+            }
+            class Derived: Base {
+                override int f(int x) in (x < -5) { return -x; }
+            }
+            void main() {
+                Base b = new Derived;
+                bool caught;
+                try {
+                    b.f(0);
+                } catch (AssertError error) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("inheritedOutContractAndRule." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int f(int x) out (r) { assert(r > 0); } do { return x; }
+            }
+            class Derived: Base {
+                override int f(int x) out (r) { assert(r < 100); } do { return x; }
+            }
+            void main() {
+                Base b = new Derived;
+                assert(b.f(5) == 5);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not catch this assertion failure"),
+)) {
+    @("inheritedOutContractBaseFails." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: AssertError;
+            class Base {
+                int f(int x) out (r) { assert(r > 0); } do { return x; }
+            }
+            class Derived: Base {
+                override int f(int x) out (r) { assert(r < 100); } do { return x; }
+            }
+            void main() {
+                Base b = new Derived;
+                bool caught;
+                try {
+                    b.f(-1);
+                } catch (AssertError error) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not catch this assertion failure"),
+)) {
+    @("inheritedOutContractOverrideFails." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: AssertError;
+            class Base {
+                int f(int x) out (r) { assert(r > 0); } do { return x; }
+            }
+            class Derived: Base {
+                override int f(int x) out (r) { assert(r < 100); } do { return x; }
+            }
+            void main() {
+                Base b = new Derived;
+                bool caught;
+                try {
+                    b.f(500);
+                } catch (AssertError error) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("inheritedContractsReadParametersFieldsAndResult." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int limit = 10;
+                int f(int x)
+                in (x < limit)
+                out (r; r == x * limit)
+                do { return x * limit; }
+            }
+            class Derived: Base {
+                this() { limit = 7; }
+                override int f(int x) { return x * limit; }
+            }
+            void main() {
+                Base b = new Derived;
+                assert(b.f(3) == 21);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not catch this assertion failure"),
+)) {
+    @("inheritedContractsThreeLevels." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: AssertError;
+            class A {
+                int f(int x) in (x != 0) out (r) { assert(r != 100); } do { return x; }
+            }
+            class B: A {
+                override int f(int x) in (x > 10) out (r) { assert(r != 200); } do { return x; }
+            }
+            class C: B {
+                override int f(int x) in (x < -10) out (r) { assert(r != 300); } do { return x; }
+            }
+            void main() {
+                A a = new C;
+                assert(a.f(5) == 5);
+                assert(a.f(-20) == -20);
+                bool caught;
+                try {
+                    a.f(100);
+                } catch (AssertError error) {
+                    caught = true;
+                }
+                assert(caught);
+                caught = false;
+                try {
+                    a.f(0);
+                } catch (AssertError error) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not catch this assertion failure"),
+)) {
+    @("inheritedInterfaceContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: AssertError;
+            interface I {
+                int f(int x) in (x > 0) out (r) { assert(r > x); };
+            }
+            class C: I {
+                int f(int x) in (x > 0) { return x + 1; }
+            }
+            class D: I {
+                int f(int x) { return x; }
+            }
+            void main() {
+                I i = new C;
+                assert(i.f(1) == 2);
+                bool caught;
+                try {
+                    i.f(0);
+                } catch (AssertError error) {
+                    caught = true;
+                }
+                assert(caught);
+                caught = false;
+                I d = new D;
+                try {
+                    d.f(1);
+                } catch (AssertError error) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("inheritedContractWithSuperCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int f(int x) in (x > 0) out (r) { assert(r >= x); } do { return x; }
+            }
+            class Derived: Base {
+                override int f(int x) in (x > 0) out (r) { assert(r >= x); } do {
+                    return super.f(x) + 1;
+                }
+            }
+            void main() {
+                Base b = new Derived;
+                assert(b.f(4) == 5);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("inheritedContractsReadAggregateRefAndOutParameters." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct S { int a; int b; }
+            class Base {
+                void f(S s, ref int r, out int o)
+                in (s.a == 1 && r == 10)
+                out (; s.b == 2 && r == 11 && o == 12)
+                do { r = 11; o = 12; }
+            }
+            class Derived: Base {
+                override void f(S s, ref int r, out int o) {
+                    r = 11;
+                    o = 12;
+                }
+            }
+            void main() {
+                Base b = new Derived;
+                int r = 10;
+                int o;
+                b.f(S(1, 2), r, o);
+                assert(r == 11 && o == 12);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not catch this assertion failure"),
+)) {
+    @("inheritedContractsOverrideWithoutOwnContract." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.exception: AssertError;
+            class Base {
+                int f(int x) in (x > 0) out (r) { assert(r == x); } do { return x; }
+            }
+            class Derived: Base {
+                override int f(int x) { return x; }
+            }
+            class Bad: Base {
+                override int f(int x) { return x + 1; }
+            }
+            void main() {
+                Base b = new Derived;
+                assert(b.f(2) == 2);
+                bool caught;
+                try {
+                    new Bad().f(2);
+                } catch (AssertError error) {
+                    caught = true;
+                }
+                assert(caught);
+            }
+        });
+    }
+}
