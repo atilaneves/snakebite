@@ -5437,14 +5437,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
 
         auto funcType = typeFunctionOf(function_);
-        if (funcType.parameterList.varargs == VarArg.variadic
-                && (!funcType.isDstyleVariadic
-                    || function_.fbody is null
-                    || !_program.isInterpreted(function_)
-                    || _plans.hasNativeSymbol(function_))) {
-            callVariadicNative(expression, function_, funcType);
-            return CallResult.init;
-        }
 
         void* classReceiver;
         bool hasClassReceiver;
@@ -5474,6 +5466,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 function_ = cast(FuncDeclaration) cast(void*) target.word;
                 classReceiver = cast(ubyte*) classReceiver + target.adjustment;
             }
+        }
+
+        funcType = typeFunctionOf(function_);
+        if (funcType.parameterList.varargs == VarArg.variadic
+                && (!funcType.isDstyleVariadic
+                    || function_.fbody is null
+                    || !_program.isInterpreted(function_)
+                    || _plans.hasNativeSymbol(function_))) {
+            callVariadicNative(expression, function_, funcType,
+                classReceiver, hasClassReceiver);
+            return CallResult.init;
         }
 
         auto layout = layoutOf(function_);
@@ -5524,15 +5527,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallExp expression,
         FuncDeclaration function_,
         TypeFunction funcType,
+        void* classReceiver,
+        bool hasClassReceiver,
     ) {
-
         auto preparation = CallAdapter.Arguments.of(
             funcType, expression.arguments,
         );
         const plan = cachedCallPlan(expression, function_,
             () => preparation.prepare(*_plans, function_));
         auto layout = layoutOf(function_);
-        auto frame = bindFrame(expression, function_, layout, true);
+        auto frame = bindFrame(expression, function_, layout, true,
+            classReceiver, hasClassReceiver);
         bindArguments(function_, expression.arguments, expression.loc,
             frame.base, layout, true);
 
