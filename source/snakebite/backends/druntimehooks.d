@@ -26,6 +26,8 @@ public enum DruntimeHook {
     callInterfaceFinalizer,
     arrayAppendChar,
     arrayAppendWchar,
+    assertMessage,
+    cAssertFail,
 }
 
 
@@ -77,6 +79,26 @@ private immutable Register[2] _arrayAppendRegisters = [
     Register(Register.Kind.unsigned, 4),
 ];
 
+// `_d_assert_msg(string msg, string file, uint line)`: a D string is two
+// registers, length first.
+private immutable Register[5] _assertMessageRegisters = [
+    Register(Register.Kind.unsigned, 8),
+    Register(Register.Kind.pointer, 8),
+    Register(Register.Kind.unsigned, 8),
+    Register(Register.Kind.pointer, 8),
+    Register(Register.Kind.unsigned, 4),
+];
+
+// The C runtime's `__assert_fail(const char* assertion, const char* file,
+// uint line, const char* function)` that `-checkaction=C` calls. It is not
+// druntime's, but a backend reaches it the same way: by linker symbol.
+private immutable Register[4] _cAssertFailRegisters = [
+    Register(Register.Kind.pointer, 8),
+    Register(Register.Kind.pointer, 8),
+    Register(Register.Kind.unsigned, 4),
+    Register(Register.Kind.pointer, 8),
+];
+
 // druntime's `_d_invariant` (`rt.invariant_`) has plain `extern(D)`
 // linkage, so its linker symbol is its mangled name, not the bare
 // identifier - the same mangled string dmd's own backend hardcodes for
@@ -126,6 +148,11 @@ public DruntimeHookSpec specOf(in DruntimeHook hook) @safe @nogc nothrow pure {
         case arrayAppendWchar:
             return DruntimeHookSpec(
                 "_d_arrayappendwd", _arrayAppendRegisters);
+        case assertMessage:
+            return DruntimeHookSpec(
+                "_d_assert_msg", _assertMessageRegisters);
+        case cAssertFail:
+            return DruntimeHookSpec("__assert_fail", _cAssertFailRegisters);
     }
 }
 

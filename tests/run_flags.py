@@ -27,6 +27,9 @@ NO_CTFE_HALT = ["native", "bytecode", "interpreter"]
 # CTFE always checks bounds, whatever the function's safety.
 NO_CTFE_UNCHECKED = ["native", "bytecode", "interpreter"]
 
+# The abort and its message come from the C runtime, which CTFE cannot call.
+NO_CTFE_ABORT = ["native", "bytecode", "interpreter"]
+
 # The program logs through the native `fputs`, which CTFE cannot call, so
 # `log` does nothing at compile time and a CTFE run only has an exit status.
 PRELUDE = """\
@@ -36,6 +39,7 @@ import core.stdc.stdio: fputs, stderr;
 """
 
 SIGILL = signal.SIGILL.value
+SIGABRT = signal.SIGABRT.value
 
 
 @dataclass(frozen=True)
@@ -215,6 +219,26 @@ def test_checkaction_halt_slice_out_of_bounds_halts(
             int[] slice = storage[0 .. 2];
             log("start\\n");
             auto value = slice[0 .. 3];
+            log("after\\n");
+        }
+    """)
+    assert_halts_after_start(backend, outcome)
+
+
+# A slice copy with different lengths is a bounds failure: compiled code
+# halts as it does for an index.
+@pytest.mark.parametrize("backend", NO_CTFE_HALT)
+def test_checkaction_halt_slice_copy_length_mismatch_halts(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=halt"], """
+        unittest {
+            int[4] target;
+            int[4] source = [1, 2, 3, 4];
+            int[] to = target[0 .. 3];
+            int[] from = source[0 .. 2];
+            log("start\\n");
+            to[] = from[];
             log("after\\n");
         }
     """)
@@ -405,6 +429,55 @@ def test_release_slice_out_of_bounds_in_system_code_is_not_checked(
         }
     """)
     assert_passes_after_start(backend, outcome)
+
+
+@pytest.mark.parametrize("backend", NO_CTFE_ABORT)
+def test_checkaction_c_failed_assert_aborts_with_the_c_message(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=C"], """
+        unittest {
+            int x = 1;
+            log("start\\n");
+            assert(x == 2);
+            log("after\\n");
+        }
+    """)
+    assert outcome.status == -SIGABRT, outcome.output
+    assert "Assertion `x == 2' failed" in outcome.output
+    assert "after" not in outcome.output
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_checkaction_context_failed_assert_prints_the_operands(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, ["-checkaction=context"], """
+        unittest {
+            int x = 1;
+            log("start\\n");
+            assert(x == 2);
+            log("after\\n");
+        }
+    """)
+    assert_raises_after_start(backend, outcome, "1 != 2")
+
+
+# The message of a failed assert is an expression: it runs when the
+# assert fails.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_failed_assert_evaluates_its_message_expression(
+    tmp_path: Path, backend: str,
+) -> None:
+    outcome = run_unittests(tmp_path, backend, [], """
+        string message() { return "dynamic"; }
+        unittest {
+            log("start\\n");
+            assert(false, message());
+            log("after\\n");
+        }
+    """)
+    assert_raises_after_start(backend, outcome, "dynamic")
 
 
 if __name__ == "__main__":

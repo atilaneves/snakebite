@@ -13,7 +13,8 @@ public struct FailurePlan {
     public enum Kind {
         ignore, // the check is not compiled: its operands are not evaluated
         raise,  // throw the error that druntime defines for the check
-        halt,   // end the process
+        halt,   // run the program's halt action
+        cAssert, // call the C runtime's assert failure function
     }
 
     public Kind kind;
@@ -48,11 +49,30 @@ public FailurePlan boundsPlanOf(
     }
 }
 
+// The three bounds checks dmd's glue layer emits, which differ in the
+// message `-checkaction=C` passes to the C runtime.
+public enum BoundsCheck {
+    index,
+    slice,
+    sliceCopy,
+}
+
+public string cMessageOf(in BoundsCheck check) @safe pure nothrow @nogc {
+    final switch (check) with (BoundsCheck) {
+        case index:
+            return "array index out of bounds";
+        case slice:
+            return "array slice out of bounds";
+        case sliceCopy:
+            return "array overflow";
+    }
+}
+
 private FailurePlan planFor(
     in imported!"dmd.astenums".CHECKENABLE enable,
     in Checks checks,
 ) @safe pure nothrow @nogc {
-    import dmd.astenums: CHECKENABLE;
+    import dmd.astenums: CHECKACTION, CHECKENABLE;
 
     final switch (enable) with (CHECKENABLE) {
         case _default:
@@ -61,10 +81,16 @@ private FailurePlan planFor(
         case safeonly:
             return FailurePlan(FailurePlan.Kind.ignore);
         case on:
-            return FailurePlan(
-                checks.failure == Checks.Failure.halt
-                    ? FailurePlan.Kind.halt
-                    : FailurePlan.Kind.raise,
-            );
+            // `context` differs from `D` only in the message the frontend
+            // gives a plain assert.
+            final switch (checks.action) with (CHECKACTION) {
+                case D:
+                case context:
+                    return FailurePlan(FailurePlan.Kind.raise);
+                case C:
+                    return FailurePlan(FailurePlan.Kind.cAssert);
+                case halt:
+                    return FailurePlan(FailurePlan.Kind.halt);
+            }
     }
 }

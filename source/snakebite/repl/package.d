@@ -114,7 +114,7 @@ public struct Repl {
     }
 
     private SubmitResult submitExpression(in string source) {
-        import snakebite.backends: makeBackend, Program;
+        import snakebite.backends: makeBackend;
         import snakebite.frontend.compiler: parseSnippet;
         import snakebite.frontend.dmd.functions: findFunction;
         import snakebite.repl.cell: replCellLineDirective;
@@ -142,8 +142,7 @@ public struct Repl {
         }
 
         auto function_ = findFunction(module_, evalName);
-        auto program = Program(interpretedModules(module_, _importPaths));
-        program.checks = checksOf(_flags);
+        auto program = programOf(module_);
         program.dependencyImage = _dependencyImage;
         auto backend = makeBackend(
             _backendName,
@@ -173,8 +172,21 @@ public struct Repl {
             : SubmitResult(SubmitResult.Kind.value, display);
     }
 
+    // A halt ends the cell, not the session: the REPL is a long-lived
+    // process that holds the user's work.
+    private imported!"snakebite.backends".Program programOf(Module module_) {
+        import snakebite.backends: Program;
+
+        return Program(
+            interpretedModules(module_, _importPaths),
+            "",
+            checksOf(_flags),
+            &endCell,
+        );
+    }
+
     private SubmitResult submitDeclaration(in string source) {
-        import snakebite.backends: makeBackend, Program;
+        import snakebite.backends: makeBackend;
         import snakebite.frontend.compiler: parseSnippet;
         import snakebite.repl.cell:
             isIncompleteDeclaration,
@@ -214,8 +226,7 @@ public struct Repl {
             return SubmitResult.init;
         }
 
-        auto program = Program(interpretedModules(module_, _importPaths));
-        program.checks = checksOf(_flags);
+        auto program = programOf(module_);
         program.dependencyImage = _dependencyImage;
         accept(
             fullSource,
@@ -273,6 +284,13 @@ public struct SubmitResult {
 
     public Kind kind;
     public string text;
+}
+
+
+private noreturn endCell() {
+    import snakebite.backends.haltprocess: Halted;
+
+    throw new Halted;
 }
 
 

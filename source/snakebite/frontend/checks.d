@@ -9,7 +9,7 @@ import dmd.globals: Param;
 
 
 // The run-time checks that the compiler flags `-release` and
-// `-checkaction=halt` select, resolved the way `dmd -unittest <flags>`
+// `-checkaction=` select, resolved the way `dmd -unittest <flags>`
 // resolves them (the block in dmd's `main.d` that follows option parsing).
 // Every snakebite run is a unittest run, and `dmd -unittest` keeps `assert`
 // on under `-release`.
@@ -19,18 +19,13 @@ import dmd.globals: Param;
 // (assertions, bounds checks), after the frontend has put its own flags
 // back; `Program.checks` carries them from one to the other.
 public struct Checks {
-    public enum Failure {
-        raise, // throw the error that druntime defines for the check
-        halt,  // end the process, as `-checkaction=halt` does
-    }
-
     public CHECKENABLE assertion = CHECKENABLE.on;
     public CHECKENABLE preconditions = CHECKENABLE.on;
     public CHECKENABLE postconditions = CHECKENABLE.on;
     public CHECKENABLE invariants = CHECKENABLE.on;
     public CHECKENABLE arrayBounds = CHECKENABLE.on;
     public CHECKENABLE switchError = CHECKENABLE.on;
-    public Failure failure;
+    public CHECKACTION action = CHECKACTION.D;
 
     private bool _release;
 
@@ -39,10 +34,18 @@ public struct Checks {
 
         if (argument == "-release")
             _release = true;
-        else if (argument == "-checkaction=halt")
-            failure = Failure.halt;
         else if (argument.startsWith("-checkaction="))
-            failure = Failure.raise;
+            acceptAction(argument["-checkaction=".length .. $]);
+    }
+
+    private void acceptAction(in const(char)[] name) @safe pure nothrow @nogc {
+        switch (name) {
+            case "D": action = CHECKACTION.D; break;
+            case "C": action = CHECKACTION.C; break;
+            case "halt": action = CHECKACTION.halt; break;
+            case "context": action = CHECKACTION.context; break;
+            default: break;
+        }
     }
 
     public void resolve() @safe pure nothrow @nogc {
@@ -63,9 +66,7 @@ public struct Checks {
         params.useInvariants = invariants;
         params.useArrayBounds = arrayBounds;
         params.useSwitchError = switchError;
-        params.checkAction = failure == Failure.halt
-            ? CHECKACTION.halt
-            : CHECKACTION.D;
+        params.checkAction = action;
     }
 
     // The predefined version identifiers that dmd defines only when the

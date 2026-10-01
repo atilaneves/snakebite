@@ -134,6 +134,8 @@ private final class GuestException: Exception {
     }
 }
 
+import snakebite.backends.checkplan: BoundsCheck;
+import snakebite.backends.exceptions: CAssertCall;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
 import snakebite.backends.comparison: ComparisonPlan;
@@ -1226,35 +1228,42 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             throw new GuestException(guest);
     }
 
-    // Calls druntime's own bounds-failure hook - `_d_arraybounds_indexp`
-    // or `_d_arraybounds_slicep`, see `snakebite.backends.druntimehooks`
-    // - the same one the bytecode compiler emits a call to. Every caller
-    // here only reaches this once its own bounds check already failed;
-    // wrapping the hook's throw through `callPlan`, the same as any other
-    // native call, lets a guest `catch (RangeError)` see it, instead of
-    // the interpreter's own refusal or a hand-built guest exception. It
-    // returns only when the current function is not compiled with bounds
-    // checks, and the caller then goes on as unchecked code does.
+    // What a failed bounds check does under the program's flags. For
+    // `-checkaction=D` it calls druntime's own bounds-failure hook -
+    // `_d_arraybounds_indexp` or `_d_arraybounds_slicep`, see
+    // `snakebite.backends.druntimehooks` - the same one the bytecode
+    // compiler emits a call to. Every caller here only reaches this once
+    // its own bounds check already failed; wrapping the hook's throw
+    // through `callPlan`, the same as any other native call, lets a guest
+    // `catch (RangeError)` see it, instead of the interpreter's own
+    // refusal or a hand-built guest exception. It returns only when the
+    // current function is not compiled with bounds checks, and the caller
+    // then goes on as unchecked code does.
     extern(D) private void failArrayBounds(
-        in DruntimeHook hook,
+        in BoundsCheck check,
         in Loc loc,
         scope const(void*)[] extraArguments,
     ) {
-        import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
-        import snakebite.backends.druntimehooks: planOf;
-        import snakebite.backends.haltprocess: haltProcess;
+        import snakebite.backends.checkplan:
+            boundsPlanOf, cMessageOf, FailurePlan;
+        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+        import snakebite.backends.exceptions: cAssertCallOf;
 
         const failure = boundsPlanOf(_program.checks, _function);
         final switch (failure.kind) with (FailurePlan.Kind) {
             case ignore:
                 return;
             case halt:
-                haltProcess;
+                _program.halt;
+            case cAssert:
+                callCAssert(cAssertCallOf(
+                    cMessageOf(check).ptr, loc, _function));
             case raise:
                 break;
         }
 
-        auto plan = planOf(*_plans, hook);
+        auto plan = planOf(*_plans, check == BoundsCheck.index
+            ? DruntimeHook.indexBounds : DruntimeHook.sliceBounds);
 
         const file = cast(const(char)*) loc.filename;
         const line = cast(uint) loc.linnum;
@@ -1263,6 +1272,22 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             ~ extraArguments;
 
         callPlan(plan, null, arguments);
+    }
+
+    // `-checkaction=C`: the C runtime's assert failure function, which
+    // aborts the process.
+    extern(D) private noreturn callCAssert(in CAssertCall call) {
+        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+
+        auto plan = planOf(*_plans, DruntimeHook.cAssertFail);
+        const(void*)[] arguments = [
+            cast(const(void)*) &call.assertion,
+            cast(const(void)*) &call.file,
+            cast(const(void)*) &call.line,
+            cast(const(void)*) &call.function_,
+        ];
+        callPlan(plan, null, arguments);
+        assert(0);
     }
 
     // The re-entry a pool entry (ADR-0003) reaches when host code calls a
@@ -2841,10 +2866,14 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     // `a[] = b[]`: both sides are evaluated as ordinary dynamic-array
-    // values first, then handed to druntime so its length and overlap
-    // checks stay authoritative.
+    // values first. The length and overlap check follows the program's
+    // flags the way any bounds check does: under `-checkaction=D` druntime
+    // does it and keeps it authoritative, otherwise the shared plan decides
+    // what a failure does.
     private void* assignSlice(AssignExp expression, void* target) {
         import core.stdc.string: memcpy;
+        import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
+        import snakebite.backends.slicecopy: copyUnchecked, slicesConform;
         import snakebite.druntime.arraycopy: _d_arraycopy;
 
         auto destination = _frames.push(_facts.size, _facts.alignment);
@@ -2855,18 +2884,30 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         evaluate(expression.e2, _type, _facts, source.base);
 
         const elementSize = factsOf(_type.nextOf).size;
-        try
-            _d_arraycopy(
-                elementSize,
-                *cast(void[]*) source.base,
-                *cast(void[]*) destination.base,
-            );
-        catch (SnakebiteException exception)
-            throw exception;
-        catch (GuestException exception)
-            throw exception;
-        catch (Throwable guest)
-            throw new GuestException(guest);
+        auto to = *cast(void[]*) destination.base;
+        auto from = *cast(void[]*) source.base;
+        const plan = boundsPlanOf(_program.checks, _function);
+        final switch (plan.kind) with (FailurePlan.Kind) {
+            case raise:
+                try
+                    _d_arraycopy(elementSize, from, to);
+                catch (SnakebiteException exception)
+                    throw exception;
+                catch (GuestException exception)
+                    throw exception;
+                catch (Throwable guest)
+                    throw new GuestException(guest);
+                break;
+            case halt:
+            case cAssert:
+                if (!slicesConform(to, from, elementSize))
+                    failArrayBounds(
+                        BoundsCheck.sliceCopy, expression.loc, null);
+                goto case;
+            case ignore:
+                copyUnchecked(to, from, elementSize);
+                break;
+        }
 
         memcpy(_place, destination.base, _facts.size);
         return destination.base;
@@ -3072,7 +3113,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         public void storageIndexBounds(
             IndexExp expression, void* index, size_t length,
         ) {
-            import snakebite.backends.druntimehooks: DruntimeHook;
             import snakebite.nativelayout: loadIntegral;
 
             const value = loadIntegral(index, size_t.sizeof, false);
@@ -3080,7 +3120,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return;
 
             evaluator.failArrayBounds(
-                DruntimeHook.indexBounds, expression.loc,
+                BoundsCheck.index, expression.loc,
                 [cast(const(void)*) index,
                     cast(const(void)*) &length],
             );
@@ -4607,6 +4647,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 return;
             case raise:
             case halt:
+            case cAssert:
                 break;
         }
 
@@ -4649,19 +4690,31 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     }
 
     // What a failed `assert` does, shared by every path through
-    // `visit(AssertExp)` above: halt the process, or throw to the guest.
+    // `visit(AssertExp)` above: halt, abort through the C runtime, or throw
+    // to the guest.
     private void failAssertion(AssertExp expression) {
         import core.exception: AssertError;
         import snakebite.backends.checkplan: assertPlanOf, FailurePlan;
-        import snakebite.backends.haltprocess: haltProcess;
-        import snakebite.backends.exceptions: assertFailureOf;
+        import snakebite.backends.exceptions:
+            assertFailureOf, cAssertCallOf;
+        import std.string: toStringz;
 
         const plan = assertPlanOf(_program.checks);
+        // `auto`: dmd's nodes are not `const`, and `messageExpression` would
+        // be if `failure` were.
+        auto failure = assertFailureOf(expression);
         final switch (plan.kind) with (FailurePlan.Kind) {
             case ignore:
                 assert(0);
             case halt:
-                haltProcess;
+                _program.halt;
+            case cAssert:
+                callCAssert(cAssertCallOf(
+                    failure.messageExpression is null
+                        ? failure.cAssertion
+                        : evaluateMessage(failure.messageExpression)
+                            .toStringz,
+                    expression.loc, _function));
             case raise:
                 break;
         }
@@ -4669,17 +4722,29 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         // What D does here is throw an `AssertError` the guest can catch.
         // Keep it inside an interpreter-owned wrapper so a guest catch does
         // not also catch the interpreter's own unsupported-node failures.
-        const failure = assertFailureOf(expression);
+        const message = failure.messageExpression is null
+            ? failure.message
+            : evaluateMessage(failure.messageExpression);
         throw new GuestException(
-            new AssertError(failure.message, failure.file, failure.line));
+            new AssertError(message, failure.file, failure.line));
+    }
+
+    // The message of a failed assertion is an expression that runs only
+    // then. `core.exception.AssertError` keeps its message, so it is copied
+    // out of the guest's memory.
+    extern(D) private string evaluateMessage(Expression message) {
+        import snakebite.nativelayout: arrayValueSize;
+
+        align(size_t.sizeof) ubyte[arrayValueSize] buffer = void;
+        evaluate(message, message.type, buffer.ptr);
+
+        return (*cast(const(char)[]*) buffer.ptr).idup;
     }
 
     // dmd makes one for a `switch` default under `-release` or
     // `-checkaction=halt`, and for `assert(0)` with assertions off.
     override void visit(HaltExp) {
-        import snakebite.backends.haltprocess: haltProcess;
-
-        haltProcess;
+        _program.halt;
     }
 
     // A class reference's own invariant is druntime's job, not this
@@ -4857,11 +4922,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const outOfBounds = plan.checkOrder && upper < lower
             || plan.checkUpper && upper > sourceLength;
         if (outOfBounds) {
-            import snakebite.backends.druntimehooks: DruntimeHook;
-
             const reportedLength = plan.reportsSourceLength ? sourceLength : 0;
             failArrayBounds(
-                DruntimeHook.sliceBounds, expression.loc,
+                BoundsCheck.slice, expression.loc,
                 [cast(const(void)*) &lower, cast(const(void)*) &upper,
                     cast(const(void)*) &reportedLength],
             );

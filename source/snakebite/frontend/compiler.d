@@ -1403,7 +1403,6 @@ private void applyFrontendFlags(in FrontendFlags flags) {
     import dmd.frontend: addStringImport;
     import dmd.globals: FeatureState, Param, global;
     import dmd.root.string: toDString;
-    import snakebite.frontend.checks: Checks;
     import std.algorithm.searching: startsWith;
     import std.conv: text;
 
@@ -1413,11 +1412,9 @@ private void applyFrontendFlags(in FrontendFlags flags) {
     Strings arguments;
     expandArguments(flags, arguments);
 
-    Checks checks;
     Param parsedParams;
     foreach (argz; arguments[]) {
         const arg = argz.toDString;
-        checks.accept(arg);
         if (arg.startsWith("-preview=")) {
             const name = arg["-preview=".length .. $];
             if (!applyFeature!(Usage.previews)("preview", parsedParams, name))
@@ -1450,32 +1447,42 @@ private void applyFrontendFlags(in FrontendFlags flags) {
     }
 
     applyParsedFrontendParams(parsedParams);
-    checks.resolve;
-    applyChecks(checks);
+    applyChecks(checksOfArguments(arguments));
     global.compileEnv.previewIn = global.params.previewIn;
     global.compileEnv.transitionIn = global.params.v.vin;
     global.compileEnv.ddocOutput = global.params.ddoc.doOutput;
 }
 
-// What the project's compiler arguments select for run-time checks.
-// `Program.checks` carries it to the backends, which run after the
-// arguments stopped being in effect.
+// What the project's compiler arguments select for run-time checks: the
+// one place that reads them, for the frontend (`applyFrontendFlags`) and
+// for the `Program` the backends run, which `Program.checks` carries them
+// to after the arguments stopped being in effect.
 public imported!"snakebite.frontend.checks".Checks checksOf(
     in FrontendFlags flags,
 ) {
     import dmd.arraytypes: Strings;
+    import snakebite.frontend.checks: Checks;
+
+    if (flags.compilerArguments.length == 0)
+        return Checks();
+
+    Strings arguments;
+    expandArguments(flags, arguments);
+
+    return checksOfArguments(arguments);
+}
+
+private imported!"snakebite.frontend.checks".Checks checksOfArguments(
+    ref imported!"dmd.arraytypes".Strings arguments,
+) {
     import dmd.root.string: toDString;
     import snakebite.frontend.checks: Checks;
 
     Checks checks;
-    if (flags.compilerArguments.length == 0)
-        return checks;
-
-    Strings arguments;
-    expandArguments(flags, arguments);
     foreach (argument; arguments[])
         checks.accept(argument.toDString);
     checks.resolve;
+
     return checks;
 }
 

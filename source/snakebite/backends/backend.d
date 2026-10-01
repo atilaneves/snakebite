@@ -13,6 +13,7 @@ public struct Program {
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
     import dmd.dsymbol: Dsymbol;
+    import snakebite.backends.haltprocess: HaltAction, haltProcess;
     import snakebite.frontend.checks: Checks;
 
     // `func` is null when the program has no `main`, which is not an error: a
@@ -28,7 +29,8 @@ public struct Program {
     FuncDeclaration[] moduleConstructors;
     Main main;
     string name;
-    Checks checks;
+    private Checks _checks;
+    private HaltAction _haltAction = &haltProcess;
     // Prepared for this project's execution before any guest code runs.
     const(DependencyImage)* dependencyImage;
     const(DependencyImage)* testStartupImage;
@@ -44,12 +46,26 @@ public struct Program {
         Module[] rootModules,
         in string name,
     ) {
+        this(rootModules, name, Checks());
+    }
+
+    // `checks` are the ones the frontend analysed `rootModules` under, and
+    // `haltAction` is what `-checkaction=halt` does here: the default ends
+    // the process, as compiled code does.
+    this(
+        Module[] rootModules,
+        in string name,
+        in Checks checks,
+        HaltAction haltAction = &haltProcess,
+    ) {
         import snakebite.frontend.dmd.functions:
             findFunction,
             findModuleConstructors;
 
         this.rootModules = rootModules;
         this.name = name;
+        _checks = checks;
+        _haltAction = haltAction;
         foreach (module_; rootModules) {
             _rootModuleSet[module_] = true;
             moduleConstructors ~= findModuleConstructors(module_);
@@ -62,6 +78,19 @@ public struct Program {
                 break;
             }
         }
+    }
+
+    public Checks checks() const {
+        return _checks;
+    }
+
+    // What a backend that can hold a function pointer stores.
+    public HaltAction haltAction() const {
+        return _haltAction;
+    }
+
+    public noreturn halt() const {
+        _haltAction();
     }
 
     public bool isInterpreted(

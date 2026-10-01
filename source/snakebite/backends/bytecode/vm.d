@@ -18,6 +18,7 @@ extern(C) bool executeIndirectCallPlan(
 );
 
 import snakebite.backends.builtins: BuiltinCall;
+import snakebite.backends.haltprocess: Halted, HaltAction;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
 import snakebite.callarguments: CallArguments;
@@ -351,7 +352,8 @@ package struct AssertSite {
     package string message;
     package string file;
     package size_t line;
-    package bool halt;
+    // Not null for a check that halts rather than throws.
+    package HaltAction halt;
 }
 
 
@@ -581,9 +583,13 @@ private Activation* handleException(
         } catch (Throwable chained) {
             throwable = chained;
         }
-        const plan = exceptionPlanOf(
-            active.exceptionHandlers[firstHandler .. $], active.pc,
-            throwable.classinfo);
+        // A halt that ends a cell is not an error guest code handles, so
+        // no `catch` or `finally` sees it.
+        const plan = cast(Halted) throwable is null
+            ? exceptionPlanOf(
+                active.exceptionHandlers[firstHandler .. $], active.pc,
+                throwable.classinfo)
+            : UnwindPlan.init;
         const step = plan.finalizers.length != 0
             ? plan.finalizers[0]
             : plan.handler;
@@ -918,25 +924,11 @@ private const(Instruction)* runAssert(Decoded)(
         return execution.next;
 
     import core.exception: AssertError;
-    import snakebite.backends.haltprocess: haltProcess;
 
     const site = execution.assertSites[execution.source];
-    if (site.halt)
-        haltProcess;
+    if (site.halt !is null)
+        site.halt();
     throw new AssertError(site.message, site.file, site.line);
-}
-
-
-// Ends the process, as a `HaltExp` does in compiled code.
-package alias opHalt =
-    execute!(runHalt, OperandKind.immediate, OperandKind.immediate);
-
-private const(Instruction)* runHalt(Decoded)(
-    ref Decoded execution,
-) {
-    import snakebite.backends.haltprocess: haltProcess;
-
-    haltProcess;
 }
 
 
@@ -2108,7 +2100,9 @@ private const(Instruction)* runStoreBitfield(Decoded)(
 // `dest[] = src[]`, `{length, pointer}` pairs at `execution.destination`
 // and `execution.source`, with `execution.width` the element size baked in at
 // compile time (both sides share one element size - the compiler checked
-// that before emitting this). Druntime owns the length and overlap checks.
+// that before emitting this). `execution.sourceWidth` is zero when druntime
+// owns the length and overlap checks, and nonzero when the compiler has
+// already decided them (`opSlicesConform`, or no check at all).
 package alias opSliceCopy =
     execute!(runSliceCopy, OperandKind.storage, OperandKind.storage);
 
@@ -2119,11 +2113,39 @@ private const(Instruction)* runSliceCopy(Decoded)(
 
     auto dest = execution.destination;
     auto src = execution.source;
+    if (execution.sourceWidth != 0) {
+        import snakebite.backends.slicecopy: copyUnchecked;
+
+        copyUnchecked(
+            *cast(void[]*) dest, *cast(void[]*) src, execution.width);
+        return execution.next;
+    }
+
     _d_arraycopy(
         execution.width,
         *cast(void[]*) src,
         *cast(void[]*) dest,
     );
+
+    return execution.next;
+}
+
+
+// Whether `dest[] = src[]` passes dmd's length and overlap check, as one
+// byte that replaces the `{length, pointer}` pair at `execution.destination`
+// (a scratch copy: a binary opcode overwrites its left operand).
+package alias opSlicesConform =
+    execute!(runSlicesConform, OperandKind.storage, OperandKind.storage);
+
+private const(Instruction)* runSlicesConform(Decoded)(
+    ref Decoded execution,
+) {
+    import snakebite.backends.slicecopy: slicesConform;
+
+    auto dest = execution.destination;
+    *cast(ubyte*) dest = slicesConform(
+        *cast(void[]*) dest, *cast(void[]*) execution.source,
+        execution.width);
 
     return execution.next;
 }

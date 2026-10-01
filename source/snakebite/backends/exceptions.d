@@ -34,17 +34,23 @@ public bool catchMatches(
     return expected !is null && actual !is null && expected.isBaseOf(actual);
 }
 
-// What a failed `assert` throws, decided once from the assertion itself
-// so that a guest catch sees the same `AssertError` whichever backend
-// evaluated it: `message` is D's own (`core.exception.onAssertError`'s
-// wording, or the literal an `assert(cond, "text")` names), and
-// `file`/`line` are the assertion's own guest source location, not
-// wherever in this project's sources a backend happened to build the
-// error. A message that is not a literal is not evaluated here.
+// What a failed `assert` reports, decided once from the assertion itself
+// so that every backend and mode says the same thing: `message` is D's own
+// (`core.exception.onAssertError`'s wording, or the literal an
+// `assert(cond, "text")` names), and `file`/`line` are the assertion's own
+// guest source location, not wherever in this project's sources a backend
+// happened to build the error. A message that is not a literal is
+// `messageExpression`, which the backend evaluates when the assertion
+// fails: it is what `assert(c, m())` names and what `-checkaction=context`
+// makes of a plain `assert(a == b)`. `cAssertion` is the text
+// `-checkaction=C` hands the C runtime: the literal, or the asserted
+// expression itself; it is null when there is a `messageExpression`.
 public struct AssertFailure {
     public string message;
     public string file;
     public size_t line;
+    public imported!"dmd.expression".Expression messageExpression;
+    public const(char)* cAssertion;
 }
 
 public AssertFailure assertFailureOf(
@@ -53,6 +59,7 @@ public AssertFailure assertFailureOf(
     import std.string: fromStringz;
 
     auto literal = expression.msg is null ? null : expression.msg.isStringExp;
+    const dynamic = expression.msg !is null && literal is null;
     const message = literal is null
         ? "Assertion failure"
         : literal.toStringz.fromStringz.idup;
@@ -61,6 +68,32 @@ public AssertFailure assertFailureOf(
         message,
         expression.loc.filename.fromStringz.idup,
         expression.loc.linnum,
+        dynamic ? expression.msg : null,
+        dynamic ? null
+            : literal is null ? expression.e1.toChars : literal.toStringz.ptr,
+    );
+}
+
+// The arguments of the C runtime's assert failure function
+// (`__assert_fail` of glibc and musl), as dmd's glue layer builds them for
+// `-checkaction=C` (`e2ir.d`'s `callCAssert`).
+public struct CAssertCall {
+    public const(char)* assertion;
+    public const(char)* file;
+    public uint line;
+    public const(char)* function_;
+}
+
+public CAssertCall cAssertCallOf(
+    in const(char)* assertion,
+    in imported!"dmd.location".Loc loc,
+    imported!"dmd.func".FuncDeclaration function_,
+) {
+    return CAssertCall(
+        assertion,
+        loc.filename,
+        cast(uint) loc.linnum,
+        function_ is null ? "" : function_.toPrettyChars,
     );
 }
 
@@ -97,14 +130,14 @@ public AssertInvariantPlan assertInvariantPlanOf(
 ) {
     import dmd.astenums: CHECKENABLE, Tclass, Tpointer, Tstruct;
     import dmd.typesem: nextOf, toBasetype;
-    import snakebite.frontend.checks: Checks;
+    import snakebite.backends.checkplan: assertPlanOf, FailurePlan;
 
     auto none = AssertInvariantPlan(AssertInvariantPlan.Kind.none);
 
-    // `-checkaction=halt` compiles `assert(e)` as `e || halt`, which has no
-    // invariant call.
+    // `-checkaction=halt` compiles `assert(e)` as `e || halt`, and `C` as
+    // `e || __assert_fail(...)`: neither has an invariant call.
     if (checks.invariants != CHECKENABLE.on
-            || checks.failure == Checks.Failure.halt)
+            || assertPlanOf(checks).kind != FailurePlan.Kind.raise)
         return none;
 
     auto type = expression.e1.type.toBasetype;
