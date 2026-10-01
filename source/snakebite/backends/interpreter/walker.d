@@ -1454,21 +1454,9 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
     override void visit(Statement statement) {
         import std.conv: text;
-        import std.string: fromStringz;
-        import dmd.hdrgen: toChars;
 
-        // `Statement` does not override the virtual `toChars()` that
-        // `RootObject.toString()` calls, so `statement.toString()` hits
-        // `RootObject`'s base implementation, `assert(0)`. Rendering
-        // statements back to source text is instead a free function - and
-        // it renders a statement as a line, trailing newline included, so
-        // the message strips it to stay on one line.
-        import std.string: strip;
-
-        throw new SnakebiteException(
-            text("interpreter cannot execute a `", statement.stmt,
-                "` statement: `", toChars(statement).fromStringz.strip, "`"),
-        );
+        assert(0, text("Statement ", statement.stmt,
+            ": no `visit` override, and not in `UnreachableNodes`"));
     }
 
     // An `import` inside a function body binds names, and dmd's semantic
@@ -2278,10 +2266,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     override void visit(Expression expression) {
         import std.conv: text;
 
-        throw new SnakebiteException(
-            text("interpreter cannot evaluate a `", expression.op,
-                "` expression: `", expression.toString, "`"),
-        );
+        assert(0, text("Expression ", expression.op,
+            ": no `visit` override, and not in `UnreachableNodes`"));
     }
 
     override void visit(IntegerExp expression) {
@@ -6341,3 +6327,8 @@ private struct Cache(Key, Value) {
         return _lookups;
     }
 }
+
+
+
+static assert(
+    imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!Evaluator);

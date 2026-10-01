@@ -1238,7 +1238,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     extern(C++):
 
     override void visit(Statement statement) {
-        throw rejection(_function, statement.loc, statementText(statement));
+        import std.conv: text;
+
+        assert(0, text("Statement ", statement.stmt,
+            ": no `visit` override, and not in `UnreachableNodes`"));
     }
 
     override void visit(CompoundStatement statement) {
@@ -3855,7 +3858,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     extern(C++):
 
     override void visit(Expression expression) {
-        throw rejection(_function, expression.loc, expressionText(expression));
+        import std.conv: text;
+
+        assert(0, text("Expression ", expression.op,
+            ": no `visit` override, and not in `UnreachableNodes`"));
     }
 
     override void visit(DeclarationExp expression) {
@@ -7674,38 +7680,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
 }
 
-// Renders `statement` back to source text for a rejection message, on one
-// line: dmd's own renderer (`toChars`) includes the trailing newline a
-// statement carries in source.
-private string statementText(imported!"dmd.statement".Statement statement) {
-    import dmd.hdrgen: toChars;
-    import std.string: fromStringz, strip;
-    import std.conv: text;
-
-    return text("`", toChars(statement).fromStringz.strip, "`");
-}
-
-// As `statementText`, for an expression: `Expression.toString` already
-// renders on one line, unlike a statement's.
+// Renders `expression` back to source text for a diagnostic message.
 private string expressionText(imported!"dmd.expression".Expression expression) {
     import std.conv: text;
 
     return text("`", expression.toString, "`");
 }
 
-// A rejection naming where in the guest source it happened (`loc`), what
-// the compiler refused (`operation`), and which function it was compiling.
-private imported!"snakebite.exception".SnakebiteException rejection(
-    imported!"dmd.func".FuncDeclaration function_,
-    imported!"dmd.location".Loc loc,
-    string operation,
-) {
-    import snakebite.exception: SnakebiteException;
-    import std.conv: text;
-    import std.string: fromStringz;
 
-    return new SnakebiteException(text(
-        loc.toChars.fromStringz, ": bytecode compiler cannot compile ",
-        operation, " in `", function_.toString, "`",
-    ));
-}
+
+static assert(
+    imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!FunctionCompiler);

@@ -60,14 +60,11 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     protected abstract void visitThrowExp(ThrowExp expression);
 
     // DMD's semantic pass records the complete runtime append operation in
-    // `lowering`. An unlowered form belongs to backend code generation, such
-    // as `dchar` append, and follows the normal unsupported-expression path.
+    // `lowering` wherever it generates code; only a scope that never reaches
+    // code generation leaves it null, and no backend runs such code.
     final override void visit(CatAssignExp expression) {
-        if (expression.lowering is null) {
-            visit(cast(Expression) expression);
-            return;
-        }
-
+        assert(expression.lowering !is null,
+            "CatAssignExp: dmd lowers every appended-to array in generated code");
         expression.lowering.accept(this);
     }
 
