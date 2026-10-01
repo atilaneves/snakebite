@@ -532,6 +532,39 @@ static foreach (backend; Matrix!(
 }
 
 
+// A callback is prepared before native code can call it, and the preparation
+// follows the functions that its body calls. A function whose return type
+// is five bytes has no callback entry, and one that only the guest calls
+// needs none.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call the native `qsort` with a guest callback"),
+)) {
+    @("callbackBodyCallsFunctionReturningFiveBytes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdlib: qsort;
+            struct Odd {
+                ubyte[5] bytes;
+            }
+            Odd make() {
+                Odd odd;
+                odd.bytes[0] = 7;
+                return odd;
+            }
+            extern(C) int compare(const void* a, const void* b) {
+                return make.bytes[0] == 7 ? 0 : 1;
+            }
+            void main() {
+                int[2] values = [2, 1];
+                qsort(values.ptr, 2, int.sizeof, &compare);
+            }
+        });
+    }
+}
+
+
 // The finalizer runs on the thread that collects, which is not the thread
 // that made the objects.
 static foreach (backend; Matrix!(

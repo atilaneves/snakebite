@@ -5,8 +5,8 @@ private:
 
 import dmd.declaration: Declaration, VarDeclaration;
 import dmd.expression:
-    CallExp, DeclarationExp, Expression, FuncExp, NewExp, StructLiteralExp,
-    SymOffExp, ThisExp, VarExp;
+    CallExp, DeclarationExp, DelegateExp, Expression, FuncExp, NewExp,
+    StructLiteralExp, SymOffExp, ThisExp, VarExp;
 import dmd.func: FuncDeclaration;
 import dmd.mtype: Type;
 import dmd.statement: ExpStatement, TryCatchStatement, TryFinallyStatement;
@@ -118,8 +118,15 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
     private extern(D) void handle(Expression) {
     }
 
+    // The name of a function in a call is the call's own `f`, so only a
+    // variable is a reference here.
     private extern(D) void handle(VarExp expression) {
-        reference(expression.var);
+        if (auto variable = expression.var.isVarDeclaration)
+            _preparation.variable(variable);
+    }
+
+    private extern(D) void handle(DelegateExp expression) {
+        _preparation.reference(expression.func);
     }
 
     private extern(D) void handle(ThisExp expression) {
