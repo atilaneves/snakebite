@@ -28,6 +28,7 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     public this(const Program program) {
         super(program);
         _shared = new Shared(program);
+        _shared.callGuest = &call;
         _shared.plans.useCallbacks(
             new CallbackBridge(
                 &invokeCallback,
@@ -261,11 +262,25 @@ private struct Shared {
         return plans.resolve(nativeSymbolName(symbol));
     }
 
+    // Runs a guest function from host code with native-layout arguments.
+    void delegate(FuncDeclaration, void*, void*[]) callGuest;
+
+    // A static initialiser's lowered call - an associative array literal's
+    // `_d_assocarrayliteralTX!(K, V)` - names a template instance that has
+    // machine code only when druntime already instantiated it over the same
+    // types, so it takes the same route as any other call to it.
     private void callNative(
         FuncDeclaration function_,
         void* returnPlace,
         scope const(void*)[] arguments,
     ) {
+        if (callSelection.usesGuestBody(function_,
+                (callee) => program.isInterpreted(callee),
+                plans.hasNativeSymbol(function_),
+                plans.hasIndependentNativeSymbol(function_))) {
+            callGuest(function_, returnPlace, cast(void*[]) arguments);
+            return;
+        }
         plans.of(function_).call(returnPlace, arguments);
     }
 

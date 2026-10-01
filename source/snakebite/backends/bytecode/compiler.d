@@ -116,11 +116,21 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _plans.resolve(nativeSymbolName(symbol));
     }
 
+    // A static initialiser's lowered call - an associative array literal's
+    // `_d_assocarrayliteralTX!(K, V)` - names a template instance that has
+    // machine code only when druntime already instantiated it over the same
+    // types, so it takes the same route as any other call to it.
     private void callNative(
         FuncDeclaration function_,
         void* returnPlace,
         scope const(void*)[] arguments,
     ) {
+        if (_callSelection.usesGuestBody(function_, &isGuestFunction,
+                hasNativeSymbol(function_),
+                hasIndependentNativeSymbol(function_))) {
+            call(function_, returnPlace, cast(void*[]) arguments);
+            return;
+        }
         _plans.of(function_).call(returnPlace, arguments);
     }
 
