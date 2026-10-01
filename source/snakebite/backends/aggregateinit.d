@@ -75,7 +75,7 @@ public struct InitStep {
     import dmd.mtype: Type;
     import dmd.expression: Expression;
     import dmd.declaration: VarDeclaration;
-    import dmd.func: FuncDeclaration;
+    import dmd.dsymbol: Dsymbol;
 
     public enum Kind {
         vthis,
@@ -97,14 +97,16 @@ public struct InitStep {
     public Expression source;
     // The field being written, for a `bitfield` step's masked store.
     public VarDeclaration field;
-    // The enclosing function whose context a `vthis` step stores when the
-    // aggregate is a nested struct reading its own function's frame -
-    // `null` when the struct's own lexical parent is not a function, which
-    // is dmd fact and not itself an error: `sd.toParent2()` only ever
-    // names a class parent for a class nested in a class, never for a
-    // struct. Also `null`, and unused, for a `vthis` step whose `source`
-    // is set instead (a nested class's `NewExp.thisexp`).
-    public FuncDeclaration parentFunction;
+    // The symbol whose context a `vthis` step stores, when the aggregate
+    // is a nested one made in a function, or in an aggregate whose `this`
+    // is the context: dmd gives `vthis` the context of the declaration
+    // scope and, for an aggregate with two contexts, `vthis2` the context
+    // of the instantiation scope. `null` is not itself an error: it leaves
+    // the field at its `.init` zero, which is the language's own treatment
+    // of a `static struct` with no captured context. Also `null`, and
+    // unused, for a `vthis` step whose `source` is set instead (a nested
+    // class's `NewExp.thisexp`).
+    public Dsymbol contextOwner;
     // A byte adjustment a `vthis` step with `source` set adds after
     // evaluating it - the same base-class offset dmd's own glue layer
     // (`glue/e2ir.d`, `NewExp.thisexp` case) adds when `thisexp`'s static
@@ -212,9 +214,8 @@ public AggregateInitPlan planStructLiteral(
 
     InitStep[] steps;
 
-    InitStep vthisStep;
-    if (!expression.useStaticInit && tryVthisStep(expression.sd, vthisStep))
-        steps ~= vthisStep;
+    if (!expression.useStaticInit)
+        steps ~= vthisStepsOf(expression.sd);
 
     if (expression.elements !is null)
         foreach (i, element; *expression.elements) {
@@ -246,11 +247,7 @@ public AggregateInitPlan planPositionalFields(
 )
 in (arguments is null || arguments.length <= sd.fields.length)
 {
-    InitStep[] steps;
-
-    InitStep vthisStep;
-    if (tryVthisStep(sd, vthisStep))
-        steps ~= vthisStep;
+    auto steps = vthisStepsOf(sd);
 
     if (arguments !is null)
         foreach (i, argument; *arguments) {
@@ -264,8 +261,9 @@ in (arguments is null || arguments.length <= sd.fields.length)
 }
 
 // The single decision both backends' heap `NewExp` adapters read for a
-// class's own hidden context field: empty for every `NewExp` but a nested
-// class's own construction, one `vthis` step otherwise. dmd's semantic
+// class's own hidden context fields: empty for every `NewExp` but a nested
+// class's own construction, one `vthis` step otherwise, and one more for
+// the `vthis2` of a class with two contexts. dmd's semantic
 // pass (`expressionsem.d`, `NewExp` semantic) synthesizes `thisexp` for
 // the implicit `new Inner()` written inside a method the same way it
 // resolves the explicit `outer.new Inner()`/`this.new Inner()` forms -
@@ -282,15 +280,9 @@ public AggregateInitPlan planClassContext(
     if (classType is null)
         return AggregateInitPlan.init;
 
-    if (expression.thisexp !is null)
-        return AggregateInitPlan(
-            false, [classVthisStep(classType.sym, expression.thisexp)]);
-
-    InitStep step;
-    if (!tryVthisStep(classType.sym, step))
-        return AggregateInitPlan.init;
-
-    return AggregateInitPlan(false, [step]);
+    auto steps = vthisStepsOf(classType.sym, expression.thisexp);
+    return steps.length == 0
+        ? AggregateInitPlan.init : AggregateInitPlan(false, steps);
 }
 
 // `ad.isNested()` is true only when dmd gave the aggregate a hidden
@@ -298,17 +290,32 @@ public AggregateInitPlan planClassContext(
 // function is lexically nested but has no such field. Shared by a nested
 // struct's own construction and a nested *class*'s construction when it
 // has no `thisexp` (nested in a function, not in another class) - both
-// read the same enclosing function's frame the same way.
-private bool tryVthisStep(
-    imported!"dmd.aggregate".AggregateDeclaration ad, out InitStep step,
+// read the same enclosing function's frame the same way. An aggregate
+// with two contexts has a `vthis2` field as well, which `setEthis` in
+// dmd's code generator fills with the context of the instantiation scope.
+// `thisexp`, when given, is the outer object of a nested class and fills
+// `vthis` instead of the enclosing context.
+private InitStep[] vthisStepsOf(
+    imported!"dmd.aggregate".AggregateDeclaration ad,
+    imported!"dmd.expression".Expression thisexp = null,
 ) {
     if (!ad.isNested() || ad.vthis is null)
-        return false;
+        return null;
 
-    auto parent = ad.toParent2();
-    step = InitStep(InitStep.Kind.vthis, ad.vthis.offset);
-    step.parentFunction = parent is null ? null : parent.isFuncDeclaration;
-    return true;
+    InitStep[] steps;
+    if (thisexp !is null)
+        steps ~= classVthisStep(ad.isClassDeclaration, thisexp);
+    else {
+        steps ~= InitStep(InitStep.Kind.vthis, ad.vthis.offset);
+        steps[0].contextOwner = ad.vthis2 is null
+            ? ad.toParent2() : ad.toParentLocal();
+    }
+
+    if (ad.vthis2 !is null) {
+        steps ~= InitStep(InitStep.Kind.vthis, ad.vthis2.offset);
+        steps[1].contextOwner = ad.toParent2();
+    }
+    return steps;
 }
 
 // `thisexp`'s own static type can be a class *derived* from `cd`'s actual

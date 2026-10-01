@@ -7,14 +7,12 @@ private:
 import snakebite.backends.layout: ClosureLayout, FrameLayout;
 
 
-public:
-
-
-struct Hop {
+public struct Hop {
     public enum Kind {
         closureWord,
         frameSlot,
         structField,
+        contextPairWord,
     }
 
     public Kind kind;
@@ -39,11 +37,27 @@ public struct ClosurePlan {
         );
     }
 
+    // The hops from the value of `function_`'s hidden `this` slot to its
+    // receiver: none for a function with one context, and word 0 of the
+    // pair for one with two.
+    public static Hop[] receiverHops(FuncDeclaration function_) {
+        import snakebite.backends.dualcontext: DualContext;
+        import snakebite.frontend.dmd.delegates: isDualContext;
+
+        return isDualContext(function_)
+            ? [Hop(Hop.Kind.contextPairWord,
+                DualContext.receiverWord * size_t.sizeof)]
+            : null;
+    }
+
     public static Hop[] staticChainPath(
         FuncDeclaration from,
         FuncDeclaration to,
     ) {
         import dmd.aggregate: AggregateDeclaration;
+        import snakebite.backends.dualcontext:
+            fieldTowards, parentTowards, wordTowards;
+        import snakebite.frontend.dmd.delegates: isDualContext;
 
         if (from is to)
             return null;
@@ -55,7 +69,10 @@ public struct ClosurePlan {
         Hop[] hops = [Hop(Hop.Kind.frameSlot,
             layout.hiddenThis.parameter.offset)];
 
-        auto parent = from.toParent2();
+        if (isDualContext(from))
+            hops ~= Hop(Hop.Kind.contextPairWord, from.wordTowards(to));
+
+        auto parent = from.parentTowards(to);
         auto currentFunction = parent is null ? null : parent.isFuncDeclaration;
         auto currentAggregate =
             parent is null ? null : parent.isAggregateDeclaration;
@@ -67,9 +84,9 @@ public struct ClosurePlan {
                     return null;
 
                 hops ~= Hop(Hop.Kind.structField,
-                    currentAggregate.vthis.offset);
+                    currentAggregate.fieldTowards(to));
 
-                auto next = currentAggregate.toParent2();
+                auto next = currentAggregate.parentTowards(to);
                 currentFunction = next is null
                     ? null : next.isFuncDeclaration;
                 currentAggregate = next is null
@@ -93,7 +110,11 @@ public struct ClosurePlan {
                 );
             }
 
-            auto next = currentFunction.toParent2();
+            if (isDualContext(currentFunction))
+                hops ~= Hop(Hop.Kind.contextPairWord,
+                    currentFunction.wordTowards(to));
+
+            auto next = currentFunction.parentTowards(to);
             currentFunction = next is null ? null : next.isFuncDeclaration;
             currentAggregate =
                 next is null ? null : next.isAggregateDeclaration;

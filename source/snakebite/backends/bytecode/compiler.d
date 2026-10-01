@@ -652,6 +652,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.backends.builtins: BuiltinCall;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.closureplan: ClosurePlan;
+    import snakebite.backends.dualcontext:
+        ContextSource, PairPlan, contextSourceOf, pairPlanOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
     import snakebite.exception: SnakebiteException;
@@ -2917,6 +2919,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (hiddenThis is null)
             throw rejection(_function, _function.loc, "a `this`");
 
+        const hidden = hiddenSlotOffset(hiddenThis);
+        return receiverOffsetFrom(
+            hiddenThis is _layout.hiddenThis.variable
+                ? _function : outerFunctionOf(hiddenThis),
+            hidden,
+        );
+    }
+
+    // The slot that holds the value of `hiddenThis`, before the hops of
+    // `ClosurePlan.receiverHops` that reach the receiver.
+    private size_t hiddenSlotOffset(VarDeclaration hiddenThis) {
         if (hiddenThis is _layout.hiddenThis.variable)
             return _layout.offsetOf(hiddenThis);
 
@@ -2955,6 +2968,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         emit(&opLoadIndirect, context, context, size_t.sizeof);
         return context;
+    }
+
+    // The receiver of `function_`, from the frame slot `hidden` that holds
+    // the value of its hidden `this` argument, by the hops
+    // `ClosurePlan.receiverHops` says.
+    private size_t receiverOffsetFrom(
+        FuncDeclaration function_, in size_t hidden,
+    ) {
+        // `auto` would give `const`, which the loop reassigns.
+        size_t value = hidden;
+        foreach (const hop; ClosurePlan.receiverHops(function_)) {
+            const address = hop.offset == 0
+                ? value : addPointerOffset(value, hop.offset);
+            value = reserveTemp(pointerFacts);
+            emit(&opLoadIndirect, value, address, size_t.sizeof);
+        }
+        return value;
     }
 
     private size_t compileThisFieldAddress(VarDeclaration field) {
@@ -3052,14 +3082,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t compileFieldAddress(DotVarExp expression) {
-        import dmd.astenums: Tclass;
+        import dmd.astenums: Tclass, Tpointer;
 
         auto field = expression.var.isVarDeclaration;
         assert(field !is null, "a field address names a variable");
 
         size_t addressOffset;
         auto aggregateType = expression.e1.type.toBasetype;
-        if (aggregateType.ty == Tclass) {
+        if (aggregateType.ty == Tclass || aggregateType.ty == Tpointer) {
             addressOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, addressOffset, size_t.sizeof);
         } else {
@@ -3989,7 +4019,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         requireDestination(expression);
 
         compileDelegateValue(
-            delegateTargetOf(expression.func, expression.type, expression.e1),
+            delegateTargetOf(expression.func, expression.type, expression.e1,
+                expression.vthis2),
             expression);
     }
 
@@ -4019,9 +4050,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             } else
                 evalInto(target.receiver, context, size_t.sizeof);
         } else if (target.needsContext) {
-            if (target.contextOwner is null)
-                throw rejection(_function, expression.loc, "a static chain");
-
             const contextOffset = contextAddressOf(target.contextOwner);
             emit(&opCopy, _destination + delegateContextOffset,
                 contextOffset, size_t.sizeof);
@@ -4029,6 +4057,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opConstant, _destination + delegateContextOffset,
                 addConstant(0), size_t.sizeof);
         }
+
+        const plan = pairPlanOf(
+            _function, target.function_, target.contextPair);
+        if (plan.variable !is null)
+            emit(&opCopy, context, storeContextPair(plan, context),
+                size_t.sizeof);
 
         if (target.virtualDispatch) {
             const method = compileClassVtableSlot(
@@ -4164,9 +4198,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        import dmd.astenums: Tclass;
+        import dmd.astenums: Tclass, Tpointer;
         auto aggregateType = expression.e1.type.toBasetype;
-        if (aggregateType.ty == Tclass) {
+        if (aggregateType.ty == Tclass || aggregateType.ty == Tpointer) {
             const facts = TypeFacts.of(field.type);
             const objectOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, objectOffset, size_t.sizeof);
@@ -4194,16 +4228,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // Satisfies `aggregateinit`'s `Hooks` contract: forwards each
     // `InitStep.Kind` to the matching `apply*Step` method below, at
-    // whichever `base`/`loc` its call site is compiling into. Built
+    // whichever `base` its call site is compiling into. Built
     // once per call site instead of the four lambdas each used to
     // build.
     private struct AggregateInitHooks {
         private FunctionCompiler _compiler;
-        private Loc _loc;
         private size_t _base;
 
         public void applyVthis(InitStep step) {
-            _compiler.applyVthisStep(step, _loc, _base);
+            _compiler.applyVthisStep(step, _base);
         }
         public void applyValue(InitStep step) {
             _compiler.applyValueStep(step, _base);
@@ -4218,15 +4251,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // A `vthis` step with `source` set (a nested class's `NewExp.thisexp`)
     // evaluates that expression directly, then adds `sourceAdjustment` if
-    // it is non-zero. Otherwise it is a nested struct reading its own
-    // enclosing function's context, and a `null` `parentFunction` means
-    // the struct's lexical parent is not a function - dmd fact, not itself
-    // an error for `planStructLiteral`/`planPositionalFields` to detect,
-    // but every construction route that can build a nested struct must
-    // reject it here: leaving `vthis` at its `.init` zero instead reads
-    // back a null context the first time a method on that instance uses
-    // it.
-    private void applyVthisStep(InitStep step, Loc loc, in size_t base) {
+    // it is non-zero. Any other step stores the context of its
+    // `contextOwner`.
+    private void applyVthisStep(InitStep step, in size_t base) {
         if (step.source !is null) {
             evalInto(step.source, base + step.offset, step.facts.size,
                 step.type);
@@ -4240,10 +4267,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        if (step.parentFunction is null)
-            throw rejection(_function, loc, "a nested struct's static chain");
-
-        const context = contextAddressOf(step.parentFunction);
+        const context = contextOffsetOf(
+            contextSourceOf(_function, step.contextOwner));
         emit(&opCopy, base + step.offset, context, size_t.sizeof);
     }
 
@@ -4296,7 +4321,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.backends.aggregateinit: applyStep, planStructLiteral;
 
         auto plan = planStructLiteral(expression);
-        auto hooks = AggregateInitHooks(this, expression.loc, _destination);
+        auto hooks = AggregateInitHooks(this, _destination);
         foreach (step; plan.steps)
             applyStep(hooks, step);
     }
@@ -4811,7 +4836,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             : planPositionalFields(structType.sym,
                 expression.member is null ? expression.arguments : null);
 
-        auto hooks = AggregateInitHooks(this, expression.loc, storage);
+        auto hooks = AggregateInitHooks(this, storage);
         driveInit(hooks, plan, expression.member !is null,
             () {
                 if (newPlan.argumentPrefix !is null)
@@ -6375,19 +6400,66 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t receiverOffsetOf(
         CallExp expression, FuncDeclaration callee, in size_t destOffset,
     ) {
+        const first = firstContextOffsetOf(expression, callee, destOffset);
+        const plan = pairPlanOf(_function, callee, expression.vthis2);
+        return plan.variable is null ? first : storeContextPair(plan, first);
+    }
+
+    // Fills the pair in the storage of its variable and returns its
+    // address, the hidden argument of a callee with two contexts. `first`
+    // is a frame slot that holds word 0.
+    private size_t storeContextPair(in PairPlan plan, in size_t first) {
+        const pairAddress = addressOfVariable(cast() plan.variable);
+        emit(&opStoreIndirect, pointerAt(pairAddress, plan.receiverOffset),
+            first, size_t.sizeof);
+        emit(&opStoreIndirect, pointerAt(pairAddress, plan.outerOffset),
+            contextOffsetOf(plan.outer), size_t.sizeof);
+        return pairAddress;
+    }
+
+    private size_t pointerAt(in size_t address, in size_t offset) {
+        return offset == 0 ? address : addPointerOffset(address, offset);
+    }
+
+    private size_t contextOffsetOf(in ContextSource source) {
+        final switch (source.kind) with (ContextSource.Kind) {
+        case none:
+            const context = reserveTemp(pointerFacts);
+            emit(&opConstant, context, addConstant(0), size_t.sizeof);
+            return context;
+        case frame:
+            return contextAddressOf(cast() source.function_);
+        case receiver:
+            auto hidden = cast() source.function_.vthis;
+            auto value = source.throughPair
+                ? loadWordAt(hiddenSlotOffset(hidden), source.pairOffset)
+                : hiddenThisOffset(hidden);
+            foreach (const offset; source.fields)
+                value = loadWordAt(value, offset);
+            return value;
+        }
+    }
+
+    private size_t loadWordAt(in size_t address, in size_t offset) {
+        const word = reserveTemp(pointerFacts);
+        emit(&opLoadIndirect, word, pointerAt(address, offset), size_t.sizeof);
+        return word;
+    }
+
+    // `receiverOffsetOf` without the pair a dual-context callee adds
+    // around it.
+    private size_t firstContextOffsetOf(
+        CallExp expression, FuncDeclaration callee, in size_t destOffset,
+    ) {
+        import snakebite.frontend.dmd.delegates: nestedContextOwnerOf;
+
         // A lambda or nested function reading `this` implicitly names an
         // outer member function's own hidden `this`, reached through the
         // static chain rather than through `expression.e1` - the same
         // reach `contextAddressOf` gives any other captured variable.
-        if (callee.isThis is null) {
-            auto parentFunction = outerFunctionOf(callee);
-            if (parentFunction is null) {
-                const context = reserveTemp(pointerFacts);
-                emit(&opConstant, context, addConstant(0), size_t.sizeof);
-                return context;
-            }
-            return contextAddressOf(parentFunction);
-        }
+        if (callee.isThis is null)
+            return contextOffsetOf(
+                contextSourceOf(_function, nestedContextOwnerOf(callee)));
 
         // An ordinary bound method call wraps its receiver in a
         // `DotVarExp` (`expression.e1.isDotVarExp.e1`); `super(args)`/
