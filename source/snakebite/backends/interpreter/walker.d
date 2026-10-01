@@ -4742,23 +4742,23 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         const hi = expression.upr is null
             ? cast(long) sourceLength : asIntegral(expression.upr);
 
-        if (knownLength) {
-            if (lo < 0 || hi < lo || cast(size_t) hi > sourceLength) {
-                import snakebite.backends.druntimehooks: DruntimeHook;
+        // A pointer has no length to check the upper bound against: only
+        // the order of the bounds, with the length reported as `0`, as
+        // compiled D does.
+        const outOfBounds = knownLength
+            ? lo < 0 || hi < lo || cast(size_t) hi > sourceLength
+            : cast(size_t) hi < cast(size_t) lo;
+        if (outOfBounds) {
+            import snakebite.backends.druntimehooks: DruntimeHook;
 
-                const lower = cast(size_t) lo;
-                const upper = cast(size_t) hi;
-                throwArrayBounds(
-                    DruntimeHook.sliceBounds, expression.loc,
-                    [cast(const(void)*) &lower, cast(const(void)*) &upper,
-                        cast(const(void)*) &sourceLength],
-                );
-            }
-        } else if (lo < 0 || hi < lo)
-            throw new SnakebiteException(
-                text("interpreter cannot slice `", array.toString, "` [",
-                    lo, " .. ", hi, "]"),
+            const lower = cast(size_t) lo;
+            const upper = cast(size_t) hi;
+            throwArrayBounds(
+                DruntimeHook.sliceBounds, expression.loc,
+                [cast(const(void)*) &lower, cast(const(void)*) &upper,
+                    cast(const(void)*) &sourceLength],
             );
+        }
 
         const stride = factsOf(sourceType.nextOf).size;
         auto bytes = cast(ubyte*) _place;

@@ -4272,6 +4272,26 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const highOffset = reserveTemp(pointerFacts);
         evalOperandInto(expression.upr, highOffset, size_t.sizeof);
+
+        // Only the order of the bounds can fail; the length reported is
+        // `0`, as compiled D does for a pointer.
+        const orderOffset = reserveTemp(pointerFacts);
+        emit(&opCopy, orderOffset, lowOffset, size_t.sizeof);
+        emit(&opLessOrEqualUnsigned, orderOffset, highOffset,
+            size_t.sizeof);
+        const lengthOffset = reserveTemp(pointerFacts);
+        emit(&opConstant, lengthOffset, addConstant(0), size_t.sizeof);
+        compileBoundsHook(
+            orderOffset,
+            DruntimeHook.sliceBounds,
+            [
+                Arg(lowOffset, 0, size_t.sizeof),
+                Arg(highOffset, 0, size_t.sizeof),
+                Arg(lengthOffset, 0, size_t.sizeof),
+            ],
+            expression.loc,
+        );
+
         emit(&opSubtract, highOffset, lowOffset, size_t.sizeof);
         emit(&opCopy, _destination + arrayLengthOffset, highOffset,
             size_t.sizeof);
