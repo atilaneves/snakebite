@@ -1625,3 +1625,76 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// A `case` label in an `if (__ctfe)` block is a run-time jump target: the
+// `switch` enters the block at the label, although the `if` itself never
+// does at run time. dmd rejects only a `goto` into the block.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0's code generator crashes on a `case` in an "
+            ~ "`if (__ctfe)` block; ldc compiles it and the program "
+            ~ "exits with status 0"),
+    Omit!(Ctfe, Because.inexpressible, "`__ctfe` is true in CTFE"),
+)) {
+    @("caseLabelInCtfeBlockIsARuntimeTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int pick(int value) {
+                switch (value) {
+                    case 0:
+                        return 10;
+                    default:
+                        if (__ctfe) {
+                            case 1:
+                                return 11;
+                        }
+                        return 12;
+                }
+            }
+
+            void main() {
+                assert(pick(0) == 10);
+                assert(pick(1) == 11);
+                assert(pick(5) == 12);
+            }
+        });
+    }
+}
+
+
+// The same for a `default` label: a value that matches no `case` enters
+// the `if (__ctfe)` block at the label.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.diverges,
+        "dmd 2.113.0's code generator makes a program that never ends "
+            ~ "for a `default` in an `if (__ctfe)` block; ldc compiles it "
+            ~ "and the program exits with status 0"),
+    Omit!(Ctfe, Because.inexpressible, "`__ctfe` is true in CTFE"),
+)) {
+    @("defaultLabelInCtfeBlockIsARuntimeTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int pick(int value) {
+                switch (value) {
+                    case 0:
+                        return 10;
+                    case 1:
+                        if (__ctfe) {
+                            default:
+                                return 11;
+                        }
+                        return 12;
+                }
+            }
+
+            void main() {
+                assert(pick(0) == 10);
+                assert(pick(1) == 12);
+                assert(pick(7) == 11);
+            }
+        });
+    }
+}

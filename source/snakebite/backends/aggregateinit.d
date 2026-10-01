@@ -50,8 +50,11 @@ public NewPlan planNew(imported!"dmd.expression".NewExp expression) {
             expression.argprefix,
         );
 
+    // dmd gives no `lowering` to a `scope class` (it never uses the GC) and
+    // sets `onstack` only for a `scope` variable's initialiser, so any
+    // other `new` of one is a frame temporary.
     return NewPlan(
-        expression.onstack
+        expression.onstack || expression.type.isScopeClass
             ? NewPlan.Destination.stack
             : NewPlan.Destination.lowering,
         objectKind,

@@ -150,6 +150,25 @@ public struct RuntimeTypes {
         return info;
     }
 
+    // The `TypeInfo_Class` a `catch` clause matches by. A clause matches on
+    // the class alone, so `const`, `immutable`, `shared` and `inout`
+    // spellings of the class name stand for the same class, whereas `get`
+    // answers a qualified type with a qualifier wrapper around it.
+    public TypeInfo_Class unqualifiedClassInfo(Type declared) {
+        import dmd.astenums: Tclass;
+        import dmd.typesem: mutableOf, toBasetype, unSharedOf;
+
+        auto type = declared.toBasetype.mutableOf.unSharedOf;
+        if (type.ty != Tclass)
+            assert(0, "a class type has a class type once its qualifiers go");
+
+        auto info = cast(TypeInfo_Class) get(type);
+        if (info is null)
+            assert(0, "the runtime type of a class is a `TypeInfo_Class`");
+
+        return info;
+    }
+
     private TypeInfo build(Type type) {
         import dmd.astenums;
         import dmd.typesem: mutableOf, nextOf, unSharedOf;
