@@ -151,3 +151,36 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// An interface's vtable slot adjusts the interface reference back to the
+// object before the method body reads a field through `this`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run D-style variadic functions"),
+)) {
+    @("virtualVariadic.interfaceDispatchAdjustsReceiver."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.vararg;
+            interface Summer {
+                int sum(int first, ...);
+            }
+            class Implementation: Summer {
+                int bias = 1000;
+                int sum(int first, ...) {
+                    int total = first + bias;
+                    foreach (type; _arguments)
+                        total += va_arg!int(_argptr);
+                    return total;
+                }
+            }
+            void main() {
+                Summer summer = new Implementation;
+                assert(summer.sum(1) == 1001);
+                assert(summer.sum(1, 2, 3) == 1006);
+            }
+        });
+    }
+}
