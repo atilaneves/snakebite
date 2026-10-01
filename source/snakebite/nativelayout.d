@@ -921,6 +921,19 @@ private void storeValue(
         return;
     }
 
+    // `&(struct S){1, 2}` at file scope: the C compound literal is a struct
+    // literal and has static storage, which dmd's static data glue (`todt`)
+    // gives a symbol of its own.
+    if (auto address = value.isAddrExp) {
+        if (auto literal = address.e1.isStructLiteralExp) {
+            auto pointee = literal.stype;
+            auto storage = new void[pointee.size];
+            storeValue(pointee, literal, storage.ptr, symbolAddress, nativeData);
+            *cast(void**) place = storage.ptr;
+            return;
+        }
+    }
+
     if (auto literal = value.isFuncExp) {
         assert(symbolAddress !is null);
         if (type.ty == Tdelegate) {
@@ -959,12 +972,18 @@ private void storeValue(
     }
 
     if (auto literal = value.isArrayLiteralExp) {
-        assert(type.ty == Tarray);
+        assert(type.ty == Tarray || type.ty == Tpointer);
         const elementSize = type.nextOf.size;
         auto data = new void[literal.elements.length * elementSize];
         foreach (i; 0 .. literal.elements.length)
             storeValue(type.nextOf, literal[i],
                 cast(ubyte*) data.ptr + i * elementSize, symbolAddress, nativeData);
+        // `int *p = (int[]){1, 2};` at file scope in C: the literal decays
+        // to a pointer to its own static storage.
+        if (type.ty == Tpointer) {
+            *cast(void**) place = data.ptr;
+            return;
+        }
         storeIntegral(bytes + arrayLengthOffset, literal.elements.length,
             size_t.sizeof);
         *cast(void**) (bytes + arrayPointerOffset) = data.ptr;

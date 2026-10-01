@@ -504,9 +504,11 @@ final class Compiler {
         import dmd.frontend: addImport, initDMD;
         import dmd.globals: global;
         import dmd.target: CPU, addDefaultVersionIdentifiers, target;
+        import snakebite.frontend.importc: preprocessCFile;
         import std.algorithm.iteration: each;
 
         initDMD;
+        global.preprocess = &preprocessCFile;
         target.cpu = CPU.baseline;
         target.setCPU;
         addDefaultVersionIdentifiers(global.params, target);
@@ -766,15 +768,14 @@ final class Compiler {
             }
 
             const sourceOverride = filePath in sourceOverrides;
-            const source = sourceOverride is null
-                ? filePath.readText
-                : owned(*sourceOverride);
-            // DMD treats null as a request to reopen the filename, which
-            // is relative for __FILE__ and may not exist in the current directory.
-            auto result = dmdParseModule(
-                owned(dmdFileName(filePath, importPaths, rootDirectory)),
-                source is null ? "" : source,
-            );
+            auto result = sourceOverride is null && isCSourceFile(filePath)
+                ? parseCRoot(filePath)
+                : dmdParseModule(
+                    owned(dmdFileName(filePath, importPaths, rootDirectory)),
+                    sourceOverride is null
+                        ? filePath.readText
+                        : owned(*sourceOverride),
+                );
             if (result.diagnostics.hasErrors)
                 throw new Exception(diagnosticMessageWithLocations);
             modules ~= result.module_;
@@ -984,6 +985,18 @@ final class Compiler {
         }
 
         return false;
+    }
+
+    // dmd preprocesses a C file when it reads it (`Module.read`), so the
+    // source is not given here, and the file must exist under the name that
+    // dmd reads: the absolute path, because the name `dmdFileName` makes is
+    // relative to a directory that is not the working directory.
+    private auto parseCRoot(in string filePath) const {
+        import dmd.frontend: dmdParseModule = parseModule;
+        import std.path: absolutePath, buildNormalizedPath;
+
+        return dmdParseModule(
+            owned(filePath.absolutePath.buildNormalizedPath), null);
     }
 
     // The name dmd sees for a root file, and so its `__FILE__`. dub compiles
@@ -1771,4 +1784,13 @@ CapturedStderr capturedStderr() @trusted nothrow @nogc {
     dup2(sinkFd, 2);
 
     return captured;
+}
+
+// Whether dmd parses `path` as C (ImportC): `.i` is C already preprocessed,
+// so only `.c` and `.h` need `Module.read`'s preprocessor run.
+private bool isCSourceFile(in string path) {
+    import std.path: extension;
+
+    const suffix = path.extension;
+    return suffix == ".c" || suffix == ".h";
 }

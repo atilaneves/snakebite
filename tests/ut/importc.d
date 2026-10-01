@@ -27,7 +27,9 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
+)) {
     @("importc.scalarAndArrayInitialisers." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -54,7 +56,9 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
+)) {
     @("importc.structInitialisers." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -80,7 +84,9 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
+)) {
     @("importc.stringAndPointerInitialisers." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -107,7 +113,9 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
+)) {
     @("importc.staticFunctionAndVariable." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -129,13 +137,13 @@ static foreach (backend; Matrix!()) {
     @Serial
     unittest {
         42.cProjectStatus!(backend, "struct_passing", `
-            struct Pair { int a; long b; };
-            struct Pair make(int a, long b) {
-                struct Pair p = {a, b};
+            struct IntAndLong { int a; long b; };
+            struct IntAndLong make(int a, long b) {
+                struct IntAndLong p = {a, b};
                 return p;
             }
-            long sum(struct Pair p) { return p.a + p.b; }
-            void scale(struct Pair *p, int factor) {
+            long sum(struct IntAndLong p) { return p.a + p.b; }
+            void scale(struct IntAndLong *p, int factor) {
                 p->a *= factor;
                 p->b *= factor;
             }
@@ -144,7 +152,7 @@ static foreach (backend; Matrix!()) {
             int main() {
                 auto p = make(3, 4);
                 scale(&p, 2);
-                return cast(int) (sum(p) + sum(make(10, 11)));
+                return cast(int) (sum(p) + sum(make(10, 18)));
             }
         });
     }
@@ -158,10 +166,10 @@ static foreach (backend; Matrix!()) {
         42.cProjectStatus!(backend, "enum_typedef", `
             enum Colour { Red, Green = 10, Blue };
             typedef unsigned char byte_t;
-            typedef struct { byte_t lo; byte_t hi; } Pair;
+            typedef struct { byte_t lo; byte_t hi; } BytePair;
             enum Colour pick(int i) { return i ? Blue : Green; }
-            Pair pack(byte_t lo, byte_t hi) {
-                Pair p = {lo, hi};
+            BytePair pack(byte_t lo, byte_t hi) {
+                BytePair p = {lo, hi};
                 return p;
             }
         `, q{
@@ -210,7 +218,7 @@ static foreach (backend; Matrix!()) {
                 int *p = values;
                 int sum = 0;
                 for (int i = 0; i < 5; i++) sum += *(p + i);
-                for (p = values + 4; p != values; p--) sum += p[-1];
+                for (p = values + 4; p != values; p--) sum += *(p - 1);
                 return sum;
             }
         `, q{
@@ -225,7 +233,9 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot read a C global, which is a mutable static variable"),
+)) {
     @("importc.compoundLiteral." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -237,10 +247,17 @@ static foreach (backend; Matrix!()) {
                 return norm1((struct Point){a, 2}) + (int[]){1, 2, 3}[2];
             }
             struct Point *global = &(struct Point){40, 2};
+            int *array = (int[]){5, 6, 7};
+            int viaAddress(void) {
+                struct Point *p = &(struct Point){1, 41};
+                p->x += 1;
+                return p->x + p->y;
+            }
         `, q{
             import CMOD;
             int main() {
                 return viaLiteral(37) == 42 && global.x + global.y == 42
+                    && array[2] == 7 && viaAddress() == 43
                     ? 42 : 1;
             }
         });
@@ -290,7 +307,9 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE does not implement C-style variadic functions"),
+)) {
     @("importc.variadicDefinedInC." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -312,7 +331,9 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call `printf`, which has no source code"),
+)) {
     @("importc.cCallsPrintf." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -328,7 +349,9 @@ static foreach (backend; Matrix!()) {
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call `strlen`, which has no source code"),
+)) {
     @("importc.systemHeader." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
@@ -338,7 +361,7 @@ static foreach (backend; Matrix!()) {
             int length(const char *text) { return (int) strlen(text); }
         `, q{
             import CMOD;
-            int main() { return length("the answer is forty-two plus!!"); }
+            int main() { return length("abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"); }
         });
     }
 }
@@ -353,19 +376,21 @@ static foreach (backend; Matrix!()) {
         `, q{
             import CMOD;
             int main() {
-                int function(int) pointer = &triple;
+                extern(C) int function(int) pointer = &triple;
                 return pointer(14);
             }
         });
     }
 }
 
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot resolve a C declaration to the D definition of the same symbol"),
+)) {
     @("importc.cCallsBackD." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
     unittest {
-        42.cProjectStatus!(backend, "callback_d", `
+        41.cProjectStatus!(backend, "callback_d", `
             extern int fromD(int);
             int viaC(int x) { return fromD(x) + 1; }
         `, q{
@@ -375,6 +400,11 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// Every test shares one frontend, which merges C structs of the same name
+// from different C files, so a struct tag is unique to its test unless the
+// definitions agree.
 
 
 // Builds a dub project whose `source/<name>.c` is `cSource` and whose

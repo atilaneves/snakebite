@@ -4,6 +4,49 @@ module snakebite.frontend.declarationcollector;
 private:
 
 
+// dmd's own `SemanticTimeTransitiveVisitor.visit(CInitializer)` takes the
+// designator list of every entry in a C initialiser list to be present,
+// but the C parser leaves it null for an entry that has no designator
+// (`{x, 3}`), so a walk over an ImportC module that has not been through
+// semantic analysis yet dereferences null. Its
+// `visit(CompoundDeclarationStatement)` asserts that each declaration is a
+// `Declaration`, but the C parser wraps the variables of `int a, b;` in a
+// `LinkDeclaration`, which is not one. The base of every walk that can
+// start before semantic analysis, `inlineasm.d`'s version gate among them.
+package extern(C++) class ImportCSafeVisitor
+        : imported!"dmd.visitor".SemanticTimeTransitiveVisitor {
+    import dmd.init: CInitializer;
+    import dmd.statement: CompoundDeclarationStatement;
+    import dmd.visitor: SemanticTimeTransitiveVisitor;
+    alias visit = SemanticTimeTransitiveVisitor.visit;
+
+    override void visit(CompoundDeclarationStatement statement) {
+        foreach (child; *statement.statements) {
+            if (child is null)
+                continue;
+            auto expression = child.isExpStatement;
+            auto declaration = expression is null
+                ? null : expression.exp.isDeclarationExp;
+            if (declaration is null)
+                continue;
+            if (auto variable = declaration.declaration.isVarDeclaration)
+                visitVarDecl(variable);
+            else
+                declaration.declaration.accept(this);
+        }
+    }
+
+    override void visit(CInitializer initializer) {
+        foreach (entry; initializer.initializerList) {
+            if (entry.designatorList !is null)
+                foreach (designator; (*entry.designatorList)[])
+                    if (designator.exp !is null)
+                        designator.exp.accept(this);
+            entry.initializer.accept(this);
+        }
+    }
+}
+
 // Named distinctly from every class that extends it (`Collector` in
 // `imagesource.d`, `InlineAsmCollector` and `InlineAsmVersionGate` in
 // `inlineasm.d`): an `extern(C++) class` with no explicit C++ namespace
@@ -17,10 +60,8 @@ private:
 // declaration compile into the build", so that answer lives here once.
 // Each subclass overrides only `visit(FuncDeclaration)`, where the two
 // collectors' jobs differ.
-package extern(C++) class DeclarationCollector
-        : imported!"dmd.visitor".SemanticTimeTransitiveVisitor {
-    import dmd.visitor: SemanticTimeTransitiveVisitor;
-    alias visit = SemanticTimeTransitiveVisitor.visit;
+package extern(C++) class DeclarationCollector : ImportCSafeVisitor {
+    alias visit = ImportCSafeVisitor.visit;
 
     import dmd.attrib: AttribDeclaration, ConditionalDeclaration;
     import dmd.dsymbolsem: include;
