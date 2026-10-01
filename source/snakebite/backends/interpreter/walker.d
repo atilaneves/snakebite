@@ -3372,6 +3372,7 @@ extern(C++) private final class Evaluator: LoweringVisitor {
     private extern(D) void storeFloatingAssign(string op)(
         BinAssignExp expression, void* resolvedTarget,
     ) {
+        import snakebite.backends.compoundassign: compoundConversion;
         import snakebite.frontend.storage: compoundTarget;
         import snakebite.nativevalue: loadFloating, storeFloating;
 
@@ -3379,6 +3380,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         auto target = resolvedTarget;
         if (target is null)
             target = addressOf(target_);
+
+        const conversion = compoundConversion(expression);
+        if (conversion.crossesKind)
+            return storeConvertedFloatingAssign!op(
+                expression, target_, target, conversion);
 
         const targetFacts = factsOf(target_.type);
         const operationFacts = factsOf(expression.e1.type);
@@ -3393,6 +3399,55 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
         storeFloating(target, result, targetFacts.size);
         storeFloating(_place, loadFloating(target, targetFacts.size),
+            _facts.size);
+    }
+
+    // An integral target under a floating operation: the target is read
+    // converted to the operation type before the right side, and the result
+    // is converted back.
+    private extern(D) void storeConvertedFloatingAssign(string op)(
+        BinAssignExp expression, Expression target_, void* target,
+        in imported!"snakebite.backends.compoundassign".CompoundConversion
+            conversion,
+    ) {
+        import snakebite.backends.casts: layoutOf;
+        import snakebite.nativelayout: loadIntegral, storeIntegral;
+        import snakebite.nativevalue: applyCast, loadFloating, storeFloating;
+
+        const targetFacts = factsOf(target_.type);
+        const operationFacts = factsOf(expression.e1.type);
+        auto field = target_.isDotVarExp is null
+            ? null : target_.isDotVarExp.var.isVarDeclaration;
+        auto bitfield = field is null || field.isBitFieldDeclaration is null
+            ? null : field;
+
+        align(size_t.alignof) ubyte[size_t.sizeof] stored = void;
+        if (bitfield is null)
+            stored[0 .. targetFacts.size] =
+                (cast(ubyte*) target)[0 .. targetFacts.size];
+        else
+            storeIntegral(stored.ptr, bitfieldValueAtPlace(bitfield, target),
+                targetFacts.size);
+
+        align(real.alignof) ubyte[real.sizeof] operation = void;
+        applyCast(layoutOf(conversion.load), stored.ptr, operation.ptr);
+        const current = loadFloating(operation.ptr, operationFacts.size);
+        const step = asFloating(expression.e2);
+        storeFloating(operation.ptr,
+            floatingResult!op(current, step, operationFacts.size),
+            operationFacts.size);
+        applyCast(layoutOf(conversion.store), operation.ptr, stored.ptr);
+
+        if (bitfield is null)
+            (cast(ubyte*) target)[0 .. targetFacts.size] =
+                stored[0 .. targetFacts.size];
+        else
+            storeBitfieldAt(bitfield, target,
+                loadIntegral(stored.ptr, targetFacts.size,
+                    !targetFacts.isUnsigned));
+        storeIntegral(_place,
+            loadIntegral(stored.ptr, targetFacts.size,
+                !targetFacts.isUnsigned),
             _facts.size);
     }
 

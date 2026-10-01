@@ -1326,16 +1326,15 @@ static foreach (backend; Matrix!()) {
 
 
 static foreach (backend; Matrix!()) {
-    @("shiftLongFieldThroughPointerByInt." ~ backend.stringof)
+    @("powAssignLongByInt." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            struct Owner { long value = 20; }
             int main() {
-                Owner owner;
-                auto pointer = &owner;
-                pointer.value <<= 1;
-                return owner.value == 40 ? 0 : 1;
+                long value = 3;
+                int exponent = 3;
+                value ^^= exponent;
+                return value == 27 ? 0 : 1;
             }
         });
     }
@@ -1343,46 +1342,172 @@ static foreach (backend; Matrix!()) {
 
 
 static foreach (backend; Matrix!()) {
-    @("shiftLongFieldOfClassByInt." ~ backend.stringof)
+    @("addAssignIntByDouble." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            class Owner { long value = 20; }
             int main() {
-                auto owner = new Owner;
-                owner.value <<= 1;
-                return owner.value == 40 ? 0 : 1;
+                int value = 20;
+                double step = 2.5;
+                value += step;
+                return value == 22 ? 0 : 1;
             }
         });
     }
 }
 
 
-static foreach (backend; Matrix!()) {
-    @("shiftLongArrayElementByInt." ~ backend.stringof)
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE converts a floating step to the integral target before the "
+        ~ "operation: pinned by the `.Ctfe.diverges` test of the same name"),
+)) {
+    @("subAssignLongByDouble." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            int main() {
-                long[2] values = [1, 20];
-                values[1] <<= 1;
-                return values[1] == 40 ? 0 : 1;
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("shiftLongRefParameterByInt." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            void twice(ref long value) { value <<= 1; }
             int main() {
                 long value = 20;
-                twice(value);
-                return value == 40 ? 0 : 1;
+                double step = 2.5;
+                value -= step;
+                return value == 17 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+@("subAssignLongByDouble.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    0.shouldBeStatusOf!(Ctfe, q{
+        int main() {
+            long value = 20;
+            double step = 2.5;
+            value -= step;
+            return value == 18 ? 0 : 1;
+        }
+    });
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE converts a floating step to the integral target before the "
+        ~ "operation: pinned by the `.Ctfe.diverges` test of the same name"),
+)) {
+    @("mulAssignUintByReal." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                uint value = 20;
+                real factor = 2.5;
+                value *= factor;
+                return value == 50 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+@("mulAssignUintByReal.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    0.shouldBeStatusOf!(Ctfe, q{
+        int main() {
+            uint value = 20;
+            real factor = 2.5;
+            value *= factor;
+            return value == 40 ? 0 : 1;
+        }
+    });
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("addAssignIntFieldThroughThisByDouble." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Owner {
+                byte pad = 9;
+                int value = 20;
+                void run(double step) { value += step; }
+            }
+            int main() {
+                Owner owner;
+                owner.run(2.5);
+                return owner.value == 22 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.diverges,
+        "CTFE converts a floating step to the integral target before the "
+        ~ "operation: pinned by the `.Ctfe.diverges` test of the same name"),
+)) {
+    @("mulAssignIntArrayElementByDouble." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int[2] values = [1, 21];
+                double factor = 2.5;
+                values[1] *= factor;
+                return values[0] == 1 && values[1] == 52 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+@("mulAssignIntArrayElementByDouble.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    0.shouldBeStatusOf!(Ctfe, q{
+        int main() {
+            int[2] values = [1, 21];
+            double factor = 2.5;
+            values[1] *= factor;
+            return values[0] == 1 && values[1] == 42 ? 0 : 1;
+        }
+    });
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a mutable static variable"),
+)) {
+    @("addAssignIntStaticByDouble." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int value = 20;
+            int main() {
+                double step = 2.5;
+                value += step;
+                return value == 22 ? 0 : 1;
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
+    @("addAssignIntGivesTheStoredValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int value = 20;
+                double step = 2.5;
+                const result = (value += step);
+                return result == 22 && value == 22 ? 0 : 1;
             }
         });
     }
@@ -1393,30 +1518,15 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read a mutable static variable"),
 )) {
-    @("shiftLongStaticByInt." ~ backend.stringof)
+    @("addAssignIntReadsTheTargetBeforeTheStep." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            long value = 20;
+            int value = 20;
+            double step() { value = 5; return 2.5; }
             int main() {
-                value <<= 1;
-                return value == 40 ? 0 : 1;
-            }
-        });
-    }
-}
-
-
-static foreach (backend; Matrix!()) {
-    @("powAssignLongByInt." ~ backend.stringof)
-    @Tags(backend.stringof)
-    unittest {
-        0.shouldBeStatusOf!(backend, q{
-            int main() {
-                long value = 3;
-                int exponent = 3;
-                value ^^= exponent;
-                return value == 27 ? 0 : 1;
+                value += step();
+                return value == 22 ? 0 : 1;
             }
         });
     }

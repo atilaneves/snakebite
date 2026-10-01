@@ -3370,6 +3370,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import snakebite.backends.arithmetic:
             ArithmeticPlan, arithmeticKind, arithmeticPlan;
+        import snakebite.backends.compoundassign:
+            CompoundConversion, compoundConversion;
         import snakebite.backends.shifts: shiftPlan;
         import snakebite.frontend.storage: compoundTarget;
         import std.conv: text;
@@ -3384,7 +3386,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         size_t operationWidth = operationFacts.size;
         size_t operands;
         bool shiftSignExtend = !targetFacts.isUnsigned;
-        bool isShift;
+        CompoundConversion conversion;
         with (ArithmeticPlan.Kind) final switch (plan.kind) {
             case integral, pointerOffset:
                 if (expression.isShlAssignExp || expression.isShrAssignExp
@@ -3393,7 +3395,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     handler = shiftHandler(shift);
                     operationWidth = shift.width;
                     shiftSignExtend = shift.signExtend;
-                    isShift = true;
                 } else
                     handler = compoundHandler(
                         expression, operationFacts.isUnsigned, false);
@@ -3401,6 +3402,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             case floating:
                 handler = compoundHandler(
                     expression, operationFacts.isUnsigned, true);
+                conversion = compoundConversion(expression);
                 break;
             case complex:
                 handler = complexHandler(expression);
@@ -3427,8 +3429,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             arithmeticKind(target.type),
         );
         storage.facts.isUnsigned = !shiftSignExtend;
-        const promotedFirst = storage.promotesBeforeOperand
-            && operationFacts.size != storage.facts.size;
+        storage.conversion = conversion;
+        const promotedFirst = conversion.crossesKind
+            || (storage.promotesBeforeOperand
+                && operationFacts.size != storage.facts.size);
         size_t valueOffset;
         if (promotedFirst)
             valueOffset = readScalar(storage, operationFacts);
@@ -3436,10 +3440,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const rightOffset = reserveTemp(rightFacts);
         // A shift count keeps its own promoted type, which can differ in
         // width from the operation type.
-        if (isShift)
-            evalOperandInto(expression.e2, rightOffset, operationWidth);
-        else
-            evalInto(expression.e2, rightOffset, rightFacts.size);
+        with (ArithmeticPlan.Kind) switch (plan.kind) {
+            case integral, pointerOffset:
+                evalOperandInto(expression.e2, rightOffset, operationWidth);
+                break;
+            default:
+                evalInto(expression.e2, rightOffset, rightFacts.size);
+        }
         if (!promotedFirst)
             valueOffset = readScalar(storage, operationFacts);
         emit(handler, valueOffset, rightOffset, operationWidth, operands);
@@ -3501,6 +3508,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         VarDeclaration variable;
         imported!"snakebite.backends.arithmetic".ArithmeticPlan.Kind
             arithmetic;
+        // Only a compound assignment sets it.
+        imported!"snakebite.backends.compoundassign".CompoundConversion
+            conversion;
 
         // DMD reads a promoted floating or complex target before its right
         // side; integral targets keep the ordinary right-side-first order.
@@ -3575,6 +3585,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t readScalar(
         ScalarStorage storage, in TypeFacts resultFacts,
     ) {
+        if (storage.conversion.crossesKind) {
+            const loaded = reserveTemp(storage.facts);
+            loadScalar(storage, loaded, storage.facts.size);
+            const converted = reserveTemp(resultFacts);
+            emitCrossKindCast(storage.conversion.load, converted, loaded);
+            return converted;
+        }
+
         if (storage.kind == ScalarStorage.Kind.frame
                 && storage.facts.size == resultFacts.size)
             return storage.offset;
@@ -3649,7 +3667,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t valueWidth,
     ) {
         size_t storedOffset = valueOffset;
-        if (valueWidth != storage.facts.size
+        size_t storedWidth = valueWidth;
+        if (storage.conversion.crossesKind) {
+            storedOffset = reserveTemp(storage.facts);
+            emitCrossKindCast(storage.conversion.store, storedOffset,
+                valueOffset);
+            storedWidth = storage.facts.size;
+        } else if (valueWidth != storage.facts.size
                 && storage.promotesBeforeOperand) {
             storedOffset = reserveTemp(storage.facts);
             emitWidthChange(storage.arithmetic, storage.facts, storedOffset,
@@ -3671,10 +3695,37 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             break;
         case bitfield:
             emitBitfieldStore(storage.variable, storage.offset, storedOffset,
-                valueWidth);
+                storedWidth);
             break;
         }
         return storedOffset;
+    }
+
+    // Between an integral and a floating value: the two kinds a compound
+    // assignment's target and operation can differ in.
+    private void emitCrossKindCast(
+        in imported!"snakebite.backends.casts".CastPlan plan,
+        in size_t destination, in size_t source,
+    ) {
+        import snakebite.nativevalue: CastKind;
+
+        with (CastKind) switch (plan.kind) {
+            case integralToFloat:
+                emit(castOp(plan.kind), destination, source,
+                    plan.destFacts.size,
+                    castSizeWithSignedness(
+                        plan.sourceFacts.size, plan.sourceFacts.isUnsigned));
+                return;
+            case floatToIntegral:
+                emit(castOp(plan.kind), destination, source,
+                    castSizeWithSignedness(
+                        plan.destFacts.size, plan.destFacts.isUnsigned),
+                    plan.sourceFacts.size);
+                return;
+            default:
+                assert(0, "an integral target under a floating operation "
+                    ~ "converts with these two casts only");
+        }
     }
 
     private void emitStaticLoad(

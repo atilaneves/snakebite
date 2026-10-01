@@ -24,7 +24,7 @@ private alias DiffersInCtfe = Omit!(Ctfe, Because.diverges,
 // bit of the result tells which count the shift used. `expected` is what
 // compiled D gives.
 private struct ShiftCase {
-    enum Form { expr, assign }
+    enum Form { expr, assign, assignLiteral }
 
     // What CTFE does with the case. `differs` carries the value it gives.
     enum Outcome { agrees, rejects, asserts, differs }
@@ -42,6 +42,7 @@ private struct ShiftCase {
 
 private enum expr = ShiftCase.Form.expr;
 private enum assign = ShiftCase.Form.assign;
+private enum assignLiteral = ShiftCase.Form.assignLiteral;
 private enum agrees = ShiftCase.Outcome.agrees;
 private enum rejects = ShiftCase.Outcome.rejects;
 private enum asserts = ShiftCase.Outcome.asserts;
@@ -408,20 +409,31 @@ private enum shiftCases = [
         "ulong", "1", "-50", agrees),
     ShiftCase("uint", ">>", assign, "longCountEqualsWidth",
         "long", "32", "0", differs, "4294967295"),
+    ShiftCase("long", "<<", assignLiteral, "intCountInRange",
+        "int", "1", "-200", agrees),
+    ShiftCase("long", ">>", assignLiteral, "intCountInRange",
+        "int", "1", "-50", agrees),
+    ShiftCase("long", ">>>", assignLiteral, "intCountInRange",
+        "int", "1", "long.max - 49", agrees),
+    ShiftCase("ulong", ">>", assignLiteral, "intCountInRange",
+        "int", "1", "long.max", agrees),
 ];
 
 private string testName(in ShiftCase row) {
     const opName = row.op == "<<" ? "shl" : row.op == ">>" ? "shr" : "ushr";
 
     return "shift." ~ row.type ~ "." ~ opName
-        ~ (row.form == assign ? "Assign." : ".") ~ row.name;
+        ~ (row.form == expr ? "." : row.form == assign
+            ? "Assign." : "AssignLiteral.") ~ row.name;
 }
 
 private string shiftCode(in ShiftCase row) {
     const value = row.type[0] == 'u' ? row.type ~ ".max" : "-100";
     const shifted = row.form == expr
         ? "return cast(" ~ row.type ~ ")(value() " ~ row.op ~ " count());"
-        : row.type ~ " v = value();\n    v " ~ row.op ~ "= count();\n    return v;";
+        : row.type ~ " v = value();\n    v " ~ row.op ~ "= "
+            ~ (row.form == assign ? "count()" : row.count)
+            ~ ";\n    return v;";
 
     return row.type ~ " value() { return " ~ value ~ "; }\n"
         ~ row.countType ~ " count() { return " ~ row.count ~ "; }\n"
