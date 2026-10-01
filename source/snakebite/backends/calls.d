@@ -56,6 +56,10 @@ public struct CallSelection {
     // Read without a lock, like `_decisions`; see `definitionOf`.
     private SharedTable!(FuncDeclaration, FuncDeclaration) _definitions;
 
+    // Whether any declaration can have a definition to link to. Set once,
+    // from the program, before the first call.
+    public bool linksFunctions;
+
     // The function that a call to `function_` runs. A declaration with no
     // body is the definition that the linker finds for it (see
     // `snakebite.frontend.dmd.linking`), and that is worked out once for
@@ -65,7 +69,7 @@ public struct CallSelection {
         FuncDeclaration function_,
         scope FuncDeclaration delegate(FuncDeclaration) link,
     ) {
-        if (function_.fbody !is null)
+        if (!linksFunctions || function_.fbody !is null)
             return function_;
 
         if (auto cached = function_ in _definitions)

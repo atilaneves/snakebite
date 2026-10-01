@@ -44,6 +44,12 @@ public struct LinkMap {
             });
     }
 
+    // Whether any root module defines a function that another module can
+    // declare. A program with none has nothing for `definitionOf` to find.
+    public bool definesLinkableFunctions() const {
+        return _functions.length != 0;
+    }
+
     // `declaration` when it has a body, no definition is known for it, or
     // it cannot be linked by name.
     public FuncDeclaration definitionOf(

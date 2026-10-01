@@ -252,6 +252,7 @@ private struct Shared {
         this.program = program;
         this.callGuest = callGuest;
         plans = PlanCache(program.dependencyImage);
+        callSelection.linksFunctions = program.definesLinkableFunctions;
         nativeData = NativeData(&this.program.isRootOwned,
             (variable) => this.program.linkedVariableOf(variable),
             &constantSymbolAddress,

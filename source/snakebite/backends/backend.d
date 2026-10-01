@@ -106,6 +106,10 @@ public struct Program {
         return _links.definitionOf(function_);
     }
 
+    public bool definesLinkableFunctions() const {
+        return _links.definesLinkableFunctions;
+    }
+
     // As `linkedFunctionOf`, for an `extern` variable.
     public imported!"dmd.declaration".VarDeclaration linkedVariableOf(
         imported!"dmd.declaration".VarDeclaration variable,

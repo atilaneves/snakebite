@@ -96,6 +96,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     public this(const Program program) {
         super(program);
         _plans = PlanCache(program.dependencyImage);
+        _callSelection.linksFunctions = program.definesLinkableFunctions;
         _nativeData = NativeData(&_program.isRootOwned,
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
