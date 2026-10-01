@@ -20,6 +20,7 @@ public extern(C++) imported!"dmd.astenums".DArray!ubyte preprocessCFile(
     ref imported!"dmd.common.outbuffer".OutBuffer defines,
 ) {
     import core.stdc.stdlib: getenv;
+    import core.stdc.string: strerror;
     import dmd.astenums: DArray;
     import dmd.root.filename: FileName;
     import dmd.errors: error;
@@ -58,61 +59,140 @@ public extern(C++) imported!"dmd.astenums".DArray!ubyte preprocessCFile(
     argv.push(null);
 
     DArray!ubyte text;
-    const status = capture(argv[], text);
-    if (status != 0) {
-        error(loc, "C preprocess command %.*s failed for file %s, exit status %d",
-            cast(int) cpp.length, cpp.ptr, csrcfile.toChars, status);
-        return DArray!ubyte();
-    }
-    return text;
+    const(char)[] diagnostics;
+    const result = capture(argv[], text, diagnostics);
+    if (result.executionError != 0)
+        error(loc, "cannot run the C preprocessor `%.*s` for file %s: %s",
+            cast(int) cpp.length, cpp.ptr, csrcfile.toChars,
+            strerror(result.executionError));
+    else if (result.status != 0)
+        error(loc, "C preprocess command %.*s failed for file %s, exit status %d\n%.*s",
+            cast(int) cpp.length, cpp.ptr, csrcfile.toChars, result.status,
+            cast(int) diagnostics.length, diagnostics.ptr);
+    else
+        return text;
+
+    // The text of an empty file, not no text: dmd reports a file with no
+    // text as one it cannot find, and tries to read it again at each import.
+    return emptyText;
 }
 
-// Runs `argv` and collects its standard output. Returns the exit status,
-// 1 when the child could not run.
-private int capture(
-    const(const(char)*)[] argv,
-    out imported!"dmd.astenums".DArray!ubyte text,
-) {
-    import core.stdc.errno: EINTR, errno;
-    import core.sys.posix.sys.wait: WEXITSTATUS, WIFEXITED, waitpid;
-    import core.sys.posix.unistd:
-        STDOUT_FILENO, _exit, close, dup2, execvp, fork, pipe, read;
+private imported!"dmd.astenums".DArray!ubyte emptyText() {
     import dmd.astenums: DArray;
     import dmd.common.outbuffer: OutBuffer;
 
-    int[2] pipeEnds;
-    if (pipe(pipeEnds) == -1)
-        return 1;
+    OutBuffer buffer;
+    buffer.writeByte('\n');
+    return DArray!ubyte(cast(ubyte[]) buffer.extractSlice(true));
+}
+
+private struct Captured {
+    // The exit status of the child, 1 when a signal ended it.
+    int status;
+    // The `errno` of a failed `execvp`, 0 when the child ran.
+    int executionError;
+}
+
+// Runs `argv` and collects its standard output, and what it writes to the
+// standard error stream, which dmd would leave on the terminal but a frontend
+// that captures its own diagnostics would lose.
+private Captured capture(
+    const(const(char)*)[] argv,
+    out imported!"dmd.astenums".DArray!ubyte text,
+    out const(char)[] diagnostics,
+) {
+    import core.stdc.errno: EINTR, errno;
+    import core.sys.posix.fcntl: O_CLOEXEC;
+    import core.sys.posix.poll: POLLIN, poll, pollfd;
+    import core.sys.posix.sys.wait: WEXITSTATUS, WIFEXITED, waitpid;
+    import core.sys.posix.unistd:
+        STDERR_FILENO, STDOUT_FILENO, _exit, close, dup2, execvp, fork, pipe, read, write;
+    import dmd.astenums: DArray;
+    import dmd.common.outbuffer: OutBuffer;
+
+    // `pipe2` closes the last pair on a successful `exec`, so the parent
+    // reads nothing from it when the program ran, and the `errno` of the
+    // failed `exec` when it did not.
+    int[2] outputEnds;
+    int[2] diagnosticEnds;
+    int[2] errorEnds;
+    if (pipe(outputEnds) == -1)
+        return Captured(1);
+    if (pipe(diagnosticEnds) == -1) {
+        foreach (end; outputEnds)
+            close(end);
+        return Captured(1);
+    }
+    if (pipe2(errorEnds, O_CLOEXEC) == -1) {
+        foreach (end; outputEnds ~ diagnosticEnds)
+            close(end);
+        return Captured(1);
+    }
 
     const child = fork();
-    if (child == -1)
-        return 1;
+    if (child == -1) {
+        foreach (end; outputEnds ~ diagnosticEnds ~ errorEnds)
+            close(end);
+        return Captured(1);
+    }
     if (child == 0) {
-        close(pipeEnds[0]);
-        dup2(pipeEnds[1], STDOUT_FILENO);
+        close(outputEnds[0]);
+        close(diagnosticEnds[0]);
+        dup2(outputEnds[1], STDOUT_FILENO);
+        dup2(diagnosticEnds[1], STDERR_FILENO);
         execvp(argv[0], argv.ptr);
-        _exit(-1);
+        const failure = errno;
+        write(errorEnds[1], &failure, failure.sizeof);
+        _exit(255);
     }
 
-    close(pipeEnds[1]);
-    OutBuffer buffer;
+    close(outputEnds[1]);
+    close(diagnosticEnds[1]);
+    close(errorEnds[1]);
+    OutBuffer output;
+    OutBuffer errors;
+    pollfd[2] watched = [
+        pollfd(outputEnds[0], POLLIN), pollfd(diagnosticEnds[0], POLLIN),
+    ];
     ubyte[1024] chunk = void;
-    for (;;) {
-        const count = read(pipeEnds[0], chunk.ptr, chunk.length);
-        if (count > 0)
-            buffer.write(chunk[0 .. count]);
-        else if (count == 0)
+    // Both pipes are read together: a child that fills one while the parent
+    // waits on the other would block for ever.
+    while (watched[0].fd != -1 || watched[1].fd != -1) {
+        if (poll(watched.ptr, watched.length, -1) == -1) {
+            if (errno == EINTR)
+                continue;
             break;
-        else if (errno != EINTR)
-            break;
+        }
+        foreach (i, ref entry; watched) {
+            if (entry.fd == -1 || entry.revents == 0)
+                continue;
+            const count = read(entry.fd, chunk.ptr, chunk.length);
+            if (count > 0)
+                (i == 0 ? output : errors).write(chunk[0 .. count]);
+            else if (count == 0 || errno != EINTR)
+                entry.fd = -1;
+        }
     }
-    close(pipeEnds[0]);
+    close(outputEnds[0]);
+    close(diagnosticEnds[0]);
+    diagnostics = cast(const(char)[]) errors.extractSlice(true);
+
+    int executionError;
+    ptrdiff_t count;
+    do
+        count = read(errorEnds[0], &executionError, executionError.sizeof);
+    while (count == -1 && errno == EINTR);
+    close(errorEnds[0]);
 
     int status;
-    waitpid(child, &status, 0);
+    while (waitpid(child, &status, 0) == -1 && errno == EINTR) {}
+    if (count == executionError.sizeof)
+        return Captured(255, executionError);
     if (!WIFEXITED(status))
-        return 1;
+        return Captured(1);
 
-    text = DArray!ubyte(cast(ubyte[]) buffer.extractSlice(true));
-    return WEXITSTATUS(status);
+    text = DArray!ubyte(cast(ubyte[]) output.extractSlice(true));
+    return Captured(WEXITSTATUS(status));
 }
+
+private extern(C) int pipe2(ref int[2] ends, int flags) nothrow @nogc;

@@ -113,6 +113,17 @@ public struct Program {
         return _links.definitionOf(variable);
     }
 
+    // A `main` in a C module is the entry of the process, as the C runtime
+    // calls it: druntime does not start, so a build with unit tests runs
+    // none of them and no module constructor, and the program is only
+    // that function.
+    public bool hasCEntryPoint() const {
+        import dmd.astenums: FileType;
+
+        return main.func !is null
+            && (cast() main.func).getModule.filetype == FileType.c;
+    }
+
     public bool isInterpreted(
         FuncDeclaration function_,
     ) const {
@@ -245,7 +256,8 @@ public int run(
     Program program,
     in string[] hostArguments = null,
 ) {
-    if (runModuleConstructors(backend, program.moduleConstructors))
+    if (runModuleConstructors(backend,
+            program.hasCEntryPoint ? null : program.moduleConstructors))
         return 1;
 
     return runMain(backend, program, hostArguments);
@@ -305,7 +317,12 @@ package(snakebite) int runMain(
     int status;
     string[] arguments;
     void*[] mainArguments;
-    if (main_.parameters !is null && main_.parameters.length != 0) {
+    CArguments cArguments;
+    if (program.hasCEntryPoint) {
+        arguments = hostArguments.length ? hostArguments.dup : [program.name];
+        cArguments = CArguments(arguments);
+        mainArguments = cArguments.of(main_);
+    } else if (main_.parameters !is null && main_.parameters.length != 0) {
         arguments = hostArguments.length
             ? hostArguments.dup
             : [program.name];
@@ -314,6 +331,38 @@ package(snakebite) int runMain(
     return failing(() {
         backend.call(main_, isVoid ? null : &status, mainArguments);
     }) ? 1 : status;
+}
+
+// The values a C `main` takes, in the order the C runtime passes them:
+// `argc`, `argv` and the environment.
+private struct CArguments {
+    private int _argc;
+    private char*[] _storage;
+    private char** _argv;
+    private char** _environment;
+
+    this(in string[] arguments) {
+        import core.sys.posix.unistd: environ;
+        import std.algorithm.iteration: map;
+        import std.array: array;
+        import std.string: toStringz;
+
+        _argc = cast(int) arguments.length;
+        _storage = arguments.map!(argument => cast(char*) argument.toStringz)
+            .array ~ null;
+        _argv = _storage.ptr;
+        _environment = cast(char**) environ;
+    }
+
+    // The address of each argument `main_` declares.
+    void*[] of(imported!"dmd.func".FuncDeclaration main_) {
+        import snakebite.frontend.dmd.functions: typeFunctionOf;
+
+        void*[3] all = [
+            cast(void*) &_argc, cast(void*) &_argv, cast(void*) &_environment,
+        ];
+        return all[0 .. typeFunctionOf(main_).parameterList.length].dup;
+    }
 }
 
 // Runs one guest call, reporting an escaping `Throwable` the way druntime

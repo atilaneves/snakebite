@@ -16,6 +16,10 @@ public struct SourceSet {
     public string[string] sourceOverrides;
     public string[] linkerFiles;
     public DubDescription dubDescription;
+    // A bare directory is built as `dmd -i` builds it, which compiles a C
+    // module that a D module imports. A dub recipe names its C files in
+    // `sourceFiles`, and dub does not compile one that it does not name.
+    public bool importedCFilesAreRoots;
 }
 
 
@@ -56,6 +60,7 @@ public Project loadProject(in string directory, SourceSet sources) {
         flags,
         project.sources.sourceOverrides,
         project.directory,
+        project.sources.importedCFilesAreRoots,
     );
     project.program = Program(parsed, project.name, checksOf(flags));
 
@@ -144,11 +149,13 @@ private SourceSet bareSourceSet(
     if (files.length == 0)
         throw new Exception(text("no D source files under ", directory));
 
-    return SourceSet(
+    auto sources = SourceSet(
         files,
         directory ~ importPaths.dup,
         stringImportPaths.dup,
     );
+    sources.importedCFilesAreRoots = true;
+    return sources;
 }
 
 
