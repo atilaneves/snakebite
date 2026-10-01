@@ -864,3 +864,53 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// A nested function template is dual-context too: word 0 of its pair is
+// the frame of the function that declares it, word 1 the frame of the
+// function that owns the alias. A delegate to it holds the address of
+// the pair.
+static foreach (backend; Matrix!()) {
+    @("callDualContextNestedFunctionThroughDelegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int outerLocal = 40;
+                int callee() { return outerLocal; }
+                int owner() {
+                    int innerLocal = 2;
+                    int add(alias other)() { return innerLocal + other(); }
+                    auto callback = &add!callee;
+                    return callback();
+                }
+                return owner() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
+
+// The delegate to the dual-context nested function is called after the
+// function that declares it returned.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE does not support closures"),
+)) {
+    @("callDualContextNestedFunctionThroughEscapedDelegate."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            int main() {
+                int outerLocal = 40;
+                int callee() { return outerLocal; }
+                int delegate() owner() {
+                    int innerLocal = 2;
+                    int add(alias other)() { return innerLocal + other(); }
+                    return &add!callee;
+                }
+                auto callback = owner();
+                return callback() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
