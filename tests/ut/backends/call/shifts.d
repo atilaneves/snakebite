@@ -10,12 +10,12 @@ import ut.backends;
 // for `long`. `byte` and `short` promote, so for them the width that
 // matters is 32, not the operand's own. The count comes from a call so
 // dmd cannot fold or reject it. CTFE has no such run-time rule: it
-// rejects the count, answers 0 for `<<=` and `>>>=`, or asserts.
+// rejects the count, gives another value (pinned per case), or asserts.
 private alias RejectedByCtfe = Omit!(Ctfe, Because.inexpressible,
     "CTFE rejects an out-of-range shift count at compile time");
-private alias WrongInCtfe = Omit!(Ctfe, Because.inexpressible,
-    "CTFE gives 0 for `<<=` and `>>>=` with an out-of-range count, " ~
-    "where the CPU masks the count");
+private alias WrongInCtfe = Omit!(Ctfe, Because.diverges,
+    "CTFE gives another value for an out-of-range count, where the CPU " ~
+    "masks it: pinned by the `.Ctfe.diverges` test of the same case");
 
 private alias AssertsInCtfe = Omit!(Ctfe, Because.inexpressible,
     "dmd's CTFE asserts on a negative `>>=` or `>>>=` count");
@@ -71,6 +71,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
     }
 }
 
+@("shift.int.shlAssign.countEqualsWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    int(0).shouldBeRetOf!(
+            Ctfe, shiftCode("int", "<<", "assign", "32"), "shifted");
+}
+
 static foreach (backend; Matrix!()) {
     @("shift.int.shrAssign.countEqualsWidth." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -87,6 +94,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
         int(-100).shouldBeRetOf!(
             backend, shiftCode("int", ">>>", "assign", "32"), "shifted");
     }
+}
+
+@("shift.int.ushrAssign.countEqualsWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    int(0).shouldBeRetOf!(
+            Ctfe, shiftCode("int", ">>>", "assign", "32"), "shifted");
 }
 
 static foreach (backend; Matrix!(RejectedByCtfe)) {
@@ -125,6 +139,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
     }
 }
 
+@("shift.int.shlAssign.countAboveWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    int(0).shouldBeRetOf!(
+            Ctfe, shiftCode("int", "<<", "assign", "33"), "shifted");
+}
+
 static foreach (backend; Matrix!()) {
     @("shift.int.shrAssign.countAboveWidth." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -141,6 +162,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
         int(2147483598).shouldBeRetOf!(
             backend, shiftCode("int", ">>>", "assign", "33"), "shifted");
     }
+}
+
+@("shift.int.ushrAssign.countAboveWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    int(0).shouldBeRetOf!(
+            Ctfe, shiftCode("int", ">>>", "assign", "33"), "shifted");
 }
 
 static foreach (backend; Matrix!(RejectedByCtfe)) {
@@ -233,6 +261,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
     }
 }
 
+@("shift.uint.shlAssign.countEqualsWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    uint(0).shouldBeRetOf!(
+            Ctfe, shiftCode("uint", "<<", "assign", "32"), "shifted");
+}
+
 static foreach (backend; Matrix!()) {
     @("shift.uint.shrAssign.countEqualsWidth." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -249,6 +284,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
         uint(4294967295).shouldBeRetOf!(
             backend, shiftCode("uint", ">>>", "assign", "32"), "shifted");
     }
+}
+
+@("shift.uint.ushrAssign.countEqualsWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    uint(0).shouldBeRetOf!(
+            Ctfe, shiftCode("uint", ">>>", "assign", "32"), "shifted");
 }
 
 static foreach (backend; Matrix!(RejectedByCtfe)) {
@@ -287,6 +329,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
     }
 }
 
+@("shift.uint.shlAssign.countAboveWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    uint(0).shouldBeRetOf!(
+            Ctfe, shiftCode("uint", "<<", "assign", "33"), "shifted");
+}
+
 static foreach (backend; Matrix!()) {
     @("shift.uint.shrAssign.countAboveWidth." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -303,6 +352,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
         uint(2147483647).shouldBeRetOf!(
             backend, shiftCode("uint", ">>>", "assign", "33"), "shifted");
     }
+}
+
+@("shift.uint.ushrAssign.countAboveWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    uint(0).shouldBeRetOf!(
+            Ctfe, shiftCode("uint", ">>>", "assign", "33"), "shifted");
 }
 
 static foreach (backend; Matrix!(RejectedByCtfe)) {
@@ -339,6 +395,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
         uint(2147483648).shouldBeRetOf!(
             backend, shiftCode("uint", "<<", "assign", "-1"), "shifted");
     }
+}
+
+@("shift.uint.shlAssign.countNegative.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    uint(0).shouldBeRetOf!(
+            Ctfe, shiftCode("uint", "<<", "assign", "-1"), "shifted");
 }
 
 static foreach (backend; Matrix!(AssertsInCtfe)) {
@@ -719,6 +782,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
     }
 }
 
+@("shift.byte.shlAssign.countEqualsWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    byte(0).shouldBeRetOf!(
+            Ctfe, shiftCode("byte", "<<", "assign", "32"), "shifted");
+}
+
 static foreach (backend; Matrix!()) {
     @("shift.byte.shrAssign.countEqualsWidth." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -735,6 +805,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
         byte(-100).shouldBeRetOf!(
             backend, shiftCode("byte", ">>>", "assign", "32"), "shifted");
     }
+}
+
+@("shift.byte.ushrAssign.countEqualsWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    byte(0).shouldBeRetOf!(
+            Ctfe, shiftCode("byte", ">>>", "assign", "32"), "shifted");
 }
 
 static foreach (backend; Matrix!(RejectedByCtfe)) {
@@ -773,6 +850,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
     }
 }
 
+@("shift.byte.shlAssign.countAboveWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    byte(0).shouldBeRetOf!(
+            Ctfe, shiftCode("byte", "<<", "assign", "33"), "shifted");
+}
+
 static foreach (backend; Matrix!()) {
     @("shift.byte.shrAssign.countAboveWidth." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -789,6 +873,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
         byte(78).shouldBeRetOf!(
             backend, shiftCode("byte", ">>>", "assign", "33"), "shifted");
     }
+}
+
+@("shift.byte.ushrAssign.countAboveWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    byte(0).shouldBeRetOf!(
+            Ctfe, shiftCode("byte", ">>>", "assign", "33"), "shifted");
 }
 
 static foreach (backend; Matrix!(RejectedByCtfe)) {
@@ -935,6 +1026,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
     }
 }
 
+@("shift.short.shlAssign.countEqualsWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    short(0).shouldBeRetOf!(
+            Ctfe, shiftCode("short", "<<", "assign", "32"), "shifted");
+}
+
 static foreach (backend; Matrix!()) {
     @("shift.short.shrAssign.countEqualsWidth." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -951,6 +1049,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
         short(-100).shouldBeRetOf!(
             backend, shiftCode("short", ">>>", "assign", "32"), "shifted");
     }
+}
+
+@("shift.short.ushrAssign.countEqualsWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    short(0).shouldBeRetOf!(
+            Ctfe, shiftCode("short", ">>>", "assign", "32"), "shifted");
 }
 
 static foreach (backend; Matrix!(RejectedByCtfe)) {
@@ -989,6 +1094,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
     }
 }
 
+@("shift.short.shlAssign.countAboveWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    short(0).shouldBeRetOf!(
+            Ctfe, shiftCode("short", "<<", "assign", "33"), "shifted");
+}
+
 static foreach (backend; Matrix!()) {
     @("shift.short.shrAssign.countAboveWidth." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1005,6 +1117,13 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
         short(32718).shouldBeRetOf!(
             backend, shiftCode("short", ">>>", "assign", "33"), "shifted");
     }
+}
+
+@("shift.short.ushrAssign.countAboveWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    short(0).shouldBeRetOf!(
+            Ctfe, shiftCode("short", ">>>", "assign", "33"), "shifted");
 }
 
 static foreach (backend; Matrix!(RejectedByCtfe)) {
@@ -1155,6 +1274,24 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
     }
 }
 
+@("shift.int.shrAssign.longCountAboveWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    int(-50).shouldBeRetOf!(
+            Ctfe,
+            q{
+                int value() { return -100; }
+                long count() { return 33; }
+                int shifted() {
+                    int v = value();
+                    v >>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
+}
+
 static foreach (backend; Matrix!()) {
     @("shift.uint.shlAssign.ulongCountEqualsWidth." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1235,6 +1372,24 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
     }
 }
 
+@("shift.byte.ushrAssign.longCountEqualsOperandWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    byte(0).shouldBeRetOf!(
+            Ctfe,
+            q{
+                byte value() { return -100; }
+                long count() { return 8; }
+                byte shifted() {
+                    byte v = value();
+                    v >>>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
+}
+
 static foreach (backend; Matrix!(WrongInCtfe)) {
     @("shift.int.ushrAssign.longCountAboveWidth." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1253,6 +1408,24 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
             "shifted",
         );
     }
+}
+
+@("shift.int.ushrAssign.longCountAboveWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    int(0).shouldBeRetOf!(
+            Ctfe,
+            q{
+                int value() { return -100; }
+                long count() { return 33; }
+                int shifted() {
+                    int v = value();
+                    v >>>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
 }
 
 static foreach (backend; Matrix!(WrongInCtfe)) {
@@ -1275,6 +1448,24 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
     }
 }
 
+@("shift.byte.ushrAssign.longCountInRange.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    byte(78).shouldBeRetOf!(
+            Ctfe,
+            q{
+                byte value() { return -100; }
+                long count() { return 1; }
+                byte shifted() {
+                    byte v = value();
+                    v >>>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
+}
+
 static foreach (backend; Matrix!(WrongInCtfe)) {
     @("shift.int.ushrAssign.longCountInRange." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1293,6 +1484,24 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
             "shifted",
         );
     }
+}
+
+@("shift.int.ushrAssign.longCountInRange.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    int(2147483598).shouldBeRetOf!(
+            Ctfe,
+            q{
+                int value() { return -100; }
+                long count() { return 1; }
+                int shifted() {
+                    int v = value();
+                    v >>>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
 }
 
 static foreach (backend; Matrix!()) {
@@ -1353,4 +1562,22 @@ static foreach (backend; Matrix!(WrongInCtfe)) {
             "shifted",
         );
     }
+}
+
+@("shift.uint.shrAssign.longCountEqualsWidth.Ctfe.diverges")
+@Tags("Ctfe")
+unittest {
+    uint(4294967295).shouldBeRetOf!(
+            Ctfe,
+            q{
+                uint value() { return uint.max; }
+                long count() { return 32; }
+                uint shifted() {
+                    uint v = value();
+                    v >>= count();
+                    return v;
+                }
+            },
+            "shifted",
+        );
 }
