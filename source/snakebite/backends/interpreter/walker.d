@@ -307,9 +307,7 @@ private struct Shared {
     // for it, so every evaluator forwards here instead of keeping its
     // own answer.
     private void* callableAddress(FuncDeclaration method, ptrdiff_t adjustment) {
-        import dmd.astenums: VarArg;
         import dmd.dsymbolsem: isAbstract;
-        import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         // getOverloads can leave an alias in a function-pointer constant.
         method = method.toAliasFunc;
@@ -319,8 +317,7 @@ private struct Shared {
         const(void)* word;
         const hasNativeSymbol = plans.hasNativeSymbol(method);
         const isVariadicGuest =
-            typeFunctionOf(method).parameterList.varargs == VarArg.variadic
-            && method.fbody !is null && !hasNativeSymbol;
+            callSelection.isVariadicGuest(method, hasNativeSymbol);
         if (callSelection.usesNativeVariadicAddress(method, hasNativeSymbol))
             return plans.addressOf(method);
         if (isVariadicGuest || callSelection.usesGuestBody(method,
@@ -329,7 +326,8 @@ private struct Shared {
                 plans.hasIndependentNativeSymbol(method))) {
             plans.registerGuestFunction(cast(void*) method, method);
             word = cast(void*) method;
-            if (isVariadicGuest)
+            if (callSelection.storesGuestWord(
+                    method, hasNativeSymbol, adjustment))
                 return cast(void*) word;
         }
         auto address = plans.callableAddress(word, method, adjustment);
@@ -1067,7 +1065,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
                 size_t.sizeof, false);
             _temporaries.suspendConstructor(receiver);
         }, {
-            if (callSite !is null && typeFunctionOf(function_).isDstyleVariadic) {
+            if (callSite !is null && typeFunctionOf(function_).parameterList
+                    .varargs == VarArg.variadic) {
                 bindArguments(function_, callSite.arguments, callSite.loc,
                     frameBase, layout, true);
                 bindVariadicArguments(callSite, frameBase, layout);
@@ -5448,14 +5447,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
 
 
         auto funcType = typeFunctionOf(function_);
-        if (funcType.parameterList.varargs == VarArg.variadic
-                && (!funcType.isDstyleVariadic
-                    || function_.fbody is null
-                    || !_program.isInterpreted(function_)
-                    || _plans.hasNativeSymbol(function_))) {
-            callVariadicNative(expression, function_, funcType);
-            return CallResult.init;
-        }
 
         void* classReceiver;
         bool hasClassReceiver;
@@ -5487,12 +5478,23 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             }
         }
 
+        funcType = typeFunctionOf(function_);
+        const isVariadic = funcType.parameterList.varargs == VarArg.variadic;
+        if (isVariadic
+                && (function_.fbody is null
+                    || !_program.isInterpreted(function_)
+                    || _plans.hasNativeSymbol(function_))) {
+            callVariadicNative(expression, function_, funcType,
+                classReceiver, hasClassReceiver);
+            return CallResult.init;
+        }
+
         auto layout = layoutOf(function_);
         auto frame = bindFrame(
             expression,
             function_,
             layout,
-            funcType.isDstyleVariadic,
+            isVariadic,
             classReceiver,
             hasClassReceiver,
             callee.context,
@@ -5511,7 +5513,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         import snakebite.nativelayout: storeIntegral;
 
         auto arguments = expression.arguments;
-        const firstExtra = 1 + layout.parameters.length;
+        const hasTypes = layout.variadicTypes != size_t.max;
+        const firstExtra = hasTypes + layout.parameters.length;
         TypeFacts[] facts;
         foreach (argument; (*arguments)[firstExtra .. $])
             facts ~= factsOf(argument.type);
@@ -5524,6 +5527,8 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         }
         storeIntegral(frame + layout.variadicCursor, cast(size_t) storage,
             size_t.sizeof);
+        if (!hasTypes)
+            return;
         auto types = (*arguments)[0];
         evaluate(types, types.type, factsOf(types.type),
             frame + layout.variadicTypes);
@@ -5535,15 +5540,17 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         CallExp expression,
         FuncDeclaration function_,
         TypeFunction funcType,
+        void* classReceiver,
+        bool hasClassReceiver,
     ) {
-
         auto preparation = CallAdapter.Arguments.of(
             funcType, expression.arguments,
         );
         const plan = cachedCallPlan(expression, function_,
             () => preparation.prepare(*_plans, function_));
         auto layout = layoutOf(function_);
-        auto frame = bindFrame(expression, function_, layout, true);
+        auto frame = bindFrame(expression, function_, layout, true,
+            classReceiver, hasClassReceiver);
         bindArguments(function_, expression.arguments, expression.loc,
             frame.base, layout, true);
 

@@ -1,0 +1,292 @@
+module ut.backends.run.virtual_variadic;
+
+
+import ut.backends;
+import core.vararg;
+
+// An untyped D variadic receives the call's `TypeInfo` tuple before its
+// declared parameters, and the extra arguments after them.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run D-style variadic functions"),
+)) {
+    @("virtualVariadic.classOverrideReadsExtraArguments."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.vararg;
+            class Base {
+                int sum(int first, ...) { return -1; }
+            }
+            class Derived: Base {
+                override int sum(int first, ...) {
+                    int total = first;
+                    foreach (type; _arguments) {
+                        assert(type == typeid(int));
+                        total += va_arg!int(_argptr);
+                    }
+                    return total;
+                }
+            }
+            void main() {
+                Base base = new Derived;
+                assert(base.sum(3) == 3);
+                assert(base.sum(3, 4) == 7);
+                assert(base.sum(3, 4, 5, 6) == 18);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run D-style variadic functions"),
+)) {
+    @("virtualVariadic.interfaceDispatchReadsExtraArguments."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.vararg;
+            interface Summer {
+                int sum(int first, ...);
+            }
+            class Implementation: Summer {
+                int sum(int first, ...) {
+                    int total = first;
+                    foreach (type; _arguments)
+                        total += va_arg!int(_argptr);
+                    return total;
+                }
+            }
+            void main() {
+                Summer summer = new Implementation;
+                assert(summer.sum(1) == 1);
+                assert(summer.sum(1, 2, 3) == 6);
+            }
+        });
+    }
+}
+
+// Each receiver and argument is evaluated once, left to right.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run D-style variadic functions"),
+)) {
+    @("virtualVariadic.evaluatesReceiverAndArgumentsOnceInOrder."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.vararg;
+            class C {
+                int sum(int first, ...) {
+                    int total = first;
+                    foreach (type; _arguments)
+                        total += va_arg!int(_argptr);
+                    return total;
+                }
+            }
+            void main() {
+                int log;
+                int step(int value) { log = log * 10 + value; return value; }
+                C receiver() { log = log * 10 + 9; return new C; }
+                assert(receiver.sum(step(1), step(2), step(3)) == 6);
+                assert(log == 9123);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!()) {
+    @("virtualVariadic.typesafeArray." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int sum(int[] values...) { return -1; }
+            }
+            class Derived: Base {
+                override int sum(int[] values...) {
+                    int total;
+                    foreach (value; values)
+                        total += value;
+                    return total;
+                }
+            }
+            void main() {
+                Base base = new Derived;
+                assert(base.sum() == 0);
+                assert(base.sum(1, 2, 3) == 6);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run D-style variadic functions"),
+)) {
+    @("virtualVariadic.mixedTypes." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.vararg;
+            class C {
+                double f(int first, ...) {
+                    double total = first;
+                    foreach (type; _arguments) {
+                        if (type == typeid(int))
+                            total += va_arg!int(_argptr);
+                        else if (type == typeid(double))
+                            total += va_arg!double(_argptr);
+                    }
+                    return total;
+                }
+            }
+            void main() {
+                C c = new C;
+                assert(c.f(1, 2, 2.5, 3) == 8.5);
+            }
+        });
+    }
+}
+
+// An interface's vtable slot adjusts the interface reference back to the
+// object before the method body reads a field through `this`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run D-style variadic functions"),
+)) {
+    @("virtualVariadic.interfaceDispatchAdjustsReceiver."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.vararg;
+            interface Summer {
+                int sum(int first, ...);
+            }
+            class Implementation: Summer {
+                int bias = 1000;
+                int sum(int first, ...) {
+                    int total = first + bias;
+                    foreach (type; _arguments)
+                        total += va_arg!int(_argptr);
+                    return total;
+                }
+            }
+            void main() {
+                Summer summer = new Implementation;
+                assert(summer.sum(1) == 1001);
+                assert(summer.sum(1, 2, 3) == 1006);
+            }
+        });
+    }
+}
+
+// A C variadic method has no `TypeInfo` tuple; the extra arguments follow
+// the System V C variadic convention.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("virtualVariadic.cLinkageOverrideReadsExtraArguments."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.stdc.stdarg: va_arg;
+            class Base {
+                extern(C) int sum(int count, ...) { return -1; }
+            }
+            class Derived: Base {
+                int bias = 100;
+                extern(C) override int sum(int count, ...) {
+                    int total = bias;
+                    foreach (i; 0 .. count)
+                        total += va_arg!int(_argptr);
+                    return total;
+                }
+            }
+            void main() {
+                Base base = new Derived;
+                assert(base.sum(0) == 100);
+                assert(base.sum(3, 4, 5, 6) == 115);
+            }
+        });
+    }
+}
+
+private interface HostSummer {
+    int sum(int first, ...);
+}
+
+private class HostSummerBase {
+    int sum(int first, ...) { return -1; }
+}
+
+private final class HostSummerImplementation: HostSummerBase, HostSummer {
+    int bias = 1000;
+    override int sum(int first, ...) {
+        int total = first + bias;
+        foreach (type; _arguments) {
+            assert(type == typeid(int));
+            total += va_arg!int(_argptr);
+        }
+        return total;
+    }
+}
+
+private extern(C) void* snakebite_ut_virtual_variadic_host_interface() {
+    return cast(void*) cast(HostSummer) new HostSummerImplementation;
+}
+
+private extern(C) void* snakebite_ut_virtual_variadic_host_class() {
+    return cast(void*) new HostSummerImplementation;
+}
+
+// The vtable slot of a host object holds compiled code, so the call
+// crosses the barrier with the `TypeInfo` tuple and the extra arguments.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("virtualVariadic.hostInterfaceTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            interface Summer {
+                int sum(int first, ...);
+            }
+            pragma(mangle, "snakebite_ut_virtual_variadic_host_interface")
+            extern(C) void* hostSummer();
+            void main() {
+                auto summer = cast(Summer) hostSummer();
+                assert(summer.sum(1) == 1001);
+                assert(summer.sum(1, 2, 3) == 1006);
+            }
+        });
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call host code"),
+)) {
+    @("virtualVariadic.hostClassTarget." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                int sum(int first, ...) { return -1; }
+            }
+            pragma(mangle, "snakebite_ut_virtual_variadic_host_class")
+            extern(C) void* hostSummer();
+            void main() {
+                auto base = cast(Base) hostSummer();
+                assert(base.sum(1) == 1001);
+                assert(base.sum(1, 2, 3) == 1006);
+            }
+        });
+    }
+}

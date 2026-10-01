@@ -140,7 +140,7 @@ unittest {
             Instruction(&opReturn, 0, size_t.sizeof, int.sizeof),
         ],
         [cast(long) cast(size_t) calleeB],
-        [CallSite.indirect(0, [], int.sizeof)],
+        [CallSite.indirect(0, [], [], int.sizeof)],
         [],
         [],
         size_t.sizeof + int.sizeof,

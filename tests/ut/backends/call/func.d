@@ -574,3 +574,26 @@ static foreach (backend; Matrix!()) {
         }, "answer");
     }
 }
+
+
+// A direct call to a guest C variadic function with a body reads its
+// extra arguments with `va_arg` on `_argptr`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot run C-style variadic functions"),
+)) {
+    @("call.variadicC.directArgptr." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        115.shouldBeRetOf!(backend, q{
+            import core.stdc.stdarg: va_arg;
+            extern(C) int sum(int count, ...) {
+                int total = 100;
+                foreach (i; 0 .. count)
+                    total += va_arg!int(_argptr);
+                return total;
+            }
+            int answer() { return sum(3, 4, 5, 6); }
+        }, "answer");
+    }
+}
