@@ -914,3 +914,33 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+
+// A class template nested in a class and instantiated with an alias to a
+// nested function has two context fields: the outer object, and the frame
+// of the function that owns the alias.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE engine reads a null outer object in a dual-context "
+            ~ "class"),
+)) {
+    @("callNestedFunctionFromDualContextClass." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Outer {
+                int base = 2;
+                class Inner(alias callee) {
+                    int call() { return base + callee(); }
+                }
+            }
+            int main() {
+                int local = 40;
+                int nested() { return local; }
+                auto outer = new Outer;
+                auto inner = outer.new Outer.Inner!nested;
+                return inner.call() == 42 ? 0 : 1;
+            }
+        });
+    }
+}
