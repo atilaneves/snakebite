@@ -2228,6 +2228,10 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         _nativeData.write(_type, _facts, expression, _place);
     }
 
+    override void visit(ClassReferenceExp expression) {
+        _nativeData.write(_type, _facts, expression, _place);
+    }
+
     // `int4 v = 1;`/`cast(int4) 1`: dmd's own semantic pass (`dcast.d`)
     // rewrites either shape to this node, `e1` already cast to the
     // vector's own element type, and its meaning is "every lane gets

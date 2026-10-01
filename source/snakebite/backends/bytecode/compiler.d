@@ -4684,6 +4684,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opZero, _destination, 0, _width);
     }
 
+    override void visit(ClassReferenceExp expression) {
+        compileConstant(expression);
+    }
+
     override void visit(TypeidExp expression) {
         import dmd.dtemplate: isExpression, isType;
         import std.conv: text;
