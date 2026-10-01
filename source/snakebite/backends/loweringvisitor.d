@@ -247,6 +247,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
             arrayLengthOffset, arrayPointerOffset;
 
         if (expression.lowering !is null) {
+            requireLiteralDestination(expression);
             const temporaryFacts = TypeFacts.of(expression.lowering.type);
             withTemporaryDestination(
                     expression.lowering.type, temporaryFacts, {
@@ -279,6 +280,11 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
 
     protected abstract void visitUnloweredArrayLiteral(
         ArrayLiteralExp expression);
+
+    // Called before a lowered literal's temporary is set up, so a backend
+    // whose result can be discarded gives the stores below a destination.
+    protected void requireLiteralDestination(ArrayLiteralExp expression) {
+    }
 
     extern(D) protected abstract void withTemporaryDestination(
         Type type, in TypeFacts facts, scope void delegate() run,

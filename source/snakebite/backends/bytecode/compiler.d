@@ -2302,19 +2302,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // Runs `expression` for effect, at statement level: whatever value it
     // produces (a call's return, an assignment's own value) is never read.
     private void compileEffect(Expression expression) {
-        const destination = _destination;
-        const width = _width;
-        scope (exit) {
-            _destination = destination;
-            _width = width;
-        }
-
-        _destination = discardResult;
-        _width = 0;
-
-        withFullExpression(FullExpressionKind.effect, expression,
-            { expression.accept(this); },
-        );
+        discardingResult({
+            withFullExpression(FullExpressionKind.effect, expression,
+                { expression.accept(this); },
+            );
+        });
     }
 
     // `NewExp.argprefix` stages constructor arguments before the call. Its
@@ -2323,16 +2315,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // expression instead of opening a nested one that would clean them up
     // before the constructor reads its arguments.
     private void compileEffectInCurrentLifetime(Expression expression) {
+        discardingResult({ expression.accept(this); });
+    }
+
+    private void discardingResult(scope void delegate() compile) {
         const destination = _destination;
         const width = _width;
+        auto valueType = _valueType;
         scope (exit) {
             _destination = destination;
             _width = width;
+            _valueType = valueType;
         }
 
         _destination = discardResult;
         _width = 0;
-        expression.accept(this);
+        compile();
     }
 
     private void compileValue(
@@ -4380,6 +4378,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileArrayLiteral(expression, _destination);
     }
 
+    protected override void requireLiteralDestination(
+            ArrayLiteralExp expression) {
+        requireDestination(expression);
+    }
+
     private struct TemporaryDestination {
         size_t offset;
         size_t width;
@@ -4820,11 +4823,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // `expressionsem.d`'s `visitAssign`'s `ArrayLengthExp` case): the
         // trailing `0` only carries the assignment's own result type,
         // dropped here the same way dmd's own frontend drops it for a
-        // statement-level assignment. Every visitor this compiler has for a
-        // bare value (`visit(IntegerExp)` and the rest) refuses to run for
-        // no destination at all (`requireDestination`'s own rejection), so
-        // a side-effect-free tail like this one is skipped outright rather
-        // than run for an effect it does not have.
+        // statement-level assignment. A tail without side effects needs no
+        // code, so it is skipped.
         if (hasSideEffect(expression.e2))
             compileEffect(expression.e2);
     }
@@ -4837,11 +4837,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // loop's own value is never read, the same discard a bare
         // `call();` statement already gets through `compileEffect` - only
         // here `expression.e1` sits behind an explicit `CastExp` instead of
-        // being the statement's own expression. Nothing about a `void`
-        // cast's own destination needs `requireDestination`'s ordinary
-        // refusal: there is no value for a `void` cast to produce in the
-        // first place, so running `expression.e1` for effect is already
-        // everything this cast means.
+        // being the statement's own expression. A `void` cast produces no
+        // value, so running `expression.e1` for effect is everything this
+        // cast means.
         if (_destination == discardResult && expression.type.ty == Tvoid) {
             compileEffect(expression.e1);
             return;
@@ -4963,9 +4961,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     extern(D):
 
+    // An expression evaluated for no result still runs, once and in order,
+    // so its operands' side effects happen: it computes into a scratch
+    // slot nobody reads. The restoring of `_destination` and `_width` is
+    // up to whoever set them (`evalInto`, `compileEffect`).
     private void requireDestination(Expression expression) {
-        if (_destination == discardResult)
-            visit(expression);
+        if (_destination != discardResult)
+            return;
+
+        const facts = TypeFacts.of(expression.type);
+        _destination = reserveTemp(facts);
+        _width = facts.size;
+        _valueType = expression.type;
     }
 
     private void compileBinaryExpression(
