@@ -2291,9 +2291,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileEffect(Expression expression) {
         const destination = _destination;
         const width = _width;
+        auto valueType = _valueType;
         scope (exit) {
             _destination = destination;
             _width = width;
+            _valueType = valueType;
         }
 
         _destination = discardResult;
@@ -2312,9 +2314,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileEffectInCurrentLifetime(Expression expression) {
         const destination = _destination;
         const width = _width;
+        auto valueType = _valueType;
         scope (exit) {
             _destination = destination;
             _width = width;
+            _valueType = valueType;
         }
 
         _destination = discardResult;
