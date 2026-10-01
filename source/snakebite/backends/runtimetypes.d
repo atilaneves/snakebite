@@ -451,7 +451,7 @@ private void setSysVArgTypes(
     static if (supported) {
         try {
             auto plan = ArgumentPlan.of(type);
-            if (plan.memory)
+            if (plan.memory || plan.count == 0)
                 return;
 
             info.m_arg1 = eightbyteRepresentative(plan.registers[0]);
