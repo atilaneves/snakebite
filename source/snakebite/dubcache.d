@@ -60,6 +60,7 @@ private bool decode(in ubyte[] bytes, out imported!"std.json".JSONValue value) {
 public imported!"std.json".JSONValue cachedDubDescription(
     in string directory, in string compiler, in string[] versions,
     scope imported!"std.json".JSONValue delegate() describe,
+    in string generator = imported!"std.file".thisExePath,
 ) {
     import std.json: JSONValue, JSONType;
     import std.file: exists, read, write, mkdirRecurse, rename, remove, FileException;
@@ -67,13 +68,15 @@ public imported!"std.json".JSONValue cachedDubDescription(
     import std.process: environment;
     import std.uuid: randomUUID;
     import std.conv: text;
+    import snakebite.dependencyimage: generatorKey;
     import snakebite.project: projectStateDirectory;
 
     const mode = environment.get("SNAKEBITE_DUB_CACHE", "on");
     if (mode == "off")
         return describe();
     const context = contextKey(directory, compiler, versions);
-    const cache = buildPath(projectStateDirectory(directory), "dub-description.bin");
+    const cache = buildPath(projectStateDirectory(directory),
+        text("dub-description-", generatorKey(generator), ".bin"));
     string[string] inputStamps;
     // Cache failures must not prevent a normal DUB invocation.
     try {

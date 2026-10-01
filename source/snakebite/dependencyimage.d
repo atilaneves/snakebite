@@ -522,9 +522,12 @@ private void require(in bool condition, in string message) {
 
 
 // An image is a function of the generator that built it (this running
-// executable) and its inputs. An unchanged image needs only metadata
-// checks and a loader reference: file stamps for the compiler, the
-// generator, and every input stand in for their contents. A root edit
+// executable) and its inputs. The generator's file stamp is part of the
+// record's name: a different or rebuilt generator reads and writes its
+// own record and never accepts another's, and generators that take turns
+// on one project each keep a record. An unchanged image needs only
+// metadata checks and a loader reference: file stamps for the compiler
+// and every input stand in for their contents. A root edit
 // can reuse the same image if it requests the same templates. A project
 // that needs no image is recorded the same way, so the answer "no image"
 // is as cheap to give again as an image is.
@@ -533,7 +536,6 @@ public struct ProjectImageCache {
     private string _settings;
     private string[] _roots;
     private string _compiler;
-    private string _generator;
 
     public this(
         in string recordPath,
@@ -544,11 +546,13 @@ public struct ProjectImageCache {
     ) {
         import std.conv: text;
 
-        _path = recordPath;
+        import std.path: extension, stripExtension;
+
+        _path = text(recordPath.stripExtension, "-", generatorKey(generator),
+            recordPath.extension);
         _settings = sourceDigest(text("snakebite-project-image-v2", __VERSION__, settings));
         _roots = roots.dup;
         _compiler = compilerPath(compiler);
-        _generator = generator;
     }
 
     // Whether the project has an image, which is then in `image`.
@@ -639,11 +643,22 @@ public struct ProjectImageCache {
         record["settings"] = _settings;
         record["compiler"] = _compiler;
         record["roots"] = fileStamps(_roots);
-        record["inputs"] = fileStamps(inputs ~ [_compiler, _generator] ~ image);
+        record["inputs"] = fileStamps(inputs ~ [_compiler] ~ image);
         record["source"] = sourceDigest(source);
         record["image"] = path;
         publish(record.toString);
     }
+}
+
+
+// Names the build of snakebite that is running. A different or rebuilt
+// executable gives a different key; so does a copy, which costs one miss
+// and is never wrong. A stat stands in for hashing the executable, which
+// is megabytes.
+public string generatorKey(
+    in string generator = imported!"std.file".thisExePath(),
+) {
+    return sourceDigest(fileStamp(generator))[0 .. 16];
 }
 
 

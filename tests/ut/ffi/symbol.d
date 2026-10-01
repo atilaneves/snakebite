@@ -1844,3 +1844,42 @@ unittest {
     regeneratedSourceCalls.should == 1;
     builds.should == 1;
 }
+
+
+// Two different generators that share a record path, as two builds of
+// snakebite do on one project, never accept each other's image. Each keeps
+// its own record, so alternating between them rebuilds nothing.
+@("image.projectCacheKeepsGeneratorsApart")
+@Serial
+unittest {
+    const sandbox = Sandbox();
+    sandbox.writeFile("root.d", "root");
+    const root = sandbox.inSandboxPath("root.d");
+    const directory = sandbox.sandboxPath;
+    const record = buildPath(directory, "project.json");
+    sandbox.writeFile("generator-a", "generator a");
+    sandbox.writeFile("generator-b", "generator b, a different build");
+    const generatorA = sandbox.inSandboxPath("generator-a");
+    const generatorB = sandbox.inSandboxPath("generator-b");
+    string[] noInputs() { return []; }
+    DependencyImage makeImage(in string source) {
+        return prepareImage(source, directory, optimise: Optimise.no);
+    }
+
+    size_t builds;
+    void prepare(in string generator) {
+        auto cache = ProjectImageCache(record, "settings", [root],
+            defaultCompiler, generator);
+        DependencyImage image;
+        cache.prepare(image, () => atomicSource, () { ++builds; },
+            &makeImage, true, &noInputs).should == true;
+    }
+
+    prepare(generatorA);
+    builds.should == 1;
+    prepare(generatorB);
+    builds.should == 2;
+    prepare(generatorA);
+    prepare(generatorB);
+    builds.should == 2;
+}
