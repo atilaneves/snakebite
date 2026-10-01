@@ -58,7 +58,8 @@ public struct ClosurePlan {
         FuncDeclaration to,
     ) {
         import dmd.aggregate: AggregateDeclaration;
-        import snakebite.backends.dualcontext: parentTowards, wordTowards;
+        import snakebite.backends.dualcontext:
+            fieldTowards, parentTowards, wordTowards;
         import snakebite.frontend.dmd.delegates: isDualContext;
 
         if (from is to)
@@ -86,9 +87,9 @@ public struct ClosurePlan {
                     return null;
 
                 hops ~= Hop(Hop.Kind.structField,
-                    currentAggregate.vthis.offset);
+                    currentAggregate.fieldTowards(to));
 
-                auto next = currentAggregate.toParent2();
+                auto next = currentAggregate.parentTowards(to);
                 currentFunction = next is null
                     ? null : next.isFuncDeclaration;
                 currentAggregate = next is null

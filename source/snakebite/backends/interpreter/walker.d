@@ -5471,16 +5471,11 @@ extern(C++) private final class Evaluator: LoweringVisitor {
             return;
         }
 
-        // `parentFunction` is `null` when the struct's lexical parent is
-        // not a function - dmd fact, not itself an error: leaving `vthis`
-        // at its `.init` zero here matches the language's own treatment
-        // of a `static struct` with no captured context.
-        if (step.parentFunction !is null)
-            storeIntegral(
-                base + step.offset,
-                cast(size_t) contextOf(step.parentFunction),
-                size_t.sizeof,
-            );
+        storeIntegral(
+            base + step.offset,
+            callContextOf(contextSourceOf(_function, step.contextOwner)),
+            size_t.sizeof,
+        );
     }
 
     private void applyValueStep(InitStep step, ubyte* base) {
@@ -6018,7 +6013,6 @@ extern(C++) private final class Evaluator: LoweringVisitor {
         void* classReceiver,
         bool hasClassReceiver,
     ) {
-
         const first = firstContextOf(
             expression, function_, classReceiver, hasClassReceiver);
         const plan = pairPlanOf(_function, function_, expression.vthis2);

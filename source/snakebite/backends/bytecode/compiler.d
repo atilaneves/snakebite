@@ -4219,16 +4219,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // Satisfies `aggregateinit`'s `Hooks` contract: forwards each
     // `InitStep.Kind` to the matching `apply*Step` method below, at
-    // whichever `base`/`loc` its call site is compiling into. Built
+    // whichever `base` its call site is compiling into. Built
     // once per call site instead of the four lambdas each used to
     // build.
     private struct AggregateInitHooks {
         private FunctionCompiler _compiler;
-        private Loc _loc;
         private size_t _base;
 
         public void applyVthis(InitStep step) {
-            _compiler.applyVthisStep(step, _loc, _base);
+            _compiler.applyVthisStep(step, _base);
         }
         public void applyValue(InitStep step) {
             _compiler.applyValueStep(step, _base);
@@ -4243,15 +4242,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // A `vthis` step with `source` set (a nested class's `NewExp.thisexp`)
     // evaluates that expression directly, then adds `sourceAdjustment` if
-    // it is non-zero. Otherwise it is a nested struct reading its own
-    // enclosing function's context, and a `null` `parentFunction` means
-    // the struct's lexical parent is not a function - dmd fact, not itself
-    // an error for `planStructLiteral`/`planPositionalFields` to detect,
-    // but every construction route that can build a nested struct must
-    // reject it here: leaving `vthis` at its `.init` zero instead reads
-    // back a null context the first time a method on that instance uses
-    // it.
-    private void applyVthisStep(InitStep step, Loc loc, in size_t base) {
+    // it is non-zero. Any other step stores the context of its
+    // `contextOwner`.
+    private void applyVthisStep(InitStep step, in size_t base) {
         if (step.source !is null) {
             evalInto(step.source, base + step.offset, step.facts.size,
                 step.type);
@@ -4265,10 +4258,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        if (step.parentFunction is null)
-            throw rejection(_function, loc, "a nested struct's static chain");
-
-        const context = contextAddressOf(step.parentFunction);
+        const context = contextOffsetOf(
+            contextSourceOf(_function, step.contextOwner));
         emit(&opCopy, base + step.offset, context, size_t.sizeof);
     }
 
@@ -4321,7 +4312,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.backends.aggregateinit: applyStep, planStructLiteral;
 
         auto plan = planStructLiteral(expression);
-        auto hooks = AggregateInitHooks(this, expression.loc, _destination);
+        auto hooks = AggregateInitHooks(this, _destination);
         foreach (step; plan.steps)
             applyStep(hooks, step);
     }
@@ -4836,7 +4827,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             : planPositionalFields(structType.sym,
                 expression.member is null ? expression.arguments : null);
 
-        auto hooks = AggregateInitHooks(this, expression.loc, storage);
+        auto hooks = AggregateInitHooks(this, storage);
         driveInit(hooks, plan, expression.member !is null,
             () {
                 if (newPlan.argumentPrefix !is null)

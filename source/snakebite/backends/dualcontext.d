@@ -15,7 +15,6 @@ private:
 public enum DualContext {
     receiverWord = 0,
     outerWord = 1,
-    size = 2 * size_t.sizeof,
 }
 
 // The byte offset in the pair of the word a lookup of `target`'s context

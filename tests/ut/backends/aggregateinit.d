@@ -110,7 +110,7 @@ unittest {
 
     plan.steps.length.should == 3;
     plan.steps[0].kind.should == InitStep.Kind.vthis;
-    (plan.steps[0].parentFunction !is null).should == true;
+    (plan.steps[0].contextOwner !is null).should == true;
     plan.steps[1].kind.should == InitStep.Kind.value;
     plan.steps[2].kind.should == InitStep.Kind.value;
 }
