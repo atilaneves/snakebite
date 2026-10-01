@@ -638,7 +638,9 @@ static foreach (backend; Matrix!(
 
 // C has no array bounds checks: a flexible array member, and the older
 // one-element form of it, are indexed past their declared length.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE checks every array index, and the C module is no exception"),
+)) {
     @("importc.flexibleArrayMember." ~ backend.stringof)
     @Tags(backend.stringof)
     @Serial
